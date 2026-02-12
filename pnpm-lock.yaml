@@ -51,6 +51,21 @@ importers:
         specifier: ^4.0.8
         version: 4.0.18(@types/node@24.10.13)(tsx@4.21.0)(yaml@2.8.2)
 
+  apps/extension:
+    dependencies:
+      '@webblackbox/cdp-router':
+        specifier: workspace:*
+        version: link:../../packages/cdp-router
+      '@webblackbox/pipeline':
+        specifier: workspace:*
+        version: link:../../packages/pipeline
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@webblackbox/recorder':
+        specifier: workspace:*
+        version: link:../../packages/recorder
+
   apps/mcp-server:
     dependencies:
       '@modelcontextprotocol/sdk':
@@ -60,6 +75,21 @@ importers:
         specifier: workspace:*
         version: link:../../packages/mcp-core
 
+  apps/player:
+    dependencies:
+      '@webblackbox/player-sdk':
+        specifier: workspace:*
+        version: link:../../packages/player-sdk
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+
+  packages/cdp-router:
+    dependencies:
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/config-typescript: {}
 
   packages/mcp-core:
@@ -67,6 +97,30 @@ importers:
       zod:
         specifier: ^4.1.12
         version: 4.3.6
+
+  packages/pipeline:
+    dependencies:
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/player-sdk:
+    dependencies:
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/protocol:
+    dependencies:
+      zod:
+        specifier: ^4.1.12
+        version: 4.3.6
+
+  packages/recorder:
+    dependencies:
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
 packages:
 

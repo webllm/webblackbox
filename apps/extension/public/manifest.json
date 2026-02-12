@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "WebBlackbox",
+  "description": "Flight recorder and time-travel debugger for web apps.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "125",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "alarms",
+    "activeTab",
+    "offscreen",
+    "debugger",
+    "webRequest",
+    "downloads",
+    "cookies"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "WebBlackbox",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "commands": {
+    "mark-bug": {
+      "description": "Create user marker",
+      "suggested_key": {
+        "default": "Ctrl+Shift+M",
+        "mac": "Command+Shift+M"
+      }
+    }
+  }
+}

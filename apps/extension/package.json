@@ -1,0 +1,19 @@
+{
+  "name": "@webblackbox/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsup --config tsup.config.ts --watch",
+    "build": "tsup --config tsup.config.ts --clean && node scripts/copy-assets.mjs",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@webblackbox/cdp-router": "workspace:*",
+    "@webblackbox/pipeline": "workspace:*",
+    "@webblackbox/protocol": "workspace:*",
+    "@webblackbox/recorder": "workspace:*"
+  }
+}

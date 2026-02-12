@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../packages/config-typescript/node-app.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@webblackbox/cdp-router": ["../../packages/cdp-router/src/index.ts"],
+      "@webblackbox/pipeline": ["../../packages/pipeline/src/index.ts"],
+      "@webblackbox/protocol": ["../../packages/protocol/src/index.ts"],
+      "@webblackbox/recorder": ["../../packages/recorder/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "tsup.config.ts", "scripts/**/*.mjs"]
+}

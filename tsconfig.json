@@ -7,7 +7,28 @@
       "path": "./packages/mcp-core"
     },
     {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/cdp-router"
+    },
+    {
+      "path": "./packages/recorder"
+    },
+    {
+      "path": "./packages/pipeline"
+    },
+    {
+      "path": "./packages/player-sdk"
+    },
+    {
       "path": "./apps/mcp-server"
+    },
+    {
+      "path": "./apps/extension"
+    },
+    {
+      "path": "./apps/player"
     }
   ]
 }
