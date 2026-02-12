@@ -1,0 +1,122 @@
+export type PortMessageHandler = (message: unknown) => void;
+
+export type PortDisconnectHandler = () => void;
+
+export type PortLike = {
+  name: string;
+  sender?: {
+    tab?: {
+      id?: number;
+    };
+  };
+  onMessage: {
+    addListener(handler: PortMessageHandler): void;
+    removeListener(handler: PortMessageHandler): void;
+  };
+  onDisconnect: {
+    addListener(handler: PortDisconnectHandler): void;
+    removeListener(handler: PortDisconnectHandler): void;
+  };
+  postMessage(message: unknown): void;
+};
+
+export type ChromeApi = {
+  action?: {
+    setBadgeText(details: { text: string }): Promise<void>;
+    setBadgeBackgroundColor(details: { color: string }): Promise<void>;
+  };
+  alarms?: {
+    create(name: string, alarmInfo: { periodInMinutes?: number; when?: number }): void;
+    onAlarm: {
+      addListener(callback: (alarm: { name: string }) => void): void;
+    };
+  };
+  commands?: {
+    onCommand: {
+      addListener(callback: (command: string) => void): void;
+    };
+  };
+  debugger?: {
+    attach(target: { tabId: number }, version: string): Promise<void>;
+    detach(target: { tabId: number }): Promise<void>;
+    sendCommand<TResult = unknown>(
+      target: { tabId: number; sessionId?: string },
+      method: string,
+      params?: Record<string, unknown>
+    ): Promise<TResult>;
+    onEvent: {
+      addListener(
+        callback: (
+          source: { tabId: number; sessionId?: string },
+          method: string,
+          params: unknown
+        ) => void
+      ): void;
+      removeListener(
+        callback: (
+          source: { tabId: number; sessionId?: string },
+          method: string,
+          params: unknown
+        ) => void
+      ): void;
+    };
+    onDetach: {
+      addListener(callback: (source: { tabId: number }, reason: string) => void): void;
+      removeListener(callback: (source: { tabId: number }, reason: string) => void): void;
+    };
+  };
+  downloads?: {
+    download(options: { url: string; filename: string; saveAs?: boolean }): Promise<number>;
+  };
+  offscreen?: {
+    createDocument(options: {
+      url: string;
+      reasons: string[];
+      justification: string;
+    }): Promise<void>;
+    closeDocument(): Promise<void>;
+  };
+  runtime?: {
+    connect(connectInfo: { name: string }): PortLike;
+    getURL(path: string): string;
+    getContexts?: (options: {
+      contextTypes: string[];
+      documentUrls?: string[];
+    }) => Promise<unknown[]>;
+    onConnect: {
+      addListener(callback: (port: PortLike) => void): void;
+    };
+    onInstalled: {
+      addListener(callback: () => void): void;
+    };
+    onMessage: {
+      addListener(
+        callback: (
+          message: unknown,
+          sender: { tab?: { id?: number } },
+          sendResponse: (response: unknown) => void
+        ) => boolean | void
+      ): void;
+    };
+    sendMessage(message: unknown): Promise<unknown>;
+  };
+  scripting?: {
+    executeScript(options: {
+      target: { tabId: number; allFrames?: boolean };
+      world?: "MAIN" | "ISOLATED";
+      files?: string[];
+    }): Promise<void>;
+  };
+  tabs?: {
+    query(queryInfo: {
+      active?: boolean;
+      currentWindow?: boolean;
+    }): Promise<Array<{ id?: number }>>;
+    sendMessage(tabId: number, message: unknown): Promise<unknown>;
+  };
+};
+
+export function getChromeApi(): ChromeApi | null {
+  const chromeApi = (globalThis as { chrome?: ChromeApi }).chrome;
+  return chromeApi ?? null;
+}
