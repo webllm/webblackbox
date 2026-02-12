@@ -136,8 +136,17 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "content.events") {
+    const tabId = senderTabId ?? port?.sender?.tab?.id;
+
+    if (typeof tabId !== "number") {
+      return;
+    }
+
     for (const rawEvent of message.events) {
-      ingestRawEvent(rawEvent);
+      ingestRawEvent({
+        ...rawEvent,
+        tabId
+      });
     }
   }
 }
@@ -205,6 +214,14 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   sessionsByTab.set(tabId, runtime);
   sessionsBySid.set(sid, runtime);
+
+  await chromeApi?.scripting
+    ?.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      files: ["injected.js"]
+    })
+    .catch(() => undefined);
 
   if (mode === "full") {
     await attachCdp(runtime);

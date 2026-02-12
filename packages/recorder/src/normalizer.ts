@@ -32,6 +32,10 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   mutation: "dom.mutation.batch",
   snapshot: "dom.snapshot",
   screenshot: "screen.screenshot",
+  console: "console.entry",
+  pageError: "error.exception",
+  unhandledrejection: "error.unhandledrejection",
+  resourceError: "error.resource",
   longtask: "perf.longtask",
   vitals: "perf.vitals",
   localStorageOp: "storage.local.op",
@@ -58,6 +62,30 @@ export class DefaultEventNormalizer implements EventNormalizer {
     }
 
     if (input.source === "content") {
+      if (input.rawType === "fetch" || input.rawType === "xhr") {
+        const payload = asRecord(input.payload);
+        const phase = payload?.phase;
+
+        if (phase === "end") {
+          return {
+            eventType: "network.response",
+            payload: input.payload
+          };
+        }
+
+        return {
+          eventType: "network.request",
+          payload: input.payload
+        };
+      }
+
+      if (input.rawType === "fetchError") {
+        return {
+          eventType: "network.failed",
+          payload: input.payload
+        };
+      }
+
       const eventType = CONTENT_EVENT_MAP[input.rawType];
 
       if (!eventType) {
@@ -81,6 +109,12 @@ export class DefaultEventNormalizer implements EventNormalizer {
       payload: input.payload
     };
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function tryNormalizeSystemEvent(rawType: string): WebBlackboxEventType | null {
