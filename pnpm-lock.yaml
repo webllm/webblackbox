@@ -112,6 +112,9 @@ importers:
       '@webblackbox/protocol':
         specifier: workspace:*
         version: link:../protocol
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
 
   packages/protocol:
     dependencies:

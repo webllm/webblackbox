@@ -21,6 +21,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@webblackbox/protocol": "workspace:*"
+    "@webblackbox/protocol": "workspace:*",
+    "jszip": "^3.10.1"
   }
 }
