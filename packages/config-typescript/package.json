@@ -1,0 +1,10 @@
+{
+  "name": "@webblackbox/config-typescript",
+  "version": "0.1.0",
+  "private": true,
+  "files": [
+    "base.json",
+    "node-app.json",
+    "node-lib.json"
+  ]
+}

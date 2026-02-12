@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../packages/config-typescript/node-app.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@webblackbox/mcp-core": ["../../packages/mcp-core/src/index.ts"]
+    },
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*.ts"]
+}
