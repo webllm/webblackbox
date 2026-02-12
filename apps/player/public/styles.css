@@ -85,6 +85,32 @@ h1 {
   flex-wrap: wrap;
 }
 
+.actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.actions button {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  padding: 9px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.actions button:hover {
+  border-color: var(--accent);
+}
+
+.feedback {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .pill {
   padding: 8px 12px;
   border-radius: 999px;
@@ -119,6 +145,10 @@ h1 {
 
 .timeline,
 .details {
+  grid-column: span 2;
+}
+
+.network-card {
   grid-column: span 2;
 }
 
@@ -218,6 +248,60 @@ h2 {
   color: var(--muted);
 }
 
+.waterfall-wrap {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.waterfall-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.waterfall-table th,
+.waterfall-table td {
+  border-bottom: 1px solid rgba(211, 216, 203, 0.7);
+  padding: 8px;
+  font-size: 13px;
+}
+
+.waterfall-btn {
+  border: none;
+  background: transparent;
+  color: var(--signal);
+  font-size: 13px;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.selected-row {
+  background: rgba(26, 127, 100, 0.1);
+}
+
+.inline-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+.inline-actions button {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.inline-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 @media (max-width: 960px) {
   .topbar {
     flex-direction: column;
@@ -229,7 +313,8 @@ h2 {
   }
 
   .timeline,
-  .details {
+  .details,
+  .network-card {
     grid-column: span 1;
   }
 }
