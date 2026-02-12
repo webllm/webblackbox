@@ -142,5 +142,41 @@ function tryNormalizeSystemEvent(rawType: string): WebBlackboxEventType | null {
     return "meta.config";
   }
 
+  if (rawType === "cdp.network.body") {
+    return "network.body";
+  }
+
+  if (rawType === "cdp.screen.screenshot") {
+    return "screen.screenshot";
+  }
+
+  if (rawType === "cdp.dom.snapshot") {
+    return "dom.snapshot";
+  }
+
+  if (rawType === "cdp.storage.cookie.snapshot") {
+    return "storage.cookie.snapshot";
+  }
+
+  if (rawType === "cdp.storage.local.snapshot") {
+    return "storage.local.snapshot";
+  }
+
+  if (rawType === "cdp.storage.idb.snapshot") {
+    return "storage.idb.snapshot";
+  }
+
+  if (rawType === "cdp.perf.trace") {
+    return "perf.trace";
+  }
+
+  if (rawType === "cdp.perf.cpu.profile") {
+    return "perf.cpu.profile";
+  }
+
+  if (rawType === "cdp.perf.heap.snapshot") {
+    return "perf.heap.snapshot";
+  }
+
   return null;
 }
