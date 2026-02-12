@@ -107,6 +107,14 @@ export type ChromeApi = {
       files?: string[];
     }): Promise<void>;
   };
+  storage?: {
+    local: {
+      get(
+        keys?: string[] | string | Record<string, unknown> | null
+      ): Promise<Record<string, unknown>>;
+      set(items: Record<string, unknown>): Promise<void>;
+    };
+  };
   tabs?: {
     query(queryInfo: {
       active?: boolean;

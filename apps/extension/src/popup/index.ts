@@ -1,5 +1,124 @@
+import { getChromeApi } from "../shared/chrome-api.js";
+import {
+  PORT_NAMES,
+  type ExtensionOutboundMessage,
+  type SessionListItem
+} from "../shared/messages.js";
+
+const chromeApi = getChromeApi();
+const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.popup });
+
 const root = document.getElementById("popup-root");
 
+const state: {
+  tabId: number | null;
+  sessions: SessionListItem[];
+  recording: { active: boolean; sid?: string; mode?: string };
+} = {
+  tabId: null,
+  sessions: [],
+  recording: { active: false }
+};
+
 if (root) {
-  root.innerHTML = `<section class="card"><h1>WebBlackbox</h1><p>Recorder controls will appear here.</p></section>`;
+  bootstrap(root).catch((error) => {
+    root.innerHTML = `<section class="card"><h1>WebBlackbox</h1><p>${String(error)}</p></section>`;
+  });
+}
+
+async function bootstrap(container: HTMLElement): Promise<void> {
+  const tabs = (await chromeApi?.tabs?.query?.({ active: true, currentWindow: true })) ?? [];
+  state.tabId = typeof tabs[0]?.id === "number" ? tabs[0].id : null;
+
+  port?.onMessage.addListener((message) => {
+    applyMessage(message as ExtensionOutboundMessage);
+    render(container);
+  });
+
+  render(container);
+}
+
+function render(container: HTMLElement): void {
+  const session = state.sessions.find((item) => item.tabId === state.tabId);
+  const active = Boolean(session);
+
+  container.innerHTML = `
+    <section class="card">
+      <h1>WebBlackbox</h1>
+      <p>Tab: ${state.tabId ?? "n/a"}</p>
+      <p>Status: ${active ? `Recording (${session?.mode ?? "lite"})` : "Idle"}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button data-action="start-lite">Start Lite</button>
+        <button data-action="start-full">Start Full</button>
+        <button data-action="stop">Stop</button>
+        <button data-action="export">Export</button>
+      </div>
+      <p style="margin-top:10px;font-size:12px;opacity:0.75;">Marker: Ctrl/Cmd + Shift + M</p>
+    </section>
+  `;
+
+  bindActions(container, session);
+}
+
+function bindActions(container: HTMLElement, session?: SessionListItem): void {
+  container.querySelector("[data-action='start-lite']")?.addEventListener("click", () => {
+    if (typeof state.tabId !== "number") {
+      return;
+    }
+
+    port?.postMessage({
+      kind: "ui.start",
+      tabId: state.tabId,
+      mode: "lite"
+    });
+  });
+
+  container.querySelector("[data-action='start-full']")?.addEventListener("click", () => {
+    if (typeof state.tabId !== "number") {
+      return;
+    }
+
+    port?.postMessage({
+      kind: "ui.start",
+      tabId: state.tabId,
+      mode: "full"
+    });
+  });
+
+  container.querySelector("[data-action='stop']")?.addEventListener("click", () => {
+    if (typeof state.tabId !== "number") {
+      return;
+    }
+
+    port?.postMessage({
+      kind: "ui.stop",
+      tabId: state.tabId
+    });
+  });
+
+  container.querySelector("[data-action='export']")?.addEventListener("click", () => {
+    if (!session) {
+      return;
+    }
+
+    port?.postMessage({
+      kind: "ui.export",
+      sid: session.sid
+    });
+  });
+}
+
+function applyMessage(message: ExtensionOutboundMessage): void {
+  if (message.kind === "sw.session-list") {
+    state.sessions = message.sessions;
+    return;
+  }
+
+  if (message.kind === "sw.recording-status") {
+    state.recording = {
+      active: message.active,
+      sid: message.sid,
+      mode: message.mode
+    };
+  }
 }

@@ -241,6 +241,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   await setRecordingBadge();
   await notifyTabStatus(tabId, true, sid, mode);
+  broadcast({ kind: "sw.recording-status", active: true, sid, mode });
   pushSessionList();
 }
 
@@ -280,6 +281,7 @@ async function stopSession(tabId: number): Promise<void> {
   }
 
   await notifyTabStatus(tabId, false);
+  broadcast({ kind: "sw.recording-status", active: false, sid: runtime.sid, mode: runtime.mode });
   pushSessionList();
 }
 
