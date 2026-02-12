@@ -10,7 +10,11 @@ import {
   type CaptureMode,
   type SessionMetadata
 } from "@webblackbox/protocol";
-import { type RawRecorderEvent, WebBlackboxRecorder } from "@webblackbox/recorder";
+import {
+  createDefaultRecorderPlugins,
+  type RawRecorderEvent,
+  WebBlackboxRecorder
+} from "@webblackbox/recorder";
 
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import {
@@ -176,6 +180,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   };
 
   const storage = new IndexedDbPipelineStorage("webblackbox-flight-recorder");
+  const recorderPlugins = createDefaultRecorderPlugins();
   const pipeline = new FlightRecorderPipeline({
     session: metadata,
     storage,
@@ -189,10 +194,15 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     tabId,
     mode,
     startedAt,
-    recorder: new WebBlackboxRecorder({
-      ...DEFAULT_RECORDER_CONFIG,
-      mode
-    }),
+    recorder: new WebBlackboxRecorder(
+      {
+        ...DEFAULT_RECORDER_CONFIG,
+        mode
+      },
+      {},
+      undefined,
+      recorderPlugins
+    ),
     pipeline,
     cdpRouter: null,
     requestMeta: new Map(),
@@ -221,7 +231,9 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
           });
         }
       }
-    }
+    },
+    undefined,
+    recorderPlugins
   );
 
   sessionsByTab.set(tabId, runtime);
