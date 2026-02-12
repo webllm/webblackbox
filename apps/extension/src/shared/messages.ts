@@ -68,7 +68,15 @@ export type SessionListMessage = {
   sessions: SessionListItem[];
 };
 
+export type PipelineStatusMessage = {
+  kind: "sw.pipeline-status";
+  activeSessions: number;
+  sessions: SessionListItem[];
+  updatedAt: number;
+};
+
 export type ExtensionOutboundMessage =
   | RecordingStatusMessage
   | FreezeNoticeMessage
-  | SessionListMessage;
+  | SessionListMessage
+  | PipelineStatusMessage;

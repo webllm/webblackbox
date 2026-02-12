@@ -28,6 +28,7 @@ type SessionRuntime = {
   sid: string;
   tabId: number;
   mode: CaptureMode;
+  config: typeof DEFAULT_RECORDER_CONFIG;
   startedAt: number;
   recorder: WebBlackboxRecorder;
   pipeline: FlightRecorderPipeline;
@@ -43,12 +44,17 @@ const chromeApi = getChromeApi();
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
 const connectedPorts = new Set<PortLike>();
+let offscreenPort: PortLike | null = null;
 
 const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_INTERVAL_MS = 8_000;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
+const OPTIONS_STORAGE_KEY = "webblackbox.options";
+const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
 
 console.info("[WebBlackbox] service worker booted");
+
+void restoreRuntimeState();
 
 chromeApi?.runtime?.onInstalled.addListener(() => {
   void setIdleBadge();
@@ -62,6 +68,12 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   }
 
   connectedPorts.add(port);
+
+  if (port.name === PORT_NAMES.offscreen) {
+    offscreenPort = port;
+    notifyOffscreenPipelineStatus();
+  }
+
   pushSessionList();
 
   const onMessage = (rawMessage: unknown) => {
@@ -76,6 +88,11 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
 
   const onDisconnect = () => {
     connectedPorts.delete(port);
+
+    if (offscreenPort === port) {
+      offscreenPort = null;
+    }
+
     port.onMessage.removeListener(onMessage);
     port.onDisconnect.removeListener(onDisconnect);
   };
@@ -170,6 +187,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   const sid = createSessionId();
   const startedAt = Date.now();
+  const recorderConfig = await loadRecorderConfig(mode);
   const metadata: SessionMetadata = {
     sid,
     tabId,
@@ -193,10 +211,11 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     sid,
     tabId,
     mode,
+    config: recorderConfig,
     startedAt,
     recorder: new WebBlackboxRecorder(
       {
-        ...DEFAULT_RECORDER_CONFIG,
+        ...recorderConfig,
         mode
       },
       {},
@@ -213,7 +232,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   runtime.recorder = new WebBlackboxRecorder(
     {
-      ...DEFAULT_RECORDER_CONFIG,
+      ...recorderConfig,
       mode
     },
     {
@@ -239,6 +258,16 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   sessionsByTab.set(tabId, runtime);
   sessionsBySid.set(sid, runtime);
 
+  ingestRawEvent({
+    source: "system",
+    rawType: "config",
+    sid,
+    tabId,
+    t: Date.now(),
+    mono: monotonicTime(),
+    payload: recorderConfig
+  });
+
   await chromeApi?.scripting
     ?.executeScript({
       target: { tabId, allFrames: true },
@@ -255,6 +284,8 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   await notifyTabStatus(tabId, true, sid, mode);
   broadcast({ kind: "sw.recording-status", active: true, sid, mode });
   pushSessionList();
+  await persistRuntimeState();
+  notifyOffscreenPipelineStatus();
 }
 
 async function stopSession(tabId: number): Promise<void> {
@@ -295,6 +326,8 @@ async function stopSession(tabId: number): Promise<void> {
   await notifyTabStatus(tabId, false);
   broadcast({ kind: "sw.recording-status", active: false, sid: runtime.sid, mode: runtime.mode });
   pushSessionList();
+  await persistRuntimeState();
+  notifyOffscreenPipelineStatus();
 }
 
 async function exportSession(sid: string): Promise<void> {
@@ -782,6 +815,105 @@ function broadcast(message: ExtensionOutboundMessage): void {
   for (const port of connectedPorts) {
     port.postMessage(message);
   }
+}
+
+async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_RECORDER_CONFIG> {
+  const baseConfig: typeof DEFAULT_RECORDER_CONFIG = {
+    ...DEFAULT_RECORDER_CONFIG,
+    mode
+  };
+
+  const storedValues = await chromeApi?.storage?.local?.get(OPTIONS_STORAGE_KEY);
+  const stored = asRecord(storedValues?.[OPTIONS_STORAGE_KEY]);
+
+  if (!stored) {
+    return baseConfig;
+  }
+
+  const sampling = asRecord(stored.sampling);
+  const redaction = asRecord(stored.redaction);
+
+  return {
+    ...baseConfig,
+    ...stored,
+    mode,
+    sampling: {
+      ...baseConfig.sampling,
+      ...sampling
+    },
+    redaction: {
+      ...baseConfig.redaction,
+      ...redaction
+    },
+    sitePolicies: Array.isArray(stored.sitePolicies)
+      ? (stored.sitePolicies as typeof baseConfig.sitePolicies)
+      : baseConfig.sitePolicies
+  };
+}
+
+async function persistRuntimeState(): Promise<void> {
+  if (!chromeApi?.storage?.local?.set) {
+    return;
+  }
+
+  const sessions = [...sessionsByTab.values()].map((runtime) => ({
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    mode: runtime.mode,
+    startedAt: runtime.startedAt
+  }));
+
+  await chromeApi.storage.local.set({
+    [ACTIVE_SESSION_STORAGE_KEY]: sessions
+  });
+}
+
+async function restoreRuntimeState(): Promise<void> {
+  if (!chromeApi?.storage?.local?.get) {
+    return;
+  }
+
+  const values = await chromeApi.storage.local.get(ACTIVE_SESSION_STORAGE_KEY);
+  const persisted = values?.[ACTIVE_SESSION_STORAGE_KEY];
+
+  if (Array.isArray(persisted) && persisted.length > 0) {
+    await chromeApi.storage.local
+      .set({
+        [ACTIVE_SESSION_STORAGE_KEY]: []
+      })
+      .catch(() => undefined);
+
+    for (const item of persisted) {
+      const row = asRecord(item);
+      const tabId = typeof row?.tabId === "number" ? row.tabId : undefined;
+
+      if (typeof tabId === "number") {
+        await notifyTabStatus(tabId, false);
+      }
+    }
+  }
+
+  await setIdleBadge();
+  pushSessionList();
+  notifyOffscreenPipelineStatus();
+}
+
+function notifyOffscreenPipelineStatus(): void {
+  if (!offscreenPort) {
+    return;
+  }
+
+  offscreenPort.postMessage({
+    kind: "sw.pipeline-status",
+    activeSessions: sessionsByTab.size,
+    sessions: [...sessionsByTab.values()].map((runtime) => ({
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      mode: runtime.mode,
+      startedAt: runtime.startedAt
+    })),
+    updatedAt: Date.now()
+  });
 }
 
 async function notifyTabStatus(
