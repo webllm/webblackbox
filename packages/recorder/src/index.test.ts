@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { RecorderConfig } from "@webblackbox/protocol";
 
 import { EventRingBuffer } from "./ring-buffer.js";
+import { createDefaultRecorderPlugins } from "./plugins.js";
 import { WebBlackboxRecorder } from "./recorder.js";
 import { redactPayload } from "./redaction.js";
 
@@ -120,5 +121,62 @@ describe("recorder", () => {
     });
 
     expect(buffer.snapshot().map((event) => event.id)).toEqual(["E-2"]);
+  });
+
+  it("applies route and error plugins", () => {
+    const recorder = new WebBlackboxRecorder(
+      TEST_CONFIG,
+      {},
+      undefined,
+      createDefaultRecorderPlugins()
+    );
+    const base = Date.now();
+
+    const navEvent = recorder.ingest({
+      source: "cdp",
+      rawType: "Page.frameNavigated",
+      sid: "S-plugins",
+      tabId: 7,
+      t: base,
+      mono: 1,
+      payload: {
+        url: "https://example.com/dashboard"
+      }
+    });
+
+    const consoleEvent = recorder.ingest({
+      source: "cdp",
+      rawType: "Runtime.consoleAPICalled",
+      sid: "S-plugins",
+      tabId: 7,
+      t: base + 10,
+      mono: 2,
+      payload: {
+        message: "hello"
+      }
+    });
+
+    const errorEvent = recorder.ingest({
+      source: "cdp",
+      rawType: "Runtime.exceptionThrown",
+      sid: "S-plugins",
+      tabId: 7,
+      t: base + 20,
+      mono: 3,
+      payload: {
+        message: "boom"
+      }
+    });
+
+    const navPayload = navEvent.event?.data as { routeContext?: { url?: string } } | undefined;
+    expect(navPayload?.routeContext?.url).toBe("https://example.com/dashboard");
+
+    const consolePayload = consoleEvent.event?.data as
+      | { routeContext?: { url?: string } }
+      | undefined;
+    expect(consolePayload?.routeContext?.url).toBe("https://example.com/dashboard");
+
+    const errorPayload = errorEvent.event?.data as { fingerprint?: string } | undefined;
+    expect(errorPayload?.fingerprint).toMatch(/^fp-/);
   });
 });
