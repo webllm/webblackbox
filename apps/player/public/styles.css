@@ -46,6 +46,13 @@ main {
   box-shadow: 0 12px 30px rgba(31, 42, 31, 0.08);
 }
 
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .eyebrow {
   margin: 0;
   text-transform: uppercase;
@@ -68,6 +75,10 @@ h1 {
   display: none;
 }
 
+#compare-input {
+  display: none;
+}
+
 .upload {
   align-self: center;
   background: var(--accent);
@@ -76,6 +87,10 @@ h1 {
   padding: 10px 16px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.upload.secondary {
+  background: #17395d;
 }
 
 .summary,
@@ -149,6 +164,10 @@ h1 {
 }
 
 .network-card {
+  grid-column: span 2;
+}
+
+.compare-card {
   grid-column: span 2;
 }
 
@@ -314,7 +333,8 @@ h2 {
 
   .timeline,
   .details,
-  .network-card {
+  .network-card,
+  .compare-card {
     grid-column: span 1;
   }
 }

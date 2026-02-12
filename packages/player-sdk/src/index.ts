@@ -116,6 +116,19 @@ export type PlayerComparison = {
   }>;
 };
 
+export type StorageComparison = {
+  leftEvents: number;
+  rightEvents: number;
+  kindDeltas: Array<{
+    kind: StorageTimelineEntry["kind"];
+    left: number;
+    right: number;
+    delta: number;
+  }>;
+  hashOnlyLeft: string[];
+  hashOnlyRight: string[];
+};
+
 export type BugReportOptions = {
   title?: string;
   range?: PlayerRange;
@@ -485,6 +498,51 @@ export class WebBlackboxPlayer {
         this.events.filter((event) => event.type === "network.request").length,
       durationDeltaMs: computeDuration(other.events) - computeDuration(this.events),
       typeDeltas
+    };
+  }
+
+  public compareStorageWith(other: WebBlackboxPlayer): StorageComparison {
+    const left = this.getStorageTimeline();
+    const right = other.getStorageTimeline();
+
+    const kinds: Array<StorageTimelineEntry["kind"]> = [
+      "cookie",
+      "local",
+      "session",
+      "idb",
+      "cache",
+      "sw",
+      "unknown"
+    ];
+
+    const kindDeltas = kinds.map((kind) => {
+      const leftCount = left.filter((entry) => entry.kind === kind).length;
+      const rightCount = right.filter((entry) => entry.kind === kind).length;
+
+      return {
+        kind,
+        left: leftCount,
+        right: rightCount,
+        delta: rightCount - leftCount
+      };
+    });
+
+    const leftHashes = new Set(
+      left.map((entry) => entry.hash).filter((value): value is string => Boolean(value))
+    );
+    const rightHashes = new Set(
+      right.map((entry) => entry.hash).filter((value): value is string => Boolean(value))
+    );
+
+    const hashOnlyLeft = [...leftHashes].filter((hash) => !rightHashes.has(hash)).sort();
+    const hashOnlyRight = [...rightHashes].filter((hash) => !leftHashes.has(hash)).sort();
+
+    return {
+      leftEvents: left.length,
+      rightEvents: right.length,
+      kindDeltas,
+      hashOnlyLeft,
+      hashOnlyRight
     };
   }
 

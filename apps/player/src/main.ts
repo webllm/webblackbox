@@ -3,6 +3,7 @@ import { type NetworkWaterfallEntry, WebBlackboxPlayer } from "@webblackbox/play
 
 type PlayerState = {
   player: WebBlackboxPlayer | null;
+  comparePlayer: WebBlackboxPlayer | null;
   events: WebBlackboxEvent[];
   selectedEventId: string | null;
   selectedRequestId: string | null;
@@ -14,6 +15,7 @@ type PlayerState = {
 
 const state: PlayerState = {
   player: null,
+  comparePlayer: null,
   events: [],
   selectedEventId: null,
   selectedRequestId: null,
@@ -37,8 +39,12 @@ app.innerHTML = `
         <h1>Time-Travel Player</h1>
         <p class="subhead">Load a .webblackbox archive and inspect timeline evidence.</p>
       </div>
-      <label class="upload" for="archive-input">Load Archive</label>
-      <input id="archive-input" type="file" accept=".webblackbox,.zip" />
+      <div class="topbar-actions">
+        <label class="upload" for="archive-input">Load Archive</label>
+        <input id="archive-input" type="file" accept=".webblackbox,.zip" />
+        <label class="upload secondary" for="compare-input">Load Compare</label>
+        <input id="compare-input" type="file" accept=".webblackbox,.zip" />
+      </div>
     </header>
 
     <section id="summary" class="summary"></section>
@@ -62,6 +68,11 @@ app.innerHTML = `
     </section>
 
     <section class="grid">
+      <article class="card compare-card">
+        <h2>Session Compare</h2>
+        <pre id="compare-details" class="code"></pre>
+      </article>
+
       <article class="card timeline">
         <h2>Timeline</h2>
         <ul id="timeline-list" class="event-list"></ul>
@@ -114,6 +125,7 @@ app.innerHTML = `
 `;
 
 const input = getElement<HTMLInputElement>("archive-input");
+const compareInput = getElement<HTMLInputElement>("compare-input");
 const textFilter = getElement<HTMLInputElement>("text-filter");
 const typeFilter = getElement<HTMLSelectElement>("type-filter");
 
@@ -133,6 +145,21 @@ function bindGlobalActions(): void {
     state.selectedEventId = null;
     state.selectedRequestId = null;
     setFeedback(`Loaded ${file.name}`);
+    await refresh();
+  });
+
+  compareInput.addEventListener("change", async () => {
+    const file = compareInput.files?.[0];
+
+    if (!file) {
+      state.comparePlayer = null;
+      await refresh();
+      return;
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    state.comparePlayer = await WebBlackboxPlayer.open(bytes);
+    setFeedback(`Loaded comparison archive: ${file.name}`);
     await refresh();
   });
 
@@ -180,6 +207,7 @@ function bindGlobalActions(): void {
 
 async function refresh(): Promise<void> {
   const summary = getElement<HTMLElement>("summary");
+  const compareDetails = getElement<HTMLElement>("compare-details");
   const timelineList = getElement<HTMLUListElement>("timeline-list");
   const details = getElement<HTMLElement>("event-details");
   const consoleList = getElement<HTMLUListElement>("console-list");
@@ -191,6 +219,8 @@ async function refresh(): Promise<void> {
 
   if (!state.player) {
     summary.innerHTML = `<p class="empty">No archive loaded.</p>`;
+    compareDetails.textContent =
+      "Load a primary archive and optional compare archive to view deltas.";
     timelineList.innerHTML = "";
     details.textContent = "Select a timeline event to inspect payload details.";
     consoleList.innerHTML = "";
@@ -207,6 +237,10 @@ async function refresh(): Promise<void> {
   state.events = applyFilters(state.player);
   const derived = state.player.buildDerived();
   const waterfall = state.player.getNetworkWaterfall();
+  const comparison = state.comparePlayer ? state.player.compareWith(state.comparePlayer) : null;
+  const storageComparison = state.comparePlayer
+    ? state.player.compareStorageWith(state.comparePlayer)
+    : null;
 
   if (waterfall.length > 0 && !state.selectedRequestId) {
     state.selectedRequestId = waterfall[0]?.reqId ?? null;
@@ -219,7 +253,37 @@ async function refresh(): Promise<void> {
     <div class="pill">${derived.totals.requests} network requests</div>
     <div class="pill">${derived.actionSpans.length} action spans</div>
     <div class="pill">${waterfall.length} waterfall rows</div>
+    ${
+      comparison
+        ? `<div class="pill">event delta ${comparison.eventDelta >= 0 ? "+" : ""}${comparison.eventDelta}</div>`
+        : ""
+    }
   `;
+
+  compareDetails.textContent = comparison
+    ? JSON.stringify(
+        {
+          sessionComparison: {
+            eventDelta: comparison.eventDelta,
+            errorDelta: comparison.errorDelta,
+            requestDelta: comparison.requestDelta,
+            durationDeltaMs: Number(comparison.durationDeltaMs.toFixed(2)),
+            topTypeDeltas: comparison.typeDeltas.slice(0, 8)
+          },
+          storageComparison: storageComparison
+            ? {
+                leftEvents: storageComparison.leftEvents,
+                rightEvents: storageComparison.rightEvents,
+                kindDeltas: storageComparison.kindDeltas,
+                hashOnlyLeft: storageComparison.hashOnlyLeft.slice(0, 20),
+                hashOnlyRight: storageComparison.hashOnlyRight.slice(0, 20)
+              }
+            : null
+        },
+        null,
+        2
+      )
+    : "Load a comparison archive to see event, request, and storage deltas.";
 
   timelineList.innerHTML = state.events
     .slice(0, 600)

@@ -99,6 +99,12 @@ describe("WebBlackboxPlayer", () => {
     expect(comparison.eventDelta).toBeGreaterThan(0);
     expect(comparison.requestDelta).toBe(0);
     expect(comparison.typeDeltas.length).toBeGreaterThan(0);
+
+    const storageComparison = left.compareStorageWith(right);
+    expect(storageComparison.rightEvents).toBeGreaterThan(storageComparison.leftEvents);
+    expect(
+      storageComparison.kindDeltas.some((delta) => delta.kind === "local" && delta.right > 0)
+    ).toBe(true);
   });
 });
 
