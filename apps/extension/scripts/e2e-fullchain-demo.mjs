@@ -260,6 +260,12 @@ async function main() {
 
   const markerResult = await verifyPlayerScreenshotMarker(playerClient, 20_000);
   assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
+  const hoverResponseResult = await verifyPlayerProgressHoverResponse(playerClient, 20_000);
+  assert(
+    hoverResponseResult.ok,
+    "Player hover response controls are not working",
+    hoverResponseResult
+  );
 
   if (swExceptions.length > 0) {
     throw new Error(`Service worker runtime exceptions: ${JSON.stringify(swExceptions)}`);
@@ -282,6 +288,7 @@ async function main() {
   console.log("Scenario:", JSON.stringify(scenarioResult));
   console.log("Player:", JSON.stringify(playerResult));
   console.log("Screenshot marker:", JSON.stringify(markerResult));
+  console.log("Hover response:", JSON.stringify(hoverResponseResult));
   console.log(`Chrome log: ${chromeLogPath}`);
   console.log("Fullchain E2E passed.");
 
@@ -1155,6 +1162,227 @@ async function verifyPlayerScreenshotMarker(playerClient, timeoutMs) {
   return {
     ok: false,
     reason: "no-screenshot-with-pointer-marker"
+  };
+}
+
+async function verifyPlayerProgressHoverResponse(playerClient, timeoutMs) {
+  const hoverReady = await waitFor(
+    async () => {
+      const snapshot = await playerClient.evaluate(`
+      (() => {
+        const markers = Array.from(
+          document.querySelectorAll('#playback-markers button[data-marker-kind="network"]')
+        );
+        const hover = document.getElementById('progress-hover');
+        const response = document.getElementById('progress-hover-response');
+        const body = document.getElementById('progress-hover-response-body');
+        const toggle = document.getElementById('progress-hover-response-toggle');
+        const copy = document.getElementById('progress-hover-response-copy');
+        const progress = document.getElementById('playback-progress');
+        const key = '__wbHoverProbeIndex';
+        const step = '__wbHoverProbeStep';
+
+        if (!hover || !response || !body || !toggle || !copy) {
+          return null;
+        }
+
+        let markerIndex = null;
+
+        if (markers.length > 0) {
+          const index =
+            typeof window[key] === 'number' && Number.isFinite(window[key]) ? window[key] : 0;
+          markerIndex = Math.abs(Math.trunc(index)) % markers.length;
+          window[key] = markerIndex + 1;
+          const marker = markers[markerIndex];
+
+          if (marker) {
+            const rect = marker.getBoundingClientRect();
+            marker.dispatchEvent(
+              new PointerEvent('pointermove', {
+                bubbles: true,
+                pointerType: 'mouse',
+                clientX: rect.left + Math.max(1, rect.width / 2),
+                clientY: rect.top + Math.max(1, rect.height / 2)
+              })
+            );
+          }
+        } else if (progress) {
+          const rawStep =
+            typeof window[step] === 'number' && Number.isFinite(window[step]) ? window[step] : 1;
+          const ratio = ((Math.abs(Math.trunc(rawStep)) % 9) + 1) / 10;
+          window[step] = rawStep + 1;
+          const rect = progress.getBoundingClientRect();
+          progress.dispatchEvent(
+            new PointerEvent('pointermove', {
+              bubbles: true,
+              pointerType: 'mouse',
+              clientX: rect.left + ratio * rect.width,
+              clientY: rect.top + Math.max(1, rect.height / 2)
+            })
+          );
+        }
+
+        if (hover.hidden || response.hidden) {
+          return null;
+        }
+
+        const text = (body.textContent ?? '').trim();
+
+        if (text.length === 0) {
+          return null;
+        }
+
+        return {
+          markerIndex,
+          copyEnabled: !copy.disabled,
+          toggleEnabled: !toggle.disabled,
+          toggleText: (toggle.textContent ?? '').trim(),
+          copyText: (copy.textContent ?? '').trim(),
+          textLength: text.length
+        };
+      })()
+    `);
+
+      return snapshot ?? null;
+    },
+    timeoutMs,
+    250,
+    "Hover response preview not found on progress markers"
+  );
+
+  if (!hoverReady.copyEnabled) {
+    return {
+      ok: true,
+      markerIndex: hoverReady.markerIndex,
+      toggleEnabled: hoverReady.toggleEnabled,
+      copyEnabled: false,
+      skipped: "response-body-not-captured"
+    };
+  }
+
+  let toggled = null;
+
+  if (hoverReady.toggleEnabled) {
+    const toggleClick = await playerClient.evaluate(`
+      (() => {
+        const toggle = document.getElementById('progress-hover-response-toggle');
+
+        if (!toggle || toggle.disabled) {
+          return { ok: false, reason: 'toggle-disabled' };
+        }
+
+        const before = (toggle.textContent ?? '').trim();
+        toggle.click();
+        return { ok: true, before };
+      })()
+    `);
+
+    if (!toggleClick?.ok) {
+      return {
+        ok: false,
+        reason: toggleClick?.reason ?? "toggle-click-failed",
+        hoverReady
+      };
+    }
+
+    toggled = await waitFor(
+      async () => {
+        const snapshot = await playerClient.evaluate(`
+        (() => {
+          const toggle = document.getElementById('progress-hover-response-toggle');
+          const body = document.getElementById('progress-hover-response-body');
+
+          if (!toggle || !body) {
+            return null;
+          }
+
+          const text = (toggle.textContent ?? '').trim();
+          return {
+            toggleText: text,
+            expanded: body.classList.contains('expanded')
+          };
+        })()
+      `);
+
+        if (!snapshot || snapshot.toggleText === toggleClick.before || !snapshot.expanded) {
+          return null;
+        }
+
+        return snapshot;
+      },
+      8_000,
+      150,
+      "Hover response toggle did not switch to expanded mode"
+    );
+  }
+
+  const copyClick = await playerClient.evaluate(`
+    (() => {
+      const copy = document.getElementById('progress-hover-response-copy');
+
+      if (!copy || copy.disabled) {
+        return { ok: false, reason: 'copy-disabled' };
+      }
+
+      copy.click();
+      return { ok: true };
+    })()
+  `);
+
+  if (!copyClick?.ok) {
+    return {
+      ok: false,
+      reason: copyClick?.reason ?? "copy-click-failed",
+      hoverReady,
+      toggled
+    };
+  }
+
+  const copied = await waitFor(
+    async () => {
+      const snapshot = await playerClient.evaluate(`
+      (() => {
+        const copy = document.getElementById('progress-hover-response-copy');
+        const feedback = document.getElementById('feedback');
+
+        if (!copy) {
+          return null;
+        }
+
+        return {
+          copyText: (copy.textContent ?? '').trim(),
+          feedback: (feedback?.textContent ?? '').trim()
+        };
+      })()
+    `);
+
+      if (!snapshot) {
+        return null;
+      }
+
+      const feedbackOk =
+        typeof snapshot.feedback === "string" &&
+        snapshot.feedback.includes("Copied response preview.");
+
+      if (snapshot.copyText !== "Copied" && !feedbackOk) {
+        return null;
+      }
+
+      return snapshot;
+    },
+    8_000,
+    150,
+    "Hover response copy action did not complete"
+  );
+
+  return {
+    ok: true,
+    markerIndex: hoverReady.markerIndex,
+    initialToggleText: hoverReady.toggleText,
+    toggleEnabled: hoverReady.toggleEnabled,
+    copyEnabled: true,
+    toggled,
+    copied
   };
 }
 

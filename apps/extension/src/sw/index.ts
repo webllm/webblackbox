@@ -65,9 +65,11 @@ type HeapSnapshotCaptureState = {
   truncated: boolean;
 };
 
-type PipelineExportResult = {
+type PipelineExportDownloadResult = {
   fileName: string;
-  bytes: Uint8Array;
+  sizeBytes: number;
+  downloadUrl: string;
+  downloadId?: number;
   integrity: HashesManifest;
 };
 
@@ -76,14 +78,14 @@ type SessionPipelineClient = {
   ingest: (event: WebBlackboxEvent) => Promise<void>;
   flush: () => Promise<void>;
   putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
-  exportBundle: (options?: { passphrase?: string }) => Promise<PipelineExportResult>;
+  exportAndDownload: (options?: { passphrase?: string }) => Promise<PipelineExportDownloadResult>;
   close: () => Promise<void>;
 };
 
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
   requestId: string;
-  op: "start" | "ingest" | "flush" | "putBlob" | "export" | "close";
+  op: "start" | "ingest" | "flush" | "putBlob" | "exportDownload" | "close";
   sid: string;
   session?: SessionMetadata;
   event?: WebBlackboxEvent;
@@ -421,7 +423,9 @@ async function exportSession(sid: string, passphrase?: string, saveAs = true): P
 
   try {
     const exported = await enqueueWithResult(runtime, async () => {
-      return runtime.pipeline.exportBundle({ passphrase });
+      return runtime.pipeline.exportAndDownload({
+        passphrase
+      });
     });
 
     await downloadExportedBundle(exported, saveAs);
@@ -565,14 +569,14 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         bytes
       });
     },
-    exportBundle: async (options = {}) => {
+    exportAndDownload: async (options = {}) => {
       const exported = await requestOffscreenPipeline<unknown>({
-        op: "export",
+        op: "exportDownload",
         sid,
         passphrase: options.passphrase
       });
 
-      return normalizePipelineExportResult(exported);
+      return normalizePipelineExportDownloadResult(exported);
     },
     close: async () => {
       await requestOffscreenPipeline<void>({
@@ -1299,7 +1303,7 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
   };
 }
 
-function normalizePipelineExportResult(raw: unknown): PipelineExportResult {
+function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDownloadResult {
   const row = asRecord(raw);
 
   if (!row) {
@@ -1311,15 +1315,23 @@ function normalizePipelineExportResult(raw: unknown): PipelineExportResult {
       ? row.fileName
       : "session.webblackbox";
 
-  const bytes = asUint8Array(row.bytes);
+  const sizeBytes = asFiniteNumber(row.sizeBytes);
+  const downloadUrl =
+    typeof row.downloadUrl === "string" && row.downloadUrl.length > 0 ? row.downloadUrl : null;
 
-  if (!bytes || bytes.byteLength === 0) {
-    throw new Error("Offscreen export payload did not include archive bytes.");
+  if (sizeBytes === null || sizeBytes <= 0) {
+    throw new Error("Offscreen export payload did not include valid archive size.");
+  }
+
+  if (!downloadUrl) {
+    throw new Error("Offscreen export payload did not include download URL.");
   }
 
   return {
     fileName,
-    bytes,
+    sizeBytes: Math.round(sizeBytes),
+    downloadUrl,
+    downloadId: asFiniteNumber(row.downloadId) ?? undefined,
     integrity: normalizeHashesManifest(row.integrity)
   };
 }
@@ -1341,61 +1353,6 @@ function normalizeHashesManifest(value: unknown): HashesManifest {
     manifestSha256: typeof row?.manifestSha256 === "string" ? row.manifestSha256 : "",
     files
   };
-}
-
-function asUint8Array(value: unknown): Uint8Array | null {
-  if (value instanceof Uint8Array) {
-    return value;
-  }
-
-  if (value instanceof ArrayBuffer) {
-    return new Uint8Array(value);
-  }
-
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-
-  if (Array.isArray(value)) {
-    return Uint8Array.from(value, (entry) =>
-      typeof entry === "number" && Number.isFinite(entry) ? entry & 0xff : 0
-    );
-  }
-
-  const row = asRecord(value);
-
-  if (!row) {
-    return null;
-  }
-
-  const numericKeys = Object.keys(row)
-    .filter((key) => /^\d+$/.test(key))
-    .map((key) => Number(key))
-    .sort((left, right) => left - right);
-
-  if (numericKeys.length === 0) {
-    return null;
-  }
-
-  const maxIndex = numericKeys[numericKeys.length - 1];
-
-  if (typeof maxIndex !== "number" || !Number.isFinite(maxIndex)) {
-    return null;
-  }
-
-  const bytes = new Uint8Array(maxIndex + 1);
-
-  for (const index of numericKeys) {
-    const rawByte = row[String(index)];
-
-    if (typeof rawByte !== "number" || !Number.isFinite(rawByte)) {
-      return null;
-    }
-
-    bytes[index] = rawByte & 0xff;
-  }
-
-  return bytes;
 }
 
 async function ensureOffscreenDocument(): Promise<void> {
@@ -1507,6 +1464,23 @@ async function closeOffscreenIfUnused(): Promise<void> {
   await chromeApi?.offscreen?.closeDocument?.().catch(() => undefined);
 }
 
+async function downloadExportedBundle(
+  exported: PipelineExportDownloadResult,
+  saveAs: boolean
+): Promise<void> {
+  if (!chromeApi?.downloads?.download) {
+    throw new Error("Downloads API is unavailable in service worker context.");
+  }
+
+  const downloadId = await chromeApi.downloads.download({
+    url: exported.downloadUrl,
+    filename: `webblackbox/${exported.fileName}`,
+    saveAs
+  });
+
+  exported.downloadId = downloadId;
+}
+
 function toSessionListItem(runtime: SessionRuntime): SessionListItem {
   const activeRuntime = sessionsByTab.get(runtime.tabId);
   const active = activeRuntime?.sid === runtime.sid;
@@ -1519,47 +1493,6 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     active,
     stoppedAt: runtime.stoppedAt
   };
-}
-
-async function downloadExportedBundle(
-  exported: PipelineExportResult,
-  saveAs: boolean
-): Promise<void> {
-  if (!chromeApi?.downloads?.download) {
-    return;
-  }
-
-  const downloadUrl = toZipDataUrl(exported.bytes);
-
-  await chromeApi.downloads.download({
-    url: downloadUrl,
-    filename: `webblackbox/${exported.fileName}`,
-    saveAs
-  });
-}
-
-function toZipDataUrl(bytes: Uint8Array): string {
-  const base64 = bytesToBase64(bytes);
-  return `data:application/zip;base64,${base64}`;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  if (typeof btoa !== "function") {
-    throw new Error("Base64 encoding is unavailable in this runtime.");
-  }
-
-  let binary = "";
-  const chunkSize = 32 * 1024;
-
-  for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
-    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.byteLength));
-
-    for (const value of chunk) {
-      binary += String.fromCharCode(value);
-    }
-  }
-
-  return btoa(binary);
 }
 
 function pushSessionList(): void {

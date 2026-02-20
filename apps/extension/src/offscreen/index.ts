@@ -7,7 +7,7 @@ import { PORT_NAMES } from "../shared/messages.js";
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
   requestId: string;
-  op: "start" | "ingest" | "flush" | "putBlob" | "export" | "close";
+  op: "start" | "ingest" | "flush" | "putBlob" | "exportDownload" | "close";
   sid: string;
   session?: SessionMetadata;
   event?: WebBlackboxEvent;
@@ -33,6 +33,7 @@ type OffscreenState = {
 const chromeApi = getChromeApi();
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.offscreen });
 const pipelines = new Map<string, FlightRecorderPipeline>();
+const EXPORT_OBJECT_URL_TTL_MS = 90_000;
 
 const state: OffscreenState = {
   active: false,
@@ -155,10 +156,11 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     return pipeline.putBlob(message.mime, bytes);
   }
 
-  if (message.op === "export") {
-    return pipeline.exportBundle({
+  if (message.op === "exportDownload") {
+    const exported = await pipeline.exportBundle({
       passphrase: message.passphrase
     });
+    return downloadExportedBundle(exported.fileName, exported.bytes, exported.integrity);
   }
 
   if (message.op === "close") {
@@ -172,6 +174,37 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 
 function postPipelineResponse(message: OffscreenPipelineResponse): void {
   port?.postMessage(message);
+}
+
+async function downloadExportedBundle(
+  fileName: string,
+  bytes: Uint8Array,
+  integrity: unknown
+): Promise<{
+  fileName: string;
+  sizeBytes: number;
+  downloadUrl: string;
+  integrity: unknown;
+}> {
+  const normalizedBytes = new Uint8Array(bytes.byteLength);
+  normalizedBytes.set(bytes);
+  const blob = new Blob([normalizedBytes], { type: "application/zip" });
+  const downloadUrl = URL.createObjectURL(blob);
+
+  scheduleObjectUrlRevoke(downloadUrl);
+
+  return {
+    fileName,
+    sizeBytes: bytes.byteLength,
+    downloadUrl,
+    integrity
+  };
+}
+
+function scheduleObjectUrlRevoke(url: string): void {
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, EXPORT_OBJECT_URL_TTL_MS);
 }
 
 function asUint8Array(value: unknown): Uint8Array | null {
