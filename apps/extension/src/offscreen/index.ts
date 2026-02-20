@@ -183,5 +183,47 @@ function asUint8Array(value: unknown): Uint8Array | null {
     return new Uint8Array(value);
   }
 
-  return null;
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value, (entry) =>
+      typeof entry === "number" && Number.isFinite(entry) ? entry & 0xff : 0
+    );
+  }
+
+  if (value === null || typeof value !== "object") {
+    return null;
+  }
+
+  const row = value as Record<string, unknown>;
+  const numericKeys = Object.keys(row)
+    .filter((key) => /^\d+$/.test(key))
+    .map((key) => Number(key))
+    .sort((left, right) => left - right);
+
+  if (numericKeys.length === 0) {
+    return null;
+  }
+
+  const maxIndex = numericKeys[numericKeys.length - 1];
+
+  if (typeof maxIndex !== "number" || !Number.isFinite(maxIndex)) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(maxIndex + 1);
+
+  for (const index of numericKeys) {
+    const rawByte = row[String(index)];
+
+    if (typeof rawByte !== "number" || !Number.isFinite(rawByte)) {
+      return null;
+    }
+
+    bytes[index] = rawByte & 0xff;
+  }
+
+  return bytes;
 }

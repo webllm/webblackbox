@@ -287,7 +287,26 @@ const screenshotDataSchema = z
     format: z.enum(["webp", "png"]),
     w: z.number().int().positive().optional(),
     h: z.number().int().positive().optional(),
-    quality: z.number().int().min(1).max(100).optional()
+    quality: z.number().int().min(1).max(100).optional(),
+    size: z.number().int().nonnegative().optional(),
+    reason: z.string().min(1).optional(),
+    viewport: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        dpr: z.number().positive()
+      })
+      .strict()
+      .optional(),
+    pointer: z
+      .object({
+        x: z.number().finite(),
+        y: z.number().finite(),
+        t: z.number().finite().optional(),
+        mono: z.number().finite().optional()
+      })
+      .strict()
+      .optional()
   })
   .strict();
 

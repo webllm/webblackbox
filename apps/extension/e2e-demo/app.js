@@ -157,6 +157,44 @@ function sleep(ms) {
   });
 }
 
+async function waitForCondition(check, timeoutMs, intervalMs = 80) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (check()) {
+      return true;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  return false;
+}
+
+function emitPointerMove(x, y) {
+  document.dispatchEvent(
+    new PointerEvent("pointermove", {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      pointerType: "mouse"
+    })
+  );
+}
+
+function emitClick(target, x, y) {
+  target.dispatchEvent(
+    new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      button: 0
+    })
+  );
+}
+
 async function runScenario(options = {}) {
   const title =
     typeof options.taskTitle === "string" && options.taskTitle.trim().length > 0
@@ -166,13 +204,29 @@ async function runScenario(options = {}) {
   refs.taskInput.value = title;
   appendLog("scenario.start", { title });
 
-  await addTaskFromInput();
-  await loadDashboard();
-  await loadSlowReport();
-  await loadFailure();
-  savePreferences();
-  pulseDom();
-  await sleep(120);
+  emitPointerMove(220, 270);
+  emitClick(refs.addTask, 220, 270);
+  await waitForCondition(() => state.tasks.length > 0, 4000);
+
+  emitPointerMove(330, 350);
+  emitClick(refs.loadDashboard, 330, 350);
+  await sleep(220);
+
+  emitPointerMove(520, 350);
+  emitClick(refs.loadSlow, 520, 350);
+  await sleep(840);
+
+  emitPointerMove(700, 350);
+  emitClick(refs.loadFail, 700, 350);
+  await sleep(260);
+
+  emitPointerMove(320, 450);
+  emitClick(refs.savePrefs, 320, 450);
+  await sleep(110);
+
+  emitPointerMove(470, 450);
+  emitClick(refs.pulseDom, 470, 450);
+  await sleep(140);
 
   appendLog("scenario.complete", {
     tasks: state.tasks.length,

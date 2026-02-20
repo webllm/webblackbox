@@ -1,6 +1,27 @@
 import type { WebBlackboxEvent } from "@webblackbox/protocol";
 import { type NetworkWaterfallEntry, WebBlackboxPlayer } from "@webblackbox/player-sdk";
 
+type ScreenshotMarker = {
+  x: number;
+  y: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  reason?: string;
+};
+
+type ScreenshotTrailPoint = {
+  x: number;
+  y: number;
+  mono: number;
+  click: boolean;
+};
+
+type ScreenshotRenderContext = {
+  mono: number | null;
+  viewportWidth?: number;
+  viewportHeight?: number;
+};
+
 type PlayerState = {
   player: WebBlackboxPlayer | null;
   comparePlayer: WebBlackboxPlayer | null;
@@ -10,6 +31,9 @@ type PlayerState = {
   textFilter: string;
   typeFilter: "all" | "errors" | "network" | "storage" | "console";
   screenshotUrl: string | null;
+  screenshotMarker: ScreenshotMarker | null;
+  screenshotContext: ScreenshotRenderContext | null;
+  screenshotTrail: ScreenshotTrailPoint[];
   feedback: string;
 };
 
@@ -22,6 +46,9 @@ const state: PlayerState = {
   textFilter: "",
   typeFilter: "all",
   screenshotUrl: null,
+  screenshotMarker: null,
+  screenshotContext: null,
+  screenshotTrail: [],
   feedback: ""
 };
 
@@ -136,7 +163,12 @@ app.innerHTML = `
       <article class="card">
         <h2>Filmstrip</h2>
         <ul id="filmstrip-list" class="signal-list"></ul>
-        <img id="filmstrip-preview" alt="Screenshot preview" class="preview" />
+        <div id="filmstrip-preview-wrap" class="preview-wrap">
+          <img id="filmstrip-preview" alt="Screenshot preview" class="preview" />
+          <svg id="filmstrip-trail-svg" class="preview-trail" aria-hidden="true"></svg>
+          <div id="filmstrip-cursor" class="preview-cursor" hidden></div>
+        </div>
+        <p id="filmstrip-meta" class="mono"></p>
       </article>
     </section>
   </section>
@@ -163,6 +195,7 @@ function bindGlobalActions(): void {
       state.player = await openArchiveWithPassphraseFallback(bytes, file.name);
       state.selectedEventId = null;
       state.selectedRequestId = null;
+      state.screenshotMarker = null;
       setFeedback(`Loaded ${file.name}`);
       await refresh();
     } catch (error) {
@@ -197,6 +230,15 @@ function bindGlobalActions(): void {
   typeFilter.addEventListener("change", async () => {
     state.typeFilter = typeFilter.value as PlayerState["typeFilter"];
     await refresh();
+  });
+
+  const filmstripPreview = getElement<HTMLImageElement>("filmstrip-preview");
+  filmstripPreview.addEventListener("load", () => {
+    renderScreenshotOverlay();
+  });
+
+  window.addEventListener("resize", () => {
+    renderScreenshotOverlay();
   });
 
   getElement<HTMLButtonElement>("export-report").addEventListener("click", () => {
@@ -280,6 +322,7 @@ async function refresh(): Promise<void> {
   const perfList = getElement<HTMLUListElement>("perf-list");
   const filmstripList = getElement<HTMLUListElement>("filmstrip-list");
   const preview = getElement<HTMLImageElement>("filmstrip-preview");
+  const filmstripMeta = getElement<HTMLElement>("filmstrip-meta");
   const waterfallBody = getElement<HTMLTableSectionElement>("waterfall-body");
   const requestDetails = getElement<HTMLElement>("request-details");
   const realtimeList = getElement<HTMLUListElement>("realtime-list");
@@ -300,6 +343,11 @@ async function refresh(): Promise<void> {
     perfList.innerHTML = "";
     filmstripList.innerHTML = "";
     preview.removeAttribute("src");
+    state.screenshotMarker = null;
+    state.screenshotContext = null;
+    state.screenshotTrail = [];
+    filmstripMeta.textContent = "";
+    renderScreenshotOverlay();
     setFeedback(state.feedback);
     bindRequestActions();
     return;
@@ -518,12 +566,23 @@ async function refresh(): Promise<void> {
     )
     .join("");
 
+  if (screenshotEvents.length === 0) {
+    state.screenshotMarker = null;
+    state.screenshotContext = null;
+    state.screenshotTrail = [];
+    filmstripMeta.textContent = "No screenshot events available.";
+    renderScreenshotOverlay();
+  } else if (!state.screenshotMarker) {
+    filmstripMeta.textContent = "Select a screenshot to inspect pointer marker.";
+  }
+
   for (const button of filmstripList.querySelectorAll<HTMLButtonElement>(
     "button[data-shot-event]"
   )) {
     button.addEventListener("click", async () => {
       const shotEvent = state.events.find((event) => event.id === button.dataset.shotEvent);
-      const hash = (shotEvent?.data as { shotId?: string } | undefined)?.shotId;
+      const shotData = asRecord(shotEvent?.data);
+      const hash = typeof shotData?.shotId === "string" ? shotData.shotId : undefined;
 
       if (!hash || !state.player) {
         return;
@@ -542,7 +601,18 @@ async function refresh(): Promise<void> {
       const bytes = new Uint8Array(blob.bytes.byteLength);
       bytes.set(blob.bytes);
       state.screenshotUrl = URL.createObjectURL(new Blob([bytes], { type: blob.mime }));
+      state.screenshotMarker = readScreenshotMarker(shotData);
+      state.screenshotContext = readScreenshotContext(shotData, shotEvent);
+      state.screenshotTrail = buildScreenshotTrail(
+        state.events,
+        state.screenshotContext?.mono ?? null
+      );
+      filmstripMeta.textContent = describeScreenshotMeta(
+        state.screenshotMarker,
+        state.screenshotTrail
+      );
       preview.src = state.screenshotUrl;
+      renderScreenshotOverlay();
     });
   }
 
@@ -683,6 +753,258 @@ function shortUrl(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+function renderScreenshotOverlay(): void {
+  renderScreenshotTrail();
+  renderScreenshotMarker();
+}
+
+function renderScreenshotMarker(): void {
+  const preview = document.getElementById("filmstrip-preview") as HTMLImageElement | null;
+  const cursor = document.getElementById("filmstrip-cursor") as HTMLDivElement | null;
+
+  if (!preview || !cursor || !state.screenshotMarker || !preview.src) {
+    if (cursor) {
+      cursor.hidden = true;
+    }
+
+    return;
+  }
+
+  const marker = state.screenshotMarker;
+  const imageWidth = preview.clientWidth;
+  const imageHeight = preview.clientHeight;
+  const sourceWidth =
+    marker.viewportWidth ?? state.screenshotContext?.viewportWidth ?? preview.naturalWidth;
+  const sourceHeight =
+    marker.viewportHeight ?? state.screenshotContext?.viewportHeight ?? preview.naturalHeight;
+
+  if (
+    imageWidth <= 0 ||
+    imageHeight <= 0 ||
+    sourceWidth <= 0 ||
+    sourceHeight <= 0 ||
+    preview.naturalWidth <= 0 ||
+    preview.naturalHeight <= 0
+  ) {
+    cursor.hidden = true;
+    return;
+  }
+
+  const scale = Math.min(imageWidth / sourceWidth, imageHeight / sourceHeight);
+  const renderedWidth = sourceWidth * scale;
+  const renderedHeight = sourceHeight * scale;
+  const offsetX = (imageWidth - renderedWidth) / 2;
+  const offsetY = (imageHeight - renderedHeight) / 2;
+  const markerX = offsetX + (marker.x / sourceWidth) * renderedWidth;
+  const markerY = offsetY + (marker.y / sourceHeight) * renderedHeight;
+
+  cursor.style.left = `${markerX}px`;
+  cursor.style.top = `${markerY}px`;
+  cursor.hidden = false;
+}
+
+function renderScreenshotTrail(): void {
+  const preview = document.getElementById("filmstrip-preview") as HTMLImageElement | null;
+  const trailSvg = document.getElementById("filmstrip-trail-svg") as SVGSVGElement | null;
+
+  if (!preview || !trailSvg || !preview.src || state.screenshotTrail.length === 0) {
+    if (trailSvg) {
+      trailSvg.innerHTML = "";
+    }
+    return;
+  }
+
+  const imageWidth = preview.clientWidth;
+  const imageHeight = preview.clientHeight;
+  const sourceWidth = state.screenshotContext?.viewportWidth ?? preview.naturalWidth;
+  const sourceHeight = state.screenshotContext?.viewportHeight ?? preview.naturalHeight;
+
+  if (
+    imageWidth <= 0 ||
+    imageHeight <= 0 ||
+    sourceWidth <= 0 ||
+    sourceHeight <= 0 ||
+    preview.naturalWidth <= 0 ||
+    preview.naturalHeight <= 0
+  ) {
+    trailSvg.innerHTML = "";
+    return;
+  }
+
+  const scale = Math.min(imageWidth / sourceWidth, imageHeight / sourceHeight);
+  const renderedWidth = sourceWidth * scale;
+  const renderedHeight = sourceHeight * scale;
+  const offsetX = (imageWidth - renderedWidth) / 2;
+  const offsetY = (imageHeight - renderedHeight) / 2;
+
+  const projected = state.screenshotTrail.map((point) => ({
+    x: offsetX + (point.x / sourceWidth) * renderedWidth,
+    y: offsetY + (point.y / sourceHeight) * renderedHeight,
+    click: point.click
+  }));
+
+  if (projected.length === 0) {
+    trailSvg.innerHTML = "";
+    return;
+  }
+
+  const polylinePoints = projected
+    .map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`)
+    .join(" ");
+  const clickDots = projected
+    .filter((point) => point.click)
+    .map(
+      (point) =>
+        `<circle class="preview-trail-point preview-trail-point-click" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="4"></circle>`
+    )
+    .join("");
+  const endPoint = projected[projected.length - 1];
+  const endDot =
+    endPoint !== undefined
+      ? `<circle class="preview-trail-point preview-trail-point-tail" cx="${endPoint.x.toFixed(2)}" cy="${endPoint.y.toFixed(2)}" r="3"></circle>`
+      : "";
+
+  trailSvg.setAttribute("viewBox", `0 0 ${imageWidth} ${imageHeight}`);
+  trailSvg.innerHTML = `<polyline class="preview-trail-line" points="${polylinePoints}"></polyline>${clickDots}${endDot}`;
+}
+
+function readScreenshotMarker(data: Record<string, unknown> | null): ScreenshotMarker | null {
+  const pointer = asRecord(data?.pointer);
+
+  if (!pointer) {
+    return null;
+  }
+
+  const x = asFiniteNumber(pointer.x);
+  const y = asFiniteNumber(pointer.y);
+
+  if (x === null || y === null) {
+    return null;
+  }
+
+  const viewport = asRecord(data?.viewport);
+  const widthFromViewport = asFiniteNumber(viewport?.width);
+  const heightFromViewport = asFiniteNumber(viewport?.height);
+  const widthFromLegacy = asFiniteNumber(data?.w);
+  const heightFromLegacy = asFiniteNumber(data?.h);
+
+  return {
+    x,
+    y,
+    viewportWidth: widthFromViewport ?? widthFromLegacy ?? undefined,
+    viewportHeight: heightFromViewport ?? heightFromLegacy ?? undefined,
+    reason: typeof data?.reason === "string" ? data.reason : undefined
+  };
+}
+
+function readScreenshotContext(
+  data: Record<string, unknown> | null,
+  event: WebBlackboxEvent | undefined
+): ScreenshotRenderContext | null {
+  const viewport = asRecord(data?.viewport);
+  const widthFromViewport = asFiniteNumber(viewport?.width);
+  const heightFromViewport = asFiniteNumber(viewport?.height);
+  const widthFromLegacy = asFiniteNumber(data?.w);
+  const heightFromLegacy = asFiniteNumber(data?.h);
+  const mono = typeof event?.mono === "number" ? event.mono : null;
+
+  if (
+    mono === null &&
+    widthFromViewport === null &&
+    heightFromViewport === null &&
+    widthFromLegacy === null &&
+    heightFromLegacy === null
+  ) {
+    return null;
+  }
+
+  return {
+    mono,
+    viewportWidth: widthFromViewport ?? widthFromLegacy ?? undefined,
+    viewportHeight: heightFromViewport ?? heightFromLegacy ?? undefined
+  };
+}
+
+function buildScreenshotTrail(
+  events: WebBlackboxEvent[],
+  screenshotMono: number | null
+): ScreenshotTrailPoint[] {
+  if (typeof screenshotMono !== "number") {
+    return [];
+  }
+
+  const windowMs = 3_500;
+  const startMono = screenshotMono - windowMs;
+  const points: ScreenshotTrailPoint[] = [];
+
+  for (const event of events) {
+    if (event.mono < startMono || event.mono > screenshotMono) {
+      continue;
+    }
+
+    const isMove = event.type === "user.mousemove";
+    const isClick = event.type === "user.click" || event.type === "user.dblclick";
+
+    if (!isMove && !isClick) {
+      continue;
+    }
+
+    const payload = asRecord(event.data);
+    const x = asFiniteNumber(payload?.x);
+    const y = asFiniteNumber(payload?.y);
+
+    if (x === null || y === null) {
+      continue;
+    }
+
+    points.push({
+      x,
+      y,
+      mono: event.mono,
+      click: isClick
+    });
+  }
+
+  points.sort((left, right) => left.mono - right.mono);
+
+  const maxPoints = 90;
+
+  if (points.length <= maxPoints) {
+    return points;
+  }
+
+  const step = Math.ceil(points.length / maxPoints);
+  return points.filter((_, index) => index % step === 0 || index === points.length - 1);
+}
+
+function describeScreenshotMeta(
+  marker: ScreenshotMarker | null,
+  trail: ScreenshotTrailPoint[]
+): string {
+  const markerText = describeScreenshotMarker(marker);
+  const trailText = trail.length > 0 ? `Trail points: ${trail.length}` : "No trail points.";
+  return `${markerText} | ${trailText}`;
+}
+
+function describeScreenshotMarker(marker: ScreenshotMarker | null): string {
+  if (!marker) {
+    return "No pointer marker on this screenshot.";
+  }
+
+  const base = `Pointer marker: (${Math.round(marker.x)}, ${Math.round(marker.y)})`;
+  return marker.reason ? `${base} [${marker.reason}]` : base;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function getElement<TElement extends HTMLElement>(id: string): TElement {

@@ -255,6 +255,12 @@ async function main() {
   const hasApiRequest = playerResult.waterfallSamples.some((sample) => sample.includes("/api/"));
   assert(hasApiRequest, "Player waterfall does not include demo API requests", playerResult);
 
+  await waitForPlayerEventType(playerClient, "user.mousemove", 20_000);
+  await waitForPlayerEventType(playerClient, "screen.screenshot", 20_000);
+
+  const markerResult = await verifyPlayerScreenshotMarker(playerClient, 20_000);
+  assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
+
   if (swExceptions.length > 0) {
     throw new Error(`Service worker runtime exceptions: ${JSON.stringify(swExceptions)}`);
   }
@@ -275,6 +281,7 @@ async function main() {
   console.log("Archive bytes:", fileInfo.size);
   console.log("Scenario:", JSON.stringify(scenarioResult));
   console.log("Player:", JSON.stringify(playerResult));
+  console.log("Screenshot marker:", JSON.stringify(markerResult));
   console.log(`Chrome log: ${chromeLogPath}`);
   console.log("Fullchain E2E passed.");
 
@@ -1048,6 +1055,107 @@ async function waitForPlayerLoad(playerClient, timeoutMs) {
     300,
     "Player did not load archive in time"
   );
+}
+
+async function waitForPlayerEventType(playerClient, eventType, timeoutMs) {
+  return waitFor(
+    async () => {
+      const found = await playerClient.evaluate(`
+      (() => {
+        const tags = Array.from(document.querySelectorAll('#timeline-list .tag'));
+        return tags.some((node) => (node.textContent ?? '').trim() === ${JSON.stringify(eventType)});
+      })()
+    `);
+
+      return found ? true : null;
+    },
+    timeoutMs,
+    250,
+    `Timeline did not include event type: ${eventType}`
+  );
+}
+
+async function verifyPlayerScreenshotMarker(playerClient, timeoutMs) {
+  const count = await waitFor(
+    async () => {
+      const value = await playerClient.evaluate(`
+      (() => document.querySelectorAll('#filmstrip-list button[data-shot-event]').length)()
+    `);
+
+      return typeof value === "number" && value > 0 ? value : null;
+    },
+    timeoutMs,
+    250,
+    "No screenshot in player filmstrip"
+  );
+
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const clicked = await playerClient.evaluate(`
+      (() => {
+        const buttons = Array.from(document.querySelectorAll('#filmstrip-list button[data-shot-event]'));
+        const button = buttons[${index}];
+
+        if (!button) {
+          return false;
+        }
+
+        button.click();
+        return true;
+      })()
+    `);
+
+    if (!clicked) {
+      continue;
+    }
+
+    try {
+      const details = await waitFor(
+        async () => {
+          const snapshot = await playerClient.evaluate(`
+          (() => {
+            const meta = (document.getElementById('filmstrip-meta')?.textContent ?? '').trim();
+            const cursor = document.getElementById('filmstrip-cursor');
+            const visible = !!cursor && !cursor.hasAttribute('hidden');
+            const trailSegments = document.querySelectorAll(
+              '#filmstrip-trail-svg .preview-trail-line, #filmstrip-trail-svg .preview-trail-point'
+            ).length;
+            return { meta, visible, trailSegments };
+          })()
+        `);
+
+          if (!snapshot || !snapshot.visible) {
+            return null;
+          }
+
+          if (!snapshot.meta.startsWith("Pointer marker:")) {
+            return null;
+          }
+
+          if (typeof snapshot.trailSegments !== "number" || snapshot.trailSegments <= 0) {
+            return null;
+          }
+
+          return snapshot;
+        },
+        2_500,
+        150,
+        "Marker not visible on this screenshot"
+      );
+
+      return {
+        ok: true,
+        meta: details.meta,
+        screenshotIndex: index
+      };
+    } catch {
+      // Continue trying older screenshots.
+    }
+  }
+
+  return {
+    ok: false,
+    reason: "no-screenshot-with-pointer-marker"
+  };
 }
 
 async function waitForFile(path, timeoutMs) {

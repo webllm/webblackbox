@@ -30,6 +30,21 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
       <label style="display:block;margin:12px 0 6px;">Action Window (ms)</label>
       <input id="actionWindowMs" type="number" min="100" max="10000" value="${config.sampling.actionWindowMs}" />
 
+      <label style="display:block;margin:12px 0 6px;">Mousemove Sampling (Hz)</label>
+      <input id="mousemoveHz" type="number" min="1" max="240" value="${config.sampling.mousemoveHz}" />
+
+      <label style="display:block;margin:12px 0 6px;">Scroll Sampling (Hz)</label>
+      <input id="scrollHz" type="number" min="1" max="120" value="${config.sampling.scrollHz}" />
+
+      <label style="display:block;margin:12px 0 6px;">DOM Flush Interval (ms)</label>
+      <input id="domFlushMs" type="number" min="25" max="10000" value="${config.sampling.domFlushMs}" />
+
+      <label style="display:block;margin:12px 0 6px;">DOM Snapshot Interval (ms)</label>
+      <input id="snapshotIntervalMs" type="number" min="500" max="120000" value="${config.sampling.snapshotIntervalMs}" />
+
+      <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
+      <input id="screenshotIdleMs" type="number" min="250" max="120000" value="${config.sampling.screenshotIdleMs}" />
+
       <label style="display:block;margin:12px 0 6px;">Blocked Selectors (one per line)</label>
       <textarea id="blockedSelectors" rows="6" style="width:100%;">${config.redaction.blockedSelectors.join("\n")}</textarea>
 
@@ -109,6 +124,26 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
     container.querySelector<HTMLInputElement>("#actionWindowMs")?.value ??
       DEFAULT_RECORDER_CONFIG.sampling.actionWindowMs
   );
+  const mousemoveHz = Number(
+    container.querySelector<HTMLInputElement>("#mousemoveHz")?.value ??
+      DEFAULT_RECORDER_CONFIG.sampling.mousemoveHz
+  );
+  const scrollHz = Number(
+    container.querySelector<HTMLInputElement>("#scrollHz")?.value ??
+      DEFAULT_RECORDER_CONFIG.sampling.scrollHz
+  );
+  const domFlushMs = Number(
+    container.querySelector<HTMLInputElement>("#domFlushMs")?.value ??
+      DEFAULT_RECORDER_CONFIG.sampling.domFlushMs
+  );
+  const snapshotIntervalMs = Number(
+    container.querySelector<HTMLInputElement>("#snapshotIntervalMs")?.value ??
+      DEFAULT_RECORDER_CONFIG.sampling.snapshotIntervalMs
+  );
+  const screenshotIdleMs = Number(
+    container.querySelector<HTMLInputElement>("#screenshotIdleMs")?.value ??
+      DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
+  );
 
   const blockedSelectors = splitLines(
     container.querySelector<HTMLTextAreaElement>("#blockedSelectors")?.value
@@ -127,7 +162,22 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
     ringBufferMinutes: Number.isFinite(ringBufferMinutes) ? Math.max(1, ringBufferMinutes) : 10,
     sampling: {
       ...DEFAULT_RECORDER_CONFIG.sampling,
-      actionWindowMs: Number.isFinite(actionWindowMs) ? Math.max(100, actionWindowMs) : 1500
+      actionWindowMs: Number.isFinite(actionWindowMs) ? Math.max(100, actionWindowMs) : 1500,
+      mousemoveHz: Number.isFinite(mousemoveHz)
+        ? Math.min(240, Math.max(1, mousemoveHz))
+        : DEFAULT_RECORDER_CONFIG.sampling.mousemoveHz,
+      scrollHz: Number.isFinite(scrollHz)
+        ? Math.min(120, Math.max(1, scrollHz))
+        : DEFAULT_RECORDER_CONFIG.sampling.scrollHz,
+      domFlushMs: Number.isFinite(domFlushMs)
+        ? Math.min(10_000, Math.max(25, domFlushMs))
+        : DEFAULT_RECORDER_CONFIG.sampling.domFlushMs,
+      snapshotIntervalMs: Number.isFinite(snapshotIntervalMs)
+        ? Math.min(120_000, Math.max(500, snapshotIntervalMs))
+        : DEFAULT_RECORDER_CONFIG.sampling.snapshotIntervalMs,
+      screenshotIdleMs: Number.isFinite(screenshotIdleMs)
+        ? Math.min(120_000, Math.max(250, screenshotIdleMs))
+        : DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
     },
     redaction: {
       ...DEFAULT_RECORDER_CONFIG.redaction,

@@ -24,6 +24,7 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   input: "user.input",
   submit: "user.submit",
   scroll: "user.scroll",
+  mousemove: "user.mousemove",
   focus: "user.focus",
   blur: "user.blur",
   marker: "user.marker",

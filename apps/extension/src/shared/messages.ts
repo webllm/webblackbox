@@ -1,4 +1,4 @@
-import type { CaptureMode, FreezeReason } from "@webblackbox/protocol";
+import type { CaptureMode, FreezeReason, SamplingProfile } from "@webblackbox/protocol";
 
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
@@ -50,6 +50,10 @@ export type RecordingStatusMessage = {
   active: boolean;
   sid?: string;
   mode?: CaptureMode;
+  sampling?: Pick<
+    SamplingProfile,
+    "mousemoveHz" | "scrollHz" | "domFlushMs" | "snapshotIntervalMs" | "screenshotIdleMs"
+  >;
 };
 
 export type FreezeNoticeMessage = {

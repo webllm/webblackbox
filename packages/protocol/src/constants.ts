@@ -24,6 +24,7 @@ export const WEBBLACKBOX_EVENT_TYPES = [
   "user.input",
   "user.submit",
   "user.scroll",
+  "user.mousemove",
   "user.focus",
   "user.blur",
   "user.marker",

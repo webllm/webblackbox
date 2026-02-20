@@ -37,10 +37,26 @@ type SessionRuntime = {
   cdpRouter: CdpRouter | null;
   requestMeta: Map<string, { url?: string; mimeType?: string; status?: number }>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
+  lastPointer: PointerState | null;
+  lastViewport: ViewportState | null;
+  lastActionScreenshotMono: number;
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
   heapSnapshotCapture: HeapSnapshotCaptureState | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+};
+
+type PointerState = {
+  x: number;
+  y: number;
+  t: number;
+  mono: number;
+};
+
+type ViewportState = {
+  width: number;
+  height: number;
+  dpr: number;
 };
 
 type HeapSnapshotCaptureState = {
@@ -84,6 +100,14 @@ type OffscreenPipelineResponse = {
   error?: string;
 };
 
+type RecordingSampling = {
+  mousemoveHz: number;
+  scrollHz: number;
+  domFlushMs: number;
+  snapshotIntervalMs: number;
+  screenshotIdleMs: number;
+};
+
 const chromeApi = getChromeApi();
 
 const sessionsByTab = new Map<number, SessionRuntime>();
@@ -101,13 +125,15 @@ const pendingOffscreenRequests = new Map<
 let offscreenRequestSeq = 0;
 
 const OFFSCREEN_PATH = "offscreen.html";
-const SCREENSHOT_INTERVAL_MS = 8_000;
+const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
+const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
 const CPU_PROFILE_SAMPLE_MS = 350;
 const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
 const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
 const STOPPED_SESSION_TTL_MS = 10 * 60_000;
+const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "keydown", "marker"]);
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -283,6 +309,9 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     cdpRouter: null,
     requestMeta: new Map(),
     screenshotInterval: null,
+    lastPointer: null,
+    lastViewport: null,
+    lastActionScreenshotMono: Number.NEGATIVE_INFINITY,
     queue: Promise.resolve(),
     removeCdpListeners: [],
     heapSnapshotCapture: null,
@@ -339,9 +368,11 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     await attachCdp(runtime);
   }
 
+  const sampling = toStatusSampling(runtime);
+
   await setRecordingBadge();
-  await notifyTabStatus(tabId, true, sid, mode);
-  broadcast({ kind: "sw.recording-status", active: true, sid, mode });
+  await notifyTabStatus(tabId, true, sid, mode, sampling);
+  broadcast({ kind: "sw.recording-status", active: true, sid, mode, sampling });
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
@@ -427,7 +458,81 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
     sid: runtime.sid
   };
 
+  updateRuntimeInteractionState(runtime, nextRawEvent);
+
+  if (runtime.mode === "full" && shouldCaptureActionScreenshot(nextRawEvent, runtime)) {
+    runtime.lastActionScreenshotMono = nextRawEvent.mono;
+    enqueue(runtime, async () => {
+      await captureScreenshot(runtime, `action:${nextRawEvent.rawType}`);
+    });
+  }
+
   runtime.recorder.ingest(nextRawEvent);
+}
+
+function updateRuntimeInteractionState(runtime: SessionRuntime, rawEvent: RawRecorderEvent): void {
+  if (rawEvent.source !== "content") {
+    return;
+  }
+
+  const payload = asRecord(rawEvent.payload);
+
+  if (!payload) {
+    return;
+  }
+
+  if (rawEvent.rawType === "resize") {
+    const width = asFiniteNumber(payload.width);
+    const height = asFiniteNumber(payload.height);
+    const dpr = asFiniteNumber(payload.dpr) ?? runtime.lastViewport?.dpr ?? 1;
+
+    if (typeof width === "number" && typeof height === "number" && width > 0 && height > 0) {
+      runtime.lastViewport = {
+        width: Math.round(width),
+        height: Math.round(height),
+        dpr: Number(dpr.toFixed(2))
+      };
+    }
+
+    return;
+  }
+
+  if (
+    rawEvent.rawType === "mousemove" ||
+    rawEvent.rawType === "click" ||
+    rawEvent.rawType === "dblclick"
+  ) {
+    const x = asFiniteNumber(payload.x);
+    const y = asFiniteNumber(payload.y);
+
+    if (typeof x === "number" && typeof y === "number") {
+      runtime.lastPointer = {
+        x: Number(x.toFixed(2)),
+        y: Number(y.toFixed(2)),
+        t: rawEvent.t,
+        mono: rawEvent.mono
+      };
+    }
+  }
+}
+
+function shouldCaptureActionScreenshot(
+  rawEvent: RawRecorderEvent,
+  runtime: SessionRuntime
+): boolean {
+  if (rawEvent.source !== "content") {
+    return false;
+  }
+
+  if (!ACTION_SCREENSHOT_RAW_TYPES.has(rawEvent.rawType)) {
+    return false;
+  }
+
+  if (rawEvent.mono - runtime.lastActionScreenshotMono < SCREENSHOT_ACTION_COOLDOWN_MS) {
+    return false;
+  }
+
+  return true;
 }
 
 function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
@@ -631,11 +736,16 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
     await captureFullModeArtifacts(runtime, "session-start");
 
+    const screenshotIntervalMs = normalizeSamplingInterval(
+      runtime.config.sampling.screenshotIdleMs,
+      DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
+    );
+
     runtime.screenshotInterval = globalThis.setInterval(() => {
       enqueue(runtime, async () => {
         await captureScreenshot(runtime, "interval");
       });
-    }, SCREENSHOT_INTERVAL_MS);
+    }, screenshotIntervalMs);
   } catch (error) {
     console.warn("[WebBlackbox] failed to attach debugger", error);
     runtime.cdpRouter = null;
@@ -770,6 +880,11 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
 
   const bytes = decodeBase64(screenshot.data);
   const hash = await runtime.pipeline.putBlob("image/webp", bytes);
+  const viewport = runtime.lastViewport;
+  const pointer =
+    runtime.lastPointer && Date.now() - runtime.lastPointer.t <= POINTER_STALE_MS
+      ? runtime.lastPointer
+      : null;
 
   ingestRawEvent({
     source: "system",
@@ -781,6 +896,24 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
     payload: {
       shotId: hash,
       format: "webp",
+      quality: 70,
+      w: viewport?.width,
+      h: viewport?.height,
+      viewport: viewport
+        ? {
+            width: viewport.width,
+            height: viewport.height,
+            dpr: viewport.dpr
+          }
+        : undefined,
+      pointer: pointer
+        ? {
+            x: pointer.x,
+            y: pointer.y,
+            t: pointer.t,
+            mono: pointer.mono
+          }
+        : undefined,
       size: bytes.byteLength,
       reason
     }
@@ -1140,6 +1273,32 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeSamplingInterval(candidate: unknown, fallback: number): number {
+  const value = asFiniteNumber(candidate);
+
+  if (value === null) {
+    return fallback;
+  }
+
+  return Math.max(250, Math.round(value));
+}
+
+function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
+  const sampling = runtime.config.sampling;
+
+  return {
+    mousemoveHz: Math.max(1, Math.round(asFiniteNumber(sampling.mousemoveHz) ?? 20)),
+    scrollHz: Math.max(1, Math.round(asFiniteNumber(sampling.scrollHz) ?? 15)),
+    domFlushMs: normalizeSamplingInterval(sampling.domFlushMs, 100),
+    snapshotIntervalMs: normalizeSamplingInterval(sampling.snapshotIntervalMs, 20_000),
+    screenshotIdleMs: normalizeSamplingInterval(sampling.screenshotIdleMs, 8_000)
+  };
+}
+
 function normalizePipelineExportResult(raw: unknown): PipelineExportResult {
   const row = asRecord(raw);
 
@@ -1218,7 +1377,13 @@ function asUint8Array(value: unknown): Uint8Array | null {
     return null;
   }
 
-  const bytes = new Uint8Array(numericKeys[numericKeys.length - 1] + 1);
+  const maxIndex = numericKeys[numericKeys.length - 1];
+
+  if (typeof maxIndex !== "number" || !Number.isFinite(maxIndex)) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(maxIndex + 1);
 
   for (const index of numericKeys) {
     const rawByte = row[String(index)];
@@ -1526,7 +1691,8 @@ async function notifyTabStatus(
   tabId: number,
   active: boolean,
   sid?: string,
-  mode?: CaptureMode
+  mode?: CaptureMode,
+  sampling?: RecordingSampling
 ): Promise<void> {
   if (!chromeApi?.tabs?.sendMessage) {
     return;
@@ -1537,7 +1703,8 @@ async function notifyTabStatus(
       kind: "sw.recording-status",
       active,
       sid,
-      mode
+      mode,
+      sampling
     })
     .catch(() => undefined);
 }

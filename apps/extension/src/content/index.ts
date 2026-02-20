@@ -9,6 +9,22 @@ const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.content });
 const eventBuffer: RawRecorderEvent[] = [];
 const mutationBuffer: Array<Record<string, unknown>> = [];
 
+type ContentSampling = {
+  mousemoveHz: number;
+  scrollHz: number;
+  domFlushMs: number;
+  snapshotIntervalMs: number;
+  screenshotIdleMs: number;
+};
+
+const DEFAULT_SAMPLING: ContentSampling = {
+  mousemoveHz: 20,
+  scrollHz: 15,
+  domFlushMs: 100,
+  snapshotIntervalMs: 20_000,
+  screenshotIdleMs: 8_000
+};
+
 let flushTimer = 0;
 let recordingActive = false;
 let indicator: HTMLDivElement | null = null;
@@ -17,6 +33,7 @@ let snapshotTimer = 0;
 let mutationFlushTimer = 0;
 let lastScrollTime = 0;
 let lastPointerTime = 0;
+let sampling: ContentSampling = { ...DEFAULT_SAMPLING };
 
 if (port) {
   port.onMessage.addListener((message) => {
@@ -183,8 +200,9 @@ function installInputAndLifecycleCapture(): void {
     "scroll",
     (event) => {
       const now = performance.now();
+      const scrollGapMs = Math.max(16, Math.round(1000 / Math.max(1, sampling.scrollHz)));
 
-      if (now - lastScrollTime < 100) {
+      if (now - lastScrollTime < scrollGapMs) {
         return;
       }
 
@@ -205,8 +223,9 @@ function installInputAndLifecycleCapture(): void {
     "pointermove",
     (event) => {
       const now = performance.now();
+      const pointerGapMs = Math.max(16, Math.round(1000 / Math.max(1, sampling.mousemoveHz)));
 
-      if (now - lastPointerTime < 80) {
+      if (now - lastPointerTime < pointerGapMs) {
         return;
       }
 
@@ -222,11 +241,7 @@ function installInputAndLifecycleCapture(): void {
   );
 
   window.addEventListener("resize", () => {
-    queueEvent("resize", {
-      width: window.innerWidth,
-      height: window.innerHeight,
-      dpr: window.devicePixelRatio
-    });
+    emitViewportSnapshot("resize");
   });
 
   window.addEventListener("visibilitychange", () => {
@@ -292,6 +307,7 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
 
   if (message.kind === "sw.recording-status") {
     recordingActive = message.active;
+    sampling = sanitizeSamplingConfig(message.sampling);
 
     if (recordingActive) {
       ensureIndicator(message.sid, message.mode);
@@ -338,10 +354,13 @@ function startMutationAndSnapshots(): void {
   }
 
   if (snapshotTimer === 0) {
+    const snapshotIntervalMs = Math.max(500, Math.round(sampling.snapshotIntervalMs));
     snapshotTimer = window.setInterval(() => {
       emitDomSnapshot("interval");
-    }, 20_000);
+    }, snapshotIntervalMs);
   }
+
+  emitViewportSnapshot("start");
 }
 
 function stopMutationAndSnapshots(): void {
@@ -368,10 +387,13 @@ function scheduleMutationFlush(): void {
     return;
   }
 
-  mutationFlushTimer = window.setTimeout(() => {
-    mutationFlushTimer = 0;
-    flushMutationBuffer();
-  }, 100);
+  mutationFlushTimer = window.setTimeout(
+    () => {
+      mutationFlushTimer = 0;
+      flushMutationBuffer();
+    },
+    Math.max(25, Math.round(sampling.domFlushMs))
+  );
 }
 
 function flushMutationBuffer(): void {
@@ -397,6 +419,15 @@ function emitDomSnapshot(reason: string): void {
     nodeCount: document.getElementsByTagName("*").length,
     htmlLength: html.length,
     htmlSnippet: html.slice(0, 16_000)
+  });
+}
+
+function emitViewportSnapshot(reason: string): void {
+  queueEvent("resize", {
+    reason,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    dpr: window.devicePixelRatio
   });
 }
 
@@ -491,6 +522,38 @@ function removeIndicator(): void {
 
   indicator.remove();
   indicator = null;
+}
+
+function sanitizeSamplingConfig(raw: unknown): ContentSampling {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ...DEFAULT_SAMPLING };
+  }
+
+  const row = raw as Record<string, unknown>;
+
+  return {
+    mousemoveHz: clampRate(row.mousemoveHz, DEFAULT_SAMPLING.mousemoveHz),
+    scrollHz: clampRate(row.scrollHz, DEFAULT_SAMPLING.scrollHz),
+    domFlushMs: clampInterval(row.domFlushMs, DEFAULT_SAMPLING.domFlushMs),
+    snapshotIntervalMs: clampInterval(row.snapshotIntervalMs, DEFAULT_SAMPLING.snapshotIntervalMs),
+    screenshotIdleMs: clampInterval(row.screenshotIdleMs, DEFAULT_SAMPLING.screenshotIdleMs)
+  };
+}
+
+function clampRate(value: unknown, fallback: number): number {
+  return clampNumber(value, fallback, 1, 240);
+}
+
+function clampInterval(value: unknown, fallback: number): number {
+  return clampNumber(value, fallback, 25, 120_000);
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function monotonicTime(): number {
