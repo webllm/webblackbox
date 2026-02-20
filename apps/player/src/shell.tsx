@@ -170,6 +170,23 @@ export function PlayerShell(): React.JSX.Element {
         </div>
       </Card>
 
+      <Card className="readout-card">
+        <div className="readout-clock">
+          <p className="eyebrow">Playback Window</p>
+          <p id="playback-window-label" className="readout-time mono">
+            0.00s / 0.00s
+          </p>
+        </div>
+        <div className="readout-metrics">
+          <p id="playback-window-events" className="readout-line">
+            0 events | 0 errors | 0 requests
+          </p>
+          <p id="playback-window-panel" className="readout-line muted">
+            Timeline panel
+          </p>
+        </div>
+      </Card>
+
       <Card className="ops-card">
         <section id="summary" className="summary"></section>
 
@@ -207,99 +224,105 @@ export function PlayerShell(): React.JSX.Element {
         </section>
       </Card>
 
-      <section className="panel-tabs" id="panel-tabs">
-        <Button
-          className="panel-tab active"
-          data-log-panel="timeline"
-          type="button"
-          variant="ghost"
-        >
-          Timeline
-        </Button>
-        <Button className="panel-tab" data-log-panel="details" type="button" variant="ghost">
-          Event
-        </Button>
-        <Button className="panel-tab" data-log-panel="network" type="button" variant="ghost">
-          Network
-        </Button>
-        <Button className="panel-tab" data-log-panel="compare" type="button" variant="ghost">
-          Compare
-        </Button>
-        <Button className="panel-tab" data-log-panel="console" type="button" variant="ghost">
-          Console
-        </Button>
-        <Button className="panel-tab" data-log-panel="realtime" type="button" variant="ghost">
-          Realtime
-        </Button>
-        <Button className="panel-tab" data-log-panel="storage" type="button" variant="ghost">
-          Storage
-        </Button>
-        <Button className="panel-tab" data-log-panel="perf" type="button" variant="ghost">
-          Performance
-        </Button>
-      </section>
-
-      <section className="log-grid">
-        <Card className="timeline-card" data-log-panel-target="timeline">
-          <h2>Timeline (&lt;= Playhead)</h2>
-          <ul id="timeline-list" className="event-list"></ul>
-        </Card>
-
-        <Card className="details-card" data-log-panel-target="details">
-          <h2>Event Details</h2>
-          <pre id="event-details" className="code"></pre>
-        </Card>
-
-        <Card className="network-card" data-log-panel-target="network">
-          <h2>Network Waterfall (&lt;= Playhead)</h2>
-          <div className="waterfall-wrap">
-            <table className="waterfall-table">
-              <thead>
-                <tr>
-                  <th align="left">Request</th>
-                  <th align="left">Status</th>
-                  <th align="left">Duration</th>
-                  <th align="left">Action</th>
-                </tr>
-              </thead>
-              <tbody id="waterfall-body"></tbody>
-            </table>
-          </div>
-          <div className="inline-actions">
-            <Button id="copy-curl" type="button" variant="secondary">
-              Copy cURL
+      <section className="log-workbench">
+        <Card className="log-rail">
+          <section className="panel-tabs" id="panel-tabs">
+            <Button
+              className="panel-tab active"
+              data-log-panel="timeline"
+              type="button"
+              variant="ghost"
+            >
+              Timeline
             </Button>
-            <Button id="copy-fetch" type="button" variant="secondary">
-              Copy fetch
+            <Button className="panel-tab" data-log-panel="details" type="button" variant="ghost">
+              Event
             </Button>
-          </div>
-          <pre id="request-details" className="code"></pre>
+            <Button className="panel-tab" data-log-panel="network" type="button" variant="ghost">
+              Network
+            </Button>
+            <Button className="panel-tab" data-log-panel="compare" type="button" variant="ghost">
+              Compare
+            </Button>
+            <Button className="panel-tab" data-log-panel="console" type="button" variant="ghost">
+              Console
+            </Button>
+            <Button className="panel-tab" data-log-panel="realtime" type="button" variant="ghost">
+              Realtime
+            </Button>
+            <Button className="panel-tab" data-log-panel="storage" type="button" variant="ghost">
+              Storage
+            </Button>
+            <Button className="panel-tab" data-log-panel="perf" type="button" variant="ghost">
+              Performance
+            </Button>
+          </section>
         </Card>
 
-        <Card className="compare-card" data-log-panel-target="compare">
-          <h2>Compare Summary</h2>
-          <pre id="compare-details" className="code"></pre>
-        </Card>
+        <section className="log-main">
+          <section className="log-grid">
+            <Card className="timeline-card" data-log-panel-target="timeline">
+              <h2>Timeline (&lt;= Playhead)</h2>
+              <ul id="timeline-list" className="event-list"></ul>
+            </Card>
 
-        <Card data-log-panel-target="console">
-          <h2>Console &amp; Errors (&lt;= Playhead)</h2>
-          <ul id="console-list" className="signal-list"></ul>
-        </Card>
+            <Card className="details-card" data-log-panel-target="details">
+              <h2>Event Details</h2>
+              <pre id="event-details" className="code"></pre>
+            </Card>
 
-        <Card data-log-panel-target="realtime">
-          <h2>Realtime WS/SSE (&lt;= Playhead)</h2>
-          <ul id="realtime-list" className="signal-list"></ul>
-        </Card>
+            <Card className="network-card" data-log-panel-target="network">
+              <h2>Network Waterfall (&lt;= Playhead)</h2>
+              <div className="waterfall-wrap">
+                <table className="waterfall-table">
+                  <thead>
+                    <tr>
+                      <th align="left">Request</th>
+                      <th align="left">Status</th>
+                      <th align="left">Duration</th>
+                      <th align="left">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="waterfall-body"></tbody>
+                </table>
+              </div>
+              <div className="inline-actions">
+                <Button id="copy-curl" type="button" variant="secondary">
+                  Copy cURL
+                </Button>
+                <Button id="copy-fetch" type="button" variant="secondary">
+                  Copy fetch
+                </Button>
+              </div>
+              <pre id="request-details" className="code"></pre>
+            </Card>
 
-        <Card data-log-panel-target="storage">
-          <h2>Storage Timeline (&lt;= Playhead)</h2>
-          <ul id="storage-list" className="signal-list"></ul>
-        </Card>
+            <Card className="compare-card" data-log-panel-target="compare">
+              <h2>Compare Summary</h2>
+              <pre id="compare-details" className="code"></pre>
+            </Card>
 
-        <Card data-log-panel-target="perf">
-          <h2>Performance Artifacts (&lt;= Playhead)</h2>
-          <ul id="perf-list" className="signal-list"></ul>
-        </Card>
+            <Card data-log-panel-target="console">
+              <h2>Console &amp; Errors (&lt;= Playhead)</h2>
+              <ul id="console-list" className="signal-list"></ul>
+            </Card>
+
+            <Card data-log-panel-target="realtime">
+              <h2>Realtime WS/SSE (&lt;= Playhead)</h2>
+              <ul id="realtime-list" className="signal-list"></ul>
+            </Card>
+
+            <Card data-log-panel-target="storage">
+              <h2>Storage Timeline (&lt;= Playhead)</h2>
+              <ul id="storage-list" className="signal-list"></ul>
+            </Card>
+
+            <Card data-log-panel-target="perf">
+              <h2>Performance Artifacts (&lt;= Playhead)</h2>
+              <ul id="perf-list" className="signal-list"></ul>
+            </Card>
+          </section>
+        </section>
       </section>
     </section>
   );

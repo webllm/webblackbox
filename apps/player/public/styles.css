@@ -738,6 +738,35 @@ h1 {
   gap: 10px;
 }
 
+.readout-card {
+  display: grid;
+  grid-template-columns: minmax(220px, auto) 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.readout-time {
+  margin: 5px 0 0;
+  font-size: 20px;
+  letter-spacing: 0.01em;
+}
+
+.readout-metrics {
+  display: grid;
+  gap: 4px;
+}
+
+.readout-line {
+  margin: 0;
+  font-size: 13px;
+  color: #1f3024;
+}
+
+.readout-line.muted {
+  color: var(--text-soft);
+}
+
 .summary {
   display: flex;
   flex-wrap: wrap;
@@ -774,16 +803,28 @@ h1 {
   gap: 8px;
 }
 
+.log-workbench {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.log-rail {
+  position: sticky;
+  top: 12px;
+}
+
 .panel-tabs {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
 }
 
 .panel-tab {
-  border-radius: 999px;
+  justify-content: flex-start;
+  border-radius: 11px;
   min-height: 33px;
-  padding: 0 12px;
+  padding: 0 10px;
   border-color: var(--line-strong);
   background: rgba(255, 255, 255, 0.78);
   color: #2f4335;
@@ -795,12 +836,19 @@ h1 {
   color: #0b5b50;
 }
 
+.log-main {
+  min-width: 0;
+}
+
 .log-grid {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(300px, 0.92fr) minmax(0, 1.08fr);
+  gap: 10px;
+  align-items: start;
 }
 
 .log-grid .card {
-  margin-bottom: 10px;
+  margin-bottom: 0;
 }
 
 .log-grid h2 {
@@ -812,11 +860,25 @@ h1 {
   display: none !important;
 }
 
+.log-grid .panel-primary {
+  grid-column: 1 / -1;
+}
+
+.log-grid .panel-secondary {
+  grid-column: 2;
+}
+
 .timeline-card,
 .details-card,
 .network-card,
 .compare-card {
   min-height: 300px;
+}
+
+.timeline-card {
+  grid-column: 1;
+  position: sticky;
+  top: 12px;
 }
 
 .event-list,
@@ -1032,6 +1094,34 @@ h1 {
   .topbar-actions {
     justify-content: flex-start;
   }
+
+  .log-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .log-rail {
+    position: static;
+  }
+
+  .panel-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  }
+
+  .panel-tab {
+    justify-content: center;
+  }
+
+  .log-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .log-grid .panel-secondary {
+    grid-column: 1;
+  }
+
+  .timeline-card {
+    position: static;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1050,6 +1140,10 @@ h1 {
   }
 
   .filters {
+    grid-template-columns: 1fr;
+  }
+
+  .readout-card {
     grid-template-columns: 1fr;
   }
 

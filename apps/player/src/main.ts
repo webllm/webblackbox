@@ -24,6 +24,17 @@ type LogPanelKey =
   | "storage"
   | "perf";
 
+const PANEL_LABELS: Record<LogPanelKey, string> = {
+  timeline: "Timeline",
+  details: "Event",
+  network: "Network",
+  compare: "Compare",
+  console: "Console",
+  realtime: "Realtime",
+  storage: "Storage",
+  perf: "Performance"
+};
+
 type ScreenshotMarker = {
   x: number;
   y: number;
@@ -268,6 +279,9 @@ const refs = {
   progressHoverResponseBody: getElement<HTMLElement>("progress-hover-response-body"),
   playbackCurrent: getElement<HTMLElement>("playback-current"),
   playbackTotal: getElement<HTMLElement>("playback-total"),
+  playbackWindowLabel: getElement<HTMLElement>("playback-window-label"),
+  playbackWindowEvents: getElement<HTMLElement>("playback-window-events"),
+  playbackWindowPanel: getElement<HTMLElement>("playback-window-panel"),
   preview: getElement<HTMLImageElement>("filmstrip-preview"),
   stagePlaceholder: getElement<HTMLElement>("stage-placeholder"),
   filmstripMeta: getElement<HTMLElement>("filmstrip-meta"),
@@ -909,6 +923,7 @@ function renderPlaybackChrome(): void {
     hideProgressHover();
     refs.playbackCurrent.textContent = "0.00s";
     refs.playbackTotal.textContent = "0.00s";
+    renderPlaybackReadout();
     return;
   }
 
@@ -923,6 +938,7 @@ function renderPlaybackChrome(): void {
   refs.playbackPlayhead.style.left = `${(Math.min(1, Math.max(0, ratio)) * 100).toFixed(3)}%`;
   refs.playbackCurrent.textContent = formatMono(state.playheadMono - model.minMono);
   refs.playbackTotal.textContent = formatMono(model.durationMono);
+  renderPlaybackReadout();
 }
 
 function renderPanelTabs(): void {
@@ -935,8 +951,60 @@ function renderPanelTabs(): void {
 
   for (const card of panelCards) {
     const panel = card.dataset.logPanelTarget as LogPanelKey | undefined;
-    card.classList.toggle("panel-hidden", panel !== state.activePanel);
+    const isTimeline = panel === "timeline";
+    const active = panel === state.activePanel;
+
+    if (isTimeline) {
+      card.classList.toggle("panel-hidden", state.activePanel === "timeline" ? !active : false);
+      card.classList.toggle("panel-primary", state.activePanel === "timeline");
+      card.classList.toggle("panel-secondary", state.activePanel !== "timeline");
+      continue;
+    }
+
+    card.classList.toggle("panel-hidden", !active);
+    card.classList.toggle("panel-primary", false);
+    card.classList.toggle("panel-secondary", active);
   }
+
+  renderPlaybackReadout();
+}
+
+function renderPlaybackReadout(): void {
+  const model = state.model;
+
+  if (!model || !state.player) {
+    refs.playbackWindowLabel.textContent = "0.00s / 0.00s";
+    refs.playbackWindowEvents.textContent = "0 events | 0 errors | 0 requests";
+    refs.playbackWindowPanel.textContent = "Timeline panel";
+    return;
+  }
+
+  const visibleEventCount = upperBoundByMono(
+    model.events,
+    state.playheadMono,
+    (event) => event.mono
+  );
+  const visibleErrorCount = prefixValue(model.errorPrefix, visibleEventCount - 1);
+  const visibleRequestCount = upperBoundByMono(
+    model.waterfall,
+    state.playheadMono,
+    (entry) => entry.startMono
+  );
+  const panelLabel = PANEL_LABELS[state.activePanel];
+  const selection = [
+    state.selectedEventId ? `event ${truncateId(state.selectedEventId)}` : null,
+    state.selectedRequestId ? `request ${truncateId(state.selectedRequestId)}` : null
+  ]
+    .filter((item): item is string => Boolean(item))
+    .join(" | ");
+
+  refs.playbackWindowLabel.textContent = `${formatMono(state.playheadMono - model.minMono)} / ${formatMono(
+    model.durationMono
+  )}`;
+  refs.playbackWindowEvents.textContent = `${visibleEventCount} events | ${visibleErrorCount} errors | ${visibleRequestCount} requests`;
+  refs.playbackWindowPanel.textContent = selection
+    ? `${panelLabel} panel | ${selection}`
+    : `${panelLabel} panel`;
 }
 
 function renderProgressMarkers(model: ArchiveModel): void {
@@ -2581,6 +2649,10 @@ function shortUrl(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+function truncateId(value: string): string {
+  return value.length > 22 ? `${value.slice(0, 9)}...${value.slice(-8)}` : value;
 }
 
 function prefixValue(prefix: number[], index: number): number {
