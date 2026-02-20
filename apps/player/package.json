@@ -6,12 +6,21 @@
   "scripts": {
     "dev": "tsup --config tsup.config.ts --watch",
     "build": "tsup --config tsup.config.ts --clean && node scripts/copy-assets.mjs",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@webblackbox/player-sdk": "workspace:*",
-    "@webblackbox/protocol": "workspace:*"
+    "@webblackbox/protocol": "workspace:*",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3"
   }
 }

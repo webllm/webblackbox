@@ -3,12 +3,13 @@
   "extends": "../../packages/config-typescript/node-app.json",
   "compilerOptions": {
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["node", "vitest/globals"],
+    "jsx": "react-jsx",
+    "types": ["node", "vitest/globals", "react", "react-dom"],
     "baseUrl": ".",
     "paths": {
       "@webblackbox/player-sdk": ["../../packages/player-sdk/src/index.ts"],
       "@webblackbox/protocol": ["../../packages/protocol/src/index.ts"]
     }
   },
-  "include": ["src/**/*.ts", "tsup.config.ts", "scripts/**/*.mjs"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tsup.config.ts", "scripts/**/*.mjs"]
 }
