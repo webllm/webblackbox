@@ -156,6 +156,19 @@ describe("recorder", () => {
       }
     });
 
+    recorder.ingest({
+      source: "cdp",
+      rawType: "Network.loadingFailed",
+      sid: "S-plugins",
+      tabId: 7,
+      t: base + 15,
+      mono: 2.5,
+      payload: {
+        requestId: "R-77",
+        errorText: "net::ERR_TIMED_OUT"
+      }
+    });
+
     const errorEvent = recorder.ingest({
       source: "cdp",
       rawType: "Runtime.exceptionThrown",
@@ -176,7 +189,19 @@ describe("recorder", () => {
       | undefined;
     expect(consolePayload?.routeContext?.url).toBe("https://example.com/dashboard");
 
-    const errorPayload = errorEvent.event?.data as { fingerprint?: string } | undefined;
+    const errorPayload = errorEvent.event?.data as
+      | {
+          fingerprint?: string;
+          aiRootCause?: {
+            plugin?: string;
+            suspects?: Array<{ type?: string }>;
+          };
+        }
+      | undefined;
     expect(errorPayload?.fingerprint).toMatch(/^fp-/);
+    expect(errorPayload?.aiRootCause?.plugin).toBe("ai-root-cause");
+    expect(errorPayload?.aiRootCause?.suspects?.some((suspect) => suspect.type === "network")).toBe(
+      true
+    );
   });
 });

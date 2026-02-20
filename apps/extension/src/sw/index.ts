@@ -3,12 +3,13 @@ import {
   createChromeDebuggerTransport,
   type CdpRouter
 } from "@webblackbox/cdp-router";
-import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/pipeline";
 import {
   createSessionId,
   DEFAULT_RECORDER_CONFIG,
   type CaptureMode,
-  type SessionMetadata
+  type HashesManifest,
+  type SessionMetadata,
+  type WebBlackboxEvent
 } from "@webblackbox/protocol";
 import {
   createDefaultRecorderPlugins,
@@ -30,13 +31,57 @@ type SessionRuntime = {
   mode: CaptureMode;
   config: typeof DEFAULT_RECORDER_CONFIG;
   startedAt: number;
+  stoppedAt?: number;
   recorder: WebBlackboxRecorder;
-  pipeline: FlightRecorderPipeline;
+  pipeline: SessionPipelineClient;
   cdpRouter: CdpRouter | null;
   requestMeta: Map<string, { url?: string; mimeType?: string; status?: number }>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
+  heapSnapshotCapture: HeapSnapshotCaptureState | null;
+  cleanupTimer: ReturnType<typeof setTimeout> | null;
+};
+
+type HeapSnapshotCaptureState = {
+  chunks: string[];
+  bytes: number;
+  truncated: boolean;
+};
+
+type PipelineExportResult = {
+  fileName: string;
+  bytes: Uint8Array;
+  integrity: HashesManifest;
+};
+
+type SessionPipelineClient = {
+  start: (session: SessionMetadata) => Promise<void>;
+  ingest: (event: WebBlackboxEvent) => Promise<void>;
+  flush: () => Promise<void>;
+  putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
+  exportBundle: (options?: { passphrase?: string }) => Promise<PipelineExportResult>;
+  close: () => Promise<void>;
+};
+
+type OffscreenPipelineRequest = {
+  kind: "sw.pipeline-request";
+  requestId: string;
+  op: "start" | "ingest" | "flush" | "putBlob" | "export" | "close";
+  sid: string;
+  session?: SessionMetadata;
+  event?: WebBlackboxEvent;
+  mime?: string;
+  bytes?: Uint8Array;
+  passphrase?: string;
+};
+
+type OffscreenPipelineResponse = {
+  kind: "offscreen.pipeline-response";
+  requestId: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
 };
 
 const chromeApi = getChromeApi();
@@ -45,12 +90,24 @@ const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
 const connectedPorts = new Set<PortLike>();
 let offscreenPort: PortLike | null = null;
+const pendingOffscreenRequests = new Map<
+  string,
+  {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }
+>();
+let offscreenRequestSeq = 0;
 
 const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_INTERVAL_MS = 8_000;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
+const CPU_PROFILE_SAMPLE_MS = 350;
+const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
 const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
+const STOPPED_SESSION_TTL_MS = 10 * 60_000;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -77,6 +134,10 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   pushSessionList();
 
   const onMessage = (rawMessage: unknown) => {
+    if (handleOffscreenRuntimeMessage(rawMessage, port)) {
+      return;
+    }
+
     const message = parseInboundMessage(rawMessage);
 
     if (!message) {
@@ -91,6 +152,7 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
 
     if (offscreenPort === port) {
       offscreenPort = null;
+      rejectPendingOffscreenRequests("Offscreen pipeline disconnected.");
     }
 
     port.onMessage.removeListener(onMessage);
@@ -136,7 +198,7 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "ui.export") {
-    await exportSession(message.sid);
+    await exportSession(message.sid, message.passphrase, message.saveAs);
     return;
   }
 
@@ -197,15 +259,9 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     tags: []
   };
 
-  const storage = new IndexedDbPipelineStorage("webblackbox-flight-recorder");
   const recorderPlugins = createDefaultRecorderPlugins();
-  const pipeline = new FlightRecorderPipeline({
-    session: metadata,
-    storage,
-    maxChunkBytes: 512 * 1024
-  });
-
-  await pipeline.start();
+  const pipeline = createOffscreenPipelineClient(sid);
+  await pipeline.start(metadata);
 
   const runtime: SessionRuntime = {
     sid,
@@ -213,6 +269,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     mode,
     config: recorderConfig,
     startedAt,
+    stoppedAt: undefined,
     recorder: new WebBlackboxRecorder(
       {
         ...recorderConfig,
@@ -227,7 +284,9 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     requestMeta: new Map(),
     screenshotInterval: null,
     queue: Promise.resolve(),
-    removeCdpListeners: []
+    removeCdpListeners: [],
+    heapSnapshotCapture: null,
+    cleanupTimer: null
   };
 
   runtime.recorder = new WebBlackboxRecorder(
@@ -296,29 +355,14 @@ async function stopSession(tabId: number): Promise<void> {
   }
 
   await runtime.queue;
-  await runtime.pipeline.flush();
-
-  if (runtime.cdpRouter) {
-    await runtime.cdpRouter.detach(runtime.tabId).catch(() => undefined);
-
-    for (const dispose of runtime.removeCdpListeners) {
-      dispose();
-    }
-
-    runtime.cdpRouter.dispose();
-  }
-
-  if (runtime.screenshotInterval !== null) {
-    clearInterval(runtime.screenshotInterval);
-    runtime.screenshotInterval = null;
-  }
-
+  await runtime.pipeline.flush().catch(() => undefined);
+  await teardownCaptureInstrumentation(runtime);
   sessionsByTab.delete(runtime.tabId);
-  sessionsBySid.delete(runtime.sid);
+  runtime.stoppedAt = Date.now();
+  scheduleStoppedRuntimeCleanup(runtime);
 
   if (sessionsByTab.size === 0) {
     await setIdleBadge();
-    await chromeApi?.offscreen?.closeDocument?.().catch(() => undefined);
   } else {
     await setRecordingBadge();
   }
@@ -330,35 +374,44 @@ async function stopSession(tabId: number): Promise<void> {
   notifyOffscreenPipelineStatus();
 }
 
-async function exportSession(sid: string): Promise<void> {
+async function exportSession(sid: string, passphrase?: string, saveAs = true): Promise<void> {
   const runtime = sessionsBySid.get(sid);
 
   if (!runtime) {
+    console.warn("[WebBlackbox] export ignored; unknown session", sid);
+    broadcast({
+      kind: "sw.export-status",
+      sid,
+      ok: false,
+      error: "Session not found for export."
+    });
     return;
   }
-
-  await runtime.queue;
-  const exported = await runtime.pipeline.exportBundle();
-
-  if (!chromeApi?.downloads?.download) {
-    return;
-  }
-
-  const blobBytes = new Uint8Array(exported.bytes.byteLength);
-  blobBytes.set(exported.bytes);
-  const blob = new Blob([blobBytes], { type: "application/zip" });
-  const url = URL.createObjectURL(blob);
 
   try {
-    await chromeApi.downloads.download({
-      url,
-      filename: `webblackbox/${exported.fileName}`,
-      saveAs: true
+    const exported = await enqueueWithResult(runtime, async () => {
+      return runtime.pipeline.exportBundle({ passphrase });
     });
-  } finally {
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-    }, 30_000);
+
+    await downloadExportedBundle(exported, saveAs);
+    broadcast({
+      kind: "sw.export-status",
+      sid,
+      ok: true,
+      fileName: exported.fileName
+    });
+
+    if (runtime.stoppedAt) {
+      await disposeStoppedSession(runtime);
+    }
+  } catch (error) {
+    console.warn("[WebBlackbox] export failed", error);
+    broadcast({
+      kind: "sw.export-status",
+      sid,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
 }
 
@@ -377,11 +430,173 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
   runtime.recorder.ingest(nextRawEvent);
 }
 
+function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
+  return {
+    start: async (session) => {
+      await requestOffscreenPipeline<void>({
+        op: "start",
+        sid,
+        session
+      });
+    },
+    ingest: async (event) => {
+      await requestOffscreenPipeline<void>({
+        op: "ingest",
+        sid,
+        event
+      });
+    },
+    flush: async () => {
+      await requestOffscreenPipeline<void>({
+        op: "flush",
+        sid
+      });
+    },
+    putBlob: async (mime, bytes) => {
+      return requestOffscreenPipeline<string>({
+        op: "putBlob",
+        sid,
+        mime,
+        bytes
+      });
+    },
+    exportBundle: async (options = {}) => {
+      const exported = await requestOffscreenPipeline<unknown>({
+        op: "export",
+        sid,
+        passphrase: options.passphrase
+      });
+
+      return normalizePipelineExportResult(exported);
+    },
+    close: async () => {
+      await requestOffscreenPipeline<void>({
+        op: "close",
+        sid
+      });
+    }
+  };
+}
+
+async function requestOffscreenPipeline<TResult>(
+  request: Omit<OffscreenPipelineRequest, "kind" | "requestId">
+): Promise<TResult> {
+  const port = await ensureOffscreenPortReady();
+  const requestId = `off-${Date.now()}-${offscreenRequestSeq}`;
+  offscreenRequestSeq += 1;
+
+  const result = await new Promise<unknown>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingOffscreenRequests.delete(requestId);
+      reject(new Error(`Timed out waiting for offscreen response: ${request.op}`));
+    }, 30_000);
+
+    pendingOffscreenRequests.set(requestId, {
+      resolve,
+      reject,
+      timeout
+    });
+
+    port.postMessage({
+      kind: "sw.pipeline-request",
+      requestId,
+      ...request
+    });
+  });
+
+  return result as TResult;
+}
+
+async function ensureOffscreenPortReady(): Promise<PortLike> {
+  if (offscreenPort) {
+    return offscreenPort;
+  }
+
+  await ensureOffscreenDocument();
+
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (offscreenPort) {
+      return offscreenPort;
+    }
+
+    await wait(25);
+  }
+
+  throw new Error("Offscreen pipeline is unavailable.");
+}
+
+function handleOffscreenRuntimeMessage(rawMessage: unknown, port: PortLike): boolean {
+  if (port.name !== PORT_NAMES.offscreen) {
+    return false;
+  }
+
+  if (rawMessage === null || typeof rawMessage !== "object" || Array.isArray(rawMessage)) {
+    return false;
+  }
+
+  const kind = (rawMessage as { kind?: unknown }).kind;
+
+  if (kind === "offscreen.ready") {
+    notifyOffscreenPipelineStatus();
+    return true;
+  }
+
+  if (kind !== "offscreen.pipeline-response") {
+    return false;
+  }
+
+  const response = rawMessage as OffscreenPipelineResponse;
+  const pending = pendingOffscreenRequests.get(response.requestId);
+
+  if (!pending) {
+    return true;
+  }
+
+  clearTimeout(pending.timeout);
+  pendingOffscreenRequests.delete(response.requestId);
+
+  if (response.ok) {
+    pending.resolve(response.result);
+  } else {
+    pending.reject(new Error(response.error ?? "Offscreen pipeline request failed."));
+  }
+
+  return true;
+}
+
+function rejectPendingOffscreenRequests(message: string): void {
+  for (const pending of pendingOffscreenRequests.values()) {
+    clearTimeout(pending.timeout);
+    pending.reject(new Error(message));
+  }
+
+  pendingOffscreenRequests.clear();
+}
+
 async function attachCdp(runtime: SessionRuntime): Promise<void> {
   try {
     const router = createCdpRouter(createChromeDebuggerTransport());
 
     const unsubscribeEvent = router.onEvent((event) => {
+      const normalizedPayload = normalizeFullModePayload(event.method, event.params ?? {});
+
+      if (event.method === "HeapProfiler.addHeapSnapshotChunk") {
+        const payload = asRecord(normalizedPayload);
+        const chunk = typeof payload?.chunk === "string" ? payload.chunk : undefined;
+
+        if (chunk && runtime.heapSnapshotCapture) {
+          const chunkBytes = new TextEncoder().encode(chunk).byteLength;
+          const nextBytes = runtime.heapSnapshotCapture.bytes + chunkBytes;
+
+          if (nextBytes <= HEAP_SNAPSHOT_MAX_BYTES) {
+            runtime.heapSnapshotCapture.chunks.push(chunk);
+            runtime.heapSnapshotCapture.bytes = nextBytes;
+          } else {
+            runtime.heapSnapshotCapture.truncated = true;
+          }
+        }
+      }
+
       ingestRawEvent({
         source: "cdp",
         rawType: event.method,
@@ -390,7 +605,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         t: Date.now(),
         mono: monotonicTime(),
         cdpSessionId: event.sessionId,
-        payload: event.params ?? {}
+        payload: normalizedPayload
       });
 
       enqueue(runtime, async () => {
@@ -522,12 +737,18 @@ async function captureResponseBody(
 }
 
 async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
-  await Promise.allSettled([
+  const tasks: Array<Promise<void>> = [
     captureScreenshot(runtime, reason),
     captureDomSnapshot(runtime, reason),
     captureStorageSnapshots(runtime, reason),
     captureTraceMetrics(runtime, reason)
-  ]);
+  ];
+
+  if (shouldCaptureAdvancedProfiles(reason)) {
+    tasks.push(captureAdvancedProfiles(runtime, reason));
+  }
+
+  await Promise.allSettled(tasks);
 }
 
 async function captureScreenshot(runtime: SessionRuntime, reason: string): Promise<void> {
@@ -726,6 +947,132 @@ async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Pro
   });
 }
 
+async function captureAdvancedProfiles(runtime: SessionRuntime, reason: string): Promise<void> {
+  await Promise.allSettled([
+    captureCpuProfile(runtime, reason),
+    captureHeapSnapshot(runtime, reason)
+  ]);
+}
+
+async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promise<void> {
+  if (!runtime.cdpRouter) {
+    return;
+  }
+
+  await runtime.cdpRouter.send({ tabId: runtime.tabId }, "Profiler.enable").catch(() => undefined);
+  const started = await runtime.cdpRouter
+    .send({ tabId: runtime.tabId }, "Profiler.start")
+    .then(() => true)
+    .catch(() => false);
+
+  if (!started) {
+    return;
+  }
+
+  await wait(CPU_PROFILE_SAMPLE_MS);
+
+  const profileResult = await runtime.cdpRouter
+    .send<{ profile?: unknown }>({ tabId: runtime.tabId }, "Profiler.stop")
+    .catch(() => undefined);
+
+  if (!profileResult?.profile) {
+    return;
+  }
+
+  const bytes = new TextEncoder().encode(JSON.stringify(profileResult.profile));
+  const hash = await runtime.pipeline.putBlob("application/json", bytes);
+
+  ingestRawEvent({
+    source: "system",
+    rawType: "cdp.perf.cpu.profile",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: Date.now(),
+    mono: monotonicTime(),
+    payload: {
+      profileHash: hash,
+      sampleMs: CPU_PROFILE_SAMPLE_MS,
+      size: bytes.byteLength,
+      reason
+    }
+  });
+
+  await runtime.cdpRouter.send({ tabId: runtime.tabId }, "Profiler.disable").catch(() => undefined);
+}
+
+async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
+  if (!runtime.cdpRouter) {
+    return;
+  }
+
+  runtime.heapSnapshotCapture = {
+    chunks: [],
+    bytes: 0,
+    truncated: false
+  };
+
+  await runtime.cdpRouter
+    .send({ tabId: runtime.tabId }, "HeapProfiler.enable")
+    .catch(() => undefined);
+
+  const completed = await runtime.cdpRouter
+    .send({ tabId: runtime.tabId }, "HeapProfiler.takeHeapSnapshot", {
+      reportProgress: false,
+      captureNumericValue: true
+    })
+    .then(() => true)
+    .catch(() => false);
+
+  const snapshot = runtime.heapSnapshotCapture;
+  runtime.heapSnapshotCapture = null;
+
+  if (!completed || !snapshot || snapshot.chunks.length === 0) {
+    await runtime.cdpRouter
+      .send({ tabId: runtime.tabId }, "HeapProfiler.disable")
+      .catch(() => undefined);
+    return;
+  }
+
+  const joined = snapshot.chunks.join("");
+  const bytes = new TextEncoder().encode(joined);
+  const hash = await runtime.pipeline.putBlob("application/json", bytes);
+
+  ingestRawEvent({
+    source: "system",
+    rawType: "cdp.perf.heap.snapshot",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: Date.now(),
+    mono: monotonicTime(),
+    payload: {
+      snapshotHash: hash,
+      size: bytes.byteLength,
+      chunkCount: snapshot.chunks.length,
+      truncated: snapshot.truncated,
+      reason
+    }
+  });
+
+  await runtime.cdpRouter
+    .send({ tabId: runtime.tabId }, "HeapProfiler.disable")
+    .catch(() => undefined);
+}
+
+function shouldCaptureAdvancedProfiles(reason: string): boolean {
+  return (
+    reason.startsWith("freeze:") ||
+    reason === "Runtime.exceptionThrown" ||
+    reason === "Network.loadingFailed" ||
+    reason === "manual"
+  );
+}
+
+function wait(durationMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
+}
+
 async function evaluateExpression(runtime: SessionRuntime, expression: string): Promise<unknown> {
   if (!runtime.cdpRouter) {
     return undefined;
@@ -761,10 +1108,129 @@ function decodeBase64(value: string): Uint8Array {
   return bytes;
 }
 
+function normalizeFullModePayload(method: string, params: unknown): unknown {
+  const payload = asRecord(params);
+
+  if (!payload) {
+    return params;
+  }
+
+  if (method === "Network.webSocketFrameReceived" || method === "Network.webSocketFrameSent") {
+    const response = asRecord(payload.response);
+    const rawData = typeof response?.payloadData === "string" ? response.payloadData : "";
+
+    return {
+      ...payload,
+      direction: method.endsWith("Sent") ? "sent" : "received",
+      frame: {
+        opcode: typeof response?.opcode === "number" ? response.opcode : undefined,
+        masked: response?.mask === true,
+        payloadLength: rawData.length,
+        payloadPreview: rawData.slice(0, 512)
+      }
+    };
+  }
+
+  return payload;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function normalizePipelineExportResult(raw: unknown): PipelineExportResult {
+  const row = asRecord(raw);
+
+  if (!row) {
+    throw new Error("Invalid offscreen export payload.");
+  }
+
+  const fileName =
+    typeof row.fileName === "string" && row.fileName.length > 0
+      ? row.fileName
+      : "session.webblackbox";
+
+  const bytes = asUint8Array(row.bytes);
+
+  if (!bytes || bytes.byteLength === 0) {
+    throw new Error("Offscreen export payload did not include archive bytes.");
+  }
+
+  return {
+    fileName,
+    bytes,
+    integrity: normalizeHashesManifest(row.integrity)
+  };
+}
+
+function normalizeHashesManifest(value: unknown): HashesManifest {
+  const row = asRecord(value);
+  const filesRow = asRecord(row?.files);
+  const files: Record<string, string> = {};
+
+  if (filesRow) {
+    for (const [name, digest] of Object.entries(filesRow)) {
+      if (typeof digest === "string") {
+        files[name] = digest;
+      }
+    }
+  }
+
+  return {
+    manifestSha256: typeof row?.manifestSha256 === "string" ? row.manifestSha256 : "",
+    files
+  };
+}
+
+function asUint8Array(value: unknown): Uint8Array | null {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value, (entry) =>
+      typeof entry === "number" && Number.isFinite(entry) ? entry & 0xff : 0
+    );
+  }
+
+  const row = asRecord(value);
+
+  if (!row) {
+    return null;
+  }
+
+  const numericKeys = Object.keys(row)
+    .filter((key) => /^\d+$/.test(key))
+    .map((key) => Number(key))
+    .sort((left, right) => left - right);
+
+  if (numericKeys.length === 0) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(numericKeys[numericKeys.length - 1] + 1);
+
+  for (const index of numericKeys) {
+    const rawByte = row[String(index)];
+
+    if (typeof rawByte !== "number" || !Number.isFinite(rawByte)) {
+      return null;
+    }
+
+    bytes[index] = rawByte & 0xff;
+  }
+
+  return bytes;
 }
 
 async function ensureOffscreenDocument(): Promise<void> {
@@ -797,13 +1263,152 @@ function enqueue(runtime: SessionRuntime, task: () => Promise<void>): void {
   });
 }
 
-function pushSessionList(): void {
-  const sessions: SessionListItem[] = [...sessionsByTab.values()].map((runtime) => ({
+function enqueueWithResult<TResult>(
+  runtime: SessionRuntime,
+  task: () => Promise<TResult>
+): Promise<TResult> {
+  return new Promise<TResult>((resolve, reject) => {
+    enqueue(runtime, async () => {
+      try {
+        resolve(await task());
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  });
+}
+
+async function teardownCaptureInstrumentation(runtime: SessionRuntime): Promise<void> {
+  if (runtime.cdpRouter) {
+    await runtime.cdpRouter.detach(runtime.tabId).catch(() => undefined);
+
+    for (const dispose of runtime.removeCdpListeners) {
+      dispose();
+    }
+
+    runtime.removeCdpListeners = [];
+    runtime.cdpRouter.dispose();
+    runtime.cdpRouter = null;
+  }
+
+  if (runtime.screenshotInterval !== null) {
+    clearInterval(runtime.screenshotInterval);
+    runtime.screenshotInterval = null;
+  }
+}
+
+function scheduleStoppedRuntimeCleanup(runtime: SessionRuntime): void {
+  if (runtime.cleanupTimer !== null) {
+    clearTimeout(runtime.cleanupTimer);
+  }
+
+  runtime.cleanupTimer = setTimeout(() => {
+    void disposeStoppedSession(runtime);
+  }, STOPPED_SESSION_TTL_MS);
+}
+
+async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
+  if (!sessionsBySid.has(runtime.sid)) {
+    return;
+  }
+
+  if (runtime.cleanupTimer !== null) {
+    clearTimeout(runtime.cleanupTimer);
+    runtime.cleanupTimer = null;
+  }
+
+  await runtime.queue;
+  await runtime.pipeline.flush().catch(() => undefined);
+  await runtime.pipeline.close().catch(() => undefined);
+  sessionsBySid.delete(runtime.sid);
+
+  if (sessionsByTab.size === 0) {
+    await setIdleBadge();
+  } else {
+    await setRecordingBadge();
+  }
+
+  await closeOffscreenIfUnused();
+  pushSessionList();
+  await persistRuntimeState();
+  notifyOffscreenPipelineStatus();
+}
+
+async function closeOffscreenIfUnused(): Promise<void> {
+  if (sessionsBySid.size > 0) {
+    return;
+  }
+
+  await chromeApi?.offscreen?.closeDocument?.().catch(() => undefined);
+}
+
+function toSessionListItem(runtime: SessionRuntime): SessionListItem {
+  const activeRuntime = sessionsByTab.get(runtime.tabId);
+  const active = activeRuntime?.sid === runtime.sid;
+
+  return {
     sid: runtime.sid,
     tabId: runtime.tabId,
     mode: runtime.mode,
-    startedAt: runtime.startedAt
-  }));
+    startedAt: runtime.startedAt,
+    active,
+    stoppedAt: runtime.stoppedAt
+  };
+}
+
+async function downloadExportedBundle(
+  exported: PipelineExportResult,
+  saveAs: boolean
+): Promise<void> {
+  if (!chromeApi?.downloads?.download) {
+    return;
+  }
+
+  const downloadUrl = toZipDataUrl(exported.bytes);
+
+  await chromeApi.downloads.download({
+    url: downloadUrl,
+    filename: `webblackbox/${exported.fileName}`,
+    saveAs
+  });
+}
+
+function toZipDataUrl(bytes: Uint8Array): string {
+  const base64 = bytesToBase64(bytes);
+  return `data:application/zip;base64,${base64}`;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof btoa !== "function") {
+    throw new Error("Base64 encoding is unavailable in this runtime.");
+  }
+
+  let binary = "";
+  const chunkSize = 32 * 1024;
+
+  for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.byteLength));
+
+    for (const value of chunk) {
+      binary += String.fromCharCode(value);
+    }
+  }
+
+  return btoa(binary);
+}
+
+function pushSessionList(): void {
+  const sessions: SessionListItem[] = [...sessionsBySid.values()]
+    .map((runtime) => toSessionListItem(runtime))
+    .sort((left, right) => {
+      const activeDiff = Number(right.active) - Number(left.active);
+
+      if (activeDiff !== 0) {
+        return activeDiff;
+      }
+
+      return right.startedAt - left.startedAt;
+    });
 
   broadcast({
     kind: "sw.session-list",
@@ -910,7 +1515,8 @@ function notifyOffscreenPipelineStatus(): void {
       sid: runtime.sid,
       tabId: runtime.tabId,
       mode: runtime.mode,
-      startedAt: runtime.startedAt
+      startedAt: runtime.startedAt,
+      active: true
     })),
     updatedAt: Date.now()
   });

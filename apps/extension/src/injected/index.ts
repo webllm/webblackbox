@@ -252,6 +252,48 @@ function installNetworkHooks(): void {
 
     xhrSend.call(this, body as unknown as XMLHttpRequestBodyInit | null | undefined);
   };
+
+  if (
+    typeof window.EventSource === "function" &&
+    !windowFlags.__WEBBLACKBOX_EVENTSOURCE_PATCHED__
+  ) {
+    const NativeEventSource = window.EventSource;
+
+    class WebBlackboxEventSource extends NativeEventSource {
+      public constructor(...args: ConstructorParameters<typeof NativeEventSource>) {
+        super(...args);
+
+        const url = typeof args[0] === "string" ? args[0] : String(args[0]);
+
+        emit("sse", {
+          phase: "open",
+          url
+        });
+
+        this.addEventListener("message", (event) => {
+          emit("sse", {
+            phase: "message",
+            url,
+            eventType: event.type,
+            lastEventId: event.lastEventId,
+            data:
+              typeof event.data === "string" ? event.data.slice(0, 800) : safeSerialize(event.data)
+          });
+        });
+
+        this.addEventListener("error", () => {
+          emit("sse", {
+            phase: "error",
+            url,
+            readyState: this.readyState
+          });
+        });
+      }
+    }
+
+    window.EventSource = WebBlackboxEventSource as typeof EventSource;
+    windowFlags.__WEBBLACKBOX_EVENTSOURCE_PATCHED__ = true;
+  }
 }
 
 function installIndexedDbHooks(): void {

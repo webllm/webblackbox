@@ -14,10 +14,12 @@ const state: {
   tabId: number | null;
   sessions: SessionListItem[];
   recording: { active: boolean; sid?: string; mode?: string };
+  exportStatus?: string;
 } = {
   tabId: null,
   sessions: [],
-  recording: { active: false }
+  recording: { active: false },
+  exportStatus: undefined
 };
 
 if (root) {
@@ -39,28 +41,49 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 }
 
 function render(container: HTMLElement): void {
-  const session = state.sessions.find((item) => item.tabId === state.tabId);
-  const active = Boolean(session);
+  const tabSessions = state.sessions
+    .filter((item) => item.tabId === state.tabId)
+    .sort((left, right) => {
+      const activeDiff = Number(right.active) - Number(left.active);
+
+      if (activeDiff !== 0) {
+        return activeDiff;
+      }
+
+      return right.startedAt - left.startedAt;
+    });
+  const activeSession = tabSessions.find((item) => item.active);
+  const exportSession = activeSession ?? tabSessions[0];
+  const status = activeSession
+    ? `Recording (${activeSession.mode})`
+    : exportSession
+      ? `Idle (Last ${exportSession.mode})`
+      : "Idle";
 
   container.innerHTML = `
     <section class="card">
       <h1>WebBlackbox</h1>
       <p>Tab: ${state.tabId ?? "n/a"}</p>
-      <p>Status: ${active ? `Recording (${session?.mode ?? "lite"})` : "Idle"}</p>
+      <p>Status: ${status}</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button data-action="start-lite">Start Lite</button>
         <button data-action="start-full">Start Full</button>
-        <button data-action="stop">Stop</button>
-        <button data-action="export">Export</button>
+        <button data-action="stop" ${activeSession ? "" : "disabled"}>Stop</button>
+        <button data-action="export" ${exportSession ? "" : "disabled"}>Export</button>
       </div>
+      <p style="margin-top:8px;font-size:12px;opacity:0.85;min-height:1.2em;">${state.exportStatus ?? ""}</p>
       <p style="margin-top:10px;font-size:12px;opacity:0.75;">Marker: Ctrl/Cmd + Shift + M</p>
     </section>
   `;
 
-  bindActions(container, session);
+  bindActions(container, activeSession, exportSession);
 }
 
-function bindActions(container: HTMLElement, session?: SessionListItem): void {
+function bindActions(
+  container: HTMLElement,
+  activeSession?: SessionListItem,
+  exportSession?: SessionListItem
+): void {
   container.querySelector("[data-action='start-lite']")?.addEventListener("click", () => {
     if (typeof state.tabId !== "number") {
       return;
@@ -86,7 +109,7 @@ function bindActions(container: HTMLElement, session?: SessionListItem): void {
   });
 
   container.querySelector("[data-action='stop']")?.addEventListener("click", () => {
-    if (typeof state.tabId !== "number") {
+    if (!activeSession || typeof state.tabId !== "number") {
       return;
     }
 
@@ -97,13 +120,22 @@ function bindActions(container: HTMLElement, session?: SessionListItem): void {
   });
 
   container.querySelector("[data-action='export']")?.addEventListener("click", () => {
-    if (!session) {
+    if (!exportSession) {
+      return;
+    }
+
+    const passphrase = prompt(
+      "Optional export passphrase (AES-GCM). Leave empty for unencrypted export."
+    );
+
+    if (passphrase === null) {
       return;
     }
 
     port?.postMessage({
       kind: "ui.export",
-      sid: session.sid
+      sid: exportSession.sid,
+      passphrase: passphrase.trim() || undefined
     });
   });
 }
@@ -120,5 +152,12 @@ function applyMessage(message: ExtensionOutboundMessage): void {
       sid: message.sid,
       mode: message.mode
     };
+    return;
+  }
+
+  if (message.kind === "sw.export-status") {
+    state.exportStatus = message.ok
+      ? `Exported: ${message.fileName ?? message.sid}`
+      : `Export failed: ${message.error ?? "Unknown error"}`;
   }
 }

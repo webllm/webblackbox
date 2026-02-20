@@ -1,14 +1,38 @@
+import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/pipeline";
+import type { SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
+
 import { getChromeApi } from "../shared/chrome-api.js";
 import { PORT_NAMES } from "../shared/messages.js";
 
-const chromeApi = getChromeApi();
-const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.offscreen });
+type OffscreenPipelineRequest = {
+  kind: "sw.pipeline-request";
+  requestId: string;
+  op: "start" | "ingest" | "flush" | "putBlob" | "export" | "close";
+  sid: string;
+  session?: SessionMetadata;
+  event?: WebBlackboxEvent;
+  mime?: string;
+  bytes?: Uint8Array;
+  passphrase?: string;
+};
+
+type OffscreenPipelineResponse = {
+  kind: "offscreen.pipeline-response";
+  requestId: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+};
 
 type OffscreenState = {
   active: boolean;
   activeSessions: number;
   updatedAt: number | null;
 };
+
+const chromeApi = getChromeApi();
+const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.offscreen });
+const pipelines = new Map<string, FlightRecorderPipeline>();
 
 const state: OffscreenState = {
   active: false,
@@ -26,6 +50,7 @@ port?.onMessage.addListener((message) => {
       const active = (message as { active?: unknown }).active;
       state.active = active === true;
       console.info("[WebBlackbox] offscreen status", message);
+      return;
     }
 
     if (kind === "sw.pipeline-status") {
@@ -41,6 +66,11 @@ port?.onMessage.addListener((message) => {
         activeSessions: state.activeSessions,
         updatedAt: state.updatedAt
       });
+      return;
+    }
+
+    if (kind === "sw.pipeline-request") {
+      void handlePipelineRequest(message as OffscreenPipelineRequest);
     }
   }
 });
@@ -49,3 +79,109 @@ port?.postMessage({
   kind: "offscreen.ready",
   t: Date.now()
 });
+
+async function handlePipelineRequest(message: OffscreenPipelineRequest): Promise<void> {
+  try {
+    const result = await processPipelineRequest(message);
+    postPipelineResponse({
+      kind: "offscreen.pipeline-response",
+      requestId: message.requestId,
+      ok: true,
+      result
+    });
+  } catch (error) {
+    postPipelineResponse({
+      kind: "offscreen.pipeline-response",
+      requestId: message.requestId,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function processPipelineRequest(message: OffscreenPipelineRequest): Promise<unknown> {
+  if (message.op === "start") {
+    if (!message.session) {
+      throw new Error("Missing session metadata for pipeline start.");
+    }
+
+    if (pipelines.has(message.sid)) {
+      return null;
+    }
+
+    const storage = new IndexedDbPipelineStorage("webblackbox-flight-recorder");
+    const pipeline = new FlightRecorderPipeline({
+      session: message.session,
+      storage,
+      maxChunkBytes: 512 * 1024
+    });
+
+    await pipeline.start();
+    pipelines.set(message.sid, pipeline);
+    return null;
+  }
+
+  const pipeline = pipelines.get(message.sid);
+
+  if (!pipeline) {
+    throw new Error(`Pipeline session not found: ${message.sid}`);
+  }
+
+  if (message.op === "ingest") {
+    if (!message.event) {
+      throw new Error("Missing event payload for pipeline ingest.");
+    }
+
+    await pipeline.ingest(message.event);
+    return null;
+  }
+
+  if (message.op === "flush") {
+    await pipeline.flush();
+    return null;
+  }
+
+  if (message.op === "putBlob") {
+    if (!message.mime) {
+      throw new Error("Missing mime for blob write.");
+    }
+
+    const bytes = asUint8Array(message.bytes);
+
+    if (!bytes) {
+      throw new Error("Missing blob bytes.");
+    }
+
+    return pipeline.putBlob(message.mime, bytes);
+  }
+
+  if (message.op === "export") {
+    return pipeline.exportBundle({
+      passphrase: message.passphrase
+    });
+  }
+
+  if (message.op === "close") {
+    await pipeline.flush().catch(() => undefined);
+    pipelines.delete(message.sid);
+    return null;
+  }
+
+  throw new Error(`Unsupported pipeline operation: ${message.op}`);
+}
+
+function postPipelineResponse(message: OffscreenPipelineResponse): void {
+  port?.postMessage(message);
+}
+
+function asUint8Array(value: unknown): Uint8Array | null {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  return null;
+}

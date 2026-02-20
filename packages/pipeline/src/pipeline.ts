@@ -28,6 +28,10 @@ export type ExportResult = {
   integrity: HashesManifest;
 };
 
+export type ExportBundleOptions = {
+  passphrase?: string;
+};
+
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
 
@@ -97,21 +101,26 @@ export class FlightRecorderPipeline {
     return snapshot;
   }
 
-  public async exportBundle(): Promise<ExportResult> {
+  public async exportBundle(options: ExportBundleOptions = {}): Promise<ExportResult> {
     await this.flush();
     const indexes = await this.finalizeIndexes();
     const chunks = await this.options.storage.listChunks(this.options.session.sid);
     const blobs = await this.options.storage.listBlobs();
     const manifest = this.buildManifest(chunks);
 
-    const { bytes, integrity } = await createWebBlackboxArchive({
-      manifest,
-      chunks,
-      blobs,
-      timeIndex: indexes.time,
-      requestIndex: indexes.request,
-      invertedIndex: indexes.inverted
-    });
+    const { bytes, integrity } = await createWebBlackboxArchive(
+      {
+        manifest,
+        chunks,
+        blobs,
+        timeIndex: indexes.time,
+        requestIndex: indexes.request,
+        invertedIndex: indexes.inverted
+      },
+      {
+        passphrase: options.passphrase
+      }
+    );
 
     await this.options.storage.putIntegrity(this.options.session.sid, integrity);
 

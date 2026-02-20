@@ -141,6 +141,22 @@ export type ExportStats = {
   durationMs: number;
 };
 
+export type ExportEncryption = {
+  algorithm: "AES-GCM";
+  kdf: {
+    name: "PBKDF2";
+    hash: "SHA-256";
+    iterations: number;
+    saltBase64: string;
+  };
+  files: Record<
+    string,
+    {
+      ivBase64: string;
+    }
+  >;
+};
+
 export type ExportManifest = {
   protocolVersion: 1;
   createdAt: string;
@@ -152,6 +168,7 @@ export type ExportManifest = {
   chunkCodec: ChunkCodec;
   redactionProfile: RedactionProfile;
   stats: ExportStats;
+  encryption?: ExportEncryption;
 };
 
 export type SessionStartMessage = {

@@ -24,6 +24,8 @@ export type UiStopSessionMessage = {
 export type UiExportSessionMessage = {
   kind: "ui.export";
   sid: string;
+  passphrase?: string;
+  saveAs?: boolean;
 };
 
 export type ContentEventBatchMessage = {
@@ -61,11 +63,21 @@ export type SessionListItem = {
   tabId: number;
   mode: CaptureMode;
   startedAt: number;
+  active: boolean;
+  stoppedAt?: number;
 };
 
 export type SessionListMessage = {
   kind: "sw.session-list";
   sessions: SessionListItem[];
+};
+
+export type ExportStatusMessage = {
+  kind: "sw.export-status";
+  sid: string;
+  ok: boolean;
+  fileName?: string;
+  error?: string;
 };
 
 export type PipelineStatusMessage = {
@@ -79,4 +91,5 @@ export type ExtensionOutboundMessage =
   | RecordingStatusMessage
   | FreezeNoticeMessage
   | SessionListMessage
+  | ExportStatusMessage
   | PipelineStatusMessage;

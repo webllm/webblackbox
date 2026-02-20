@@ -41,7 +41,8 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   localStorageOp: "storage.local.op",
   sessionStorageOp: "storage.session.op",
   indexedDbOp: "storage.idb.op",
-  cookieSnapshot: "storage.cookie.snapshot"
+  cookieSnapshot: "storage.cookie.snapshot",
+  sse: "network.sse.message"
 };
 
 export class DefaultEventNormalizer implements EventNormalizer {

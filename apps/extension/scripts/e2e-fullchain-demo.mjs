@@ -1,0 +1,1297 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { constants, createWriteStream } from "node:fs";
+import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = dirname(fileURLToPath(import.meta.url));
+const extensionRoot = resolve(root, "..");
+const workspaceRoot = resolve(extensionRoot, "..", "..");
+
+const extensionDir = process.env.WB_E2E_EXTENSION_DIR ?? resolve(extensionRoot, "build");
+const demoDir = resolve(extensionRoot, "e2e-demo");
+const playerDir = process.env.WB_E2E_PLAYER_DIR ?? resolve(workspaceRoot, "apps/player/build");
+
+const remotePort = Number(process.env.WB_E2E_REMOTE_PORT ?? "9233");
+const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
+const profileDir =
+  process.env.WB_E2E_PROFILE_DIR ?? `/tmp/webblackbox-ext-fullchain-profile-${Date.now()}`;
+const downloadDir = process.env.WB_E2E_DOWNLOAD_DIR ?? resolve(profileDir, "downloads");
+const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-fullchain-${Date.now()}.log`;
+const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
+const baseUrl = `http://127.0.0.1:${remotePort}`;
+
+const chromeCandidates = [
+  process.env.WB_E2E_CHROME_BIN,
+  "/Users/unadlib/Library/Caches/ms-playwright/chromium-1212/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+  "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+].filter(Boolean);
+
+const state = {
+  chromeProcess: null,
+  logStream: null,
+  browserClient: null,
+  swClient: null,
+  popupClient: null,
+  demoClient: null,
+  playerClient: null,
+  openedTargetIds: [],
+  server: null
+};
+
+main().catch(async (error) => {
+  console.error("Fullchain E2E failed:", error instanceof Error ? error.message : String(error));
+  await cleanup();
+  process.exit(1);
+});
+
+async function main() {
+  await ensureBuildInputs();
+
+  await rm(profileDir, { recursive: true, force: true });
+  await mkdir(profileDir, { recursive: true });
+  await mkdir(downloadDir, { recursive: true });
+
+  const server = await startDemoServer({
+    demoDir,
+    playerDir,
+    artifactsDir: downloadDir
+  });
+
+  state.server = server.server;
+
+  const demoUrl = `http://127.0.0.1:${server.port}/demo/`;
+  const playerUrl = `http://127.0.0.1:${server.port}/player/`;
+
+  const chromeBinary = await resolveChromeBinary(chromeCandidates);
+
+  const { proc, logStream } = startChrome(chromeBinary, {
+    extensionDir,
+    profileDir,
+    remotePort,
+    headless,
+    logPath: chromeLogPath
+  });
+
+  state.chromeProcess = proc;
+  state.logStream = logStream;
+
+  const version = await waitForChromeReady(baseUrl, 25_000);
+  console.log(`Chrome: ${version.Browser}`);
+
+  const browserWsUrl =
+    typeof version.webSocketDebuggerUrl === "string" ? version.webSocketDebuggerUrl : null;
+
+  if (browserWsUrl) {
+    const browserClient = new CdpClient(browserWsUrl);
+    await browserClient.connect();
+    state.browserClient = browserClient;
+    await browserClient
+      .send("Browser.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath: downloadDir,
+        eventsEnabled: true
+      })
+      .catch(() => undefined);
+  }
+
+  const swTarget = await waitForExtensionServiceWorker(baseUrl, 25_000);
+  const extensionId = extractExtensionId(swTarget.url);
+  console.log(`Extension ID: ${extensionId}`);
+
+  const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
+  await swClient.connect();
+  await swClient.send("Runtime.enable");
+  state.swClient = swClient;
+
+  const swExceptions = [];
+  swClient.on("Runtime.exceptionThrown", (params) => {
+    swExceptions.push({
+      text: params?.exceptionDetails?.text ?? "unknown",
+      line: params?.exceptionDetails?.lineNumber ?? null
+    });
+  });
+
+  const demoTarget = await openTarget(baseUrl, demoUrl);
+  const popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+  state.openedTargetIds.push(demoTarget.id, popupTarget.id);
+
+  const demoClient = new CdpClient(demoTarget.webSocketDebuggerUrl);
+  const popupClient = new CdpClient(popupTarget.webSocketDebuggerUrl);
+  await demoClient.connect();
+  await popupClient.connect();
+  await demoClient.send("Runtime.enable");
+  await popupClient.send("Runtime.enable");
+  await demoClient.send("DOM.enable");
+  state.demoClient = demoClient;
+  state.popupClient = popupClient;
+
+  const demoExceptions = [];
+  demoClient.on("Runtime.exceptionThrown", (params) => {
+    demoExceptions.push({
+      text: params?.exceptionDetails?.text ?? "unknown",
+      line: params?.exceptionDetails?.lineNumber ?? null
+    });
+  });
+
+  await sleep(1_200);
+
+  const start = await startSessionFromPopup(popupClient, "full", demoUrl);
+  assert(start?.ok === true, "Failed to start full mode", start);
+
+  const indicator = await waitForIndicatorText(demoClient, "REC full", 25_000);
+  assert(typeof indicator === "string", "Recorder indicator did not appear", {
+    indicator,
+    start
+  });
+
+  const activeSessions = await readRuntimeSessions(popupClient);
+  assert(
+    Array.isArray(activeSessions) && activeSessions.length === 1,
+    "Expected exactly one active runtime session",
+    { activeSessions }
+  );
+
+  const sid = activeSessions[0]?.sid;
+  assert(typeof sid === "string" && sid.length > 0, "Missing session id", { activeSessions });
+
+  const scenarioResult = await runDemoScenario(demoClient);
+  assert(scenarioResult?.ok === true, "Demo scenario failed", scenarioResult);
+
+  await sleep(1_600);
+
+  const stop = await stopActiveSessionFromPopup(popupClient);
+  assert(stop?.ok === true, "Failed to stop full mode", stop);
+
+  const indicatorGone = await waitForIndicatorGone(demoClient, 15_000);
+  assert(indicatorGone, "Recorder indicator did not clear after stop", { indicatorGone, stop });
+
+  const sessionsAfterStop = await readRuntimeSessions(popupClient);
+  assert(
+    Array.isArray(sessionsAfterStop) && sessionsAfterStop.length === 0,
+    "Runtime sessions were not cleared",
+    {
+      sessionsAfterStop
+    }
+  );
+
+  const exportStatusBefore = await readExportStatusLine(popupClient);
+  const exportStartedAtMs = Date.now();
+  await exportSessionFromPopup(popupClient, sid);
+  const exportStatus = await waitForExportStatus(popupClient, exportStatusBefore, 35_000);
+  assert(exportStatus.ok, "Export status indicates failure", exportStatus);
+
+  const downloadRecord = await waitForExportedDownload(
+    popupClient,
+    sid,
+    exportStartedAtMs,
+    downloadTimeoutMs
+  );
+  assert(typeof downloadRecord?.filename === "string", "Download record missing filename", {
+    downloadRecord
+  });
+
+  let exportedPath = downloadRecord.filename;
+  let fileInfo = await waitForFile(exportedPath, 10_000);
+
+  if (fileInfo.size === 0) {
+    const rebuiltPath = resolve(downloadDir, `${sid}.webblackbox`);
+    const rebuilt = await rebuildArchiveFromDataUrl(downloadRecord.url, rebuiltPath);
+
+    if (rebuilt) {
+      exportedPath = rebuiltPath;
+      fileInfo = await waitForFile(exportedPath, 5_000);
+    }
+  }
+
+  assert(fileInfo.size > 0, "Exported archive is empty", {
+    exportedPath,
+    fileInfo,
+    downloadRecord
+  });
+
+  const playerTarget = await openTarget(baseUrl, playerUrl);
+  state.openedTargetIds.push(playerTarget.id);
+
+  const playerClient = new CdpClient(playerTarget.webSocketDebuggerUrl);
+  await playerClient.connect();
+  await playerClient.send("Runtime.enable");
+  await playerClient.send("DOM.enable");
+  state.playerClient = playerClient;
+
+  const playerExceptions = [];
+  playerClient.on("Runtime.exceptionThrown", (params) => {
+    playerExceptions.push({
+      text: params?.exceptionDetails?.text ?? "unknown",
+      line: params?.exceptionDetails?.lineNumber ?? null
+    });
+  });
+
+  await waitForPlayerReady(playerClient, 20_000);
+  await setFileInputFiles(playerClient, "#archive-input", [exportedPath]);
+  await playerClient.evaluate(`
+    (() => {
+      const input = document.querySelector('#archive-input');
+      if (!input) {
+        return { ok: false, reason: 'archive-input-not-found' };
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
+    })()
+  `);
+
+  const playerResult = await waitForPlayerLoad(playerClient, 35_000);
+  assert(playerResult.eventCount > 0, "Player rendered zero timeline events", playerResult);
+  assert(
+    playerResult.waterfallCount > 0,
+    "Player rendered zero network waterfall rows",
+    playerResult
+  );
+
+  const hasApiRequest = playerResult.waterfallSamples.some((sample) => sample.includes("/api/"));
+  assert(hasApiRequest, "Player waterfall does not include demo API requests", playerResult);
+
+  if (swExceptions.length > 0) {
+    throw new Error(`Service worker runtime exceptions: ${JSON.stringify(swExceptions)}`);
+  }
+
+  if (demoExceptions.length > 0) {
+    throw new Error(`Demo page runtime exceptions: ${JSON.stringify(demoExceptions)}`);
+  }
+
+  if (playerExceptions.length > 0) {
+    throw new Error(`Player page runtime exceptions: ${JSON.stringify(playerExceptions)}`);
+  }
+
+  console.log("Demo URL:", demoUrl);
+  console.log("Player URL:", playerUrl);
+  console.log("Session:", sid);
+  console.log("Export:", exportStatus.text);
+  console.log("Archive:", exportedPath);
+  console.log("Archive bytes:", fileInfo.size);
+  console.log("Scenario:", JSON.stringify(scenarioResult));
+  console.log("Player:", JSON.stringify(playerResult));
+  console.log(`Chrome log: ${chromeLogPath}`);
+  console.log("Fullchain E2E passed.");
+
+  await cleanup();
+}
+
+function assert(condition, message, details) {
+  if (!condition) {
+    const suffix = details === undefined ? "" : ` | details=${JSON.stringify(details)}`;
+    throw new Error(`${message}${suffix}`);
+  }
+}
+
+async function ensureBuildInputs() {
+  await access(extensionDir, constants.R_OK);
+  await access(resolve(extensionDir, "manifest.json"), constants.R_OK);
+  await access(resolve(extensionDir, "sw.js"), constants.R_OK);
+
+  await access(demoDir, constants.R_OK);
+  await access(resolve(demoDir, "index.html"), constants.R_OK);
+  await access(resolve(demoDir, "app.js"), constants.R_OK);
+
+  await access(playerDir, constants.R_OK);
+  await access(resolve(playerDir, "index.html"), constants.R_OK);
+  await access(resolve(playerDir, "main.js"), constants.R_OK);
+}
+
+async function resolveChromeBinary(candidates) {
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // continue
+    }
+  }
+
+  throw new Error(
+    "Chrome binary not found. Set WB_E2E_CHROME_BIN or install Chrome for Testing/Google Chrome."
+  );
+}
+
+function startChrome(binary, options) {
+  const args = [
+    `--remote-debugging-port=${options.remotePort}`,
+    `--user-data-dir=${options.profileDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--safebrowsing-disable-download-protection",
+    "--window-size=1400,1000",
+    `--disable-extensions-except=${options.extensionDir}`,
+    `--load-extension=${options.extensionDir}`,
+    "--enable-logging=stderr",
+    "--v=1",
+    "about:blank"
+  ];
+
+  if (options.headless) {
+    args.unshift("--headless=new");
+  }
+
+  const proc = spawn(binary, args, {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  const logStream = createWriteStream(options.logPath, { flags: "a" });
+  proc.stdout?.pipe(logStream);
+  proc.stderr?.pipe(logStream);
+
+  proc.on("exit", (code, signal) => {
+    if (code !== 0 && code !== null) {
+      console.warn(`Chrome exited with code ${code}.`);
+    }
+
+    if (signal) {
+      console.warn(`Chrome exited via signal ${signal}.`);
+    }
+  });
+
+  return { proc, logStream };
+}
+
+async function startDemoServer({ demoDir, playerDir, artifactsDir }) {
+  const tasks = [];
+
+  const server = createServer(async (request, response) => {
+    try {
+      const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+      const pathname = decodeURIComponent(requestUrl.pathname);
+
+      if (pathname === "/") {
+        redirect(response, "/demo/");
+        return;
+      }
+
+      if (pathname.startsWith("/api/")) {
+        await handleApiRequest(request, response, requestUrl, tasks);
+        return;
+      }
+
+      if (pathname === "/demo") {
+        redirect(response, "/demo/");
+        return;
+      }
+
+      if (pathname.startsWith("/demo/")) {
+        const relativePath = pathname.slice("/demo/".length) || "index.html";
+        await serveStatic(response, demoDir, relativePath);
+        return;
+      }
+
+      if (pathname === "/player") {
+        redirect(response, "/player/");
+        return;
+      }
+
+      if (pathname.startsWith("/player/")) {
+        const relativePath = pathname.slice("/player/".length) || "index.html";
+        await serveStatic(response, playerDir, relativePath);
+        return;
+      }
+
+      if (pathname.startsWith("/artifacts/")) {
+        const relativePath = pathname.slice("/artifacts/".length);
+        await serveStatic(response, artifactsDir, relativePath);
+        return;
+      }
+
+      writeJson(response, 404, {
+        ok: false,
+        error: "not-found",
+        path: pathname
+      });
+    } catch (error) {
+      writeJson(response, 500, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = server.address();
+
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to resolve local demo server address.");
+  }
+
+  return {
+    server,
+    port: address.port
+  };
+}
+
+async function handleApiRequest(request, response, requestUrl, tasks) {
+  const pathname = requestUrl.pathname;
+
+  if (pathname === "/api/dashboard" && request.method === "GET") {
+    writeJson(response, 200, {
+      ok: true,
+      view: requestUrl.searchParams.get("view") ?? "default",
+      generatedAt: new Date().toISOString(),
+      totals: {
+        open: tasks.length,
+        completed: 0
+      },
+      tasks: tasks.slice(-10)
+    });
+    return;
+  }
+
+  if (pathname === "/api/slow-report" && request.method === "GET") {
+    const rawDelay = Number(requestUrl.searchParams.get("delay") ?? "600");
+    const delay = Number.isFinite(rawDelay) ? Math.max(150, Math.min(rawDelay, 2_000)) : 600;
+    await sleep(delay);
+
+    writeJson(response, 200, {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      delayMs: delay,
+      report: {
+        p95: 312,
+        p99: 640,
+        errorRate: 0.013
+      }
+    });
+    return;
+  }
+
+  if (pathname === "/api/fail" && request.method === "GET") {
+    const rawStatus = Number(requestUrl.searchParams.get("code") ?? "503");
+    const status = Number.isFinite(rawStatus) ? Math.max(400, Math.min(rawStatus, 599)) : 503;
+
+    writeJson(response, status, {
+      ok: false,
+      code: status,
+      reason: "synthetic-upstream-failure"
+    });
+    return;
+  }
+
+  if (pathname === "/api/tasks" && request.method === "POST") {
+    const bodyText = await readRequestBody(request, 512_000);
+    let body;
+
+    try {
+      body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
+    } catch {
+      writeJson(response, 400, {
+        ok: false,
+        error: "invalid-json"
+      });
+      return;
+    }
+
+    const title =
+      typeof body?.title === "string" && body.title.trim().length > 0
+        ? body.title.trim()
+        : `Task ${tasks.length + 1}`;
+
+    const task = {
+      id: `task-${tasks.length + 1}`,
+      title,
+      source: typeof body?.source === "string" ? body.source : "unknown",
+      createdAt: new Date().toISOString()
+    };
+
+    tasks.push(task);
+
+    writeJson(response, 201, {
+      ok: true,
+      task,
+      total: tasks.length
+    });
+    return;
+  }
+
+  writeJson(response, 404, {
+    ok: false,
+    error: "api-route-not-found",
+    path: pathname,
+    method: request.method
+  });
+}
+
+function writeJson(response, status, payload) {
+  const bytes = Buffer.from(JSON.stringify(payload));
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength
+  });
+  response.end(bytes);
+}
+
+function redirect(response, location) {
+  response.writeHead(302, {
+    location,
+    "cache-control": "no-store"
+  });
+  response.end();
+}
+
+async function readRequestBody(request, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+
+    request.on("data", (chunk) => {
+      total += chunk.byteLength;
+
+      if (total > maxBytes) {
+        reject(new Error(`Request body exceeds ${maxBytes} bytes.`));
+        request.destroy();
+        return;
+      }
+
+      chunks.push(chunk);
+    });
+
+    request.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+
+    request.on("error", (error) => {
+      reject(error);
+    });
+  });
+}
+
+async function serveStatic(response, rootDir, relativePath) {
+  const safeRelative = normalizeRelativePath(relativePath);
+  const resolved = resolve(rootDir, safeRelative);
+  const guardedRoot = rootDir.endsWith(sep) ? rootDir : `${rootDir}${sep}`;
+
+  if (resolved !== rootDir && !resolved.startsWith(guardedRoot)) {
+    writeJson(response, 403, {
+      ok: false,
+      error: "path-traversal"
+    });
+    return;
+  }
+
+  let filePath = resolved;
+
+  try {
+    const info = await stat(filePath);
+
+    if (info.isDirectory()) {
+      filePath = resolve(filePath, "index.html");
+    }
+  } catch {
+    writeJson(response, 404, {
+      ok: false,
+      error: "asset-not-found",
+      path: relativePath
+    });
+    return;
+  }
+
+  let bytes;
+
+  try {
+    bytes = await readFile(filePath);
+  } catch {
+    writeJson(response, 404, {
+      ok: false,
+      error: "asset-not-found",
+      path: relativePath
+    });
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": mimeTypeFor(filePath),
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength
+  });
+  response.end(bytes);
+}
+
+function normalizeRelativePath(value) {
+  const normalized = value.replaceAll("\\", "/").replace(/^\/+/, "");
+  return normalized.length > 0 ? normalized : "index.html";
+}
+
+function mimeTypeFor(path) {
+  const extension = extname(path).toLowerCase();
+
+  if (extension === ".html") {
+    return "text/html; charset=utf-8";
+  }
+
+  if (extension === ".js") {
+    return "text/javascript; charset=utf-8";
+  }
+
+  if (extension === ".css") {
+    return "text/css; charset=utf-8";
+  }
+
+  if (extension === ".json") {
+    return "application/json; charset=utf-8";
+  }
+
+  if (extension === ".webblackbox" || extension === ".zip") {
+    return "application/zip";
+  }
+
+  if (extension === ".svg") {
+    return "image/svg+xml";
+  }
+
+  if (extension === ".png") {
+    return "image/png";
+  }
+
+  return "application/octet-stream";
+}
+
+async function waitForChromeReady(urlBase, timeoutMs) {
+  return waitFor(
+    async () => {
+      const version = await fetchJson(`${urlBase}/json/version`, 4_000);
+      return version?.Browser ? version : null;
+    },
+    timeoutMs,
+    250,
+    "Chrome DevTools endpoint not ready"
+  );
+}
+
+async function waitForExtensionServiceWorker(urlBase, timeoutMs) {
+  return waitFor(
+    async () => {
+      const targets = await fetchJson(`${urlBase}/json/list`, 4_000);
+
+      if (!Array.isArray(targets)) {
+        return null;
+      }
+
+      return (
+        targets.find(
+          (target) =>
+            target?.type === "service_worker" &&
+            typeof target?.url === "string" &&
+            target.url.startsWith("chrome-extension://") &&
+            target.url.endsWith("/sw.js")
+        ) ?? null
+      );
+    },
+    timeoutMs,
+    250,
+    "Extension service worker target not found"
+  );
+}
+
+function extractExtensionId(url) {
+  const match = /^chrome-extension:\/\/([^/]+)\//.exec(url);
+
+  if (!match) {
+    throw new Error(`Failed to parse extension id from target URL: ${url}`);
+  }
+
+  return match[1];
+}
+
+async function openTarget(urlBase, url) {
+  const target = await fetchJson(`${urlBase}/json/new?${encodeURIComponent(url)}`, 6_000, {
+    method: "PUT"
+  });
+
+  if (!target?.id || !target?.webSocketDebuggerUrl) {
+    throw new Error(`Failed to open target: ${url}`);
+  }
+
+  return target;
+}
+
+async function closeTarget(urlBase, targetId) {
+  try {
+    await fetchJson(`${urlBase}/json/close/${targetId}`, 4_000);
+  } catch {
+    // ignore during cleanup
+  }
+}
+
+async function startSessionFromPopup(popupClient, mode, expectedUrl) {
+  const expression = `
+    (async () => {
+      const tabs = await chrome.tabs.query({});
+      const exact = tabs.find((tab) =>
+        typeof tab.id === 'number' &&
+        typeof tab.url === 'string' &&
+        tab.url.startsWith(${JSON.stringify(expectedUrl)})
+      );
+
+      const fallback = tabs.find((tab) =>
+        typeof tab.id === 'number' &&
+        typeof tab.url === 'string' &&
+        !tab.url.startsWith('chrome-extension://') &&
+        tab.url !== 'about:blank'
+      );
+
+      const target = exact ?? fallback;
+
+      if (!target || typeof target.id !== 'number') {
+        return {
+          ok: false,
+          reason: 'target-tab-not-found',
+          tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active }))
+        };
+      }
+
+      await chrome.runtime.sendMessage({ kind: 'ui.start', tabId: target.id, mode: ${JSON.stringify(
+        mode
+      )} });
+      return { ok: true, tabId: target.id, mode: ${JSON.stringify(mode)} };
+    })()
+  `;
+
+  return popupClient.evaluate(expression);
+}
+
+async function stopActiveSessionFromPopup(popupClient) {
+  const expression = `
+    (async () => {
+      const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
+      const rows = store['webblackbox.runtime.sessions'];
+      const active = Array.isArray(rows) ? rows[0] : undefined;
+
+      if (!active || typeof active.tabId !== 'number') {
+        return { ok: false, reason: 'no-active-session', rows };
+      }
+
+      await chrome.runtime.sendMessage({ kind: 'ui.stop', tabId: active.tabId });
+      return { ok: true, tabId: active.tabId };
+    })()
+  `;
+
+  return popupClient.evaluate(expression);
+}
+
+async function exportSessionFromPopup(popupClient, sid) {
+  const expression = `
+    (async () => {
+      await chrome.runtime.sendMessage({
+        kind: 'ui.export',
+        sid: ${JSON.stringify(sid)},
+        saveAs: false
+      });
+      return { ok: true, sid: ${JSON.stringify(sid)} };
+    })()
+  `;
+
+  return popupClient.evaluate(expression);
+}
+
+async function readRuntimeSessions(popupClient) {
+  const expression = `
+    (async () => {
+      const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
+      const rows = store['webblackbox.runtime.sessions'];
+      return Array.isArray(rows) ? rows : [];
+    })()
+  `;
+
+  return popupClient.evaluate(expression);
+}
+
+async function readExportStatusLine(popupClient) {
+  const expression = `
+    (() => {
+      const lines = Array.from(document.querySelectorAll('p')).map((el) =>
+        (el.textContent ?? '').trim()
+      );
+      return lines.find((line) => line.startsWith('Export')) ?? null;
+    })()
+  `;
+
+  return popupClient.evaluate(expression);
+}
+
+async function waitForExportStatus(popupClient, previousStatus, timeoutMs) {
+  return waitFor(
+    async () => {
+      const status = await readExportStatusLine(popupClient);
+
+      if (!status || status === previousStatus) {
+        return null;
+      }
+
+      return {
+        ok: status.startsWith("Exported:"),
+        text: status
+      };
+    },
+    timeoutMs,
+    250,
+    "Export status not observed"
+  );
+}
+
+async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs) {
+  const expression = `
+    (async () => {
+      const sid = ${JSON.stringify(sid)};
+      const startedAtMs = ${JSON.stringify(startedAtMs)};
+      const rows = await chrome.downloads.search({
+        orderBy: ['-startTime'],
+        limit: 40
+      });
+
+      const recent = rows.filter((item) => {
+        if (typeof item.startTime !== 'string') {
+          return false;
+        }
+        const ts = Date.parse(item.startTime);
+        return Number.isFinite(ts) && ts >= startedAtMs - 4_000;
+      });
+
+      const match = recent.find((item) =>
+        typeof item.filename === 'string' &&
+        (item.filename.includes(sid + '.webblackbox') || item.filename.endsWith('.webblackbox'))
+      );
+
+      const latest = match ?? recent[0] ?? null;
+
+      return {
+        complete:
+          latest && latest.state === 'complete' && typeof latest.filename === 'string'
+            ? {
+                id: latest.id,
+                filename: latest.filename,
+                state: latest.state,
+                bytesReceived: latest.bytesReceived,
+                totalBytes: latest.totalBytes,
+                url: latest.url
+              }
+            : null,
+        latest: latest
+          ? {
+              id: latest.id,
+              filename: latest.filename,
+              state: latest.state,
+              error: latest.error,
+              bytesReceived: latest.bytesReceived,
+              totalBytes: latest.totalBytes,
+              url: latest.url
+            }
+          : null
+      };
+    })()
+  `;
+
+  return waitFor(
+    async () => {
+      const snapshot = await popupClient.evaluate(expression);
+
+      if (!snapshot) {
+        return null;
+      }
+
+      if (snapshot.complete) {
+        return snapshot.complete;
+      }
+
+      const latest = snapshot.latest;
+
+      if (latest && latest.state && latest.state !== "in_progress") {
+        const suffix = latest.error ? ` (${latest.error})` : "";
+        throw new Error(`Download ended in state '${latest.state}'${suffix}`);
+      }
+
+      return null;
+    },
+    timeoutMs,
+    400,
+    "Download not completed"
+  );
+}
+
+async function runDemoScenario(demoClient) {
+  const expression = `
+    (async () => {
+      if (!window.__wbDemo || typeof window.__wbDemo.runScenario !== 'function') {
+        return { ok: false, reason: 'demo-scenario-missing' };
+      }
+
+      try {
+        return await window.__wbDemo.runScenario({ taskTitle: 'Fullchain E2E Task' });
+      } catch (error) {
+        return {
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error)
+        };
+      }
+    })()
+  `;
+
+  return demoClient.evaluate(expression);
+}
+
+async function waitForIndicatorText(pageClient, fragment, timeoutMs) {
+  return waitFor(
+    async () => {
+      const text = await pageClient.evaluate(
+        `(() => document.querySelector('[data-webblackbox-indicator="true"]')?.textContent ?? null)()`
+      );
+
+      return typeof text === "string" && text.includes(fragment) ? text : null;
+    },
+    timeoutMs,
+    250,
+    `Indicator not found: ${fragment}`
+  );
+}
+
+async function waitForIndicatorGone(pageClient, timeoutMs) {
+  return waitFor(
+    async () => {
+      const text = await pageClient.evaluate(
+        `(() => document.querySelector('[data-webblackbox-indicator="true"]')?.textContent ?? null)()`
+      );
+
+      return text ? null : true;
+    },
+    timeoutMs,
+    250,
+    "Indicator not cleared"
+  );
+}
+
+async function waitForPlayerReady(playerClient, timeoutMs) {
+  return waitFor(
+    async () => {
+      const ready = await playerClient.evaluate(`
+      (() => {
+        const input = document.querySelector('#archive-input');
+        return !!input;
+      })()
+    `);
+
+      return ready ? true : null;
+    },
+    timeoutMs,
+    250,
+    "Player UI not ready"
+  );
+}
+
+async function setFileInputFiles(pageClient, selector, files) {
+  const runtimeResult = await pageClient.send("Runtime.evaluate", {
+    expression: `document.querySelector(${JSON.stringify(selector)})`,
+    returnByValue: false,
+    awaitPromise: false
+  });
+
+  const objectId = runtimeResult?.result?.objectId;
+
+  if (!objectId) {
+    throw new Error(`File input not found: ${selector}`);
+  }
+
+  await pageClient.send("DOM.setFileInputFiles", {
+    files,
+    objectId
+  });
+}
+
+async function waitForPlayerLoad(playerClient, timeoutMs) {
+  return waitFor(
+    async () => {
+      const snapshot = await playerClient.evaluate(`
+      (() => {
+        const eventCount = document.querySelectorAll('#timeline-list .event').length;
+        const waterfallRows = document.querySelectorAll('#waterfall-body tr').length;
+        const feedback = (document.getElementById('feedback')?.textContent ?? '').trim();
+        const samples = Array.from(document.querySelectorAll('#waterfall-body .waterfall-btn'))
+          .map((el) => (el.textContent ?? '').trim())
+          .slice(0, 12);
+
+        if (eventCount === 0) {
+          return null;
+        }
+
+        return {
+          eventCount,
+          waterfallCount: waterfallRows,
+          feedback,
+          waterfallSamples: samples
+        };
+      })()
+    `);
+
+      return snapshot ?? null;
+    },
+    timeoutMs,
+    300,
+    "Player did not load archive in time"
+  );
+}
+
+async function waitForFile(path, timeoutMs) {
+  return waitFor(
+    async () => {
+      try {
+        return await stat(path);
+      } catch {
+        return null;
+      }
+    },
+    timeoutMs,
+    250,
+    `File not found: ${path}`
+  );
+}
+
+async function rebuildArchiveFromDataUrl(dataUrl, outputPath) {
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+    return false;
+  }
+
+  const marker = "base64,";
+  const markerIndex = dataUrl.indexOf(marker);
+
+  if (markerIndex === -1) {
+    return false;
+  }
+
+  const base64 = dataUrl.slice(markerIndex + marker.length);
+
+  if (base64.length === 0) {
+    return false;
+  }
+
+  const bytes = Buffer.from(base64, "base64");
+
+  if (bytes.byteLength === 0) {
+    return false;
+  }
+
+  await writeFile(outputPath, bytes);
+  return true;
+}
+
+async function waitFor(fn, timeoutMs, intervalMs, timeoutMessage) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const result = await fn();
+
+      if (result !== null && result !== undefined) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  if (lastError instanceof Error) {
+    throw new Error(`${timeoutMessage}: ${lastError.message}`);
+  }
+
+  throw new Error(timeoutMessage);
+}
+
+async function fetchJson(url, timeoutMs, init) {
+  const response = await fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} for ${url}`);
+  }
+
+  return response.json();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function cleanup() {
+  if (state.browserClient) {
+    state.browserClient.close();
+    state.browserClient = null;
+  }
+
+  if (state.playerClient) {
+    state.playerClient.close();
+    state.playerClient = null;
+  }
+
+  if (state.demoClient) {
+    state.demoClient.close();
+    state.demoClient = null;
+  }
+
+  if (state.popupClient) {
+    state.popupClient.close();
+    state.popupClient = null;
+  }
+
+  if (state.swClient) {
+    state.swClient.close();
+    state.swClient = null;
+  }
+
+  for (const targetId of state.openedTargetIds.splice(0)) {
+    await closeTarget(baseUrl, targetId);
+  }
+
+  if (state.chromeProcess && !state.chromeProcess.killed) {
+    state.chromeProcess.kill("SIGTERM");
+    await sleep(700);
+
+    if (!state.chromeProcess.killed) {
+      state.chromeProcess.kill("SIGKILL");
+    }
+  }
+
+  state.chromeProcess = null;
+
+  if (state.logStream) {
+    await new Promise((resolve) => {
+      state.logStream.end(resolve);
+    });
+    state.logStream = null;
+  }
+
+  if (state.server) {
+    await new Promise((resolve) => {
+      state.server.close(() => resolve());
+    });
+    state.server = null;
+  }
+}
+
+class CdpClient {
+  constructor(wsUrl) {
+    this.wsUrl = wsUrl;
+    this.socket = null;
+    this.sequence = 0;
+    this.pending = new Map();
+    this.eventHandlers = new Map();
+  }
+
+  async connect() {
+    await new Promise((resolve, reject) => {
+      const socket = new WebSocket(this.wsUrl);
+      this.socket = socket;
+
+      socket.addEventListener("open", () => {
+        resolve();
+      });
+
+      socket.addEventListener("error", () => {
+        reject(new Error(`Failed to open WebSocket: ${this.wsUrl}`));
+      });
+
+      socket.addEventListener("close", () => {
+        for (const pending of this.pending.values()) {
+          pending.reject(new Error("CDP socket closed"));
+        }
+        this.pending.clear();
+      });
+
+      socket.addEventListener("message", (event) => {
+        const payload = JSON.parse(String(event.data));
+
+        if (typeof payload.id === "number") {
+          const pending = this.pending.get(payload.id);
+
+          if (!pending) {
+            return;
+          }
+
+          this.pending.delete(payload.id);
+
+          if (payload.error) {
+            pending.reject(new Error(payload.error.message ?? JSON.stringify(payload.error)));
+            return;
+          }
+
+          pending.resolve(payload.result);
+          return;
+        }
+
+        if (typeof payload.method === "string") {
+          const handlers = this.eventHandlers.get(payload.method) ?? [];
+
+          for (const handler of handlers) {
+            handler(payload.params ?? {});
+          }
+        }
+      });
+    });
+  }
+
+  on(method, handler) {
+    const handlers = this.eventHandlers.get(method) ?? [];
+    handlers.push(handler);
+    this.eventHandlers.set(method, handlers);
+  }
+
+  send(method, params = {}) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("CDP socket is not open"));
+    }
+
+    const id = ++this.sequence;
+    const message = JSON.stringify({ id, method, params });
+
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.socket.send(message);
+    });
+  }
+
+  async evaluate(expression) {
+    const result = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true
+    });
+
+    if (result?.exceptionDetails) {
+      const message = result.exceptionDetails.text ?? "Runtime.evaluate failed";
+      throw new Error(message);
+    }
+
+    return result?.result?.value;
+  }
+
+  close() {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.close();
+    }
+  }
+}

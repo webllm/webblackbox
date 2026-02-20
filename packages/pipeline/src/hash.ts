@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 function toUint8Array(input: ArrayBuffer | Uint8Array | string): Uint8Array {
   if (typeof input === "string") {
     return new TextEncoder().encode(input);
@@ -14,15 +12,16 @@ function toUint8Array(input: ArrayBuffer | Uint8Array | string): Uint8Array {
 
 export async function sha256Hex(input: ArrayBuffer | Uint8Array | string): Promise<string> {
   const data = toUint8Array(input);
+  const subtle = globalThis.crypto?.subtle;
 
-  if (globalThis.crypto?.subtle) {
-    const source = new Uint8Array(data.byteLength);
-    source.set(data);
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", source.buffer);
-    return bufferToHex(new Uint8Array(digest));
+  if (!subtle) {
+    throw new Error("Web Crypto API is required for SHA-256 hashing.");
   }
 
-  return createHash("sha256").update(data).digest("hex");
+  const source = new Uint8Array(data.byteLength);
+  source.set(data);
+  const digest = await subtle.digest("SHA-256", source.buffer);
+  return bufferToHex(new Uint8Array(digest));
 }
 
 function bufferToHex(bytes: Uint8Array): string {

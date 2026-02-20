@@ -53,6 +53,9 @@ app.innerHTML = `
       <button id="export-report">Export Bug Report</button>
       <button id="export-har">Export HAR</button>
       <button id="export-playwright">Export Playwright</button>
+      <button id="export-playwright-mocks">Export Playwright Mocks</button>
+      <button id="export-github-issue">Export GitHub Issue</button>
+      <button id="export-jira-issue">Export Jira Issue</button>
       <span id="feedback" class="feedback"></span>
     </section>
 
@@ -71,6 +74,11 @@ app.innerHTML = `
       <article class="card compare-card">
         <h2>Session Compare</h2>
         <pre id="compare-details" class="code"></pre>
+      </article>
+
+      <article class="card domdiff-card">
+        <h2>DOM Diff Browser</h2>
+        <pre id="domdiff-details" class="code"></pre>
       </article>
 
       <article class="card timeline">
@@ -110,9 +118,19 @@ app.innerHTML = `
         <pre id="request-details" class="code"></pre>
       </article>
 
+      <article class="card realtime-card">
+        <h2>WS / SSE Timeline</h2>
+        <ul id="realtime-list" class="signal-list"></ul>
+      </article>
+
       <article class="card">
         <h2>Storage Timeline</h2>
         <ul id="storage-list" class="signal-list"></ul>
+      </article>
+
+      <article class="card perf-card">
+        <h2>Performance Artifacts</h2>
+        <ul id="perf-list" class="signal-list"></ul>
       </article>
 
       <article class="card">
@@ -140,12 +158,16 @@ function bindGlobalActions(): void {
       return;
     }
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    state.player = await WebBlackboxPlayer.open(bytes);
-    state.selectedEventId = null;
-    state.selectedRequestId = null;
-    setFeedback(`Loaded ${file.name}`);
-    await refresh();
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      state.player = await openArchiveWithPassphraseFallback(bytes, file.name);
+      state.selectedEventId = null;
+      state.selectedRequestId = null;
+      setFeedback(`Loaded ${file.name}`);
+      await refresh();
+    } catch (error) {
+      setFeedback(`Failed to load ${file.name}: ${String(error)}`);
+    }
   });
 
   compareInput.addEventListener("change", async () => {
@@ -157,10 +179,14 @@ function bindGlobalActions(): void {
       return;
     }
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    state.comparePlayer = await WebBlackboxPlayer.open(bytes);
-    setFeedback(`Loaded comparison archive: ${file.name}`);
-    await refresh();
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      state.comparePlayer = await openArchiveWithPassphraseFallback(bytes, file.name);
+      setFeedback(`Loaded comparison archive: ${file.name}`);
+      await refresh();
+    } catch (error) {
+      setFeedback(`Failed to load comparison archive ${file.name}: ${String(error)}`);
+    }
   });
 
   textFilter.addEventListener("input", async () => {
@@ -203,6 +229,44 @@ function bindGlobalActions(): void {
     );
     setFeedback("Playwright script exported.");
   });
+
+  getElement<HTMLButtonElement>("export-playwright-mocks").addEventListener("click", async () => {
+    if (!state.player) {
+      return;
+    }
+
+    const script = await state.player.generatePlaywrightMockScript({ maxMocks: 25 });
+    downloadTextFile("webblackbox-replay-mocks.spec.ts", script, "text/plain");
+    setFeedback("Playwright mock script exported.");
+  });
+
+  getElement<HTMLButtonElement>("export-github-issue").addEventListener("click", () => {
+    if (!state.player) {
+      return;
+    }
+
+    const payload = state.player.generateGitHubIssueTemplate();
+    downloadTextFile(
+      "webblackbox-github-issue.json",
+      JSON.stringify(payload, null, 2),
+      "application/json"
+    );
+    setFeedback("GitHub issue template exported.");
+  });
+
+  getElement<HTMLButtonElement>("export-jira-issue").addEventListener("click", () => {
+    if (!state.player) {
+      return;
+    }
+
+    const payload = state.player.generateJiraIssueTemplate();
+    downloadTextFile(
+      "webblackbox-jira-issue.json",
+      JSON.stringify(payload, null, 2),
+      "application/json"
+    );
+    setFeedback("Jira issue template exported.");
+  });
 }
 
 async function refresh(): Promise<void> {
@@ -210,12 +274,15 @@ async function refresh(): Promise<void> {
   const compareDetails = getElement<HTMLElement>("compare-details");
   const timelineList = getElement<HTMLUListElement>("timeline-list");
   const details = getElement<HTMLElement>("event-details");
+  const domDiffDetails = getElement<HTMLElement>("domdiff-details");
   const consoleList = getElement<HTMLUListElement>("console-list");
   const storageList = getElement<HTMLUListElement>("storage-list");
+  const perfList = getElement<HTMLUListElement>("perf-list");
   const filmstripList = getElement<HTMLUListElement>("filmstrip-list");
   const preview = getElement<HTMLImageElement>("filmstrip-preview");
   const waterfallBody = getElement<HTMLTableSectionElement>("waterfall-body");
   const requestDetails = getElement<HTMLElement>("request-details");
+  const realtimeList = getElement<HTMLUListElement>("realtime-list");
 
   if (!state.player) {
     summary.innerHTML = `<p class="empty">No archive loaded.</p>`;
@@ -223,10 +290,14 @@ async function refresh(): Promise<void> {
       "Load a primary archive and optional compare archive to view deltas.";
     timelineList.innerHTML = "";
     details.textContent = "Select a timeline event to inspect payload details.";
+    domDiffDetails.textContent =
+      "Load an archive with DOM snapshots to inspect tree-level changes.";
     consoleList.innerHTML = "";
     waterfallBody.innerHTML = "";
     requestDetails.textContent = "Select a request row to inspect network details.";
+    realtimeList.innerHTML = "";
     storageList.innerHTML = "";
+    perfList.innerHTML = "";
     filmstripList.innerHTML = "";
     preview.removeAttribute("src");
     setFeedback(state.feedback);
@@ -237,9 +308,17 @@ async function refresh(): Promise<void> {
   state.events = applyFilters(state.player);
   const derived = state.player.buildDerived();
   const waterfall = state.player.getNetworkWaterfall();
+  const domSnapshots = state.player.getDomSnapshots();
+  const domDiffs = await state.player.getDomDiffTimeline({ limit: 24 });
+  const latestDomDiff = domDiffs[domDiffs.length - 1] ?? null;
+  const perfArtifacts = state.player.getPerformanceArtifacts();
+  const realtimeTimeline = state.player.getRealtimeNetworkTimeline();
   const comparison = state.comparePlayer ? state.player.compareWith(state.comparePlayer) : null;
   const storageComparison = state.comparePlayer
     ? state.player.compareStorageWith(state.comparePlayer)
+    : null;
+  const compareDomDiff = state.comparePlayer
+    ? await state.player.compareLatestDomSnapshotWith(state.comparePlayer)
     : null;
 
   if (waterfall.length > 0 && !state.selectedRequestId) {
@@ -253,6 +332,9 @@ async function refresh(): Promise<void> {
     <div class="pill">${derived.totals.requests} network requests</div>
     <div class="pill">${derived.actionSpans.length} action spans</div>
     <div class="pill">${waterfall.length} waterfall rows</div>
+    <div class="pill">${realtimeTimeline.length} ws/sse entries</div>
+    <div class="pill">${domSnapshots.length} dom snapshots</div>
+    <div class="pill">${perfArtifacts.length} perf artifacts</div>
     ${
       comparison
         ? `<div class="pill">event delta ${comparison.eventDelta >= 0 ? "+" : ""}${comparison.eventDelta}</div>`
@@ -284,6 +366,40 @@ async function refresh(): Promise<void> {
         2
       )
     : "Load a comparison archive to see event, request, and storage deltas.";
+
+  domDiffDetails.textContent =
+    latestDomDiff || compareDomDiff
+      ? JSON.stringify(
+          {
+            timeline: {
+              snapshots: domSnapshots.length,
+              diffSteps: domDiffs.length,
+              latest: latestDomDiff
+                ? {
+                    fromEventId: latestDomDiff.previous.eventId,
+                    toEventId: latestDomDiff.current.eventId,
+                    summary: latestDomDiff.summary,
+                    addedPaths: latestDomDiff.addedPaths.slice(0, 40),
+                    removedPaths: latestDomDiff.removedPaths.slice(0, 40),
+                    changedPaths: latestDomDiff.changedPaths.slice(0, 40)
+                  }
+                : null
+            },
+            crossSession: compareDomDiff
+              ? {
+                  leftEventId: compareDomDiff.previous.eventId,
+                  rightEventId: compareDomDiff.current.eventId,
+                  summary: compareDomDiff.summary,
+                  addedPaths: compareDomDiff.addedPaths.slice(0, 40),
+                  removedPaths: compareDomDiff.removedPaths.slice(0, 40),
+                  changedPaths: compareDomDiff.changedPaths.slice(0, 40)
+                }
+              : null
+          },
+          null,
+          2
+        )
+      : "No DOM snapshots captured for the selected archives.";
 
   timelineList.innerHTML = state.events
     .slice(0, 600)
@@ -332,6 +448,15 @@ async function refresh(): Promise<void> {
     state.events.filter((event) => event.type.startsWith("storage."))
   );
 
+  perfList.innerHTML = perfArtifacts
+    .slice(-60)
+    .map((entry) => {
+      const sizeText = typeof entry.size === "number" ? `${entry.size} bytes` : "size n/a";
+      const reasonText = entry.reason ? ` (${entry.reason})` : "";
+      return `<li class="signal"><span class="signal-type">${entry.eventType}</span><span class="signal-text">${entry.eventId} @ ${entry.mono.toFixed(2)}ms - ${sizeText}${reasonText}</span></li>`;
+    })
+    .join("");
+
   waterfallBody.innerHTML = waterfall
     .slice(0, 300)
     .map((entry) => {
@@ -370,6 +495,19 @@ async function refresh(): Promise<void> {
         2
       )
     : "No request selected.";
+
+  realtimeList.innerHTML = realtimeTimeline
+    .slice(-120)
+    .map((entry) => {
+      const direction = entry.direction ? `${entry.direction} ` : "";
+      const preview = entry.payloadPreview
+        ? entry.payloadPreview.length > 120
+          ? `${entry.payloadPreview.slice(0, 120)}...`
+          : entry.payloadPreview
+        : "(no payload)";
+      return `<li class="signal"><span class="signal-type">${entry.eventType}</span><span class="signal-text">${direction}${entry.streamId ?? "-"} @ ${entry.mono.toFixed(2)}ms ${escapeHtml(preview)}</span></li>`;
+    })
+    .join("");
 
   const screenshotEvents = state.events.filter((event) => event.type === "screen.screenshot");
   filmstripList.innerHTML = screenshotEvents
@@ -493,6 +631,31 @@ function downloadTextFile(filename: string, content: string, mime: string): void
   anchor.download = filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+async function openArchiveWithPassphraseFallback(
+  bytes: Uint8Array,
+  fileName: string
+): Promise<WebBlackboxPlayer> {
+  try {
+    return await WebBlackboxPlayer.open(bytes);
+  } catch (error) {
+    const message = String(error).toLowerCase();
+
+    if (!message.includes("encrypted")) {
+      throw error;
+    }
+
+    const passphrase = prompt(`Archive '${fileName}' is encrypted. Enter passphrase:`);
+
+    if (!passphrase || passphrase.trim().length === 0) {
+      throw new Error("Passphrase is required for encrypted archive.");
+    }
+
+    return WebBlackboxPlayer.open(bytes, {
+      passphrase: passphrase.trim()
+    });
+  }
 }
 
 async function copyText(value: string): Promise<void> {

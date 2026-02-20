@@ -91,4 +91,33 @@ describe("pipeline", () => {
     expect(parsed.manifest.protocolVersion).toBe(1);
     expect(parsed.integrity).not.toBeNull();
   });
+
+  it("supports AES-GCM export encryption with passphrase", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-enc-1", "user.click", 100));
+    await pipeline.ingest(createEvent("E-enc-2", "network.request", 120));
+
+    const exported = await pipeline.exportBundle({ passphrase: "secret-passphrase" });
+
+    await expect(readWebBlackboxArchive(exported.bytes)).rejects.toThrow(/encrypted/i);
+
+    const parsed = await readWebBlackboxArchive(exported.bytes, {
+      passphrase: "secret-passphrase"
+    });
+
+    expect(parsed.events.length).toBeGreaterThanOrEqual(2);
+    expect(parsed.manifest.encryption?.algorithm).toBe("AES-GCM");
+    expect(
+      Object.keys(parsed.manifest.encryption?.files ?? {}).some((path) =>
+        path.startsWith("events/")
+      )
+    ).toBe(true);
+  });
 });

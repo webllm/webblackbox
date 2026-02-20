@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebBlackbox Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">WebBlackbox E2E</p>
+        <h1>Interactive Demo Surface</h1>
+        <p>
+          This page intentionally mixes UI actions, storage writes, successful requests, and failing
+          requests so the extension can capture a realistic timeline.
+        </p>
+      </header>
+
+      <section class="card">
+        <h2>Task Composer</h2>
+        <div class="row">
+          <label for="task-input">Task title</label>
+          <input id="task-input" type="text" placeholder="Write a reproducible task" />
+          <button id="add-task" type="button">Add Task (POST)</button>
+        </div>
+        <ul id="task-list"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Network Actions</h2>
+        <div class="button-row">
+          <button id="load-dashboard" type="button">Load Dashboard (GET)</button>
+          <button id="load-slow" type="button">Load Slow Report (GET)</button>
+          <button id="load-fail" type="button">Trigger Failure (503)</button>
+        </div>
+        <pre id="network-output" class="output"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Local Operations</h2>
+        <div class="button-row">
+          <button id="save-prefs" type="button">Save Preferences</button>
+          <button id="pulse-dom" type="button">Pulse DOM</button>
+        </div>
+        <p id="pulse-target">No pulse yet.</p>
+      </section>
+
+      <section class="card">
+        <h2>Event Log</h2>
+        <ul id="event-log" class="event-log"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

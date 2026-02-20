@@ -171,6 +171,18 @@ h1 {
   grid-column: span 2;
 }
 
+.domdiff-card {
+  grid-column: span 2;
+}
+
+.perf-card {
+  grid-column: span 2;
+}
+
+.realtime-card {
+  grid-column: span 2;
+}
+
 h2 {
   margin: 0 0 10px;
   font-size: 15px;
@@ -334,7 +346,10 @@ h2 {
   .timeline,
   .details,
   .network-card,
-  .compare-card {
+  .compare-card,
+  .domdiff-card,
+  .perf-card,
+  .realtime-card {
     grid-column: span 1;
   }
 }

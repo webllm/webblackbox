@@ -6,6 +6,7 @@ export default tseslint.config(
   {
     ignores: [
       "**/dist/**",
+      "**/build/**",
       "**/coverage/**",
       "**/.turbo/**",
       "**/node_modules/**",
@@ -23,6 +24,14 @@ export default tseslint.config(
     },
     rules: {
       "no-console": "off"
+    }
+  },
+  {
+    files: ["apps/**/e2e-demo/**/*.{js,mjs,cjs}", "apps/**/public/**/*.{js,mjs,cjs}"],
+    languageOptions: {
+      globals: {
+        ...globals.browser
+      }
     }
   }
 );

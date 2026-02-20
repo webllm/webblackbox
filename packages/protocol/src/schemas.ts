@@ -164,6 +164,28 @@ export const exportStatsSchema = z
   })
   .strict();
 
+export const exportEncryptionSchema = z
+  .object({
+    algorithm: z.literal("AES-GCM"),
+    kdf: z
+      .object({
+        name: z.literal("PBKDF2"),
+        hash: z.literal("SHA-256"),
+        iterations: z.number().int().positive(),
+        saltBase64: z.string().min(1)
+      })
+      .strict(),
+    files: z.record(
+      z.string(),
+      z
+        .object({
+          ivBase64: z.string().min(1)
+        })
+        .strict()
+    )
+  })
+  .strict();
+
 export const exportManifestSchema = z
   .object({
     protocolVersion: z.literal(WEBBLACKBOX_PROTOCOL_VERSION),
@@ -177,7 +199,8 @@ export const exportManifestSchema = z
       .strict(),
     chunkCodec: chunkCodecSchema,
     redactionProfile: redactionProfileSchema,
-    stats: exportStatsSchema
+    stats: exportStatsSchema,
+    encryption: exportEncryptionSchema.optional()
   })
   .strict();
 

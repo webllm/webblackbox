@@ -15,6 +15,10 @@ export type PlayerStatus = "idle" | "loaded";
 
 export type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 
+export type PlayerOpenOptions = {
+  passphrase?: string;
+};
+
 export type PlayerRange = {
   monoStart?: number;
   monoEnd?: number;
@@ -87,6 +91,22 @@ export type NetworkWaterfallEntry = {
   eventIds: string[];
 };
 
+export type RealtimeNetworkEntry = {
+  eventId: string;
+  eventType: WebBlackboxEventType;
+  protocol: "ws" | "sse";
+  mono: number;
+  t: number;
+  streamId?: string;
+  direction?: "sent" | "received" | "unknown";
+  phase?: string;
+  url?: string;
+  opcode?: number;
+  payloadLength?: number;
+  payloadPreview?: string;
+  snapshot?: unknown;
+};
+
 export type StorageTimelineEntry = {
   eventId: string;
   eventType: WebBlackboxEventType;
@@ -97,6 +117,18 @@ export type StorageTimelineEntry = {
   hash?: string;
   mode?: string;
   count?: number;
+  reason?: string;
+  snapshot?: unknown;
+};
+
+export type PerformanceArtifactEntry = {
+  eventId: string;
+  eventType: WebBlackboxEventType;
+  t: number;
+  mono: number;
+  kind: "trace" | "cpu" | "heap" | "longtask" | "vitals" | "other";
+  hash?: string;
+  size?: number;
   reason?: string;
   snapshot?: unknown;
 };
@@ -143,9 +175,81 @@ export type PlaywrightScriptOptions = {
   includeHarReplay?: boolean;
 };
 
+export type PlaywrightMockScriptOptions = PlaywrightScriptOptions & {
+  maxMocks?: number;
+};
+
+export type TeamIssueTemplateOptions = {
+  title?: string;
+  range?: PlayerRange;
+  maxItems?: number;
+  labels?: string[];
+  assignees?: string[];
+  issueType?: string;
+  projectKey?: string;
+  priority?: string;
+};
+
+export type GitHubIssueTemplate = {
+  title: string;
+  body: string;
+  labels: string[];
+  assignees: string[];
+};
+
+export type JiraIssueTemplate = {
+  fields: {
+    summary: string;
+    description: string;
+    issuetype: {
+      name: string;
+    };
+    labels: string[];
+    project?: {
+      key: string;
+    };
+    priority?: {
+      name: string;
+    };
+  };
+};
+
+export type DomSnapshotRef = {
+  eventId: string;
+  mono: number;
+  t: number;
+  snapshotId?: string;
+  contentHash?: string;
+  source?: string;
+  nodeCount?: number;
+  reason?: string;
+};
+
+export type DomDiffTimelineOptions = {
+  range?: PlayerRange;
+  limit?: number;
+};
+
+export type DomDiffResult = {
+  previous: DomSnapshotRef;
+  current: DomSnapshotRef;
+  addedPaths: string[];
+  removedPaths: string[];
+  changedPaths: string[];
+  summary: {
+    added: number;
+    removed: number;
+    changed: number;
+  };
+};
+
 type BlobRef = {
   path: string;
   mime: string;
+};
+
+type ArchiveEncryptedFileMeta = {
+  ivBase64: string;
 };
 
 const ACTION_TRIGGER_TYPES = new Set<WebBlackboxEventType>([
@@ -195,9 +299,21 @@ export class WebBlackboxPlayer {
 
   private readonly blobsByHash = new Map<string, BlobRef>();
 
-  private constructor(zip: JSZip, archive: PlayerArchive, events: WebBlackboxEvent[]) {
+  private readonly archiveKey: CryptoKey | null;
+
+  private readonly encryptedFiles: Record<string, ArchiveEncryptedFileMeta>;
+
+  private constructor(
+    zip: JSZip,
+    archive: PlayerArchive,
+    events: WebBlackboxEvent[],
+    archiveKey: CryptoKey | null,
+    encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
+  ) {
     this.zip = zip;
     this.archive = archive;
+    this.archiveKey = archiveKey;
+    this.encryptedFiles = encryptedFiles;
     this.events = [...events].sort((left, right) => left.mono - right.mono || left.t - right.t);
 
     for (const event of this.events) {
@@ -242,11 +358,16 @@ export class WebBlackboxPlayer {
     }
   }
 
-  public static async open(input: PlayerOpenInput): Promise<WebBlackboxPlayer> {
+  public static async open(
+    input: PlayerOpenInput,
+    options: PlayerOpenOptions = {}
+  ): Promise<WebBlackboxPlayer> {
     const bytes = await normalizeOpenInput(input);
     const zip = await JSZip.loadAsync(bytes);
 
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
+    const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
+    const encryptedFiles = manifest.encryption?.files ?? {};
     const timeIndex = await readOptionalJson<ChunkTimeIndexEntry[]>(zip, "index/time.json", []);
     const requestIndex = await readOptionalJson<RequestIndexEntry[]>(zip, "index/req.json", []);
     const invertedIndex = await readOptionalJson<InvertedIndexEntry[]>(zip, "index/inv.json", []);
@@ -255,7 +376,7 @@ export class WebBlackboxPlayer {
       "integrity/hashes.json",
       null
     );
-    const events = await readEvents(zip);
+    const events = await readEvents(zip, archiveKey, encryptedFiles);
 
     return new WebBlackboxPlayer(
       zip,
@@ -266,7 +387,9 @@ export class WebBlackboxPlayer {
         invertedIndex,
         integrity
       },
-      events
+      events,
+      archiveKey,
+      encryptedFiles
     );
   }
 
@@ -358,7 +481,8 @@ export class WebBlackboxPlayer {
       return null;
     }
 
-    const bytes = await file.async("uint8array");
+    const rawBytes = await file.async("uint8array");
+    const bytes = await this.decryptArchiveFile(blob.path, rawBytes);
 
     return {
       mime: blob.mime,
@@ -444,6 +568,41 @@ export class WebBlackboxPlayer {
     return this.query({ requestId: reqId }).sort((left, right) => left.mono - right.mono);
   }
 
+  public getRealtimeNetworkTimeline(range?: PlayerRange): RealtimeNetworkEntry[] {
+    return this.query({ range })
+      .filter(
+        (event) => event.type.startsWith("network.ws.") || event.type === "network.sse.message"
+      )
+      .map((event) => {
+        const payload = asRecord(event.data);
+        const frame = asRecord(payload?.frame);
+        const protocol: RealtimeNetworkEntry["protocol"] = event.type.startsWith("network.ws.")
+          ? "ws"
+          : "sse";
+
+        return {
+          eventId: event.id,
+          eventType: event.type,
+          protocol,
+          mono: event.mono,
+          t: event.t,
+          streamId:
+            asString(payload?.requestId) ?? asString(payload?.reqId) ?? asString(payload?.streamId),
+          direction: readRealtimeDirection(payload),
+          phase: asString(payload?.phase),
+          url: asString(payload?.url),
+          opcode: asNumber(frame?.opcode) ?? asNumber(asRecord(payload?.response)?.opcode),
+          payloadLength: asNumber(frame?.payloadLength),
+          payloadPreview:
+            asString(frame?.payloadPreview) ??
+            asString(payload?.data) ??
+            asString(asRecord(payload?.response)?.payloadData),
+          snapshot: payload
+        };
+      })
+      .sort((left, right) => left.mono - right.mono);
+  }
+
   public getStorageTimeline(range?: PlayerRange): StorageTimelineEntry[] {
     return this.query({ range })
       .filter((event) => STORAGE_EVENT_PREFIXES.some((prefix) => event.type.startsWith(prefix)))
@@ -465,6 +624,114 @@ export class WebBlackboxPlayer {
         };
       })
       .sort((left, right) => left.mono - right.mono);
+  }
+
+  public getPerformanceArtifacts(range?: PlayerRange): PerformanceArtifactEntry[] {
+    return this.query({ range })
+      .filter((event) => event.type.startsWith("perf."))
+      .map((event) => {
+        const payload = asRecord(event.data);
+
+        return {
+          eventId: event.id,
+          eventType: event.type,
+          t: event.t,
+          mono: event.mono,
+          kind: detectPerformanceKind(event.type),
+          hash:
+            asString(payload?.traceHash) ??
+            asString(payload?.profileHash) ??
+            asString(payload?.snapshotHash) ??
+            asString(payload?.contentHash),
+          size: asNumber(payload?.size) ?? asNumber(payload?.sampledSize),
+          reason: asString(payload?.reason),
+          snapshot: payload
+        };
+      })
+      .sort((left, right) => left.mono - right.mono);
+  }
+
+  public getDomSnapshots(range?: PlayerRange): DomSnapshotRef[] {
+    return this.query({ range })
+      .filter((event) => event.type === "dom.snapshot")
+      .map((event) => {
+        const payload = asRecord(event.data);
+
+        return {
+          eventId: event.id,
+          mono: event.mono,
+          t: event.t,
+          snapshotId: asString(payload?.snapshotId),
+          contentHash: asString(payload?.contentHash),
+          source: asString(payload?.source),
+          nodeCount: asNumber(payload?.nodeCount),
+          reason: asString(payload?.reason)
+        };
+      })
+      .sort((left, right) => left.mono - right.mono);
+  }
+
+  public async getDomDiffTimeline(options: DomDiffTimelineOptions = {}): Promise<DomDiffResult[]> {
+    const snapshots = this.getDomSnapshots(options.range);
+
+    if (snapshots.length < 2) {
+      return [];
+    }
+
+    const start = Math.max(1, snapshots.length - Math.max(1, options.limit ?? snapshots.length));
+    const diffs: DomDiffResult[] = [];
+
+    for (let index = start; index < snapshots.length; index += 1) {
+      const previous = snapshots[index - 1];
+      const current = snapshots[index];
+
+      if (!previous || !current) {
+        continue;
+      }
+
+      const diff = await this.compareDomSnapshots(previous.eventId, current.eventId);
+
+      if (diff) {
+        diffs.push(diff);
+      }
+    }
+
+    return diffs;
+  }
+
+  public async compareDomSnapshots(
+    previousEventId: string,
+    currentEventId: string
+  ): Promise<DomDiffResult | null> {
+    const previous = this.getDomSnapshots().find((entry) => entry.eventId === previousEventId);
+    const current = this.getDomSnapshots().find((entry) => entry.eventId === currentEventId);
+
+    if (!previous || !current) {
+      return null;
+    }
+
+    const previousPaths = await this.loadDomPaths(previous);
+    const currentPaths = await this.loadDomPaths(current);
+
+    return buildDomDiff(previous, current, previousPaths, currentPaths);
+  }
+
+  public async compareLatestDomSnapshotWith(
+    other: WebBlackboxPlayer
+  ): Promise<DomDiffResult | null> {
+    const left = this.getDomSnapshots();
+    const right = other.getDomSnapshots();
+    const previous = left[left.length - 1];
+    const current = right[right.length - 1];
+
+    if (!previous || !current) {
+      return null;
+    }
+
+    const previousPaths = await this.loadDomPaths(previous);
+    const currentPaths = await other.loadDomPaths(current);
+
+    return buildDomDiff(previous, current, previousPaths, currentPaths);
   }
 
   public compareWith(other: WebBlackboxPlayer): PlayerComparison {
@@ -678,6 +945,52 @@ export class WebBlackboxPlayer {
     ].join("\n");
   }
 
+  public generateGitHubIssueTemplate(options: TeamIssueTemplateOptions = {}): GitHubIssueTemplate {
+    const title = options.title ?? `Bug: ${this.archive.manifest.site.origin} regression`;
+    const body = this.generateBugReport({
+      title: `${title} - WebBlackbox Evidence`,
+      range: options.range,
+      maxItems: options.maxItems
+    });
+
+    return {
+      title,
+      body,
+      labels: options.labels ?? ["bug", "webblackbox"],
+      assignees: options.assignees ?? []
+    };
+  }
+
+  public generateJiraIssueTemplate(options: TeamIssueTemplateOptions = {}): JiraIssueTemplate {
+    const summary = options.title ?? `WebBlackbox: ${this.archive.manifest.site.origin} issue`;
+    const description = this.generateBugReport({
+      title: `${summary} - WebBlackbox Evidence`,
+      range: options.range,
+      maxItems: options.maxItems
+    });
+
+    return {
+      fields: {
+        summary,
+        description,
+        issuetype: {
+          name: options.issueType ?? "Bug"
+        },
+        labels: options.labels ?? ["webblackbox", "flight-recorder"],
+        project: options.projectKey
+          ? {
+              key: options.projectKey
+            }
+          : undefined,
+        priority: options.priority
+          ? {
+              name: options.priority
+            }
+          : undefined
+      }
+    };
+  }
+
   public generatePlaywrightScript(options: PlaywrightScriptOptions = {}): string {
     const name = options.name ?? "replay-from-webblackbox";
     const maxActions = Math.max(1, options.maxActions ?? 40);
@@ -708,6 +1021,133 @@ export class WebBlackboxPlayer {
     lines.push("  await context.close();", "});");
 
     return lines.join("\n");
+  }
+
+  public async generatePlaywrightMockScript(
+    options: PlaywrightMockScriptOptions = {}
+  ): Promise<string> {
+    const name = options.name ?? "replay-with-mocks";
+    const maxActions = Math.max(1, options.maxActions ?? 40);
+    const maxMocks = Math.max(1, options.maxMocks ?? 25);
+    const actions = this.query({ range: options.range })
+      .filter(
+        (event) =>
+          event.type.startsWith("user.") || event.type === "nav.commit" || event.type === "nav.hash"
+      )
+      .slice(0, maxActions);
+
+    const mockEntries = this.getNetworkWaterfall(options.range)
+      .filter((entry) => Boolean(entry.responseBodyHash) && typeof entry.status === "number")
+      .slice(0, maxMocks);
+
+    const lines = [
+      "import { test } from '@playwright/test';",
+      "",
+      `test('${name}', async ({ browser }) => {`,
+      "  const context = await browser.newContext();"
+    ];
+
+    for (const entry of mockEntries) {
+      const body = await this.readMockResponseBody(entry.responseBodyHash);
+
+      if (!body) {
+        continue;
+      }
+
+      lines.push(
+        `  await context.route(${JSON.stringify(entry.url)}, async route => route.fulfill(${JSON.stringify(
+          {
+            status: entry.status,
+            headers: sanitizeMockHeaders(entry.responseHeaders),
+            body
+          },
+          null,
+          2
+        )}));`
+      );
+    }
+
+    lines.push(
+      "  const page = await context.newPage();",
+      `  await page.goto(${JSON.stringify(options.startUrl ?? this.archive.manifest.site.origin)});`
+    );
+
+    for (const action of actions) {
+      lines.push(...toPlaywrightLines(action));
+    }
+
+    lines.push("  await context.close();", "});");
+
+    return lines.join("\n");
+  }
+
+  private async loadDomPaths(snapshot: DomSnapshotRef): Promise<Set<string>> {
+    if (snapshot.contentHash) {
+      const blob = await this.getBlob(snapshot.contentHash);
+
+      if (blob && blob.mime === "application/json") {
+        const text = new TextDecoder().decode(blob.bytes);
+
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          const fromCdp = extractCdpDomPaths(parsed);
+
+          if (fromCdp.size > 0) {
+            return fromCdp;
+          }
+        } catch {
+          return new Set();
+        }
+      }
+    }
+
+    const event = this.eventsById.get(snapshot.eventId);
+    const payload = asRecord(event?.data);
+    const htmlSnippet = asString(payload?.htmlSnippet);
+
+    if (!htmlSnippet) {
+      return new Set();
+    }
+
+    return extractHtmlPaths(htmlSnippet);
+  }
+
+  private async readMockResponseBody(hash?: string): Promise<string | null> {
+    if (!hash) {
+      return null;
+    }
+
+    const blob = await this.getBlob(hash);
+
+    if (!blob) {
+      return null;
+    }
+
+    const text = new TextDecoder().decode(blob.bytes);
+
+    if (text.trim().length === 0) {
+      return null;
+    }
+
+    return text;
+  }
+
+  private async decryptArchiveFile(path: string, bytes: Uint8Array): Promise<Uint8Array> {
+    const encryptedFile = this.encryptedFiles[path];
+
+    if (!encryptedFile) {
+      return bytes;
+    }
+
+    if (!this.archiveKey) {
+      throw new Error("Archive is encrypted. Missing decryption key.");
+    }
+
+    try {
+      return decryptBytes(bytes, this.archiveKey, fromBase64(encryptedFile.ivBase64));
+    } catch {
+      throw new Error("Unable to decrypt archive content. The passphrase may be invalid.");
+    }
   }
 }
 
@@ -899,6 +1339,42 @@ function detectStorageKind(type: WebBlackboxEventType): StorageTimelineEntry["ki
   return "unknown";
 }
 
+function detectPerformanceKind(type: WebBlackboxEventType): PerformanceArtifactEntry["kind"] {
+  if (type === "perf.trace") {
+    return "trace";
+  }
+
+  if (type === "perf.cpu.profile") {
+    return "cpu";
+  }
+
+  if (type === "perf.heap.snapshot") {
+    return "heap";
+  }
+
+  if (type === "perf.longtask") {
+    return "longtask";
+  }
+
+  if (type === "perf.vitals") {
+    return "vitals";
+  }
+
+  return "other";
+}
+
+function readRealtimeDirection(
+  payload: Record<string, unknown> | null
+): RealtimeNetworkEntry["direction"] {
+  const explicitDirection = asString(payload?.direction);
+
+  if (explicitDirection === "sent" || explicitDirection === "received") {
+    return explicitDirection;
+  }
+
+  return explicitDirection ? "unknown" : undefined;
+}
+
 function buildTypeCounts(events: WebBlackboxEvent[]): Map<string, number> {
   const counts = new Map<string, number>();
 
@@ -1078,6 +1554,195 @@ function toHarEntry(entry: NetworkWaterfallEntry): Record<string, unknown> {
   };
 }
 
+function buildDomDiff(
+  previous: DomSnapshotRef,
+  current: DomSnapshotRef,
+  previousPaths: Set<string>,
+  currentPaths: Set<string>
+): DomDiffResult {
+  const addedPaths = [...currentPaths].filter((path) => !previousPaths.has(path)).sort();
+  const removedPaths = [...previousPaths].filter((path) => !currentPaths.has(path)).sort();
+  const changedPaths = deriveChangedPaths(addedPaths, removedPaths);
+
+  return {
+    previous,
+    current,
+    addedPaths,
+    removedPaths,
+    changedPaths,
+    summary: {
+      added: addedPaths.length,
+      removed: removedPaths.length,
+      changed: changedPaths.length
+    }
+  };
+}
+
+function deriveChangedPaths(addedPaths: string[], removedPaths: string[]): string[] {
+  const removedParents = new Set(removedPaths.map((path) => parentPath(path)).filter(Boolean));
+
+  return addedPaths
+    .filter((path) => {
+      const parent = parentPath(path);
+      return Boolean(parent) && removedParents.has(parent);
+    })
+    .sort();
+}
+
+function parentPath(path: string): string | null {
+  const index = path.lastIndexOf("/");
+
+  if (index <= 0) {
+    return null;
+  }
+
+  return path.slice(0, index);
+}
+
+function extractCdpDomPaths(snapshot: unknown): Set<string> {
+  const root = asRecord(snapshot);
+  const strings = Array.isArray(root?.strings) ? root.strings : [];
+  const documents = Array.isArray(root?.documents) ? root.documents : [];
+  const firstDocument = asRecord(documents[0]);
+  const nodes = asRecord(firstDocument?.nodes);
+  const parentIndex = Array.isArray(nodes?.parentIndex) ? nodes.parentIndex : [];
+  const nodeName = Array.isArray(nodes?.nodeName) ? nodes.nodeName : [];
+
+  if (parentIndex.length === 0 || nodeName.length === 0) {
+    return new Set();
+  }
+
+  const names = nodeName.map((nameIndex) => {
+    if (typeof nameIndex !== "number" || !Number.isInteger(nameIndex)) {
+      return "UNKNOWN";
+    }
+
+    return normalizeNodeName(strings[nameIndex]);
+  });
+
+  const childrenByParent = new Map<number, number[]>();
+
+  for (let index = 0; index < parentIndex.length; index += 1) {
+    const parent = parentIndex[index];
+
+    if (typeof parent !== "number" || parent < 0) {
+      continue;
+    }
+
+    const children = childrenByParent.get(parent) ?? [];
+    children.push(index);
+    childrenByParent.set(parent, children);
+  }
+
+  const paths = new Set<string>();
+  const roots = parentIndex
+    .map((parent, index) => ({ parent, index }))
+    .filter((item) => typeof item.parent !== "number" || item.parent < 0)
+    .map((item) => item.index);
+
+  const stack: Array<{ index: number; path: string }> = [];
+
+  for (const rootIndex of roots) {
+    const rootName = names[rootIndex] ?? "UNKNOWN";
+
+    if (rootName === "#DOCUMENT") {
+      const children = childrenByParent.get(rootIndex) ?? [];
+
+      for (const child of children) {
+        stack.push({
+          index: child,
+          path: `/${names[child] ?? "UNKNOWN"}[1]`
+        });
+      }
+      continue;
+    }
+
+    stack.push({
+      index: rootIndex,
+      path: `/${rootName}[1]`
+    });
+  }
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+
+    if (!current) {
+      continue;
+    }
+
+    paths.add(current.path);
+    const children = childrenByParent.get(current.index) ?? [];
+    const siblingCounts = new Map<string, number>();
+
+    for (const childIndex of children) {
+      const childName = names[childIndex] ?? "UNKNOWN";
+      const nextCount = (siblingCounts.get(childName) ?? 0) + 1;
+      siblingCounts.set(childName, nextCount);
+      stack.push({
+        index: childIndex,
+        path: `${current.path}/${childName}[${nextCount}]`
+      });
+    }
+  }
+
+  return paths;
+}
+
+function extractHtmlPaths(htmlSnippet: string): Set<string> {
+  const tokenRegex = /<\/?([a-zA-Z0-9:-]+)(?:\s[^>]*)?>/g;
+  const stack: string[] = [];
+  const siblingCounts: number[] = [];
+  const paths = new Set<string>();
+  let match = tokenRegex.exec(htmlSnippet);
+
+  while (match) {
+    const rawTag = match[0] ?? "";
+    const tag = normalizeNodeName(match[1]);
+    const isClosing = rawTag.startsWith("</");
+    const isSelfClosing = rawTag.endsWith("/>");
+
+    if (isClosing) {
+      stack.pop();
+      siblingCounts.pop();
+      match = tokenRegex.exec(htmlSnippet);
+      continue;
+    }
+
+    const parentIndex = siblingCounts.length - 1;
+    const nextIndex = parentIndex >= 0 ? (siblingCounts[parentIndex] ?? 0) + 1 : 1;
+
+    if (parentIndex >= 0) {
+      siblingCounts[parentIndex] = nextIndex;
+    }
+
+    const path = `${stack.join("")}/${tag}[${nextIndex}]`;
+    paths.add(path);
+
+    if (!isSelfClosing) {
+      stack.push(`/${tag}[${nextIndex}]`);
+      siblingCounts.push(0);
+    }
+
+    match = tokenRegex.exec(htmlSnippet);
+  }
+
+  return paths;
+}
+
+function normalizeNodeName(value: unknown): string {
+  const raw = asString(value)?.trim();
+
+  if (!raw) {
+    return "UNKNOWN";
+  }
+
+  if (raw.startsWith("#")) {
+    return raw.toUpperCase();
+  }
+
+  return raw.toUpperCase();
+}
+
 function headersToHarArray(
   headers: Record<string, string>
 ): Array<{ name: string; value: string }> {
@@ -1173,6 +1838,20 @@ function normalizeHeaders(raw: unknown): Record<string, string> {
   );
 }
 
+function sanitizeMockHeaders(headers: Record<string, string>): Record<string, string> {
+  const excluded = new Set([
+    "set-cookie",
+    "content-encoding",
+    "content-length",
+    "transfer-encoding",
+    "connection"
+  ]);
+
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !excluded.has(name.toLowerCase()))
+  );
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -1207,7 +1886,32 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-async function readEvents(zip: JSZip): Promise<WebBlackboxEvent[]> {
+async function resolveArchiveReadKey(
+  manifest: ExportManifest,
+  passphrase?: string
+): Promise<CryptoKey | null> {
+  const encryption = manifest.encryption;
+
+  if (!encryption) {
+    return null;
+  }
+
+  if (!passphrase) {
+    throw new Error("Archive is encrypted. Provide a passphrase to open it.");
+  }
+
+  return deriveArchiveKey(
+    passphrase,
+    fromBase64(encryption.kdf.saltBase64),
+    encryption.kdf.iterations
+  );
+}
+
+async function readEvents(
+  zip: JSZip,
+  archiveKey: CryptoKey | null,
+  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
+): Promise<WebBlackboxEvent[]> {
   const eventPaths = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
     .sort();
@@ -1221,7 +1925,9 @@ async function readEvents(zip: JSZip): Promise<WebBlackboxEvent[]> {
       continue;
     }
 
-    const content = await file.async("string");
+    const rawBytes = await file.async("uint8array");
+    const bytes = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
+    const content = new TextDecoder().decode(bytes);
     const lines = content.split(/\r?\n/).filter(Boolean);
 
     for (const line of lines) {
@@ -1230,6 +1936,25 @@ async function readEvents(zip: JSZip): Promise<WebBlackboxEvent[]> {
   }
 
   return events;
+}
+
+async function decryptArchiveBytes(
+  path: string,
+  bytes: Uint8Array,
+  archiveKey: CryptoKey | null,
+  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
+): Promise<Uint8Array> {
+  const encryptedFile = encryptedFiles[path];
+
+  if (!encryptedFile) {
+    return bytes;
+  }
+
+  if (!archiveKey) {
+    throw new Error("Archive is encrypted. Missing decryption key.");
+  }
+
+  return decryptBytes(bytes, archiveKey, fromBase64(encryptedFile.ivBase64));
 }
 
 function withinRange(event: WebBlackboxEvent, range?: PlayerRange): boolean {
@@ -1342,6 +2067,88 @@ function inferMime(extension: string): string {
   }
 
   return "application/octet-stream";
+}
+
+async function deriveArchiveKey(
+  passphrase: string,
+  salt: Uint8Array,
+  iterations: number
+): Promise<CryptoKey> {
+  const cryptoApi = requireCryptoApi();
+  const baseKey = await cryptoApi.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+
+  return cryptoApi.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations,
+      salt: toArrayBuffer(salt)
+    },
+    baseKey,
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    false,
+    ["decrypt"]
+  );
+}
+
+async function decryptBytes(
+  bytes: Uint8Array,
+  key: CryptoKey,
+  iv: Uint8Array
+): Promise<Uint8Array> {
+  const cryptoApi = requireCryptoApi();
+  const decrypted = await cryptoApi.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: toArrayBuffer(iv)
+    },
+    key,
+    toArrayBuffer(bytes)
+  );
+
+  return new Uint8Array(decrypted);
+}
+
+function requireCryptoApi(): Crypto {
+  if (typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.subtle !== "undefined") {
+    return globalThis.crypto;
+  }
+
+  throw new Error("Web Crypto API is required to open encrypted archives.");
+}
+
+function fromBase64(value: string): Uint8Array {
+  if (typeof atob === "function") {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return bytes;
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(value, "base64"));
+  }
+
+  throw new Error("Base64 decoding is unavailable in this environment.");
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 async function normalizeOpenInput(input: PlayerOpenInput): Promise<Uint8Array> {

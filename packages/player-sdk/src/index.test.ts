@@ -31,6 +31,21 @@ describe("WebBlackboxPlayer", () => {
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
   });
 
+  it("opens encrypted archives when passphrase is provided", async () => {
+    const bytes = await createEncryptedArchive(await createFixtureArchive(), "test-passphrase");
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/encrypted/i);
+
+    const player = await WebBlackboxPlayer.open(bytes, {
+      passphrase: "test-passphrase"
+    });
+
+    expect(player.query({ types: ["network.request"] })).toHaveLength(1);
+
+    const blob = await player.getBlob("blob1");
+    expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
+  });
+
   it("builds derived action spans", async () => {
     const bytes = await createFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
@@ -82,13 +97,55 @@ describe("WebBlackboxPlayer", () => {
     const timeline = player.getStorageTimeline();
     expect(timeline.some((entry) => entry.kind === "local")).toBe(true);
 
+    const perfArtifacts = player.getPerformanceArtifacts();
+    expect(perfArtifacts.some((entry) => entry.kind === "cpu")).toBe(true);
+    expect(perfArtifacts.some((entry) => entry.kind === "heap")).toBe(true);
+
+    const realtime = player.getRealtimeNetworkTimeline();
+    expect(realtime.some((entry) => entry.protocol === "ws")).toBe(true);
+    expect(realtime.some((entry) => entry.protocol === "sse")).toBe(true);
+
     const report = player.generateBugReport({ title: "Issue Snapshot" });
     expect(report).toContain("# Issue Snapshot");
     expect(report).toContain("## Errors");
 
+    const githubIssue = player.generateGitHubIssueTemplate({
+      title: "Checkout flow failure",
+      labels: ["bug", "checkout"],
+      assignees: ["qa-owner"]
+    });
+    expect(githubIssue.title).toBe("Checkout flow failure");
+    expect(githubIssue.body).toContain("WebBlackbox Evidence");
+    expect(githubIssue.labels).toEqual(["bug", "checkout"]);
+
+    const jiraIssue = player.generateJiraIssueTemplate({
+      title: "Checkout flow failure",
+      projectKey: "WBX",
+      priority: "High"
+    });
+    expect(jiraIssue.fields.project?.key).toBe("WBX");
+    expect(jiraIssue.fields.priority?.name).toBe("High");
+    expect(jiraIssue.fields.description).toContain("WebBlackbox Evidence");
+
     const script = player.generatePlaywrightScript({ includeHarReplay: true });
     expect(script).toContain("context.routeFromHAR");
     expect(script).toContain("page.click");
+
+    const mockScript = await player.generatePlaywrightMockScript({ maxMocks: 5 });
+    expect(mockScript).toContain("context.route(");
+    expect(mockScript).toContain("route.fulfill");
+
+    const domSnapshots = player.getDomSnapshots();
+    expect(domSnapshots).toHaveLength(2);
+    expect(domSnapshots[0]?.contentHash).toBe("dom-hash-1");
+
+    const domDiff = await player.compareDomSnapshots("E-18", "E-19");
+    expect(domDiff).not.toBeNull();
+    expect(domDiff?.summary.added).toBeGreaterThan(0);
+    expect(domDiff?.summary.removed).toBeGreaterThan(0);
+
+    const domTimeline = await player.getDomDiffTimeline();
+    expect(domTimeline).toHaveLength(1);
   });
 
   it("compares two recordings", async () => {
@@ -318,6 +375,51 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       tab: 9,
       t: 2005,
       mono: 18,
+      type: "network.ws.open",
+      id: "E-14A",
+      data: {
+        requestId: "WS-1",
+        url: "wss://example.com/socket"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2005,
+      mono: 18.2,
+      type: "network.ws.frame",
+      id: "E-14B",
+      data: {
+        requestId: "WS-1",
+        direction: "received",
+        frame: {
+          opcode: 1,
+          payloadLength: 5,
+          payloadPreview: "hello"
+        }
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2005,
+      mono: 18.4,
+      type: "network.sse.message",
+      id: "E-14C",
+      data: {
+        phase: "message",
+        url: "https://example.com/events",
+        data: "evt"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2006,
+      mono: 19,
       type: "storage.local.snapshot",
       id: "E-15",
       data: {
@@ -330,8 +432,8 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       v: 1,
       sid: "S-2",
       tab: 9,
-      t: 2006,
-      mono: 19,
+      t: 2007,
+      mono: 20,
       type: "error.exception",
       id: "E-16",
       lvl: "error",
@@ -343,12 +445,72 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       v: 1,
       sid: "S-2",
       tab: 9,
-      t: 2007,
-      mono: 20,
+      t: 2008,
+      mono: 21,
       type: "user.marker",
       id: "E-17",
       data: {
         message: "bug here"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2009,
+      mono: 22,
+      type: "dom.snapshot",
+      id: "E-18",
+      data: {
+        snapshotId: "D-1",
+        contentHash: "dom-hash-1",
+        source: "cdp",
+        nodeCount: 5,
+        reason: "interval"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2011,
+      mono: 24,
+      type: "dom.snapshot",
+      id: "E-19",
+      data: {
+        snapshotId: "D-2",
+        contentHash: "dom-hash-2",
+        source: "cdp",
+        nodeCount: 5,
+        reason: "freeze:error"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2013,
+      mono: 25,
+      type: "perf.cpu.profile",
+      id: "E-20",
+      data: {
+        profileHash: "cpu-hash-1",
+        size: 128,
+        reason: "freeze:error"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2014,
+      mono: 26,
+      type: "perf.heap.snapshot",
+      id: "E-21",
+      data: {
+        snapshotHash: "heap-hash-1",
+        size: 256,
+        reason: "freeze:error"
       }
     }
   ];
@@ -372,8 +534,8 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
     stats: {
       eventCount: events.length,
       chunkCount: 1,
-      blobCount: 2,
-      durationMs: 10
+      blobCount: 6,
+      durationMs: 16
     }
   };
 
@@ -388,6 +550,176 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
   zip.file("blobs/sha256-blob-body-1.json", new TextEncoder().encode('{"ok":true}'));
+  zip.file("blobs/sha256-cpu-hash-1.json", new TextEncoder().encode('{"nodes":[]}'));
+  zip.file("blobs/sha256-heap-hash-1.json", new TextEncoder().encode('{"snapshot":true}'));
+  zip.file(
+    "blobs/sha256-dom-hash-1.json",
+    new TextEncoder().encode(JSON.stringify(createDomSnapshotPayload(["DIV", "P"])))
+  );
+  zip.file(
+    "blobs/sha256-dom-hash-2.json",
+    new TextEncoder().encode(JSON.stringify(createDomSnapshotPayload(["DIV", "SPAN"])))
+  );
 
   return zip.generateAsync({ type: "uint8array" });
+}
+
+function createDomSnapshotPayload(bodyChildren: string[]): Record<string, unknown> {
+  const strings = ["#document", "HTML", "BODY", ...bodyChildren];
+  const parentIndex = [-1, 0, 1];
+  const nodeName = [0, 1, 2];
+
+  for (let index = 0; index < bodyChildren.length; index += 1) {
+    parentIndex.push(2);
+    nodeName.push(3 + index);
+  }
+
+  return {
+    strings,
+    documents: [
+      {
+        nodes: {
+          parentIndex,
+          nodeName
+        }
+      }
+    ]
+  };
+}
+
+async function createEncryptedArchive(source: Uint8Array, passphrase: string): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const manifestFile = zip.file("manifest.json");
+
+  if (!manifestFile) {
+    throw new Error("Missing manifest in fixture archive");
+  }
+
+  const manifest = JSON.parse(await manifestFile.async("string")) as ExportManifest;
+  const salt = randomBytes(16);
+  const iterations = 120_000;
+  const key = await deriveArchiveKey(passphrase, salt, iterations);
+  const files: Record<string, { ivBase64: string }> = {};
+
+  for (const path of Object.keys(zip.files)) {
+    if (!path.startsWith("events/") && !path.startsWith("blobs/")) {
+      continue;
+    }
+
+    const file = zip.file(path);
+
+    if (!file) {
+      continue;
+    }
+
+    const plain = await file.async("uint8array");
+    const iv = randomBytes(12);
+    const encrypted = await encryptBytes(plain, key, iv);
+    zip.file(path, encrypted);
+    files[path] = {
+      ivBase64: toBase64(iv)
+    };
+  }
+
+  manifest.encryption = {
+    algorithm: "AES-GCM",
+    kdf: {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations,
+      saltBase64: toBase64(salt)
+    },
+    files
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function deriveArchiveKey(
+  passphrase: string,
+  salt: Uint8Array,
+  iterations: number
+): Promise<CryptoKey> {
+  const cryptoApi = requireCryptoApi();
+  const baseKey = await cryptoApi.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+
+  return cryptoApi.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations,
+      salt: toArrayBuffer(salt)
+    },
+    baseKey,
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    false,
+    ["encrypt"]
+  );
+}
+
+async function encryptBytes(
+  bytes: Uint8Array,
+  key: CryptoKey,
+  iv: Uint8Array
+): Promise<Uint8Array> {
+  const cryptoApi = requireCryptoApi();
+  const encrypted = await cryptoApi.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: toArrayBuffer(iv)
+    },
+    key,
+    toArrayBuffer(bytes)
+  );
+
+  return new Uint8Array(encrypted);
+}
+
+function randomBytes(size: number): Uint8Array {
+  const cryptoApi = requireCryptoApi();
+  const bytes = new Uint8Array(size);
+  cryptoApi.getRandomValues(bytes);
+  return bytes;
+}
+
+function requireCryptoApi(): Crypto {
+  if (typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.subtle !== "undefined") {
+    return globalThis.crypto;
+  }
+
+  throw new Error("Web Crypto API unavailable in test environment.");
+}
+
+function toBase64(bytes: Uint8Array): string {
+  if (typeof btoa === "function") {
+    let binary = "";
+
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+
+    return btoa(binary);
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+
+  throw new Error("Base64 encoding is unavailable in this environment.");
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
