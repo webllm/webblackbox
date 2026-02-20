@@ -574,6 +574,10 @@ function bindGlobalActions(): void {
     renderScreenshotOverlay();
   });
 
+  refs.preview.addEventListener("error", () => {
+    clearScreenshotView("Failed to decode screenshot.");
+  });
+
   window.addEventListener("resize", () => {
     renderScreenshotOverlay();
   });
@@ -1981,10 +1985,25 @@ function clearScreenshotView(message: string): void {
 }
 
 function updateStagePlaceholder(): void {
-  const hasSrc = Boolean(refs.preview.getAttribute("src"));
-  refs.stagePlaceholder.hidden = hasSrc;
+  const hasSource = Boolean(refs.preview.getAttribute("src") || refs.preview.currentSrc);
+  const hasRenderedImage =
+    hasSource &&
+    refs.preview.complete &&
+    refs.preview.naturalWidth > 0 &&
+    refs.preview.naturalHeight > 0;
 
-  if (!hasSrc && !refs.stagePlaceholder.textContent) {
+  refs.stagePlaceholder.hidden = hasRenderedImage;
+
+  if (hasRenderedImage) {
+    return;
+  }
+
+  if (hasSource) {
+    refs.stagePlaceholder.textContent = "Loading screenshot...";
+    return;
+  }
+
+  if (!refs.stagePlaceholder.textContent) {
     refs.stagePlaceholder.textContent = "No screenshot loaded.";
   }
 }
