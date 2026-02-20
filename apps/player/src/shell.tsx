@@ -230,30 +230,73 @@ export function PlayerShell(): React.JSX.Element {
             <Button
               className="panel-tab active"
               data-log-panel="timeline"
+              data-count="0"
               type="button"
               variant="ghost"
             >
               Timeline
             </Button>
-            <Button className="panel-tab" data-log-panel="details" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="details"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Event
             </Button>
-            <Button className="panel-tab" data-log-panel="network" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="network"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Network
             </Button>
-            <Button className="panel-tab" data-log-panel="compare" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="compare"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Compare
             </Button>
-            <Button className="panel-tab" data-log-panel="console" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="console"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Console
             </Button>
-            <Button className="panel-tab" data-log-panel="realtime" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="realtime"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Realtime
             </Button>
-            <Button className="panel-tab" data-log-panel="storage" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="storage"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Storage
             </Button>
-            <Button className="panel-tab" data-log-panel="perf" type="button" variant="ghost">
+            <Button
+              className="panel-tab"
+              data-log-panel="perf"
+              data-count="0"
+              type="button"
+              variant="ghost"
+            >
               Performance
             </Button>
           </section>

@@ -821,10 +821,11 @@ h1 {
 }
 
 .panel-tab {
+  position: relative;
   justify-content: flex-start;
   border-radius: 11px;
   min-height: 33px;
-  padding: 0 10px;
+  padding: 0 10px 0 12px;
   border-color: var(--line-strong);
   background: rgba(255, 255, 255, 0.78);
   color: #2f4335;
@@ -834,6 +835,29 @@ h1 {
   border-color: #0d8071;
   background: var(--accent-soft);
   color: #0b5b50;
+}
+
+.panel-tab::after {
+  content: attr(data-count);
+  margin-left: auto;
+  min-width: 22px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid #d3ddcc;
+  background: #f4f8f2;
+  color: #4d5f4e;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+}
+
+.panel-tab.active::after {
+  border-color: #9dcfc4;
+  background: #ecfbf7;
+  color: #0e6153;
 }
 
 .log-main {

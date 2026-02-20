@@ -110,6 +110,7 @@ type ScreenshotRecord = {
 
 type ArchiveModel = {
   events: WebBlackboxEvent[];
+  consoleSignals: WebBlackboxEvent[];
   eventById: Map<string, WebBlackboxEvent>;
   eventSearchText: string[];
   errorPrefix: number[];
@@ -966,7 +967,70 @@ function renderPanelTabs(): void {
     card.classList.toggle("panel-secondary", active);
   }
 
+  renderPanelTabCounts();
   renderPlaybackReadout();
+}
+
+function renderPanelTabCounts(): void {
+  const model = state.model;
+
+  if (!model) {
+    for (const button of panelTabButtons) {
+      button.dataset.count = "0";
+    }
+
+    return;
+  }
+
+  const visibleEventCount = upperBoundByMono(
+    model.events,
+    state.playheadMono,
+    (event) => event.mono
+  );
+  const visibleNetworkCount = upperBoundByMono(
+    model.waterfall,
+    state.playheadMono,
+    (entry) => entry.startMono
+  );
+  const visibleConsoleCount = upperBoundByMono(
+    model.consoleSignals,
+    state.playheadMono,
+    (event) => event.mono
+  );
+  const visibleRealtimeCount = upperBoundByMono(
+    model.realtime,
+    state.playheadMono,
+    (entry) => entry.mono
+  );
+  const visibleStorageCount = upperBoundByMono(
+    model.storage,
+    state.playheadMono,
+    (entry) => entry.mono
+  );
+  const visiblePerfCount = upperBoundByMono(model.perf, state.playheadMono, (entry) => entry.mono);
+  const visibleCompareCount = state.compareSummary ? 1 : 0;
+  const selectedEvent = state.selectedEventId
+    ? (model.eventById.get(state.selectedEventId) ?? null)
+    : null;
+  const visibleDetailsCount = selectedEvent && selectedEvent.mono <= state.playheadMono ? 1 : 0;
+
+  const counts: Record<LogPanelKey, number> = {
+    timeline: visibleEventCount,
+    details: visibleDetailsCount,
+    network: visibleNetworkCount,
+    compare: visibleCompareCount,
+    console: visibleConsoleCount,
+    realtime: visibleRealtimeCount,
+    storage: visibleStorageCount,
+    perf: visiblePerfCount
+  };
+
+  for (const button of panelTabButtons) {
+    const panel = button.dataset.logPanel as LogPanelKey | undefined;
+    const count = panel ? (counts[panel] ?? 0) : 0;
+    button.dataset.count = String(count);
+    button.title = `${PANEL_LABELS[panel ?? "timeline"]}: ${count}`;
+  }
 }
 
 function renderPlaybackReadout(): void {
@@ -1783,10 +1847,15 @@ function renderConsoleSignals(): void {
     return;
   }
 
-  const visibleCount = upperBoundByMono(model.events, state.playheadMono, (event) => event.mono);
-  const scoped = model.events
-    .slice(0, visibleCount)
-    .filter((event) => event.type.startsWith("error.") || event.type.startsWith("console."));
+  const visibleCount = upperBoundByMono(
+    model.consoleSignals,
+    state.playheadMono,
+    (event) => event.mono
+  );
+  const scoped = model.consoleSignals.slice(
+    Math.max(0, visibleCount - MAX_SIGNAL_ROWS),
+    visibleCount
+  );
 
   renderSignalEvents(refs.consoleList, scoped);
 }
@@ -2147,6 +2216,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   const events = [...player.events].sort(
     (left, right) => left.mono - right.mono || left.t - right.t
   );
+  const consoleSignals: WebBlackboxEvent[] = [];
   const eventById = new Map<string, WebBlackboxEvent>();
   const eventSearchText: string[] = [];
   const errorPrefix: number[] = [];
@@ -2163,6 +2233,9 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
 
     if (event.type.startsWith("error.")) {
       errorCount += 1;
+      consoleSignals.push(event);
+    } else if (event.type.startsWith("console.")) {
+      consoleSignals.push(event);
     }
 
     if (event.type === "network.request") {
@@ -2234,6 +2307,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
 
   return {
     events,
+    consoleSignals,
     eventById,
     eventSearchText,
     errorPrefix,
