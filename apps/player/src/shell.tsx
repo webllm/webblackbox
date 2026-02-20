@@ -184,6 +184,9 @@ export function PlayerShell(): React.JSX.Element {
           <p id="playback-window-panel" className="readout-line muted">
             Timeline panel
           </p>
+          <p className="readout-line muted">
+            Shortcuts: Space play/pause, Left/Right seek, Home/End bounds, 1-8 panels
+          </p>
         </div>
       </Card>
 

@@ -35,6 +35,17 @@ const PANEL_LABELS: Record<LogPanelKey, string> = {
   perf: "Performance"
 };
 
+const PANEL_SHORTCUT_BY_CODE: Record<string, LogPanelKey> = {
+  Digit1: "timeline",
+  Digit2: "details",
+  Digit3: "network",
+  Digit4: "compare",
+  Digit5: "console",
+  Digit6: "realtime",
+  Digit7: "storage",
+  Digit8: "perf"
+};
+
 type ScreenshotMarker = {
   x: number;
   y: number;
@@ -608,6 +619,35 @@ function bindGlobalActions(): void {
     if (event.code === "Space") {
       event.preventDefault();
       togglePlayback();
+      return;
+    }
+
+    if (event.code === "Home" || event.code === "End") {
+      const model = state.model;
+
+      if (!model) {
+        return;
+      }
+
+      event.preventDefault();
+      pausePlayback();
+      setPlayhead(event.code === "Home" ? model.minMono : model.maxMono, {
+        forcePanels: true
+      });
+      return;
+    }
+
+    const shortcutPanel = PANEL_SHORTCUT_BY_CODE[event.code];
+
+    if (shortcutPanel) {
+      event.preventDefault();
+
+      if (shortcutPanel !== state.activePanel) {
+        state.activePanel = shortcutPanel;
+        renderPanels();
+        renderSummary();
+      }
+
       return;
     }
 
