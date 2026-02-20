@@ -9,11 +9,14 @@ import { Select } from "./components/ui/select.js";
 export function PlayerShell(): React.JSX.Element {
   return (
     <section className="shell">
-      <header className="topbar">
-        <div>
+      <header className="topbar card">
+        <div className="topbar-copy">
           <p className="eyebrow">WebBlackbox</p>
           <h1>Session Player</h1>
-          <p className="subhead">Top screenshot playback + time-synced logs.</p>
+          <p className="subhead">
+            Screenshot playback on top, timeline controls in the middle, and logs synced to playhead
+            below.
+          </p>
         </div>
         <div className="topbar-actions">
           <label className="upload" htmlFor="archive-input">
@@ -28,6 +31,28 @@ export function PlayerShell(): React.JSX.Element {
       </header>
 
       <Card className="stage-card">
+        <div className="stage-head">
+          <div>
+            <p className="eyebrow">Playback</p>
+            <h2 className="stage-title">Visual Timeline</h2>
+          </div>
+          <div className="stage-tools">
+            <label className="mask-wrap" htmlFor="mask-response-preview">
+              <Checkbox id="mask-response-preview" defaultChecked />
+              Mask preview
+            </label>
+            <div className="time-chip">
+              <span id="playback-current" className="mono">
+                0.00s
+              </span>
+              <span className="time-divider">/</span>
+              <span id="playback-total" className="mono">
+                0.00s
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div className="stage-frame" id="filmstrip-preview-wrap">
           <img id="filmstrip-preview" alt="Screenshot playback" className="preview" />
           <svg id="filmstrip-trail-svg" className="preview-trail" aria-hidden="true"></svg>
@@ -37,7 +62,7 @@ export function PlayerShell(): React.JSX.Element {
           </div>
         </div>
 
-        <div className="playback-controls">
+        <div className="transport-row">
           <div className="playback-buttons">
             <Button id="playback-back" type="button" variant="outline">
               -1s
@@ -57,10 +82,6 @@ export function PlayerShell(): React.JSX.Element {
                 <option value="2">2x</option>
                 <option value="4">4x</option>
               </Select>
-            </label>
-            <label className="mask-wrap" htmlFor="mask-response-preview">
-              <Checkbox id="mask-response-preview" defaultChecked />
-              Mask preview
             </label>
           </div>
 
@@ -125,6 +146,7 @@ export function PlayerShell(): React.JSX.Element {
                 </section>
               </div>
             </div>
+
             <div className="progress-legend" aria-hidden="true">
               <span className="legend-item">
                 <i className="legend-dot legend-error"></i>Error
@@ -139,55 +161,51 @@ export function PlayerShell(): React.JSX.Element {
                 <i className="legend-dot legend-action"></i>Action
               </span>
             </div>
-            <div className="time-row">
-              <span id="playback-current" className="mono">
-                0.00s
-              </span>
-              <span id="playback-total" className="mono">
-                0.00s
-              </span>
-            </div>
           </div>
         </div>
 
-        <p id="filmstrip-meta" className="mono"></p>
-        <ul id="filmstrip-list" className="shot-strip"></ul>
+        <div className="filmstrip-wrap">
+          <p id="filmstrip-meta" className="mono"></p>
+          <ul id="filmstrip-list" className="shot-strip"></ul>
+        </div>
       </Card>
 
-      <section id="summary" className="summary"></section>
+      <Card className="ops-card">
+        <section id="summary" className="summary"></section>
 
-      <section className="actions">
-        <Button id="export-report" type="button">
-          Export Bug Report
-        </Button>
-        <Button id="export-har" type="button">
-          Export HAR
-        </Button>
-        <Button id="export-playwright" type="button">
-          Export Playwright
-        </Button>
-        <Button id="export-playwright-mocks" type="button">
-          Export Playwright Mocks
-        </Button>
-        <Button id="export-github-issue" type="button">
-          Export GitHub Issue
-        </Button>
-        <Button id="export-jira-issue" type="button">
-          Export Jira Issue
-        </Button>
-        <span id="feedback" className="feedback"></span>
-      </section>
+        <section className="actions">
+          <Button id="export-report" type="button">
+            Export Bug Report
+          </Button>
+          <Button id="export-har" type="button">
+            Export HAR
+          </Button>
+          <Button id="export-playwright" type="button">
+            Export Playwright
+          </Button>
+          <Button id="export-playwright-mocks" type="button">
+            Export Playwright Mocks
+          </Button>
+          <Button id="export-github-issue" type="button">
+            Export GitHub Issue
+          </Button>
+          <Button id="export-jira-issue" type="button">
+            Export Jira Issue
+          </Button>
+          <span id="feedback" className="feedback"></span>
+        </section>
 
-      <section className="filters">
-        <Input id="text-filter" type="search" placeholder="Search timeline payloads" />
-        <Select id="type-filter">
-          <option value="all">All Timeline Events</option>
-          <option value="errors">Errors</option>
-          <option value="network">Network</option>
-          <option value="storage">Storage</option>
-          <option value="console">Console</option>
-        </Select>
-      </section>
+        <section className="filters">
+          <Input id="text-filter" type="search" placeholder="Search timeline payloads" />
+          <Select id="type-filter">
+            <option value="all">All Timeline Events</option>
+            <option value="errors">Errors</option>
+            <option value="network">Network</option>
+            <option value="storage">Storage</option>
+            <option value="console">Console</option>
+          </Select>
+        </section>
+      </Card>
 
       <section className="panel-tabs" id="panel-tabs">
         <Button
