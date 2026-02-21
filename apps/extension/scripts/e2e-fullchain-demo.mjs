@@ -23,6 +23,7 @@ const downloadDir = process.env.WB_E2E_DOWNLOAD_DIR ?? resolve(profileDir, "down
 const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-fullchain-${Date.now()}.log`;
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
+const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 
 const chromeCandidates = [
@@ -149,6 +150,19 @@ async function main() {
     indicator,
     start
   });
+
+  if (reloadAfterStart) {
+    await demoClient.send("Page.reload", { ignoreCache: true });
+    const reloadedIndicator = await waitForIndicatorText(demoClient, `REC ${captureMode}`, 25_000);
+    assert(
+      typeof reloadedIndicator === "string",
+      "Recorder indicator did not recover after reload",
+      {
+        reloadedIndicator,
+        captureMode
+      }
+    );
+  }
 
   const activeSessions = await readRuntimeSessions(popupClient);
   assert(
@@ -296,6 +310,7 @@ async function main() {
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
   console.log("Capture mode:", captureMode);
+  console.log("Reload after start:", reloadAfterStart);
   console.log("Session:", sid);
   console.log("Export:", exportStatus.text);
   console.log("Archive:", exportedPath);

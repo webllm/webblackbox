@@ -51,11 +51,17 @@ let screenshotPendingReason: string | null = null;
 let lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
 let lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
 let sampling: ContentSampling = { ...DEFAULT_SAMPLING };
+let readyPingTimer = 0;
+let readyPingAttempts = 0;
+const READY_PING_MAX_ATTEMPTS = 50;
+const READY_PING_INTERVAL_MS = 150;
 
 if (port) {
   port.onMessage.addListener((message) => {
     handleSwMessage(message as ExtensionOutboundMessage);
   });
+
+  requestRecordingStatusHandshake(true);
 }
 
 chromeApi?.runtime?.onMessage.addListener((message) => {
@@ -336,6 +342,8 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
     sampling = sanitizeSamplingConfig(message.sampling);
 
     if (recordingActive) {
+      stopReadyPing();
+
       if (!wasRecording) {
         flushPreRecordingBuffer();
       }
@@ -346,6 +354,7 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
       stopMutationAndSnapshots();
       removeIndicator();
       flushEvents();
+      requestRecordingStatusHandshake(false);
     }
 
     return;
@@ -353,6 +362,61 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
 
   if (message.kind === "sw.freeze") {
     ensureIndicator(message.sid, "freeze");
+  }
+}
+
+function requestRecordingStatusHandshake(force = false): void {
+  if (!port) {
+    return;
+  }
+
+  if (recordingActive && !force) {
+    stopReadyPing();
+    return;
+  }
+
+  if (force) {
+    readyPingAttempts = 0;
+  }
+
+  sendReadyPing();
+
+  if (readyPingTimer > 0) {
+    return;
+  }
+
+  readyPingTimer = window.setInterval(() => {
+    if (recordingActive || readyPingAttempts >= READY_PING_MAX_ATTEMPTS) {
+      stopReadyPing();
+      return;
+    }
+
+    sendReadyPing();
+  }, READY_PING_INTERVAL_MS);
+}
+
+function sendReadyPing(): void {
+  if (!port || recordingActive) {
+    return;
+  }
+
+  readyPingAttempts += 1;
+
+  try {
+    port.postMessage({
+      kind: "content.ready"
+    });
+  } catch {
+    void 0;
+  }
+}
+
+function stopReadyPing(): void {
+  readyPingAttempts = 0;
+
+  if (readyPingTimer > 0) {
+    clearInterval(readyPingTimer);
+    readyPingTimer = 0;
   }
 }
 

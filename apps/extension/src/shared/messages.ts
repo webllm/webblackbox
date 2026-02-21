@@ -38,12 +38,17 @@ export type ContentMarkerMessage = {
   message: string;
 };
 
+export type ContentReadyMessage = {
+  kind: "content.ready";
+};
+
 export type ExtensionInboundMessage =
   | UiStartSessionMessage
   | UiStopSessionMessage
   | UiExportSessionMessage
   | ContentEventBatchMessage
-  | ContentMarkerMessage;
+  | ContentMarkerMessage
+  | ContentReadyMessage;
 
 export type RecordingStatusMessage = {
   kind: "sw.recording-status";

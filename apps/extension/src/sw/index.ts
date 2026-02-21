@@ -164,6 +164,10 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
     notifyOffscreenPipelineStatus();
   }
 
+  if (port.name === PORT_NAMES.content) {
+    void syncContentPortStateOnConnect(port);
+  }
+
   pushSessionList();
 
   const onMessage = (rawMessage: unknown) => {
@@ -195,6 +199,51 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   port.onMessage.addListener(onMessage);
   port.onDisconnect.addListener(onDisconnect);
 });
+
+async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
+  const tabId = port.sender?.tab?.id;
+
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  const runtime = sessionsByTab.get(tabId);
+
+  if (!runtime || runtime.stoppedAt) {
+    return;
+  }
+
+  await ensureInjectedHooks(tabId);
+  syncContentPortRecordingState(port);
+}
+
+function syncContentPortRecordingState(port: PortLike): void {
+  const tabId = port.sender?.tab?.id;
+
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  const runtime = sessionsByTab.get(tabId);
+
+  if (!runtime || runtime.stoppedAt) {
+    return;
+  }
+
+  const sampling = toStatusSampling(runtime);
+
+  try {
+    port.postMessage({
+      kind: "sw.recording-status",
+      active: true,
+      sid: runtime.sid,
+      mode: runtime.mode,
+      sampling
+    });
+  } catch {
+    void 0;
+  }
+}
 
 chromeApi?.runtime?.onMessage.addListener((rawMessage, sender) => {
   const message = parseInboundMessage(rawMessage);
@@ -252,6 +301,30 @@ async function handleInboundMessage(
       });
     }
 
+    return;
+  }
+
+  if (message.kind === "content.ready") {
+    const tabId = senderTabId ?? port?.sender?.tab?.id;
+
+    if (typeof tabId !== "number") {
+      return;
+    }
+
+    const runtime = sessionsByTab.get(tabId);
+
+    if (!runtime || runtime.stoppedAt) {
+      return;
+    }
+
+    await ensureInjectedHooks(tabId);
+
+    if (port?.name === PORT_NAMES.content) {
+      syncContentPortRecordingState(port);
+      return;
+    }
+
+    await notifyTabStatus(tabId, true, runtime.sid, runtime.mode, toStatusSampling(runtime));
     return;
   }
 
@@ -364,13 +437,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     payload: recorderConfig
   });
 
-  await chromeApi?.scripting
-    ?.executeScript({
-      target: { tabId, allFrames: true },
-      world: "MAIN",
-      files: ["injected.js"]
-    })
-    .catch(() => undefined);
+  await ensureInjectedHooks(tabId);
 
   if (mode === "full") {
     await attachCdp(runtime);
@@ -1807,6 +1874,16 @@ function normalizeHashesManifest(value: unknown): HashesManifest {
     manifestSha256: typeof row?.manifestSha256 === "string" ? row.manifestSha256 : "",
     files
   };
+}
+
+async function ensureInjectedHooks(tabId: number): Promise<void> {
+  await chromeApi?.scripting
+    ?.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      files: ["injected.js"]
+    })
+    .catch(() => undefined);
 }
 
 async function ensureOffscreenDocument(): Promise<void> {
