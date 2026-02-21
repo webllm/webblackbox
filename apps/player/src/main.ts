@@ -983,6 +983,9 @@ function renderPlaybackChrome(): void {
 }
 
 function renderPanelTabs(): void {
+  const secondaryPanel: LogPanelKey =
+    state.activePanel === "timeline" ? "details" : state.activePanel;
+
   for (const button of panelTabButtons) {
     const panel = button.dataset.logPanel as LogPanelKey | undefined;
     const active = panel === state.activePanel;
@@ -992,19 +995,12 @@ function renderPanelTabs(): void {
 
   for (const card of panelCards) {
     const panel = card.dataset.logPanelTarget as LogPanelKey | undefined;
-    const isTimeline = panel === "timeline";
-    const active = panel === state.activePanel;
+    const showAsTimeline = panel === "timeline";
+    const showAsSecondary = panel === secondaryPanel;
 
-    if (isTimeline) {
-      card.classList.toggle("panel-hidden", state.activePanel === "timeline" ? !active : false);
-      card.classList.toggle("panel-primary", state.activePanel === "timeline");
-      card.classList.toggle("panel-secondary", state.activePanel !== "timeline");
-      continue;
-    }
-
-    card.classList.toggle("panel-hidden", !active);
-    card.classList.toggle("panel-primary", false);
-    card.classList.toggle("panel-secondary", active);
+    card.classList.toggle("panel-hidden", !showAsTimeline && !showAsSecondary);
+    card.classList.toggle("panel-primary", showAsTimeline);
+    card.classList.toggle("panel-secondary", showAsSecondary);
   }
 
   renderPanelTabCounts();
@@ -1764,9 +1760,13 @@ function renderTimelineWindow(): void {
 
 function renderTimelineRow(event: WebBlackboxEvent): string {
   const selectedClass = state.selectedEventId === event.id ? "selected" : "";
-  return `<li class="event-row"><button data-event-id="${escapeHtml(event.id)}" class="event ${selectedClass}">
+  const model = state.model;
+  const relativeMono = Math.max(0, event.mono - (model?.minMono ?? 0));
+  const buttonClass = selectedClass ? `event ${selectedClass}` : "event";
+
+  return `<li class="event-row"><button data-event-id="${escapeHtml(event.id)}" class="${buttonClass}">
         <span class="tag">${escapeHtml(event.type)}</span>
-        <span class="mono">${event.mono.toFixed(2)}ms</span>
+        <span class="mono">${formatMono(relativeMono)}</span>
         <span class="id">${escapeHtml(event.id)}</span>
       </button></li>`;
 }

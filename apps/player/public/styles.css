@@ -866,7 +866,7 @@ h1 {
 
 .log-grid {
   display: grid;
-  grid-template-columns: minmax(300px, 0.92fr) minmax(0, 1.08fr);
+  grid-template-columns: minmax(320px, 0.92fr) minmax(0, 1.08fr);
   gap: 10px;
   align-items: start;
 }
@@ -885,24 +885,26 @@ h1 {
 }
 
 .log-grid .panel-primary {
-  grid-column: 1 / -1;
+  grid-column: 1;
+  grid-row: 1;
 }
 
 .log-grid .panel-secondary {
   grid-column: 2;
+  grid-row: 1;
+}
+
+.timeline-card {
+  position: sticky;
+  top: 12px;
+  align-self: start;
 }
 
 .timeline-card,
 .details-card,
 .network-card,
 .compare-card {
-  min-height: 300px;
-}
-
-.timeline-card {
-  grid-column: 1;
-  position: sticky;
-  top: 12px;
+  min-height: 320px;
 }
 
 .event-list,
@@ -1141,6 +1143,12 @@ h1 {
 
   .log-grid .panel-secondary {
     grid-column: 1;
+    grid-row: auto;
+  }
+
+  .log-grid .panel-primary {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .timeline-card {
