@@ -312,6 +312,42 @@ describe("recorder", () => {
     expect(failedPayload?.errorText).toContain("timeout");
   });
 
+  it("maps lite storage snapshot raw types", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const base = Date.now();
+
+    const localSnapshot = recorder.ingest({
+      source: "content",
+      rawType: "localStorageSnapshot",
+      sid: "S-storage",
+      tabId: 21,
+      t: base,
+      mono: 1,
+      payload: {
+        hash: "H-local",
+        count: 2,
+        mode: "sample"
+      }
+    });
+
+    const idbSnapshot = recorder.ingest({
+      source: "content",
+      rawType: "indexedDbSnapshot",
+      sid: "S-storage",
+      tabId: 21,
+      t: base + 1,
+      mono: 2,
+      payload: {
+        hash: "H-idb",
+        count: 1,
+        mode: "schema-only"
+      }
+    });
+
+    expect(localSnapshot.event?.type).toBe("storage.local.snapshot");
+    expect(idbSnapshot.event?.type).toBe("storage.idb.snapshot");
+  });
+
   it("retains only events in ring buffer time window", () => {
     const buffer = new EventRingBuffer(1);
     const base = Date.now();

@@ -133,6 +133,8 @@ const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
 const LITE_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
 const LITE_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
+const LITE_DOM_SNAPSHOT_MAX_BYTES = 1_500 * 1024;
+const LITE_STORAGE_SNAPSHOT_MAX_BYTES = 600 * 1024;
 const CPU_PROFILE_SAMPLE_MS = 350;
 const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
@@ -468,9 +470,9 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
 
   updateRuntimeInteractionState(runtime, nextRawEvent);
 
-  if (shouldMaterializeLiteScreenshot(runtime, nextRawEvent)) {
+  if (shouldMaterializeLiteContentEvent(runtime, nextRawEvent)) {
     enqueue(runtime, async () => {
-      const materialized = await materializeLiteScreenshot(runtime, nextRawEvent);
+      const materialized = await materializeLiteContentEvent(runtime, nextRawEvent);
 
       if (!materialized) {
         return;
@@ -492,7 +494,7 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
   runtime.recorder.ingest(nextRawEvent);
 }
 
-function shouldMaterializeLiteScreenshot(
+function shouldMaterializeLiteContentEvent(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent
 ): boolean {
@@ -500,12 +502,60 @@ function shouldMaterializeLiteScreenshot(
     return false;
   }
 
-  if (rawEvent.source !== "content" || rawEvent.rawType !== "screenshot") {
+  if (rawEvent.source !== "content") {
     return false;
   }
 
   const payload = asRecord(rawEvent.payload);
-  return typeof payload?.dataUrl === "string" && payload.dataUrl.length > 0;
+
+  if (!payload) {
+    return false;
+  }
+
+  if (rawEvent.rawType === "screenshot") {
+    return typeof payload.dataUrl === "string" && payload.dataUrl.length > 0;
+  }
+
+  if (rawEvent.rawType === "snapshot") {
+    return typeof payload.html === "string" && payload.html.length > 0;
+  }
+
+  if (rawEvent.rawType === "localStorageSnapshot") {
+    return asRecord(payload.entries) !== null;
+  }
+
+  if (rawEvent.rawType === "indexedDbSnapshot") {
+    return Array.isArray(payload.databaseNames);
+  }
+
+  if (rawEvent.rawType === "cookieSnapshot") {
+    return Array.isArray(payload.names);
+  }
+
+  return false;
+}
+
+async function materializeLiteContentEvent(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): Promise<RawRecorderEvent | null> {
+  if (rawEvent.rawType === "screenshot") {
+    return materializeLiteScreenshot(runtime, rawEvent);
+  }
+
+  if (rawEvent.rawType === "snapshot") {
+    return materializeLiteDomSnapshot(runtime, rawEvent);
+  }
+
+  if (
+    rawEvent.rawType === "localStorageSnapshot" ||
+    rawEvent.rawType === "indexedDbSnapshot" ||
+    rawEvent.rawType === "cookieSnapshot"
+  ) {
+    return materializeLiteStorageSnapshot(runtime, rawEvent);
+  }
+
+  return rawEvent;
 }
 
 async function materializeLiteScreenshot(
@@ -552,6 +602,123 @@ async function materializeLiteScreenshot(
       pointer
     }
   };
+}
+
+async function materializeLiteDomSnapshot(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): Promise<RawRecorderEvent | null> {
+  const payload = asRecord(rawEvent.payload);
+  const html = asString(payload?.html);
+
+  if (!payload || !html) {
+    return null;
+  }
+
+  const encoded = encodeTextWithByteLimit(html, LITE_DOM_SNAPSHOT_MAX_BYTES);
+  const contentHash = await runtime.pipeline.putBlob("text/html", encoded.bytes);
+  const snapshotId = asString(payload.snapshotId) ?? `D-${Math.round(rawEvent.mono)}`;
+  const nodeCount = normalizeNonNegativeInt(payload.nodeCount);
+  const reason = asString(payload.reason) ?? undefined;
+  const htmlLength = normalizeNonNegativeInt(payload.htmlLength) ?? html.length;
+  const truncated = payload.truncated === true || encoded.truncated;
+
+  return {
+    ...rawEvent,
+    payload: {
+      snapshotId,
+      contentHash,
+      source: "html",
+      nodeCount,
+      reason,
+      htmlLength,
+      truncated
+    }
+  };
+}
+
+async function materializeLiteStorageSnapshot(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): Promise<RawRecorderEvent | null> {
+  const payload = asRecord(rawEvent.payload);
+
+  if (!payload) {
+    return null;
+  }
+
+  const reason = asString(payload.reason) ?? undefined;
+
+  if (rawEvent.rawType === "localStorageSnapshot") {
+    const entries = asRecord(payload.entries) ?? {};
+    const serialized = JSON.stringify(entries);
+    const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
+    const hash =
+      encoded.bytes.byteLength > 0
+        ? await runtime.pipeline.putBlob("application/json", encoded.bytes)
+        : undefined;
+    const count = normalizeNonNegativeInt(payload.count) ?? Object.keys(entries).length;
+
+    return {
+      ...rawEvent,
+      payload: {
+        hash,
+        count,
+        mode: "sample",
+        redacted: true,
+        reason,
+        truncated: payload.truncated === true || encoded.truncated
+      }
+    };
+  }
+
+  if (rawEvent.rawType === "indexedDbSnapshot") {
+    const names = asStringArray(payload.databaseNames, 400);
+    const serialized = JSON.stringify(names);
+    const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
+    const hash =
+      encoded.bytes.byteLength > 0
+        ? await runtime.pipeline.putBlob("application/json", encoded.bytes)
+        : undefined;
+    const count = normalizeNonNegativeInt(payload.count) ?? names.length;
+
+    return {
+      ...rawEvent,
+      payload: {
+        hash,
+        count,
+        mode: "schema-only",
+        redacted: true,
+        reason,
+        truncated: payload.truncated === true || encoded.truncated
+      }
+    };
+  }
+
+  if (rawEvent.rawType === "cookieSnapshot") {
+    const names = asStringArray(payload.names, 400);
+    const serialized = JSON.stringify(names);
+    const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
+    const hash =
+      encoded.bytes.byteLength > 0
+        ? await runtime.pipeline.putBlob("application/json", encoded.bytes)
+        : undefined;
+    const count = normalizeNonNegativeInt(payload.count) ?? names.length;
+
+    return {
+      ...rawEvent,
+      payload: {
+        hash,
+        count,
+        mode: "sample",
+        redacted: true,
+        reason,
+        truncated: payload.truncated === true || encoded.truncated
+      }
+    };
+  }
+
+  return rawEvent;
 }
 
 function updateRuntimeInteractionState(runtime: SessionRuntime, rawEvent: RawRecorderEvent): void {
@@ -1453,6 +1620,69 @@ function normalizePositiveInt(value: unknown): number | undefined {
   }
 
   return Math.max(1, Math.round(candidate));
+}
+
+function normalizeNonNegativeInt(value: unknown): number | undefined {
+  const candidate = asFiniteNumber(value);
+
+  if (candidate === null || candidate < 0) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.round(candidate));
+}
+
+function asStringArray(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const output: string[] = [];
+
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0) {
+      continue;
+    }
+
+    output.push(entry);
+
+    if (output.length >= limit) {
+      break;
+    }
+  }
+
+  return output;
+}
+
+function encodeTextWithByteLimit(
+  value: string,
+  maxBytes: number
+): { bytes: Uint8Array; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const fullBytes = encoder.encode(value);
+
+  if (fullBytes.byteLength <= maxBytes) {
+    return {
+      bytes: fullBytes,
+      truncated: false
+    };
+  }
+
+  const roughRatio = Math.max(0.05, maxBytes / fullBytes.byteLength);
+  let targetChars = Math.max(1, Math.floor(value.length * roughRatio));
+  let clipped = value.slice(0, targetChars);
+  let clippedBytes = encoder.encode(clipped);
+
+  while (clippedBytes.byteLength > maxBytes && targetChars > 1) {
+    targetChars = Math.max(1, Math.floor(targetChars * 0.9));
+    clipped = value.slice(0, targetChars);
+    clippedBytes = encoder.encode(clipped);
+  }
+
+  return {
+    bytes: clippedBytes,
+    truncated: true
+  };
 }
 
 function normalizeScreenshotViewport(

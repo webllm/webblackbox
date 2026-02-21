@@ -41,8 +41,10 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   longtask: "perf.longtask",
   vitals: "perf.vitals",
   localStorageOp: "storage.local.op",
+  localStorageSnapshot: "storage.local.snapshot",
   sessionStorageOp: "storage.session.op",
   indexedDbOp: "storage.idb.op",
+  indexedDbSnapshot: "storage.idb.snapshot",
   cookieSnapshot: "storage.cookie.snapshot",
   sse: "network.sse.message"
 };

@@ -17,6 +17,9 @@ const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_440;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
+const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
+const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
+const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
 
 type ContentSampling = {
   mousemoveHz: number;
@@ -384,6 +387,7 @@ function startMutationAndSnapshots(): void {
     const snapshotIntervalMs = Math.max(500, Math.round(sampling.snapshotIntervalMs));
     snapshotTimer = window.setInterval(() => {
       emitDomSnapshot("interval");
+      emitStorageSnapshots("interval");
     }, snapshotIntervalMs);
   }
 
@@ -396,6 +400,7 @@ function startMutationAndSnapshots(): void {
 
   emitViewportSnapshot("start");
   emitDomSnapshot("start");
+  emitStorageSnapshots("start");
   scheduleScreenshotCapture("start", true);
 }
 
@@ -454,6 +459,8 @@ function flushMutationBuffer(): void {
 
 function emitDomSnapshot(reason: string): void {
   const html = document.documentElement.outerHTML;
+  const truncated = html.length > DOM_SNAPSHOT_MAX_HTML_CHARS;
+  const sampledHtml = truncated ? html.slice(0, DOM_SNAPSHOT_MAX_HTML_CHARS) : html;
 
   queueEvent("snapshot", {
     reason,
@@ -461,8 +468,85 @@ function emitDomSnapshot(reason: string): void {
     title: document.title,
     nodeCount: document.getElementsByTagName("*").length,
     htmlLength: html.length,
-    htmlSnippet: html.slice(0, 16_000)
+    truncated,
+    html: sampledHtml
   });
+}
+
+function emitStorageSnapshots(reason: string): void {
+  emitCookieSnapshot(reason);
+  emitLocalStorageSnapshot(reason);
+  void emitIndexedDbSnapshot(reason);
+}
+
+function emitCookieSnapshot(reason: string): void {
+  const cookieNames = document.cookie
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      const separatorIndex = entry.indexOf("=");
+      return separatorIndex > 0 ? entry.slice(0, separatorIndex).trim() : entry;
+    })
+    .filter((entry) => entry.length > 0)
+    .slice(0, STORAGE_SNAPSHOT_MAX_ITEMS);
+
+  queueEvent("cookieSnapshot", {
+    reason,
+    count: cookieNames.length,
+    names: cookieNames,
+    redacted: true
+  });
+}
+
+function emitLocalStorageSnapshot(reason: string): void {
+  const count = localStorage.length;
+  const maxItems = Math.min(count, STORAGE_SNAPSHOT_MAX_ITEMS);
+  const entries: Record<string, unknown> = {};
+
+  for (let index = 0; index < maxItems; index += 1) {
+    const key = localStorage.key(index);
+
+    if (!key) {
+      continue;
+    }
+
+    const value = localStorage.getItem(key) ?? "";
+    entries[key] = {
+      length: value.length,
+      sample: value.slice(0, STORAGE_SNAPSHOT_MAX_VALUE_CHARS)
+    };
+  }
+
+  queueEvent("localStorageSnapshot", {
+    reason,
+    count,
+    truncated: count > maxItems,
+    entries
+  });
+}
+
+async function emitIndexedDbSnapshot(reason: string): Promise<void> {
+  if (!("indexedDB" in window) || typeof indexedDB.databases !== "function") {
+    return;
+  }
+
+  try {
+    const rows = await indexedDB.databases();
+    const names = rows
+      .map((entry) => entry.name)
+      .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      .slice(0, STORAGE_SNAPSHOT_MAX_ITEMS);
+
+    queueEvent("indexedDbSnapshot", {
+      reason,
+      count: names.length,
+      databaseNames: names,
+      truncated: rows.length > names.length
+    });
+  } catch {
+    void 0;
+  }
 }
 
 function emitViewportSnapshot(reason: string): void {
@@ -489,6 +573,7 @@ function emitMarker(message: string): void {
   });
 
   emitDomSnapshot("marker");
+  emitStorageSnapshots("marker");
   scheduleScreenshotCapture("marker", true);
 }
 
@@ -689,6 +774,9 @@ function shouldBufferBeforeRecording(event: RawRecorderEvent): boolean {
 
   return (
     event.rawType === "console" ||
+    event.rawType === "fetch" ||
+    event.rawType === "xhr" ||
+    event.rawType === "fetchError" ||
     event.rawType === "pageError" ||
     event.rawType === "unhandledrejection" ||
     event.rawType === "resourceError"
