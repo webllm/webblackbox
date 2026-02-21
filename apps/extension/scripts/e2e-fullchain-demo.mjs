@@ -22,6 +22,7 @@ const profileDir =
 const downloadDir = process.env.WB_E2E_DOWNLOAD_DIR ?? resolve(profileDir, "downloads");
 const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-fullchain-${Date.now()}.log`;
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
+const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 
 const chromeCandidates = [
@@ -140,10 +141,10 @@ async function main() {
 
   await sleep(1_200);
 
-  const start = await startSessionFromPopup(popupClient, "full", demoUrl);
-  assert(start?.ok === true, "Failed to start full mode", start);
+  const start = await startSessionFromPopup(popupClient, captureMode, demoUrl);
+  assert(start?.ok === true, `Failed to start ${captureMode} mode`, start);
 
-  const indicator = await waitForIndicatorText(demoClient, "REC full", 25_000);
+  const indicator = await waitForIndicatorText(demoClient, `REC ${captureMode}`, 25_000);
   assert(typeof indicator === "string", "Recorder indicator did not appear", {
     indicator,
     start
@@ -165,7 +166,7 @@ async function main() {
   await sleep(1_600);
 
   const stop = await stopActiveSessionFromPopup(popupClient);
-  assert(stop?.ok === true, "Failed to stop full mode", stop);
+  assert(stop?.ok === true, `Failed to stop ${captureMode} mode`, stop);
 
   const indicatorGone = await waitForIndicatorGone(demoClient, 15_000);
   assert(indicatorGone, "Recorder indicator did not clear after stop", { indicatorGone, stop });
@@ -255,9 +256,21 @@ async function main() {
   const hasApiRequest = playerResult.waterfallSamples.some((sample) => sample.includes("/api/"));
   assert(hasApiRequest, "Player waterfall does not include demo API requests", playerResult);
 
-  await waitForPlayerEventType(playerClient, "user.mousemove", 20_000);
-  await waitForPlayerEventType(playerClient, "screen.screenshot", 20_000);
-  await waitForPlayerEventType(playerClient, "console.entry", 20_000);
+  const requiredEventTypes =
+    captureMode === "lite"
+      ? [
+          "user.mousemove",
+          "screen.screenshot",
+          "console.entry",
+          "network.request",
+          "dom.snapshot",
+          "storage.local.snapshot"
+        ]
+      : ["user.mousemove", "screen.screenshot", "console.entry"];
+
+  for (const eventType of requiredEventTypes) {
+    await waitForPlayerEventType(playerClient, eventType, 20_000);
+  }
 
   const markerResult = await verifyPlayerScreenshotMarker(playerClient, 20_000);
   assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
@@ -282,6 +295,7 @@ async function main() {
 
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
+  console.log("Capture mode:", captureMode);
   console.log("Session:", sid);
   console.log("Export:", exportStatus.text);
   console.log("Archive:", exportedPath);

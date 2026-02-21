@@ -203,6 +203,7 @@ async function runScenario(options = {}) {
 
   refs.taskInput.value = title;
   appendLog("scenario.start", { title });
+  console.info("[wb-demo] scenario.start", { title });
 
   emitPointerMove(220, 270);
   emitClick(refs.addTask, 220, 270);
@@ -227,8 +228,16 @@ async function runScenario(options = {}) {
   emitPointerMove(470, 450);
   emitClick(refs.pulseDom, 470, 450);
   await sleep(140);
+  console.log("[wb-demo] scenario.progress", {
+    tasks: state.tasks.length,
+    pulseCount: state.pulseCount
+  });
 
   appendLog("scenario.complete", {
+    tasks: state.tasks.length,
+    pulseCount: state.pulseCount
+  });
+  console.info("[wb-demo] scenario.complete", {
     tasks: state.tasks.length,
     pulseCount: state.pulseCount
   });

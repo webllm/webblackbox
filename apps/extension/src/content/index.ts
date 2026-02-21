@@ -616,7 +616,7 @@ function scheduleScreenshotCapture(reason: string, prioritize = false): void {
 }
 
 async function captureScreenshot(reason: string): Promise<void> {
-  if (!recordingActive || document.visibilityState === "hidden") {
+  if (!recordingActive) {
     return;
   }
 
