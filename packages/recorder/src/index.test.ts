@@ -94,6 +94,126 @@ describe("recorder", () => {
     expect(result.freezeReason).toBe("error");
   });
 
+  it("normalizes console payloads from cdp and injected hooks", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const base = Date.now();
+
+    const runtimeConsole = recorder.ingest({
+      source: "cdp",
+      rawType: "Runtime.consoleAPICalled",
+      sid: "S-console",
+      tabId: 12,
+      t: base,
+      mono: 1,
+      payload: {
+        type: "warning",
+        args: [
+          { type: "string", value: "hello" },
+          { type: "number", value: 42 }
+        ],
+        stackTrace: {
+          callFrames: [
+            {
+              functionName: "render",
+              url: "https://example.com/app.js",
+              lineNumber: 10,
+              columnNumber: 5
+            }
+          ]
+        }
+      }
+    });
+
+    const runtimePayload = runtimeConsole.event?.data as
+      | {
+          source?: string;
+          level?: string;
+          method?: string;
+          text?: string;
+          args?: unknown[];
+          stackTop?: string;
+        }
+      | undefined;
+    expect(runtimeConsole.event?.type).toBe("console.entry");
+    expect(runtimePayload?.source).toBe("cdp.runtime");
+    expect(runtimePayload?.level).toBe("warn");
+    expect(runtimePayload?.method).toBe("warning");
+    expect(runtimePayload?.text).toContain("hello");
+    expect(Array.isArray(runtimePayload?.args)).toBe(true);
+    expect(runtimePayload?.stackTop).toContain("render");
+
+    const logEntryConsole = recorder.ingest({
+      source: "cdp",
+      rawType: "Log.entryAdded",
+      sid: "S-console",
+      tabId: 12,
+      t: base + 1,
+      mono: 2,
+      payload: {
+        entry: {
+          source: "javascript",
+          level: "error",
+          text: "boom",
+          url: "https://example.com/app.js",
+          lineNumber: 22
+        }
+      }
+    });
+
+    const logEntryPayload = logEntryConsole.event?.data as
+      | {
+          source?: string;
+          level?: string;
+          method?: string;
+          text?: string;
+          line?: number;
+          url?: string;
+        }
+      | undefined;
+    expect(logEntryConsole.event?.type).toBe("console.entry");
+    expect(logEntryPayload?.source).toBe("cdp.log");
+    expect(logEntryPayload?.level).toBe("error");
+    expect(logEntryPayload?.method).toBe("javascript");
+    expect(logEntryPayload?.text).toBe("boom");
+    expect(logEntryPayload?.line).toBe(22);
+
+    const injectedConsole = recorder.ingest({
+      source: "content",
+      rawType: "console",
+      sid: "S-console",
+      tabId: 12,
+      t: base + 2,
+      mono: 3,
+      payload: {
+        source: "injected",
+        method: "table",
+        level: "log",
+        args: [
+          "rows",
+          {
+            total: 3
+          }
+        ],
+        stackTop: "at table (https://example.com/app.js:5:2)"
+      }
+    });
+
+    const injectedPayload = injectedConsole.event?.data as
+      | {
+          source?: string;
+          level?: string;
+          method?: string;
+          text?: string;
+          stackTop?: string;
+        }
+      | undefined;
+    expect(injectedConsole.event?.type).toBe("console.entry");
+    expect(injectedPayload?.source).toBe("injected");
+    expect(injectedPayload?.method).toBe("table");
+    expect(injectedPayload?.text).toContain("rows");
+    expect(injectedPayload?.stackTop).toContain("table");
+  });
+
   it("retains only events in ring buffer time window", () => {
     const buffer = new EventRingBuffer(1);
     const base = Date.now();

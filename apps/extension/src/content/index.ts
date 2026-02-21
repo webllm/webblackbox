@@ -7,7 +7,9 @@ const chromeApi = getChromeApi();
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.content });
 
 const eventBuffer: RawRecorderEvent[] = [];
+const preRecordingBuffer: RawRecorderEvent[] = [];
 const mutationBuffer: Array<Record<string, unknown>> = [];
+const PRE_RECORDING_BUFFER_MAX = 400;
 
 type ContentSampling = {
   mousemoveHz: number;
@@ -306,10 +308,15 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
   }
 
   if (message.kind === "sw.recording-status") {
+    const wasRecording = recordingActive;
     recordingActive = message.active;
     sampling = sanitizeSamplingConfig(message.sampling);
 
     if (recordingActive) {
+      if (!wasRecording) {
+        flushPreRecordingBuffer();
+      }
+
       ensureIndicator(message.sid, message.mode);
       startMutationAndSnapshots();
     } else {
@@ -461,7 +468,19 @@ function queueEvent(rawType: string, payload: Record<string, unknown>): void {
 }
 
 function queueRawEvent(event: RawRecorderEvent): void {
-  if (!recordingActive || !port) {
+  if (!port) {
+    return;
+  }
+
+  if (!recordingActive) {
+    if (shouldBufferBeforeRecording(event)) {
+      preRecordingBuffer.push(event);
+
+      if (preRecordingBuffer.length > PRE_RECORDING_BUFFER_MAX) {
+        preRecordingBuffer.splice(0, preRecordingBuffer.length - PRE_RECORDING_BUFFER_MAX);
+      }
+    }
+
     return;
   }
 
@@ -474,6 +493,35 @@ function queueRawEvent(event: RawRecorderEvent): void {
   flushTimer = window.setTimeout(() => {
     flushEvents();
   }, 200);
+}
+
+function shouldBufferBeforeRecording(event: RawRecorderEvent): boolean {
+  if (event.source !== "content") {
+    return false;
+  }
+
+  return (
+    event.rawType === "console" ||
+    event.rawType === "pageError" ||
+    event.rawType === "unhandledrejection" ||
+    event.rawType === "resourceError"
+  );
+}
+
+function flushPreRecordingBuffer(): void {
+  if (!recordingActive || !port || preRecordingBuffer.length === 0) {
+    return;
+  }
+
+  eventBuffer.push(...preRecordingBuffer.splice(0, preRecordingBuffer.length));
+
+  if (flushTimer > 0) {
+    return;
+  }
+
+  flushTimer = window.setTimeout(() => {
+    flushEvents();
+  }, 0);
 }
 
 function flushEvents(): void {

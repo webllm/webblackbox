@@ -37,25 +37,125 @@ function monotonicTime(): number {
 }
 
 function installConsoleHooks(): void {
-  const consoleLevels = ["log", "info", "warn", "error", "debug"] as const;
+  const consoleMethods = [
+    "log",
+    "info",
+    "warn",
+    "error",
+    "debug",
+    "assert",
+    "trace",
+    "dir",
+    "dirxml",
+    "table",
+    "group",
+    "groupCollapsed",
+    "groupEnd",
+    "count",
+    "countReset",
+    "time",
+    "timeEnd",
+    "timeLog",
+    "clear"
+  ] as const;
   const consoleRecord = console as unknown as Record<string, (...args: unknown[]) => unknown>;
 
-  for (const level of consoleLevels) {
-    const original = consoleRecord[level];
+  for (const method of consoleMethods) {
+    const original = consoleRecord[method];
 
     if (typeof original !== "function") {
       continue;
     }
 
-    consoleRecord[level] = (...args: unknown[]) => {
+    consoleRecord[method] = (...args: unknown[]) => {
+      if (method === "assert" && Boolean(args[0])) {
+        return Reflect.apply(original, console, args);
+      }
+
+      const level = consoleMethodToLevel(method);
+      const serializedArgs = args.map((value) => safeSerialize(value));
+
       emit("console", {
+        source: "injected",
+        method,
         level,
-        args: args.map((value) => safeSerialize(value))
+        args: serializedArgs,
+        text: formatConsoleText(serializedArgs),
+        stackTop: readStackTop()
       });
 
       return Reflect.apply(original, console, args);
     };
   }
+}
+
+function consoleMethodToLevel(method: string): "log" | "info" | "warn" | "error" | "debug" {
+  if (method === "error" || method === "assert") {
+    return "error";
+  }
+
+  if (method === "warn") {
+    return "warn";
+  }
+
+  if (method === "info") {
+    return "info";
+  }
+
+  if (method === "debug" || method === "trace") {
+    return "debug";
+  }
+
+  return "log";
+}
+
+function formatConsoleText(args: unknown[]): string {
+  if (args.length === 0) {
+    return "";
+  }
+
+  const parts = args
+    .slice(0, 8)
+    .map((entry) => stringifyValue(entry))
+    .filter((entry) => entry.length > 0);
+
+  const joined = parts.join(" ");
+  return joined.length > 600 ? `${joined.slice(0, 597)}...` : joined;
+}
+
+function stringifyValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean" || value === null) {
+    return String(value);
+  }
+
+  if (value === undefined) {
+    return "undefined";
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function readStackTop(): string | undefined {
+  const stack = new Error().stack;
+
+  if (!stack) {
+    return undefined;
+  }
+
+  const lines = stack.split("\n").map((line) => line.trim());
+  const selfLine = lines.findIndex((line) => line.includes("installConsoleHooks"));
+  const candidate =
+    selfLine >= 0 ? (lines[selfLine + 2] ?? lines[selfLine + 1]) : (lines[2] ?? lines[1]);
+
+  return candidate ? candidate.slice(0, 260) : undefined;
 }
 
 function installErrorHooks(): void {

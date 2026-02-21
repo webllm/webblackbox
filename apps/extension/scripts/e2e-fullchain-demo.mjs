@@ -257,6 +257,7 @@ async function main() {
 
   await waitForPlayerEventType(playerClient, "user.mousemove", 20_000);
   await waitForPlayerEventType(playerClient, "screen.screenshot", 20_000);
+  await waitForPlayerEventType(playerClient, "console.entry", 20_000);
 
   const markerResult = await verifyPlayerScreenshotMarker(playerClient, 20_000);
   assert(markerResult.ok, "Player screenshot marker is missing", markerResult);

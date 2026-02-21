@@ -264,9 +264,18 @@ const networkResponseDataSchema = z
 const consoleEntryDataSchema = z
   .object({
     level: z.enum(["log", "info", "warn", "error", "debug"]),
+    method: z.string().optional(),
+    source: z.string().optional(),
     text: z.string().optional(),
     stackTop: z.string().optional(),
-    args: z.array(z.unknown()).optional()
+    args: z.array(z.unknown()).optional(),
+    url: z.string().optional(),
+    line: z.number().int().optional(),
+    col: z.number().int().optional(),
+    networkRequestId: z.string().optional(),
+    workerId: z.string().optional(),
+    executionContextId: z.number().int().optional(),
+    timestamp: z.number().finite().optional()
   })
   .strict();
 

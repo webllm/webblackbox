@@ -35,6 +35,7 @@ type SessionRuntime = {
   recorder: WebBlackboxRecorder;
   pipeline: SessionPipelineClient;
   cdpRouter: CdpRouter | null;
+  enabledCdpSessions: Set<string>;
   requestMeta: Map<string, { url?: string; mimeType?: string; status?: number }>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
   lastPointer: PointerState | null;
@@ -309,6 +310,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     ),
     pipeline,
     cdpRouter: null,
+    enabledCdpSessions: new Set<string>(),
     requestMeta: new Map(),
     screenshotInterval: null,
     lastPointer: null,
@@ -731,7 +733,9 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
     runtime.removeCdpListeners.push(unsubscribeEvent, unsubscribeDetach);
 
     await router.attach(runtime.tabId);
+    runtime.enabledCdpSessions.clear();
     await router.enableBaseline(runtime.tabId);
+    runtime.enabledCdpSessions.add("root");
     await router.enableAutoAttach(runtime.tabId);
     await router.send({ tabId: runtime.tabId }, "DOMStorage.enable").catch(() => undefined);
     await router.send({ tabId: runtime.tabId }, "Performance.enable").catch(() => undefined);
@@ -763,6 +767,26 @@ async function processFullModeEvent(
   sessionId?: string
 ): Promise<void> {
   const payload = asRecord(params);
+
+  if (method === "Target.attachedToTarget") {
+    const childSessionId = typeof payload?.sessionId === "string" ? payload.sessionId : undefined;
+
+    if (childSessionId) {
+      await primeChildCdpSession(runtime, childSessionId);
+    }
+
+    return;
+  }
+
+  if (method === "Target.detachedFromTarget") {
+    const childSessionId = typeof payload?.sessionId === "string" ? payload.sessionId : undefined;
+
+    if (childSessionId) {
+      runtime.enabledCdpSessions.delete(childSessionId);
+    }
+
+    return;
+  }
 
   if (method === "Network.responseReceived") {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
@@ -796,6 +820,30 @@ async function processFullModeEvent(
 
   if (method === "Page.frameNavigated") {
     await captureDomSnapshot(runtime, "navigation");
+  }
+}
+
+async function primeChildCdpSession(
+  runtime: SessionRuntime,
+  childSessionId: string
+): Promise<void> {
+  if (!runtime.cdpRouter || runtime.enabledCdpSessions.has(childSessionId)) {
+    return;
+  }
+
+  runtime.enabledCdpSessions.add(childSessionId);
+
+  try {
+    await runtime.cdpRouter.enableBaseline(runtime.tabId, childSessionId);
+    await runtime.cdpRouter.enableAutoAttach(runtime.tabId, undefined, childSessionId);
+    await runtime.cdpRouter
+      .send({ tabId: runtime.tabId, sessionId: childSessionId }, "DOMStorage.enable")
+      .catch(() => undefined);
+    await runtime.cdpRouter
+      .send({ tabId: runtime.tabId, sessionId: childSessionId }, "Performance.enable")
+      .catch(() => undefined);
+  } catch {
+    runtime.enabledCdpSessions.delete(childSessionId);
   }
 }
 
@@ -1412,6 +1460,8 @@ async function teardownCaptureInstrumentation(runtime: SessionRuntime): Promise<
     runtime.cdpRouter.dispose();
     runtime.cdpRouter = null;
   }
+
+  runtime.enabledCdpSessions.clear();
 
   if (runtime.screenshotInterval !== null) {
     clearInterval(runtime.screenshotInterval);
