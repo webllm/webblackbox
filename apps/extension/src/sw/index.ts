@@ -131,6 +131,8 @@ const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
 const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
+const LITE_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
+const LITE_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const CPU_PROFILE_SAMPLE_MS = 350;
 const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
@@ -466,6 +468,20 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
 
   updateRuntimeInteractionState(runtime, nextRawEvent);
 
+  if (shouldMaterializeLiteScreenshot(runtime, nextRawEvent)) {
+    enqueue(runtime, async () => {
+      const materialized = await materializeLiteScreenshot(runtime, nextRawEvent);
+
+      if (!materialized) {
+        return;
+      }
+
+      runtime.recorder.ingest(materialized);
+    });
+
+    return;
+  }
+
   if (runtime.mode === "full" && shouldCaptureActionScreenshot(nextRawEvent, runtime)) {
     runtime.lastActionScreenshotMono = nextRawEvent.mono;
     enqueue(runtime, async () => {
@@ -474,6 +490,68 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
   }
 
   runtime.recorder.ingest(nextRawEvent);
+}
+
+function shouldMaterializeLiteScreenshot(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): boolean {
+  if (runtime.mode !== "lite") {
+    return false;
+  }
+
+  if (rawEvent.source !== "content" || rawEvent.rawType !== "screenshot") {
+    return false;
+  }
+
+  const payload = asRecord(rawEvent.payload);
+  return typeof payload?.dataUrl === "string" && payload.dataUrl.length > 0;
+}
+
+async function materializeLiteScreenshot(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): Promise<RawRecorderEvent | null> {
+  const payload = asRecord(rawEvent.payload);
+  const dataUrl = asString(payload?.dataUrl);
+
+  if (!payload || !dataUrl || dataUrl.length > LITE_SCREENSHOT_MAX_DATA_URL_LENGTH) {
+    return null;
+  }
+
+  const decoded = decodeDataUrl(dataUrl);
+
+  if (
+    !decoded ||
+    decoded.bytes.byteLength === 0 ||
+    decoded.bytes.byteLength > LITE_SCREENSHOT_MAX_BYTES
+  ) {
+    return null;
+  }
+
+  const shotId = await runtime.pipeline.putBlob(decoded.mime, decoded.bytes);
+  const width = normalizePositiveInt(payload.w) ?? normalizePositiveInt(payload.width);
+  const height = normalizePositiveInt(payload.h) ?? normalizePositiveInt(payload.height);
+  const quality = normalizePositiveInt(payload.quality);
+  const reason = asString(payload.reason) ?? undefined;
+  const viewport = normalizeScreenshotViewport(payload.viewport);
+  const pointer = normalizeScreenshotPointer(payload.pointer);
+  const format = decoded.mime.includes("png") ? "png" : "webp";
+
+  return {
+    ...rawEvent,
+    payload: {
+      shotId,
+      format,
+      w: width,
+      h: height,
+      quality: format === "webp" ? quality : undefined,
+      size: decoded.bytes.byteLength,
+      reason,
+      viewport,
+      pointer
+    }
+  };
 }
 
 function updateRuntimeInteractionState(runtime: SessionRuntime, rawEvent: RawRecorderEvent): void {
@@ -1293,6 +1371,40 @@ function decodeBase64(value: string): Uint8Array {
   return bytes;
 }
 
+function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } | null {
+  if (!dataUrl.startsWith("data:")) {
+    return null;
+  }
+
+  const commaIndex = dataUrl.indexOf(",");
+
+  if (commaIndex <= 5) {
+    return null;
+  }
+
+  const header = dataUrl.slice(5, commaIndex);
+  const encoded = dataUrl.slice(commaIndex + 1);
+  const segments = header.split(";");
+  const mime = segments[0] && segments[0].length > 0 ? segments[0] : "application/octet-stream";
+  const isBase64 = segments.includes("base64");
+
+  try {
+    if (isBase64) {
+      return {
+        mime,
+        bytes: decodeBase64(encoded)
+      };
+    }
+
+    return {
+      mime,
+      bytes: new TextEncoder().encode(decodeURIComponent(encoded))
+    };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeFullModePayload(method: string, params: unknown): unknown {
   const payload = asRecord(params);
 
@@ -1327,6 +1439,70 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function normalizePositiveInt(value: unknown): number | undefined {
+  const candidate = asFiniteNumber(value);
+
+  if (candidate === null || candidate <= 0) {
+    return undefined;
+  }
+
+  return Math.max(1, Math.round(candidate));
+}
+
+function normalizeScreenshotViewport(
+  value: unknown
+): { width: number; height: number; dpr: number } | undefined {
+  const row = asRecord(value);
+
+  if (!row) {
+    return undefined;
+  }
+
+  const width = normalizePositiveInt(row.width);
+  const height = normalizePositiveInt(row.height);
+  const dpr = asFiniteNumber(row.dpr);
+
+  if (!width || !height || dpr === null || dpr <= 0) {
+    return undefined;
+  }
+
+  return {
+    width,
+    height,
+    dpr: Number(dpr.toFixed(3))
+  };
+}
+
+function normalizeScreenshotPointer(
+  value: unknown
+): { x: number; y: number; t?: number; mono?: number } | undefined {
+  const row = asRecord(value);
+
+  if (!row) {
+    return undefined;
+  }
+
+  const x = asFiniteNumber(row.x);
+  const y = asFiniteNumber(row.y);
+  const t = asFiniteNumber(row.t);
+  const mono = asFiniteNumber(row.mono);
+
+  if (x === null || y === null) {
+    return undefined;
+  }
+
+  return {
+    x: Number(x.toFixed(2)),
+    y: Number(y.toFixed(2)),
+    t: t === null ? undefined : t,
+    mono: mono === null ? undefined : mono
+  };
 }
 
 function normalizeSamplingInterval(candidate: unknown, fallback: number): number {

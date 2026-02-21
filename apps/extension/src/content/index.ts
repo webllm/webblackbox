@@ -1,4 +1,5 @@
 import type { RawRecorderEvent } from "@webblackbox/recorder";
+import html2canvas from "html2canvas-pro";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
@@ -10,6 +11,12 @@ const eventBuffer: RawRecorderEvent[] = [];
 const preRecordingBuffer: RawRecorderEvent[] = [];
 const mutationBuffer: Array<Record<string, unknown>> = [];
 const PRE_RECORDING_BUFFER_MAX = 400;
+const SCREENSHOT_MAX_DATA_URL_LENGTH = 10 * 1024 * 1024;
+const SCREENSHOT_POINTER_STALE_MS = 2_500;
+const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
+const SCREENSHOT_MAX_DIMENSION_PX = 1_440;
+const SCREENSHOT_MAX_SCALE = 1.5;
+const SCREENSHOT_MIN_SCALE = 0.45;
 
 type ContentSampling = {
   mousemoveHz: number;
@@ -32,9 +39,14 @@ let recordingActive = false;
 let indicator: HTMLDivElement | null = null;
 let mutationObserver: MutationObserver | null = null;
 let snapshotTimer = 0;
+let screenshotTimer = 0;
 let mutationFlushTimer = 0;
 let lastScrollTime = 0;
 let lastPointerTime = 0;
+let screenshotInFlight = false;
+let screenshotPendingReason: string | null = null;
+let lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
+let lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
 let sampling: ContentSampling = { ...DEFAULT_SAMPLING };
 
 if (port) {
@@ -98,7 +110,9 @@ function installInputAndLifecycleCapture(): void {
   document.addEventListener(
     "click",
     (event) => {
+      trackPointer(event.clientX, event.clientY);
       queueEvent("click", clickPayload(event));
+      scheduleScreenshotCapture("action:click", true);
     },
     true
   );
@@ -106,7 +120,9 @@ function installInputAndLifecycleCapture(): void {
   document.addEventListener(
     "dblclick",
     (event) => {
+      trackPointer(event.clientX, event.clientY);
       queueEvent("dblclick", clickPayload(event));
+      scheduleScreenshotCapture("action:dblclick", true);
     },
     true
   );
@@ -128,6 +144,8 @@ function installInputAndLifecycleCapture(): void {
         metaKey: event.metaKey,
         target: toTargetPayload(event.target)
       });
+
+      scheduleScreenshotCapture("action:keydown", true);
     },
     true
   );
@@ -194,6 +212,7 @@ function installInputAndLifecycleCapture(): void {
       queueEvent("submit", {
         target: toTargetPayload(event.target)
       });
+      scheduleScreenshotCapture("action:submit", true);
     },
     true
   );
@@ -224,6 +243,7 @@ function installInputAndLifecycleCapture(): void {
   document.addEventListener(
     "pointermove",
     (event) => {
+      trackPointer(event.clientX, event.clientY);
       const now = performance.now();
       const pointerGapMs = Math.max(16, Math.round(1000 / Math.max(1, sampling.mousemoveHz)));
 
@@ -367,7 +387,16 @@ function startMutationAndSnapshots(): void {
     }, snapshotIntervalMs);
   }
 
+  if (screenshotTimer === 0) {
+    const screenshotIntervalMs = Math.max(250, Math.round(sampling.screenshotIdleMs));
+    screenshotTimer = window.setInterval(() => {
+      scheduleScreenshotCapture("interval");
+    }, screenshotIntervalMs);
+  }
+
   emitViewportSnapshot("start");
+  emitDomSnapshot("start");
+  scheduleScreenshotCapture("start", true);
 }
 
 function stopMutationAndSnapshots(): void {
@@ -378,6 +407,13 @@ function stopMutationAndSnapshots(): void {
     clearInterval(snapshotTimer);
     snapshotTimer = 0;
   }
+
+  if (screenshotTimer > 0) {
+    clearInterval(screenshotTimer);
+    screenshotTimer = 0;
+  }
+
+  screenshotPendingReason = null;
 
   if (mutationFlushTimer > 0) {
     clearTimeout(mutationFlushTimer);
@@ -453,6 +489,157 @@ function emitMarker(message: string): void {
   });
 
   emitDomSnapshot("marker");
+  scheduleScreenshotCapture("marker", true);
+}
+
+function scheduleScreenshotCapture(reason: string, prioritize = false): void {
+  if (!recordingActive) {
+    return;
+  }
+
+  const nowMono = monotonicTime();
+  const isAction = reason.startsWith("action:");
+
+  if (isAction && nowMono - lastActionScreenshotMono < SCREENSHOT_ACTION_COOLDOWN_MS) {
+    return;
+  }
+
+  if (isAction) {
+    lastActionScreenshotMono = nowMono;
+  }
+
+  if (screenshotInFlight) {
+    if (prioritize || screenshotPendingReason === null) {
+      screenshotPendingReason = reason;
+    }
+
+    return;
+  }
+
+  screenshotInFlight = true;
+
+  void captureScreenshot(reason).finally(() => {
+    screenshotInFlight = false;
+
+    const pending = screenshotPendingReason;
+    screenshotPendingReason = null;
+
+    if (pending) {
+      scheduleScreenshotCapture(pending);
+    }
+  });
+}
+
+async function captureScreenshot(reason: string): Promise<void> {
+  if (!recordingActive || document.visibilityState === "hidden") {
+    return;
+  }
+
+  const root = document.documentElement;
+  const viewportWidth = Math.max(1, Math.round(window.innerWidth));
+  const viewportHeight = Math.max(1, Math.round(window.innerHeight));
+  const baseScale = Math.max(1, window.devicePixelRatio || 1);
+  const dimensionScale = Math.min(
+    1,
+    SCREENSHOT_MAX_DIMENSION_PX / Math.max(viewportWidth, viewportHeight)
+  );
+  const scale = Math.max(
+    SCREENSHOT_MIN_SCALE,
+    Math.min(SCREENSHOT_MAX_SCALE, Number((baseScale * dimensionScale).toFixed(3)))
+  );
+
+  const previousIndicatorVisibility = indicator?.style.visibility;
+
+  if (indicator) {
+    indicator.style.visibility = "hidden";
+  }
+
+  try {
+    const canvas = await html2canvas(root, {
+      backgroundColor: null,
+      useCORS: true,
+      allowTaint: false,
+      logging: false,
+      scale,
+      x: window.scrollX,
+      y: window.scrollY,
+      width: viewportWidth,
+      height: viewportHeight,
+      windowWidth: Math.max(document.documentElement.scrollWidth, viewportWidth),
+      windowHeight: Math.max(document.documentElement.scrollHeight, viewportHeight),
+      scrollX: window.scrollX,
+      scrollY: window.scrollY
+    });
+
+    const webpDataUrl = safeCanvasToDataUrl(canvas, "image/webp", 0.72);
+    const pngDataUrl = webpDataUrl ? null : safeCanvasToDataUrl(canvas, "image/png");
+    const dataUrl = webpDataUrl ?? pngDataUrl;
+
+    if (!dataUrl || dataUrl.length > SCREENSHOT_MAX_DATA_URL_LENGTH) {
+      return;
+    }
+
+    queueEvent("screenshot", {
+      reason,
+      dataUrl,
+      format: webpDataUrl ? "webp" : "png",
+      quality: webpDataUrl ? 72 : undefined,
+      w: canvas.width,
+      h: canvas.height,
+      viewport: {
+        width: viewportWidth,
+        height: viewportHeight,
+        dpr: Number((window.devicePixelRatio || 1).toFixed(3))
+      },
+      pointer: readPointerSnapshot()
+    });
+  } catch {
+    void 0;
+  } finally {
+    if (indicator) {
+      indicator.style.visibility = previousIndicatorVisibility ?? "";
+    }
+  }
+}
+
+function safeCanvasToDataUrl(
+  canvas: HTMLCanvasElement,
+  format: string,
+  quality?: number
+): string | null {
+  try {
+    return typeof quality === "number"
+      ? canvas.toDataURL(format, quality)
+      : canvas.toDataURL(format);
+  } catch {
+    return null;
+  }
+}
+
+function trackPointer(x: number, y: number): void {
+  lastPointerState = {
+    x: Number(x.toFixed(2)),
+    y: Number(y.toFixed(2)),
+    t: Date.now(),
+    mono: monotonicTime()
+  };
+}
+
+function readPointerSnapshot(): Record<string, unknown> | undefined {
+  if (!lastPointerState) {
+    return undefined;
+  }
+
+  if (Date.now() - lastPointerState.t > SCREENSHOT_POINTER_STALE_MS) {
+    return undefined;
+  }
+
+  return {
+    x: lastPointerState.x,
+    y: lastPointerState.y,
+    t: lastPointerState.t,
+    mono: lastPointerState.mono
+  };
 }
 
 function queueEvent(rawType: string, payload: Record<string, unknown>): void {
