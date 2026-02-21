@@ -77,25 +77,25 @@ export class DefaultEventNormalizer implements EventNormalizer {
 
       if (input.rawType === "fetch" || input.rawType === "xhr") {
         const payload = asRecord(input.payload);
-        const phase = payload?.phase;
+        const phase = asString(payload?.phase);
 
         if (phase === "end") {
           return {
             eventType: "network.response",
-            payload: input.payload
+            payload: normalizeContentNetworkResponsePayload(payload)
           };
         }
 
         return {
           eventType: "network.request",
-          payload: input.payload
+          payload: normalizeContentNetworkRequestPayload(payload)
         };
       }
 
       if (input.rawType === "fetchError") {
         return {
           eventType: "network.failed",
-          payload: input.payload
+          payload: normalizeContentNetworkFailedPayload(asRecord(input.payload))
         };
       }
 
@@ -180,6 +180,112 @@ function normalizeContentConsolePayload(payload: unknown): Record<string, unknow
     args,
     stackTop: asString(row?.stackTop) ?? undefined
   });
+}
+
+function normalizeContentNetworkRequestPayload(
+  payload: Record<string, unknown> | null
+): Record<string, unknown> {
+  const method = (asString(payload?.method) ?? "GET").toUpperCase();
+  const url = asString(payload?.url) ?? "unknown://request";
+  const reqId = readRequestId(payload) ?? buildFallbackReqId(method, url);
+
+  return stripUndefined({
+    reqId,
+    requestId: reqId,
+    method,
+    url,
+    headers: normalizeHeaderRecord(payload?.headers),
+    postDataSize:
+      asFiniteNumber(payload?.postDataSize) ??
+      asFiniteNumber(payload?.bodyLength) ??
+      asFiniteNumber(payload?.size) ??
+      undefined
+  });
+}
+
+function normalizeContentNetworkResponsePayload(
+  payload: Record<string, unknown> | null
+): Record<string, unknown> {
+  const method = asString(payload?.method);
+  const url = asString(payload?.url);
+  const reqId =
+    readRequestId(payload) ?? buildFallbackReqId(method ?? "GET", url ?? "unknown://request");
+
+  return stripUndefined({
+    reqId,
+    requestId: reqId,
+    method: method ? method.toUpperCase() : undefined,
+    url,
+    status: asFiniteNumber(payload?.status) ?? undefined,
+    statusText: asString(payload?.statusText) ?? undefined,
+    mimeType: asString(payload?.mimeType) ?? undefined,
+    headers: normalizeHeaderRecord(payload?.headers),
+    encodedDataLength:
+      asFiniteNumber(payload?.encodedDataLength) ??
+      asFiniteNumber(payload?.bodyLength) ??
+      asFiniteNumber(payload?.size) ??
+      undefined,
+    duration: asFiniteNumber(payload?.duration) ?? undefined,
+    ok: asBoolean(payload?.ok),
+    redirected: asBoolean(payload?.redirected),
+    responseUrl: asString(payload?.responseUrl) ?? undefined,
+    failed: asBoolean(payload?.failed)
+  });
+}
+
+function normalizeContentNetworkFailedPayload(
+  payload: Record<string, unknown> | null
+): Record<string, unknown> {
+  const method = asString(payload?.method);
+  const url = asString(payload?.url);
+  const reqId =
+    readRequestId(payload) ?? buildFallbackReqId(method ?? "GET", url ?? "unknown://request");
+
+  return stripUndefined({
+    reqId,
+    requestId: reqId,
+    method: method ? method.toUpperCase() : undefined,
+    url,
+    duration: asFiniteNumber(payload?.duration) ?? undefined,
+    message: asString(payload?.message) ?? undefined,
+    errorText: asString(payload?.errorText) ?? asString(payload?.message) ?? undefined
+  });
+}
+
+function readRequestId(payload: Record<string, unknown> | null): string | null {
+  return (
+    asString(payload?.reqId) ??
+    asString(payload?.requestId) ??
+    asString(asRecord(payload?.request)?.requestId) ??
+    null
+  );
+}
+
+function buildFallbackReqId(method: string, url: string): string {
+  return `content-${method.toUpperCase()}-${compactText(url, 120)}`;
+}
+
+function normalizeHeaderRecord(value: unknown): Record<string, string> | undefined {
+  const row = asRecord(value);
+
+  if (!row) {
+    return undefined;
+  }
+
+  const output: Record<string, string> = {};
+
+  for (const [key, entry] of Object.entries(row).slice(0, 64)) {
+    if (typeof entry === "string") {
+      output[key.toLowerCase()] = compactText(entry, 500);
+      continue;
+    }
+
+    if (typeof entry === "number" || typeof entry === "boolean") {
+      output[key.toLowerCase()] = String(entry);
+    }
+  }
+
+  return Object.keys(output).length > 0 ? output : undefined;
 }
 
 function normalizeConsoleLevel(rawLevel: string): ConsoleLevel {
@@ -363,6 +469,10 @@ function asString(value: unknown): string | undefined {
 
 function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function compactText(value: string, maxLength: number): string {

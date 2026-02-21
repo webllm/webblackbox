@@ -2,6 +2,7 @@ type CapturePayload = Record<string, unknown>;
 
 const FLAG = "__WEBBLACKBOX_INJECTED__";
 const windowFlags = window as unknown as Record<string, unknown>;
+let networkRequestSeq = 0;
 
 if (!windowFlags[FLAG]) {
   windowFlags[FLAG] = true;
@@ -262,43 +263,52 @@ function installNetworkHooks(): void {
   const originalFetch = window.fetch.bind(window);
 
   window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
-    const request = args[0];
-    const requestUrl =
-      request instanceof Request
-        ? request.url
-        : typeof request === "string"
-          ? request
-          : request instanceof URL
-            ? request.toString()
-            : "unknown";
-    const method = request instanceof Request ? request.method : "GET";
-    const started = performance.now();
+    const requestMeta = resolveFetchRequestMeta(args);
+    const reqId = nextRequestId("fetch");
+    const startedMono = monotonicTime();
 
     emit("fetch", {
       phase: "start",
-      method,
-      url: requestUrl
+      reqId,
+      requestId: reqId,
+      method: requestMeta.method,
+      url: requestMeta.url,
+      headers: requestMeta.headers,
+      postDataSize: requestMeta.postDataSize
     });
 
     try {
       const response = await originalFetch(...args);
+      const contentType = normalizeContentType(response.headers.get("content-type"));
+      const encodedDataLength = parseHeaderInt(response.headers.get("content-length"));
 
       emit("fetch", {
         phase: "end",
-        method,
-        url: requestUrl,
+        reqId,
+        requestId: reqId,
+        method: requestMeta.method,
+        url: requestMeta.url,
         status: response.status,
+        statusText: response.statusText,
         ok: response.ok,
-        duration: performance.now() - started
+        redirected: response.redirected,
+        responseUrl: response.url,
+        mimeType: contentType,
+        headers: readHeaders(response.headers),
+        encodedDataLength,
+        duration: monotonicTime() - startedMono
       });
 
       return response;
     } catch (error) {
       emit("fetchError", {
-        method,
-        url: requestUrl,
-        duration: performance.now() - started,
-        message: error instanceof Error ? error.message : String(error)
+        reqId,
+        requestId: reqId,
+        method: requestMeta.method,
+        url: requestMeta.url,
+        duration: monotonicTime() - startedMono,
+        message: error instanceof Error ? error.message : String(error),
+        errorText: error instanceof Error ? error.message : String(error)
       });
 
       throw error;
@@ -316,37 +326,123 @@ function installNetworkHooks(): void {
     password?: string | null
   ): void {
     (
-      this as XMLHttpRequest & { __wbMethod?: string; __wbUrl?: string; __wbStarted?: number }
+      this as XMLHttpRequest & {
+        __wbReqId?: string;
+        __wbMethod?: string;
+        __wbUrl?: string;
+        __wbStartedMono?: number;
+        __wbFailed?: boolean;
+      }
+    ).__wbReqId = nextRequestId("xhr");
+    (
+      this as XMLHttpRequest & {
+        __wbReqId?: string;
+        __wbMethod?: string;
+        __wbUrl?: string;
+        __wbStartedMono?: number;
+        __wbFailed?: boolean;
+      }
     ).__wbMethod = method;
     (
-      this as XMLHttpRequest & { __wbMethod?: string; __wbUrl?: string; __wbStarted?: number }
+      this as XMLHttpRequest & {
+        __wbReqId?: string;
+        __wbMethod?: string;
+        __wbUrl?: string;
+        __wbStartedMono?: number;
+        __wbFailed?: boolean;
+      }
     ).__wbUrl = typeof url === "string" ? url : url.toString();
+    (
+      this as XMLHttpRequest & {
+        __wbReqId?: string;
+        __wbMethod?: string;
+        __wbUrl?: string;
+        __wbStartedMono?: number;
+        __wbFailed?: boolean;
+      }
+    ).__wbFailed = false;
 
     xhrOpen.call(this, method, url, async ?? true, username ?? null, password ?? null);
   };
 
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null): void {
     const xhr = this as XMLHttpRequest & {
+      __wbReqId?: string;
       __wbMethod?: string;
       __wbUrl?: string;
-      __wbStarted?: number;
+      __wbStartedMono?: number;
+      __wbFailed?: boolean;
     };
-    xhr.__wbStarted = performance.now();
+    xhr.__wbStartedMono = monotonicTime();
+    const reqId = xhr.__wbReqId ?? nextRequestId("xhr");
+    xhr.__wbReqId = reqId;
 
     emit("xhr", {
       phase: "start",
+      reqId,
+      requestId: reqId,
       method: xhr.__wbMethod ?? "GET",
       url: xhr.__wbUrl ?? "unknown",
-      bodyLength: typeof body === "string" ? body.length : undefined
+      postDataSize: estimateBodyLength(body)
     });
 
-    this.addEventListener("loadend", () => {
-      emit("xhr", {
-        phase: "end",
+    const emitXhrFailure = (reason: string) => {
+      if (xhr.__wbFailed) {
+        return;
+      }
+
+      xhr.__wbFailed = true;
+
+      emit("fetchError", {
+        reqId,
+        requestId: reqId,
         method: xhr.__wbMethod ?? "GET",
         url: xhr.__wbUrl ?? "unknown",
+        duration: monotonicTime() - (xhr.__wbStartedMono ?? monotonicTime()),
+        message: reason,
+        errorText: reason
+      });
+    };
+
+    this.addEventListener(
+      "error",
+      () => {
+        emitXhrFailure("XHR error");
+      },
+      { once: true }
+    );
+    this.addEventListener(
+      "abort",
+      () => {
+        emitXhrFailure("XHR aborted");
+      },
+      { once: true }
+    );
+    this.addEventListener(
+      "timeout",
+      () => {
+        emitXhrFailure("XHR timeout");
+      },
+      { once: true }
+    );
+
+    this.addEventListener("loadend", () => {
+      const contentType = normalizeContentType(this.getResponseHeader("content-type"));
+
+      emit("xhr", {
+        phase: "end",
+        reqId,
+        requestId: reqId,
+        method: xhr.__wbMethod ?? "GET",
+        url: this.responseURL || xhr.__wbUrl || "unknown",
         status: this.status,
-        duration: performance.now() - (xhr.__wbStarted ?? performance.now())
+        statusText: this.statusText,
+        ok: this.status >= 200 && this.status < 400,
+        headers: parseXhrResponseHeaders(this.getAllResponseHeaders()),
+        mimeType: contentType,
+        encodedDataLength: parseHeaderInt(this.getResponseHeader("content-length")),
+        failed: Boolean(xhr.__wbFailed),
+        duration: monotonicTime() - (xhr.__wbStartedMono ?? monotonicTime())
       });
     });
 
@@ -364,16 +460,21 @@ function installNetworkHooks(): void {
         super(...args);
 
         const url = typeof args[0] === "string" ? args[0] : String(args[0]);
+        const streamId = nextRequestId("sse");
 
         emit("sse", {
           phase: "open",
-          url
+          url,
+          streamId,
+          requestId: streamId
         });
 
         this.addEventListener("message", (event) => {
           emit("sse", {
             phase: "message",
             url,
+            streamId,
+            requestId: streamId,
             eventType: event.type,
             lastEventId: event.lastEventId,
             data:
@@ -385,6 +486,8 @@ function installNetworkHooks(): void {
           emit("sse", {
             phase: "error",
             url,
+            streamId,
+            requestId: streamId,
             readyState: this.readyState
           });
         });
@@ -394,6 +497,159 @@ function installNetworkHooks(): void {
     window.EventSource = WebBlackboxEventSource as typeof EventSource;
     windowFlags.__WEBBLACKBOX_EVENTSOURCE_PATCHED__ = true;
   }
+}
+
+function nextRequestId(prefix: "fetch" | "xhr" | "sse"): string {
+  networkRequestSeq += 1;
+  return `${prefix}-${Date.now().toString(36)}-${networkRequestSeq.toString(36)}`;
+}
+
+function resolveFetchRequestMeta(args: Parameters<typeof fetch>): {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  postDataSize?: number;
+} {
+  const [request, init] = args;
+  const requestInit = init ?? {};
+  const requestUrl =
+    request instanceof Request
+      ? request.url
+      : typeof request === "string"
+        ? request
+        : request instanceof URL
+          ? request.toString()
+          : "unknown";
+  const requestMethod = (
+    requestInit.method ??
+    (request instanceof Request ? request.method : undefined) ??
+    "GET"
+  ).toUpperCase();
+  const headerSource =
+    requestInit.headers ?? (request instanceof Request ? request.headers : undefined);
+  const headers = headerSource ? toHeaderRecord(headerSource) : undefined;
+  const bodyCandidate = requestInit.body;
+  const postDataSize = estimateBodyLength(bodyCandidate);
+
+  return {
+    url: requestUrl,
+    method: requestMethod,
+    headers,
+    postDataSize
+  };
+}
+
+function toHeaderRecord(rawHeaders: HeadersInit): Record<string, string> | undefined {
+  const headers = new Headers(rawHeaders);
+  const output: Record<string, string> = {};
+  let count = 0;
+
+  headers.forEach((value, key) => {
+    if (count >= 64) {
+      return;
+    }
+
+    output[key] = value.slice(0, 500);
+    count += 1;
+  });
+
+  return count > 0 ? output : undefined;
+}
+
+function readHeaders(headers: Headers): Record<string, string> | undefined {
+  return toHeaderRecord(headers);
+}
+
+function parseXhrResponseHeaders(value: string): Record<string, string> | undefined {
+  if (value.trim().length === 0) {
+    return undefined;
+  }
+
+  const output: Record<string, string> = {};
+  let count = 0;
+
+  for (const line of value.split(/\r?\n/)) {
+    if (count >= 64 || line.trim().length === 0) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(":");
+
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim().toLowerCase();
+    const entry = line.slice(separatorIndex + 1).trim();
+
+    if (key.length === 0 || entry.length === 0) {
+      continue;
+    }
+
+    output[key] = entry.slice(0, 500);
+    count += 1;
+  }
+
+  return count > 0 ? output : undefined;
+}
+
+function parseHeaderInt(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function normalizeContentType(value: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const [mime] = value.split(";");
+  const normalized = mime?.trim();
+  return normalized && normalized.length > 0 ? normalized : undefined;
+}
+
+function estimateBodyLength(value: unknown): number | undefined {
+  if (typeof value === "string") {
+    return value.length;
+  }
+
+  if (value instanceof URLSearchParams) {
+    return value.toString().length;
+  }
+
+  if (value instanceof FormData) {
+    let total = 0;
+
+    for (const [key, entry] of value.entries()) {
+      total += key.length;
+
+      if (typeof entry === "string") {
+        total += entry.length;
+      } else if (entry instanceof Blob) {
+        total += entry.size;
+      }
+    }
+
+    return total;
+  }
+
+  if (value instanceof Blob) {
+    return value.size;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return value.byteLength;
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return value.byteLength;
+  }
+
+  return undefined;
 }
 
 function installIndexedDbHooks(): void {

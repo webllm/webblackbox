@@ -214,6 +214,104 @@ describe("recorder", () => {
     expect(injectedPayload?.stackTop).toContain("table");
   });
 
+  it("normalizes injected fetch/xhr payloads into correlated network events", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const base = Date.now();
+
+    const fetchRequest = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-network",
+      tabId: 15,
+      t: base,
+      mono: 1,
+      payload: {
+        phase: "start",
+        reqId: "fetch-a1",
+        method: "post",
+        url: "https://example.test/api/tasks",
+        headers: {
+          "content-type": "application/json"
+        },
+        postDataSize: 128
+      }
+    });
+
+    const fetchResponse = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-network",
+      tabId: 15,
+      t: base + 40,
+      mono: 2,
+      payload: {
+        phase: "end",
+        requestId: "fetch-a1",
+        method: "post",
+        url: "https://example.test/api/tasks",
+        status: 201,
+        statusText: "Created",
+        mimeType: "application/json",
+        duration: 40.2
+      }
+    });
+
+    const xhrFailed = recorder.ingest({
+      source: "content",
+      rawType: "fetchError",
+      sid: "S-network",
+      tabId: 15,
+      t: base + 50,
+      mono: 3,
+      payload: {
+        reqId: "xhr-a2",
+        method: "GET",
+        url: "https://example.test/api/slow",
+        duration: 700,
+        message: "XHR timeout"
+      }
+    });
+
+    expect(fetchRequest.event?.type).toBe("network.request");
+    expect(fetchResponse.event?.type).toBe("network.response");
+    expect(xhrFailed.event?.type).toBe("network.failed");
+
+    const requestPayload = fetchRequest.event?.data as
+      | {
+          reqId?: string;
+          requestId?: string;
+          method?: string;
+          postDataSize?: number;
+        }
+      | undefined;
+    expect(requestPayload?.reqId).toBe("fetch-a1");
+    expect(requestPayload?.requestId).toBe("fetch-a1");
+    expect(requestPayload?.method).toBe("POST");
+    expect(requestPayload?.postDataSize).toBe(128);
+
+    const responsePayload = fetchResponse.event?.data as
+      | {
+          reqId?: string;
+          requestId?: string;
+          status?: number;
+          duration?: number;
+        }
+      | undefined;
+    expect(responsePayload?.reqId).toBe("fetch-a1");
+    expect(responsePayload?.requestId).toBe("fetch-a1");
+    expect(responsePayload?.status).toBe(201);
+    expect(responsePayload?.duration).toBeCloseTo(40.2, 4);
+
+    const failedPayload = xhrFailed.event?.data as
+      | {
+          reqId?: string;
+          errorText?: string;
+        }
+      | undefined;
+    expect(failedPayload?.reqId).toBe("xhr-a2");
+    expect(failedPayload?.errorText).toContain("timeout");
+  });
+
   it("retains only events in ring buffer time window", () => {
     const buffer = new EventRingBuffer(1);
     const base = Date.now();
