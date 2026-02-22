@@ -614,6 +614,7 @@ input[type="file"],
   opacity: 0.6;
   pointer-events: none;
   z-index: 1;
+  display: none;
 }
 
 .progress-hover {
