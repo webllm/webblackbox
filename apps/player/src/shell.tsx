@@ -333,14 +333,85 @@ export function PlayerShell(): React.JSX.Element {
 
           <Card className="network-card" data-log-panel-target="network">
             <h2>Network</h2>
+            <div className="network-toolbar" role="group" aria-label="Network filters">
+              <Input id="network-filter" type="search" placeholder="Filter URL, host, id, method" />
+              <Select id="network-method-filter" defaultValue="all">
+                <option value="all">All Methods</option>
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+                <option value="OPTIONS">OPTIONS</option>
+                <option value="HEAD">HEAD</option>
+              </Select>
+              <Select id="network-status-filter" defaultValue="all">
+                <option value="all">All Status</option>
+                <option value="success">2xx</option>
+                <option value="redirect">3xx</option>
+                <option value="client-error">4xx</option>
+                <option value="server-error">5xx</option>
+                <option value="failed">Failed</option>
+              </Select>
+              <Select id="network-type-filter" defaultValue="all">
+                <option value="all">All Types</option>
+                <option value="document">Document</option>
+                <option value="fetch">Fetch/XHR</option>
+                <option value="script">Script</option>
+                <option value="stylesheet">Stylesheet</option>
+                <option value="image">Image</option>
+                <option value="font">Font</option>
+                <option value="text">Text</option>
+                <option value="other">Other</option>
+              </Select>
+              <span id="network-summary" className="network-summary mono">
+                0 / 0 requests
+              </span>
+            </div>
             <div className="waterfall-wrap">
               <table className="waterfall-table">
                 <thead>
                   <tr>
-                    <th align="left">Request</th>
-                    <th align="left">Status</th>
-                    <th align="left">Duration</th>
-                    <th align="left">Action</th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="name" type="button">
+                        Name
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="method" type="button">
+                        Method
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="status" type="button">
+                        Status
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="type" type="button">
+                        Type
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="initiator" type="button">
+                        Initiator
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="size" type="button">
+                        Size
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="time" type="button">
+                        Time
+                      </button>
+                    </th>
+                    <th align="left">
+                      <button className="wf-sort-btn" data-wf-sort-key="start" type="button">
+                        Waterfall
+                      </button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody id="waterfall-body"></tbody>

@@ -14,6 +14,33 @@ import { createRoot } from "react-dom/client";
 import { PlayerShell } from "./shell.js";
 
 type TimelineFilter = "all" | "errors" | "network" | "storage" | "console";
+type NetworkStatusFilter =
+  | "all"
+  | "success"
+  | "redirect"
+  | "client-error"
+  | "server-error"
+  | "failed";
+type NetworkTypeFilter =
+  | "all"
+  | "document"
+  | "fetch"
+  | "script"
+  | "stylesheet"
+  | "image"
+  | "font"
+  | "text"
+  | "other";
+type NetworkSortKey =
+  | "start"
+  | "name"
+  | "method"
+  | "status"
+  | "type"
+  | "initiator"
+  | "size"
+  | "time";
+type NetworkSortDirection = "asc" | "desc";
 type LogPanelKey =
   | "timeline"
   | "details"
@@ -154,6 +181,14 @@ type PlayerState = {
   selectedRequestId: string | null;
   textFilter: string;
   typeFilter: TimelineFilter;
+  networkView: {
+    query: string;
+    method: string;
+    status: NetworkStatusFilter;
+    type: NetworkTypeFilter;
+    sortKey: NetworkSortKey;
+    sortDirection: NetworkSortDirection;
+  };
   activePanel: LogPanelKey;
   playheadMono: number;
   isPlaying: boolean;
@@ -189,7 +224,7 @@ type SetPlayheadOptions = {
 };
 
 const MAX_TIMELINE_ROWS = 20_000;
-const MAX_WATERFALL_ROWS = 180;
+const MAX_WATERFALL_ROWS = 360;
 const MAX_SIGNAL_ROWS = 120;
 const MAX_SHOT_BUTTONS = 180;
 const MAX_TRAIL_POINTS = 110;
@@ -227,6 +262,14 @@ const state: PlayerState = {
   selectedRequestId: null,
   textFilter: "",
   typeFilter: "all",
+  networkView: {
+    query: "",
+    method: "all",
+    status: "all",
+    type: "all",
+    sortKey: "start",
+    sortDirection: "asc"
+  },
   activePanel: "details",
   playheadMono: 0,
   isPlaying: false,
@@ -281,6 +324,11 @@ const refs = {
   logGridDivider: getElement<HTMLElement>("log-grid-divider"),
   textFilter: getElement<HTMLInputElement>("text-filter"),
   typeFilter: getElement<HTMLSelectElement>("type-filter"),
+  networkFilter: getElement<HTMLInputElement>("network-filter"),
+  networkMethodFilter: getElement<HTMLSelectElement>("network-method-filter"),
+  networkStatusFilter: getElement<HTMLSelectElement>("network-status-filter"),
+  networkTypeFilter: getElement<HTMLSelectElement>("network-type-filter"),
+  networkSummary: getElement<HTMLElement>("network-summary"),
   panelTabs: getElement<HTMLElement>("panel-tabs"),
   playbackToggle: getElement<HTMLButtonElement>("playback-toggle"),
   playbackBack: getElement<HTMLButtonElement>("playback-back"),
@@ -332,6 +380,9 @@ const refs = {
 const panelTabButtons = Array.from(
   refs.panelTabs.querySelectorAll<HTMLButtonElement>("button[data-log-panel]")
 );
+const networkSortButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>("button[data-wf-sort-key]")
+);
 const panelCards = Array.from(document.querySelectorAll<HTMLElement>("[data-log-panel-target]"));
 
 bindGlobalActions();
@@ -361,6 +412,46 @@ function bindGlobalActions(): void {
     renderPanels();
     renderSummary();
   });
+
+  refs.networkFilter.addEventListener("input", () => {
+    state.networkView.query = refs.networkFilter.value.trim();
+    renderWaterfall();
+  });
+
+  refs.networkMethodFilter.addEventListener("change", () => {
+    state.networkView.method = refs.networkMethodFilter.value;
+    renderWaterfall();
+  });
+
+  refs.networkStatusFilter.addEventListener("change", () => {
+    state.networkView.status = refs.networkStatusFilter.value as NetworkStatusFilter;
+    renderWaterfall();
+  });
+
+  refs.networkTypeFilter.addEventListener("change", () => {
+    state.networkView.type = refs.networkTypeFilter.value as NetworkTypeFilter;
+    renderWaterfall();
+  });
+
+  for (const button of networkSortButtons) {
+    button.addEventListener("click", () => {
+      const sortKey = button.dataset.wfSortKey as NetworkSortKey | undefined;
+
+      if (!sortKey) {
+        return;
+      }
+
+      if (state.networkView.sortKey === sortKey) {
+        state.networkView.sortDirection =
+          state.networkView.sortDirection === "asc" ? "desc" : "asc";
+      } else {
+        state.networkView.sortKey = sortKey;
+        state.networkView.sortDirection = sortKey === "start" ? "asc" : "desc";
+      }
+
+      renderWaterfall();
+    });
+  }
 
   refs.panelTabs.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
@@ -571,13 +662,13 @@ function bindGlobalActions(): void {
 
   refs.waterfallBody.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
-    const button = target.closest<HTMLButtonElement>("button[data-req-id]");
+    const row = target.closest<HTMLElement>("[data-req-id]");
 
-    if (!button) {
+    if (!row) {
       return;
     }
 
-    const reqId = button.dataset.reqId;
+    const reqId = row.dataset.reqId;
 
     if (!reqId) {
       return;
@@ -1966,7 +2057,9 @@ function renderPanels(): void {
     refs.timelineList.innerHTML = "";
     refs.eventDetails.textContent = "Select a timeline event to inspect payload details.";
     refs.waterfallBody.innerHTML = "";
+    refs.networkSummary.textContent = "0 / 0 requests";
     refs.requestDetails.textContent = "Select a request row to inspect network details.";
+    renderNetworkSortButtons();
     refs.consoleList.innerHTML = "";
     refs.realtimeList.innerHTML = "";
     refs.storageList.innerHTML = "";
@@ -2092,12 +2185,31 @@ function renderEventDetails(): void {
   refs.eventDetails.textContent = JSON.stringify(selected, null, 2);
 }
 
+function renderNetworkSortButtons(): void {
+  for (const button of networkSortButtons) {
+    const sortKey = button.dataset.wfSortKey as NetworkSortKey | undefined;
+    const active = sortKey === state.networkView.sortKey;
+    const descending = active && state.networkView.sortDirection === "desc";
+    const ascending = active && state.networkView.sortDirection === "asc";
+    button.classList.toggle("is-active", active);
+    button.classList.toggle("is-desc", descending);
+    button.classList.toggle("is-asc", ascending);
+    button.setAttribute("aria-pressed", String(active));
+    button.title = active
+      ? `Sorted by ${button.textContent?.trim() ?? "column"} (${descending ? "desc" : "asc"})`
+      : `Sort by ${button.textContent?.trim() ?? "column"}`;
+  }
+}
+
 function renderWaterfall(): void {
   const model = state.model;
   const player = state.player;
 
+  renderNetworkSortButtons();
+
   if (!model || !player) {
     refs.waterfallBody.innerHTML = "";
+    refs.networkSummary.textContent = "0 / 0 requests";
     refs.requestDetails.textContent = "Select a request row to inspect network details.";
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
@@ -2109,12 +2221,23 @@ function renderWaterfall(): void {
     state.playheadMono,
     (entry) => entry.startMono
   );
-  const visible = model.waterfall.slice(0, visibleCount);
+  const visibleEntries = model.waterfall.slice(0, visibleCount);
+  const filteredEntries = applyNetworkViewFilters(visibleEntries);
+  const sortedEntries = sortNetworkEntries(
+    filteredEntries,
+    state.networkView.sortKey,
+    state.networkView.sortDirection
+  );
+  const renderedEntries = sortedEntries.slice(0, MAX_WATERFALL_ROWS);
 
-  if (visible.length === 0) {
+  renderNetworkSummary(visibleEntries, filteredEntries, renderedEntries);
+
+  if (renderedEntries.length === 0) {
     state.selectedRequestId = null;
     refs.waterfallBody.innerHTML = "";
-    refs.requestDetails.textContent = "No requests at current playhead.";
+    refs.requestDetails.textContent = filteredEntries.length
+      ? "No requests visible in current table window."
+      : "No requests at current playhead or current filters.";
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
     return;
@@ -2122,22 +2245,49 @@ function renderWaterfall(): void {
 
   if (
     !state.selectedRequestId ||
-    !visible.some((entry) => entry.reqId === state.selectedRequestId)
+    !sortedEntries.some((entry) => entry.reqId === state.selectedRequestId)
   ) {
-    state.selectedRequestId = visible[visible.length - 1]?.reqId ?? null;
+    state.selectedRequestId = renderedEntries[0]?.reqId ?? null;
   }
 
-  const rendered = visible.slice(-MAX_WATERFALL_ROWS);
+  const timelineStart = visibleEntries[0]?.startMono ?? 0;
+  const timelineEnd = visibleEntries.reduce(
+    (maxMono, entry) => Math.max(maxMono, entry.endMono),
+    timelineStart + 1
+  );
+  const timelineSpan = Math.max(1, timelineEnd - timelineStart);
 
-  refs.waterfallBody.innerHTML = rendered
+  refs.waterfallBody.innerHTML = renderedEntries
     .map((entry) => {
-      const status = entry.failed ? "FAILED" : String(entry.status ?? "-");
+      const status = describeNetworkStatus(entry);
       const selectedClass = state.selectedRequestId === entry.reqId ? "selected" : "";
-      return `<tr class="${selectedClass}">
-        <td><button class="waterfall-btn" data-req-id="${escapeHtml(entry.reqId)}">${escapeHtml(shortUrl(entry.url))}</button></td>
-        <td>${escapeHtml(status)}</td>
-        <td>${entry.durationMs.toFixed(1)}ms</td>
-        <td>${escapeHtml(entry.actionId ?? "-")}</td>
+      const statusClass = resolveNetworkStatusClass(entry);
+      const requestName = describeRequestName(entry.url);
+      const method = entry.method.toUpperCase();
+      const type = resolveNetworkTypeLabel(entry.mimeType);
+      const initiator = resolveNetworkInitiator(entry);
+      const size = formatNetworkSize(entry);
+      const elapsed = `${entry.durationMs.toFixed(1)} ms`;
+      const offset = Math.max(0, entry.startMono - timelineStart);
+      const left = clamp((offset / timelineSpan) * 100, 0, 100);
+      const width = clamp((Math.max(entry.durationMs, 1) / timelineSpan) * 100, 0.8, 100 - left);
+
+      return `<tr class="${selectedClass}" data-req-id="${escapeHtml(entry.reqId)}">
+        <td class="waterfall-col-name">
+          <button class="waterfall-btn" data-req-id="${escapeHtml(entry.reqId)}" title="${escapeHtml(entry.url)}">${escapeHtml(requestName.name)}</button>
+          <span class="waterfall-host">${escapeHtml(requestName.host)}</span>
+        </td>
+        <td class="waterfall-col-method mono">${escapeHtml(method)}</td>
+        <td class="waterfall-col-status ${statusClass} mono">${escapeHtml(status)}</td>
+        <td class="waterfall-col-type">${escapeHtml(type)}</td>
+        <td class="waterfall-col-initiator mono">${escapeHtml(initiator)}</td>
+        <td class="waterfall-col-size mono">${escapeHtml(size)}</td>
+        <td class="waterfall-col-time mono">${escapeHtml(elapsed)}</td>
+        <td class="waterfall-col-bar">
+          <div class="wf-track">
+            <span class="wf-bar ${statusClass}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%;"></span>
+          </div>
+        </td>
       </tr>`;
     })
     .join("");
@@ -2173,6 +2323,339 @@ function renderWaterfall(): void {
 
   refs.copyCurl.disabled = false;
   refs.copyFetch.disabled = false;
+}
+
+function renderNetworkSummary(
+  visibleEntries: NetworkWaterfallEntry[],
+  filteredEntries: NetworkWaterfallEntry[],
+  renderedEntries: NetworkWaterfallEntry[]
+): void {
+  if (visibleEntries.length === 0) {
+    refs.networkSummary.textContent = "0 / 0 requests";
+    return;
+  }
+
+  const filteredBytes = sumNetworkTransferBytes(filteredEntries);
+  const totalBytes = sumNetworkTransferBytes(visibleEntries);
+  const truncatedSuffix =
+    renderedEntries.length < filteredEntries.length ? ` | showing ${renderedEntries.length}` : "";
+
+  refs.networkSummary.textContent = `${filteredEntries.length} / ${visibleEntries.length} requests | ${formatByteSize(filteredBytes)} / ${formatByteSize(totalBytes)} transferred${truncatedSuffix}`;
+}
+
+function applyNetworkViewFilters(entries: NetworkWaterfallEntry[]): NetworkWaterfallEntry[] {
+  const methodFilter = state.networkView.method.toUpperCase();
+  const query = state.networkView.query.trim().toLowerCase();
+  const statusFilter = state.networkView.status;
+  const typeFilter = state.networkView.type;
+
+  return entries.filter((entry) => {
+    if (methodFilter !== "ALL" && entry.method.toUpperCase() !== methodFilter) {
+      return false;
+    }
+
+    if (!matchesNetworkStatus(entry, statusFilter)) {
+      return false;
+    }
+
+    if (!matchesNetworkType(entry, typeFilter)) {
+      return false;
+    }
+
+    if (query.length === 0) {
+      return true;
+    }
+
+    const requestName = describeRequestName(entry.url);
+    const status = describeNetworkStatus(entry);
+    const type = resolveNetworkTypeLabel(entry.mimeType);
+    const initiator = resolveNetworkInitiator(entry);
+    const haystack =
+      `${entry.reqId} ${entry.method} ${entry.url} ${requestName.name} ${requestName.host} ${status} ${type} ${initiator}`
+        .trim()
+        .toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function sortNetworkEntries(
+  entries: NetworkWaterfallEntry[],
+  sortKey: NetworkSortKey,
+  sortDirection: NetworkSortDirection
+): NetworkWaterfallEntry[] {
+  const direction = sortDirection === "asc" ? 1 : -1;
+
+  return entries
+    .map((entry, index) => ({
+      entry,
+      index
+    }))
+    .sort((left, right) => {
+      const order = compareNetworkEntries(left.entry, right.entry, sortKey) * direction;
+
+      if (order !== 0) {
+        return order;
+      }
+
+      return left.index - right.index;
+    })
+    .map((item) => item.entry);
+}
+
+function compareNetworkEntries(
+  left: NetworkWaterfallEntry,
+  right: NetworkWaterfallEntry,
+  sortKey: NetworkSortKey
+): number {
+  if (sortKey === "start") {
+    return left.startMono - right.startMono;
+  }
+
+  if (sortKey === "method") {
+    return left.method.localeCompare(right.method);
+  }
+
+  if (sortKey === "status") {
+    return networkStatusCode(left) - networkStatusCode(right);
+  }
+
+  if (sortKey === "type") {
+    return resolveNetworkTypeLabel(left.mimeType).localeCompare(
+      resolveNetworkTypeLabel(right.mimeType)
+    );
+  }
+
+  if (sortKey === "initiator") {
+    return resolveNetworkInitiator(left).localeCompare(resolveNetworkInitiator(right));
+  }
+
+  if (sortKey === "size") {
+    return resolveNetworkSizeBytes(left) - resolveNetworkSizeBytes(right);
+  }
+
+  if (sortKey === "time") {
+    return left.durationMs - right.durationMs;
+  }
+
+  const leftName = describeRequestName(left.url);
+  const rightName = describeRequestName(right.url);
+  const byName = leftName.name.localeCompare(rightName.name);
+  return byName !== 0 ? byName : leftName.host.localeCompare(rightName.host);
+}
+
+function matchesNetworkStatus(entry: NetworkWaterfallEntry, filter: NetworkStatusFilter): boolean {
+  if (filter === "all") {
+    return true;
+  }
+
+  if (filter === "failed") {
+    return entry.failed;
+  }
+
+  const status = entry.status;
+
+  if (typeof status !== "number") {
+    return false;
+  }
+
+  if (filter === "success") {
+    return status >= 200 && status < 300;
+  }
+
+  if (filter === "redirect") {
+    return status >= 300 && status < 400;
+  }
+
+  if (filter === "client-error") {
+    return status >= 400 && status < 500;
+  }
+
+  if (filter === "server-error") {
+    return status >= 500;
+  }
+
+  return true;
+}
+
+function matchesNetworkType(entry: NetworkWaterfallEntry, filter: NetworkTypeFilter): boolean {
+  if (filter === "all") {
+    return true;
+  }
+
+  return resolveNetworkTypeBucket(entry.mimeType) === filter;
+}
+
+function networkStatusCode(entry: NetworkWaterfallEntry): number {
+  if (entry.failed) {
+    return -1;
+  }
+
+  return typeof entry.status === "number" ? entry.status : 0;
+}
+
+function describeNetworkStatus(entry: NetworkWaterfallEntry): string {
+  if (entry.failed) {
+    return "(failed)";
+  }
+
+  if (typeof entry.status === "number") {
+    if (entry.statusText && entry.statusText.length > 0) {
+      return `${entry.status} ${entry.statusText}`;
+    }
+
+    return String(entry.status);
+  }
+
+  return "(pending)";
+}
+
+function resolveNetworkStatusClass(entry: NetworkWaterfallEntry): string {
+  if (entry.failed) {
+    return "wf-status-failed";
+  }
+
+  const status = entry.status;
+
+  if (typeof status !== "number") {
+    return "wf-status-neutral";
+  }
+
+  if (status >= 500) {
+    return "wf-status-error";
+  }
+
+  if (status >= 400) {
+    return "wf-status-warn";
+  }
+
+  if (status >= 300) {
+    return "wf-status-redirect";
+  }
+
+  if (status >= 200) {
+    return "wf-status-ok";
+  }
+
+  return "wf-status-neutral";
+}
+
+function describeRequestName(url: string): {
+  name: string;
+  host: string;
+} {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname || "/";
+    const basename = path === "/" ? "/" : (path.split("/").filter(Boolean).pop() ?? path);
+    const query = parsed.search ? parsed.search : "";
+    const displayName = compactText(`${basename}${query}`, 120);
+    return {
+      name: displayName || parsed.hostname,
+      host: parsed.hostname
+    };
+  } catch {
+    return {
+      name: compactText(url, 120),
+      host: ""
+    };
+  }
+}
+
+function resolveNetworkTypeLabel(mimeType: string | undefined): string {
+  return resolveNetworkTypeBucket(mimeType);
+}
+
+function resolveNetworkTypeBucket(mimeType: string | undefined): NetworkTypeFilter {
+  if (!mimeType) {
+    return "other";
+  }
+
+  const mime = mimeType.toLowerCase();
+
+  if (mime.includes("json") || mime.includes("xml") || mime.includes("protobuf")) {
+    return "fetch";
+  }
+
+  if (mime.includes("javascript") || mime.includes("ecmascript")) {
+    return "script";
+  }
+
+  if (mime.includes("css")) {
+    return "stylesheet";
+  }
+
+  if (mime.startsWith("image/")) {
+    return "image";
+  }
+
+  if (mime.startsWith("font/") || mime.includes("woff") || mime.includes("truetype")) {
+    return "font";
+  }
+
+  if (mime.includes("html")) {
+    return "document";
+  }
+
+  if (mime.startsWith("text/")) {
+    return "text";
+  }
+
+  return "other";
+}
+
+function resolveNetworkInitiator(entry: NetworkWaterfallEntry): string {
+  if (entry.actionId && entry.actionId.length > 0) {
+    const maybeActionNumber = /(\d+)$/.exec(entry.actionId)?.[1];
+
+    if (maybeActionNumber) {
+      return `action #${maybeActionNumber}`;
+    }
+
+    return compactText(entry.actionId, 24);
+  }
+
+  return "(direct)";
+}
+
+function formatNetworkSize(entry: NetworkWaterfallEntry): string {
+  const size = resolveNetworkSizeBytes(entry);
+
+  if (!Number.isFinite(size) || size < 0) {
+    return entry.failed ? "(failed)" : "-";
+  }
+
+  return formatByteSize(size);
+}
+
+function resolveNetworkSizeBytes(entry: NetworkWaterfallEntry): number {
+  const size = entry.encodedDataLength ?? entry.responseBodySize;
+  return typeof size === "number" && Number.isFinite(size) && size >= 0 ? size : -1;
+}
+
+function sumNetworkTransferBytes(entries: NetworkWaterfallEntry[]): number {
+  let total = 0;
+
+  for (const entry of entries) {
+    const bytes = resolveNetworkSizeBytes(entry);
+
+    if (bytes > 0) {
+      total += bytes;
+    }
+  }
+
+  return total;
+}
+
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function renderConsoleSignals(): void {
