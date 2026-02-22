@@ -1070,19 +1070,24 @@ input[type="file"],
 .panel-stage {
   min-height: 0;
   background: var(--sys-color-surface);
+  display: flex;
+  overflow: hidden;
 }
 
 .log-grid {
   --log-grid-primary: 48%;
+  flex: 1;
+  height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(320px, var(--log-grid-primary)) 8px minmax(320px, 1fr);
+  grid-template-columns: minmax(260px, var(--log-grid-primary)) 8px minmax(260px, 1fr);
   gap: 0;
   align-items: stretch;
 }
 
 .log-grid > [data-log-panel-target] {
-  min-height: 340px;
+  min-height: 0;
+  height: 100%;
   border: none;
   border-bottom: 1px solid var(--sys-color-divider);
   border-radius: 0;
@@ -1090,6 +1095,7 @@ input[type="file"],
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow: hidden;
 }
 
 .log-grid h2 {
@@ -1150,7 +1156,7 @@ input[type="file"],
 .details-card,
 .network-card,
 .compare-card {
-  min-height: 340px;
+  min-height: 0;
 }
 
 .event-list,
@@ -1276,8 +1282,8 @@ input[type="file"],
 }
 
 .waterfall-wrap {
+  flex: 1;
   min-height: 0;
-  max-height: 220px;
   overflow: auto;
   border-bottom: 1px solid var(--sys-color-divider);
 }

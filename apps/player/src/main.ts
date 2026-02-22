@@ -36,14 +36,13 @@ const PANEL_LABELS: Record<LogPanelKey, string> = {
 };
 
 const PANEL_SHORTCUT_BY_CODE: Record<string, LogPanelKey> = {
-  Digit1: "timeline",
-  Digit2: "details",
-  Digit3: "network",
-  Digit4: "compare",
-  Digit5: "console",
-  Digit6: "realtime",
-  Digit7: "storage",
-  Digit8: "perf"
+  Digit1: "details",
+  Digit2: "network",
+  Digit3: "compare",
+  Digit4: "console",
+  Digit5: "realtime",
+  Digit6: "storage",
+  Digit7: "perf"
 };
 
 type ScreenshotMarker = {
@@ -228,7 +227,7 @@ const state: PlayerState = {
   selectedRequestId: null,
   textFilter: "",
   typeFilter: "all",
-  activePanel: "timeline",
+  activePanel: "details",
   playheadMono: 0,
   isPlaying: false,
   playbackRate: 1,
@@ -1272,12 +1271,12 @@ function renderPlaybackChrome(): void {
 }
 
 function renderPanelTabs(): void {
-  const secondaryPanel: LogPanelKey =
+  const activeSecondaryPanel: LogPanelKey =
     state.activePanel === "timeline" ? "details" : state.activePanel;
 
   for (const button of panelTabButtons) {
     const panel = button.dataset.logPanel as LogPanelKey | undefined;
-    const active = panel === state.activePanel;
+    const active = panel === activeSecondaryPanel;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
   }
@@ -1285,7 +1284,7 @@ function renderPanelTabs(): void {
   for (const card of panelCards) {
     const panel = card.dataset.logPanelTarget as LogPanelKey | undefined;
     const showAsTimeline = panel === "timeline";
-    const showAsSecondary = panel === secondaryPanel;
+    const showAsSecondary = panel === activeSecondaryPanel;
 
     card.classList.toggle("panel-hidden", !showAsTimeline && !showAsSecondary);
     card.classList.toggle("panel-primary", showAsTimeline);
@@ -1364,7 +1363,7 @@ function renderPlaybackReadout(): void {
   if (!model || !state.player) {
     refs.playbackWindowLabel.textContent = "0.00s / 0.00s";
     refs.playbackWindowEvents.textContent = "0 events | 0 errors | 0 requests";
-    refs.playbackWindowPanel.textContent = "Timeline panel";
+    refs.playbackWindowPanel.textContent = "Event panel";
     return;
   }
 
@@ -1379,7 +1378,8 @@ function renderPlaybackReadout(): void {
     state.playheadMono,
     (entry) => entry.startMono
   );
-  const panelLabel = PANEL_LABELS[state.activePanel];
+  const panelKey = state.activePanel === "timeline" ? "details" : state.activePanel;
+  const panelLabel = PANEL_LABELS[panelKey];
   const selection = [
     state.selectedEventId ? `event ${truncateId(state.selectedEventId)}` : null,
     state.selectedRequestId ? `request ${truncateId(state.selectedRequestId)}` : null
@@ -1697,7 +1697,7 @@ function buildProgressHoverTags(
     tags.push({
       label: latestEvent.type,
       tone: "action",
-      panel: "timeline",
+      panel: "details",
       mono: latestEvent.mono,
       eventId: latestEvent.id
     });
@@ -3168,11 +3168,11 @@ function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | 
   }
 
   if (kind === "screenshot") {
-    return "timeline";
+    return "details";
   }
 
   if (kind === "action") {
-    return "timeline";
+    return "details";
   }
 
   return null;

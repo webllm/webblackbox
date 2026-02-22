@@ -39,7 +39,7 @@ export function PlayerShell(): React.JSX.Element {
             0 events | 0 errors | 0 requests
           </span>
           <span id="playback-window-panel" className="status-item muted">
-            Timeline panel
+            Event panel
           </span>
         </div>
         <div className="status-actions">
@@ -246,15 +246,6 @@ export function PlayerShell(): React.JSX.Element {
         <section className="panel-tabs" id="panel-tabs" role="tablist" aria-label="Log panels">
           <Button
             className="panel-tab active"
-            data-log-panel="timeline"
-            data-count="0"
-            type="button"
-            variant="ghost"
-          >
-            Timeline
-          </Button>
-          <Button
-            className="panel-tab"
             data-log-panel="details"
             data-count="0"
             type="button"
