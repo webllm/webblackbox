@@ -1,4 +1,9 @@
-import type { HashesManifest, RecorderConfig, SessionMetadata } from "@webblackbox/protocol";
+import type {
+  ExportPolicy,
+  HashesManifest,
+  RecorderConfig,
+  SessionMetadata
+} from "@webblackbox/protocol";
 import type { PipelineStorage } from "@webblackbox/pipeline";
 import type { RawRecorderEvent, RecorderHooks } from "@webblackbox/recorder";
 import type { RecorderPlugin } from "@webblackbox/recorder";
@@ -67,6 +72,9 @@ export type WebBlackboxLiteSdkOptions = {
 export type WebBlackboxLiteExportOptions = {
   passphrase?: string;
   stopCapture?: boolean;
+  includeScreenshots?: ExportPolicy["includeScreenshots"];
+  maxArchiveBytes?: ExportPolicy["maxArchiveBytes"];
+  recentWindowMs?: ExportPolicy["recentWindowMs"];
 };
 
 export type WebBlackboxLiteExportResult = {

@@ -1,6 +1,8 @@
 import {
+  DEFAULT_EXPORT_POLICY,
   DEFAULT_RECORDER_CONFIG,
   createSessionId,
+  type ExportPolicy,
   type RecorderConfig,
   type SessionMetadata,
   type WebBlackboxEvent
@@ -242,7 +244,8 @@ export class WebBlackboxLiteSdk {
     await this.waitForQueues();
 
     const exported = await this.pipeline.exportBundle({
-      passphrase: options.passphrase
+      passphrase: options.passphrase,
+      ...resolveExportPolicy(options)
     });
 
     return {
@@ -475,6 +478,40 @@ function resolveLiteSdkBaseConfig(): RecorderConfig {
       bodyCaptureMaxBytes: LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES
     }
   };
+}
+
+function resolveExportPolicy(options: WebBlackboxLiteExportOptions): ExportPolicy {
+  return {
+    includeScreenshots:
+      typeof options.includeScreenshots === "boolean"
+        ? options.includeScreenshots
+        : DEFAULT_EXPORT_POLICY.includeScreenshots,
+    maxArchiveBytes: normalizeExportBoundedInt(
+      options.maxArchiveBytes,
+      DEFAULT_EXPORT_POLICY.maxArchiveBytes,
+      64 * 1024,
+      5 * 1024 * 1024 * 1024
+    ),
+    recentWindowMs: normalizeExportBoundedInt(
+      options.recentWindowMs,
+      DEFAULT_EXPORT_POLICY.recentWindowMs,
+      1 * 60 * 1000,
+      30 * 24 * 60 * 60 * 1000
+    )
+  };
+}
+
+function normalizeExportBoundedInt(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function resolveStorage(options: WebBlackboxLiteSdkOptions, sid: string): PipelineStorage {

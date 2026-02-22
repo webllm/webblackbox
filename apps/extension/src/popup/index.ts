@@ -1,3 +1,5 @@
+import { DEFAULT_EXPORT_POLICY, type ExportPolicy } from "@webblackbox/protocol";
+
 import { getChromeApi } from "../shared/chrome-api.js";
 import {
   PORT_NAMES,
@@ -9,16 +11,25 @@ const chromeApi = getChromeApi();
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.popup });
 
 const root = document.getElementById("popup-root");
+const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
+
+type PopupExportPolicyForm = {
+  includeScreenshots: boolean;
+  maxArchiveMb: number;
+  recentMinutes: number;
+};
 
 const state: {
   tabId: number | null;
   sessions: SessionListItem[];
   recording: { active: boolean; sid?: string; mode?: string };
+  exportPolicyForm: PopupExportPolicyForm;
   exportStatus?: string;
 } = {
   tabId: null,
   sessions: [],
   recording: { active: false },
+  exportPolicyForm: toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY),
   exportStatus: undefined
 };
 
@@ -30,6 +41,7 @@ if (root) {
 
 async function bootstrap(container: HTMLElement): Promise<void> {
   state.tabId = await getActiveTabId();
+  state.exportPolicyForm = loadPopupExportPolicyForm();
 
   port?.onMessage.addListener((message) => {
     applyMessage(message as ExtensionOutboundMessage);
@@ -77,6 +89,23 @@ function render(container: HTMLElement): void {
         <button data-action="stop" ${activeSession ? "" : "disabled"}>Stop</button>
         <button data-action="export" ${exportSession ? "" : "disabled"}>Export</button>
       </div>
+      <section style="margin-top:10px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;">
+        <p style="margin:0 0 8px;font-size:12px;font-weight:600;opacity:0.9;">Archive Policy</p>
+        <label style="display:flex;align-items:center;gap:8px;margin:0 0 8px;">
+          <input id="export-include-screenshots" type="checkbox" ${
+            state.exportPolicyForm.includeScreenshots ? "checked" : ""
+          } />
+          <span style="font-size:12px;">Include screenshots</span>
+        </label>
+        <label style="display:block;font-size:12px;margin:0 0 4px;">Max archive size (MB)</label>
+        <input id="export-max-size-mb" type="number" min="1" max="4096" step="1" value="${
+          state.exportPolicyForm.maxArchiveMb
+        }" style="width:100%;" />
+        <label style="display:block;font-size:12px;margin:8px 0 4px;">Recent window (minutes)</label>
+        <input id="export-recent-minutes" type="number" min="1" max="43200" step="1" value="${
+          state.exportPolicyForm.recentMinutes
+        }" style="width:100%;" />
+      </section>
       <p style="margin-top:8px;font-size:12px;opacity:0.85;min-height:1.2em;">${state.exportStatus ?? ""}</p>
       <p style="margin-top:10px;font-size:12px;opacity:0.75;">Marker: Ctrl/Cmd + Shift + M</p>
     </section>
@@ -146,10 +175,13 @@ function bindActions(
       return;
     }
 
+    const policy = readExportPolicyFromForm(container);
+
     port?.postMessage({
       kind: "ui.export",
       sid: exportSession.sid,
-      passphrase: passphrase.trim() || undefined
+      passphrase: passphrase.trim() || undefined,
+      policy
     });
   });
 }
@@ -231,4 +263,100 @@ function isRecordableTabUrl(url: string | undefined): boolean {
   }
 
   return true;
+}
+
+function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
+  const includeScreenshots =
+    container.querySelector<HTMLInputElement>("#export-include-screenshots")?.checked ??
+    state.exportPolicyForm.includeScreenshots;
+  const maxArchiveMb = normalizeBoundedInt(
+    Number(container.querySelector<HTMLInputElement>("#export-max-size-mb")?.value),
+    state.exportPolicyForm.maxArchiveMb,
+    1,
+    4096
+  );
+  const recentMinutes = normalizeBoundedInt(
+    Number(container.querySelector<HTMLInputElement>("#export-recent-minutes")?.value),
+    state.exportPolicyForm.recentMinutes,
+    1,
+    43_200
+  );
+
+  state.exportPolicyForm = {
+    includeScreenshots,
+    maxArchiveMb,
+    recentMinutes
+  };
+  savePopupExportPolicyForm(state.exportPolicyForm);
+
+  return {
+    includeScreenshots,
+    maxArchiveBytes: maxArchiveMb * 1024 * 1024,
+    recentWindowMs: recentMinutes * 60 * 1000
+  };
+}
+
+function toPopupExportPolicyForm(policy: ExportPolicy): PopupExportPolicyForm {
+  return {
+    includeScreenshots: policy.includeScreenshots,
+    maxArchiveMb: Math.max(1, Math.round(policy.maxArchiveBytes / (1024 * 1024))),
+    recentMinutes: Math.max(1, Math.round(policy.recentWindowMs / (60 * 1000)))
+  };
+}
+
+function loadPopupExportPolicyForm(): PopupExportPolicyForm {
+  if (typeof localStorage === "undefined") {
+    return toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY);
+  }
+
+  try {
+    const raw = localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY);
+
+    if (!raw) {
+      return toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY);
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PopupExportPolicyForm>;
+
+    return {
+      includeScreenshots:
+        typeof parsed.includeScreenshots === "boolean"
+          ? parsed.includeScreenshots
+          : DEFAULT_EXPORT_POLICY.includeScreenshots,
+      maxArchiveMb: normalizeBoundedInt(
+        parsed.maxArchiveMb,
+        Math.round(DEFAULT_EXPORT_POLICY.maxArchiveBytes / (1024 * 1024)),
+        1,
+        4096
+      ),
+      recentMinutes: normalizeBoundedInt(
+        parsed.recentMinutes,
+        Math.round(DEFAULT_EXPORT_POLICY.recentWindowMs / (60 * 1000)),
+        1,
+        43_200
+      )
+    };
+  } catch {
+    return toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY);
+  }
+}
+
+function savePopupExportPolicyForm(policy: PopupExportPolicyForm): void {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+
+  try {
+    localStorage.setItem(POPUP_EXPORT_POLICY_STORAGE_KEY, JSON.stringify(policy));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function normalizeBoundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.round(value)));
 }

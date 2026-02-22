@@ -199,6 +199,12 @@ export type ExportMessage = {
   passphrase?: string;
 };
 
+export type ExportPolicy = {
+  includeScreenshots: boolean;
+  maxArchiveBytes: number;
+  recentWindowMs: number;
+};
+
 export type EventBatchMessage = {
   t: "EVT.BATCH";
   sid: string;

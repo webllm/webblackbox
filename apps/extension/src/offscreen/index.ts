@@ -14,6 +14,9 @@ type OffscreenPipelineRequest = {
   mime?: string;
   bytes?: Uint8Array;
   passphrase?: string;
+  includeScreenshots?: boolean;
+  maxArchiveBytes?: number;
+  recentWindowMs?: number;
 };
 
 type OffscreenPipelineResponse = {
@@ -158,7 +161,10 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 
   if (message.op === "exportDownload") {
     const exported = await pipeline.exportBundle({
-      passphrase: message.passphrase
+      passphrase: message.passphrase,
+      includeScreenshots: message.includeScreenshots,
+      maxArchiveBytes: message.maxArchiveBytes,
+      recentWindowMs: message.recentWindowMs
     });
     return downloadExportedBundle(exported.fileName, exported.bytes, exported.integrity);
   }

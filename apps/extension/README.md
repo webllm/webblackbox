@@ -148,9 +148,10 @@ The build output is in the `build/` directory. Build entries:
 ### Export
 
 1. User clicks **Export** in popup
-2. Service worker signals the pipeline to export
-3. Pipeline finalizes indexes, generates archive with optional encryption
-4. Service worker downloads the `.webblackbox` file via `chrome.downloads`
+2. Popup export policy is applied (defaults: `includeScreenshots=true`, `maxArchiveBytes=100MB`, `recentWindowMs=20 minutes`)
+3. Service worker signals the pipeline to export with policy + optional encryption
+4. Pipeline finalizes indexes, generates archive with optional encryption
+5. Service worker downloads the `.webblackbox` file via `chrome.downloads`
 
 ### Freeze
 

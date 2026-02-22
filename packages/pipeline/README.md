@@ -51,11 +51,16 @@ const indexes = await pipeline.finalizeIndexes();
 
 // Export as archive
 const result = await pipeline.exportBundle({
-  passphrase: "optional-encryption-key"
+  passphrase: "optional-encryption-key",
+  includeScreenshots: true,
+  maxArchiveBytes: 100 * 1024 * 1024,
+  recentWindowMs: 20 * 60 * 1000
 });
 
 console.log(`Exported: ${result.fileName} (${result.bytes.length} bytes)`);
 ```
+
+`includeScreenshots`, `maxArchiveBytes`, and `recentWindowMs` are optional export filters. If omitted, export includes the full retained session.
 
 ### Blob Storage
 

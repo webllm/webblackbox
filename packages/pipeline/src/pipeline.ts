@@ -9,6 +9,7 @@ import type {
 
 import { CHUNK_CODECS } from "@webblackbox/protocol";
 
+import { decodeEventsNdjson, encodeEventsNdjson } from "./codec.js";
 import { EventChunker } from "./chunker.js";
 import { createWebBlackboxArchive } from "./exporter.js";
 import { sha256Hex } from "./hash.js";
@@ -30,7 +31,33 @@ export type ExportResult = {
 
 export type ExportBundleOptions = {
   passphrase?: string;
+  includeScreenshots?: boolean;
+  maxArchiveBytes?: number;
+  recentWindowMs?: number;
 };
+
+type PreparedExportChunk = {
+  chunk: StoredChunk;
+  events: WebBlackboxEvent[];
+  blobHashes: string[];
+};
+
+type ExportIndexes = {
+  time: ReturnType<EventIndexer["snapshot"]>["time"];
+  request: RequestIndexEntry[];
+  inverted: InvertedIndexEntry[];
+};
+
+type ResolvedExportPolicy = {
+  includeScreenshots: boolean;
+  maxArchiveBytes: number | null;
+  recentWindowMs: number | null;
+  cutoffTimestamp: number;
+};
+
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
+const SCREENSHOT_EVENT_TYPE: WebBlackboxEvent["type"] = "screen.screenshot";
+const EXPORT_OVERHEAD_RESERVE_BYTES = 2 * 1024 * 1024;
 
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
@@ -105,24 +132,85 @@ export class FlightRecorderPipeline {
 
   public async exportBundle(options: ExportBundleOptions = {}): Promise<ExportResult> {
     await this.flush();
-    const indexes = await this.finalizeIndexes();
-    const chunks = await this.options.storage.listChunks(this.options.session.sid);
-    const blobs = await this.listSessionBlobs();
-    const manifest = this.buildManifest(chunks);
+    const hasCustomSelection =
+      options.includeScreenshots === false ||
+      typeof options.maxArchiveBytes === "number" ||
+      typeof options.recentWindowMs === "number";
 
-    const { bytes, integrity } = await createWebBlackboxArchive(
+    if (!hasCustomSelection) {
+      const indexes = await this.finalizeIndexes();
+      const chunks = await this.options.storage.listChunks(this.options.session.sid);
+      const blobs = await this.listSessionBlobs();
+      const manifest = this.buildManifest(chunks, blobs.length);
+
+      const { bytes, integrity } = await createWebBlackboxArchive(
+        {
+          manifest,
+          chunks,
+          blobs,
+          timeIndex: indexes.time,
+          requestIndex: indexes.request,
+          invertedIndex: indexes.inverted
+        },
+        {
+          passphrase: options.passphrase
+        }
+      );
+
+      await this.options.storage.putIntegrity(this.options.session.sid, integrity);
+
+      return {
+        fileName: `${this.options.session.sid}.webblackbox`,
+        bytes,
+        integrity
+      };
+    }
+
+    const rawChunks = await this.options.storage.listChunks(this.options.session.sid);
+    const exportPolicy = resolveExportPolicy(options);
+    const prepared = await this.prepareExportChunks(rawChunks, exportPolicy);
+    const blobsByHash = await this.listSessionBlobMap();
+    let selected = this.selectChunksBySize(prepared, blobsByHash, exportPolicy.maxArchiveBytes);
+    let exportData = this.buildExportSnapshot(selected, blobsByHash);
+    let manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
+    let archive = await createWebBlackboxArchive(
       {
         manifest,
-        chunks,
-        blobs,
-        timeIndex: indexes.time,
-        requestIndex: indexes.request,
-        invertedIndex: indexes.inverted
+        chunks: exportData.chunks,
+        blobs: exportData.blobs,
+        timeIndex: exportData.indexes.time,
+        requestIndex: exportData.indexes.request,
+        invertedIndex: exportData.indexes.inverted
       },
       {
         passphrase: options.passphrase
       }
     );
+
+    while (
+      exportPolicy.maxArchiveBytes !== null &&
+      archive.bytes.byteLength > exportPolicy.maxArchiveBytes &&
+      selected.length > 0
+    ) {
+      selected = selected.slice(1);
+      exportData = this.buildExportSnapshot(selected, blobsByHash);
+      manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
+      archive = await createWebBlackboxArchive(
+        {
+          manifest,
+          chunks: exportData.chunks,
+          blobs: exportData.blobs,
+          timeIndex: exportData.indexes.time,
+          requestIndex: exportData.indexes.request,
+          invertedIndex: exportData.indexes.inverted
+        },
+        {
+          passphrase: options.passphrase
+        }
+      );
+    }
+
+    const { bytes, integrity } = archive;
 
     await this.options.storage.putIntegrity(this.options.session.sid, integrity);
 
@@ -146,6 +234,157 @@ export class FlightRecorderPipeline {
     }
 
     return blobs;
+  }
+
+  private async listSessionBlobMap(): Promise<Map<string, StoredBlob>> {
+    const blobs = await this.listSessionBlobs();
+    const byHash = new Map<string, StoredBlob>();
+
+    for (const blob of blobs) {
+      byHash.set(blob.hash, blob);
+    }
+
+    return byHash;
+  }
+
+  private async prepareExportChunks(
+    chunks: StoredChunk[],
+    exportPolicy: ResolvedExportPolicy
+  ): Promise<PreparedExportChunk[]> {
+    const output: PreparedExportChunk[] = [];
+
+    for (const chunk of chunks) {
+      const decoded = decodeEventsNdjson(chunk.bytes);
+      const filtered = decoded.filter((event) => shouldIncludeEvent(event, exportPolicy));
+
+      if (filtered.length === 0) {
+        continue;
+      }
+
+      const blobHashes = collectBlobHashesFromEvents(filtered);
+
+      if (filtered.length === decoded.length) {
+        output.push({
+          chunk,
+          events: filtered,
+          blobHashes
+        });
+        continue;
+      }
+
+      const bytes = encodeEventsNdjson(filtered);
+      const first = filtered[0];
+      const last = filtered[filtered.length - 1];
+
+      output.push({
+        chunk: {
+          sid: chunk.sid,
+          meta: {
+            ...chunk.meta,
+            tStart: first?.t ?? chunk.meta.tStart,
+            tEnd: last?.t ?? chunk.meta.tEnd,
+            monoStart: first?.mono ?? chunk.meta.monoStart,
+            monoEnd: last?.mono ?? chunk.meta.monoEnd,
+            eventCount: filtered.length,
+            byteLength: bytes.byteLength,
+            sha256: await sha256Hex(bytes)
+          },
+          bytes
+        },
+        events: filtered,
+        blobHashes
+      });
+    }
+
+    return output;
+  }
+
+  private selectChunksBySize(
+    chunks: PreparedExportChunk[],
+    blobsByHash: Map<string, StoredBlob>,
+    maxArchiveBytes: number | null
+  ): PreparedExportChunk[] {
+    if (maxArchiveBytes === null || chunks.length === 0) {
+      return chunks;
+    }
+
+    const reserve = Math.min(EXPORT_OVERHEAD_RESERVE_BYTES, Math.floor(maxArchiveBytes * 0.1));
+    const budget = Math.max(0, maxArchiveBytes - reserve);
+    const selected: PreparedExportChunk[] = [];
+    const selectedBlobHashes = new Set<string>();
+    let totalBytes = 0;
+
+    for (let index = chunks.length - 1; index >= 0; index -= 1) {
+      const candidate = chunks[index];
+
+      if (!candidate) {
+        continue;
+      }
+
+      let additionalBlobBytes = 0;
+
+      for (const hash of candidate.blobHashes) {
+        if (selectedBlobHashes.has(hash)) {
+          continue;
+        }
+
+        additionalBlobBytes += blobsByHash.get(hash)?.bytes.byteLength ?? 0;
+      }
+
+      const candidateBytes = candidate.chunk.bytes.byteLength + additionalBlobBytes;
+      const nextTotal = totalBytes + candidateBytes;
+
+      if (nextTotal > budget && selected.length > 0) {
+        break;
+      }
+
+      selected.push(candidate);
+      totalBytes = nextTotal;
+
+      for (const hash of candidate.blobHashes) {
+        selectedBlobHashes.add(hash);
+      }
+    }
+
+    return selected.reverse();
+  }
+
+  private buildExportSnapshot(
+    selectedChunks: PreparedExportChunk[],
+    blobsByHash: Map<string, StoredBlob>
+  ): {
+    chunks: StoredChunk[];
+    blobs: StoredBlob[];
+    indexes: ExportIndexes;
+  } {
+    const chunks = selectedChunks.map((entry) => entry.chunk);
+    const indexer = new EventIndexer();
+    const blobHashes = new Set<string>();
+
+    for (const chunk of selectedChunks) {
+      indexer.addChunk(chunk.chunk.meta);
+      indexer.addEvents(chunk.events);
+
+      for (const hash of chunk.blobHashes) {
+        blobHashes.add(hash);
+      }
+    }
+
+    const blobs: StoredBlob[] = [];
+
+    for (const hash of [...blobHashes].sort()) {
+      const blob = blobsByHash.get(hash);
+
+      if (blob) {
+        blobs.push(blob);
+      }
+    }
+
+    return {
+      chunks,
+      blobs,
+      indexes: indexer.snapshot()
+    };
   }
 
   private async persistChunk(
@@ -180,7 +419,7 @@ export class FlightRecorderPipeline {
     this.indexer.addEvents(events);
   }
 
-  private buildManifest(chunks: StoredChunk[]): ExportManifest {
+  private buildManifest(chunks: StoredChunk[], blobCount: number): ExportManifest {
     const first = chunks[0]?.meta.tStart ?? this.options.session.startedAt;
     const last = chunks[chunks.length - 1]?.meta.tEnd ?? this.options.session.startedAt;
 
@@ -203,9 +442,86 @@ export class FlightRecorderPipeline {
       stats: {
         eventCount: chunks.reduce((count, chunk) => count + chunk.meta.eventCount, 0),
         chunkCount: chunks.length,
-        blobCount: this.blobHashes.size,
+        blobCount,
         durationMs: Math.max(0, last - first)
       }
     };
   }
+}
+
+function resolveExportPolicy(options: ExportBundleOptions): ResolvedExportPolicy {
+  const includeScreenshots = options.includeScreenshots !== false;
+  const maxArchiveBytes = normalizeBoundedPositiveInt(options.maxArchiveBytes);
+  const recentWindowMs = normalizeBoundedPositiveInt(options.recentWindowMs);
+  const now = Date.now();
+  const cutoffTimestamp =
+    recentWindowMs === null ? Number.NEGATIVE_INFINITY : Math.max(0, now - recentWindowMs);
+
+  return {
+    includeScreenshots,
+    maxArchiveBytes,
+    recentWindowMs,
+    cutoffTimestamp
+  };
+}
+
+function shouldIncludeEvent(event: WebBlackboxEvent, exportPolicy: ResolvedExportPolicy): boolean {
+  if (!exportPolicy.includeScreenshots && event.type === SCREENSHOT_EVENT_TYPE) {
+    return false;
+  }
+
+  if (event.t < exportPolicy.cutoffTimestamp) {
+    return false;
+  }
+
+  return true;
+}
+
+function collectBlobHashesFromEvents(events: WebBlackboxEvent[]): string[] {
+  const hashes = new Set<string>();
+
+  for (const event of events) {
+    collectBlobHashesFromUnknown(event.data, hashes);
+  }
+
+  return [...hashes].sort();
+}
+
+function collectBlobHashesFromUnknown(value: unknown, output: Set<string>): void {
+  const stack: unknown[] = [value];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+
+    if (typeof current === "string") {
+      if (SHA256_HEX_PATTERN.test(current)) {
+        output.add(current);
+      }
+
+      continue;
+    }
+
+    if (!current || typeof current !== "object") {
+      continue;
+    }
+
+    if (Array.isArray(current)) {
+      for (const entry of current) {
+        stack.push(entry);
+      }
+      continue;
+    }
+
+    for (const entry of Object.values(current as Record<string, unknown>)) {
+      stack.push(entry);
+    }
+  }
+}
+
+function normalizeBoundedPositiveInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  return Math.max(1, Math.round(value));
 }

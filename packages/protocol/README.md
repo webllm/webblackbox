@@ -223,7 +223,7 @@ const eid2 = idFactory.next(); // "E-00000002"
 ## Default Configuration
 
 ```typescript
-import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
+import { DEFAULT_EXPORT_POLICY, DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 // Defaults:
 // - mode: "lite"
@@ -233,6 +233,11 @@ import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 // - screenshotIdleMs: 8000
 // - Redacts: authorization, cookie, set-cookie headers
 // - Blocks: .secret, [data-sensitive], input[type='password']
+//
+// Export policy defaults:
+// - includeScreenshots: true
+// - maxArchiveBytes: 100 * 1024 * 1024
+// - recentWindowMs: 20 * 60 * 1000
 ```
 
 ## Message Types

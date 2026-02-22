@@ -74,16 +74,36 @@ vi.mock("./lite-capture-agent.js", () => {
 
 import { WebBlackboxLiteSdk } from "./lite-sdk.js";
 
-function createRawEvent(rawType: string, payload: Record<string, unknown>): RawRecorderEvent {
+function createRawEvent(
+  rawType: string,
+  payload: Record<string, unknown>,
+  overrides: Partial<Pick<RawRecorderEvent, "source" | "tabId" | "sid" | "t" | "mono">> = {}
+): RawRecorderEvent {
+  const now = Date.now();
+
   return {
-    source: "content",
+    source: overrides.source ?? "content",
     rawType,
-    tabId: 99,
-    sid: "S-raw",
-    t: Date.now(),
-    mono: performance.timeOrigin + performance.now(),
+    tabId: overrides.tabId ?? 99,
+    sid: overrides.sid ?? "S-raw",
+    t: overrides.t ?? now,
+    mono: overrides.mono ?? now,
     payload
   };
+}
+
+function createNoisyPayload(size: number, seed: number): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789-_";
+  let state = ((seed + 1) * 48_271) % 2_147_483_647;
+  let output = "";
+
+  for (let index = 0; index < size; index += 1) {
+    state = (state * 48_271) % 2_147_483_647;
+    const cursor = state % chars.length;
+    output += chars[cursor] ?? "x";
+  }
+
+  return output;
 }
 
 describe("WebBlackboxLiteSdk", () => {
@@ -258,6 +278,125 @@ describe("WebBlackboxLiteSdk", () => {
     const config = sdk.getRecorderConfig();
     expect(config.freezeOnNetworkFailure).toBe(true);
     expect(config.freezeOnLongTaskSpike).toBe(true);
+
+    await sdk.dispose();
+  });
+
+  it("applies default export policy and allows screenshot/window override", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-export-policy",
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+    const now = Date.now();
+    const old = now - 30 * 60 * 1000;
+    const recent = now - 5 * 60 * 1000;
+
+    await sdk.start();
+
+    sdk.ingestRawEvent(
+      createRawEvent(
+        "click",
+        {
+          x: 12,
+          y: 24,
+          target: {
+            selector: "button.old"
+          }
+        },
+        {
+          t: old,
+          mono: old
+        }
+      )
+    );
+    sdk.ingestRawEvent(
+      createRawEvent(
+        "click",
+        {
+          x: 48,
+          y: 96,
+          target: {
+            selector: "button.recent"
+          }
+        },
+        {
+          t: recent,
+          mono: recent
+        }
+      )
+    );
+    sdk.ingestRawEvent(
+      createRawEvent(
+        "screenshot",
+        {
+          dataUrl: `data:image/png;base64,${Buffer.from([11, 22, 33, 44]).toString("base64")}`,
+          w: 320,
+          h: 180,
+          reason: "action:click"
+        },
+        {
+          t: recent + 1,
+          mono: recent + 1
+        }
+      )
+    );
+
+    const exportedDefault = await sdk.export({ stopCapture: false });
+    const parsedDefault = await readWebBlackboxArchive(exportedDefault.bytes);
+    expect(parsedDefault.events.some((event) => event.t < now - 20 * 60 * 1000)).toBe(false);
+    expect(parsedDefault.events.some((event) => event.type === "screen.screenshot")).toBe(true);
+
+    const exportedNoScreenshot = await sdk.export({
+      stopCapture: false,
+      includeScreenshots: false,
+      recentWindowMs: 60 * 60 * 1000
+    });
+    const parsedNoScreenshot = await readWebBlackboxArchive(exportedNoScreenshot.bytes);
+    expect(parsedNoScreenshot.events.some((event) => event.type === "screen.screenshot")).toBe(
+      false
+    );
+
+    await sdk.dispose();
+  });
+
+  it("enforces maxArchiveBytes export policy", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-export-size-cap",
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    await sdk.start();
+
+    const now = Date.now();
+
+    for (let index = 0; index < 50; index += 1) {
+      sdk.ingestRawEvent(
+        createRawEvent(
+          "marker",
+          {
+            message: `M-${index}`,
+            payload: createNoisyPayload(4096, index)
+          },
+          {
+            t: now + index,
+            mono: now + index
+          }
+        )
+      );
+    }
+
+    const exported = await sdk.export({
+      stopCapture: false,
+      maxArchiveBytes: 64 * 1024,
+      recentWindowMs: 60 * 60 * 1000,
+      includeScreenshots: true
+    });
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(exported.bytes.byteLength).toBeLessThanOrEqual(64 * 1024);
+    expect(parsed.events.length).toBeLessThan(50);
 
     await sdk.dispose();
   });

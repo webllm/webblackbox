@@ -5,8 +5,10 @@ import {
 } from "@webblackbox/cdp-router";
 import {
   createSessionId,
+  DEFAULT_EXPORT_POLICY,
   DEFAULT_RECORDER_CONFIG,
   type CaptureMode,
+  type ExportPolicy,
   type FreezeReason,
   type HashesManifest,
   type SessionMetadata,
@@ -91,7 +93,12 @@ type SessionPipelineClient = {
   ingest: (event: WebBlackboxEvent) => Promise<void>;
   flush: () => Promise<void>;
   putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
-  exportAndDownload: (options?: { passphrase?: string }) => Promise<PipelineExportDownloadResult>;
+  exportAndDownload: (options?: {
+    passphrase?: string;
+    includeScreenshots?: boolean;
+    maxArchiveBytes?: number;
+    recentWindowMs?: number;
+  }) => Promise<PipelineExportDownloadResult>;
   close: () => Promise<void>;
 };
 
@@ -105,6 +112,9 @@ type OffscreenPipelineRequest = {
   mime?: string;
   bytes?: Uint8Array;
   passphrase?: string;
+  includeScreenshots?: boolean;
+  maxArchiveBytes?: number;
+  recentWindowMs?: number;
 };
 
 type OffscreenPipelineResponse = {
@@ -326,7 +336,12 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "ui.export") {
-    await exportSession(message.sid, message.passphrase, message.saveAs);
+    await exportSession(
+      message.sid,
+      message.passphrase,
+      message.saveAs,
+      resolveExportPolicy(message.policy)
+    );
     return;
   }
 
@@ -527,7 +542,12 @@ async function stopSession(tabId: number): Promise<void> {
   notifyOffscreenPipelineStatus();
 }
 
-async function exportSession(sid: string, passphrase?: string, saveAs = true): Promise<void> {
+async function exportSession(
+  sid: string,
+  passphrase: string | undefined,
+  saveAs = true,
+  policy: ExportPolicy = DEFAULT_EXPORT_POLICY
+): Promise<void> {
   const runtime = sessionsBySid.get(sid);
 
   if (!runtime) {
@@ -548,7 +568,10 @@ async function exportSession(sid: string, passphrase?: string, saveAs = true): P
 
     const exported = await enqueueWithResult(runtime, async () => {
       return runtime.pipeline.exportAndDownload({
-        passphrase
+        passphrase,
+        includeScreenshots: policy.includeScreenshots,
+        maxArchiveBytes: policy.maxArchiveBytes,
+        recentWindowMs: policy.recentWindowMs
       });
     });
 
@@ -1019,7 +1042,10 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
       const exported = await requestOffscreenPipeline<unknown>({
         op: "exportDownload",
         sid,
-        passphrase: options.passphrase
+        passphrase: options.passphrase,
+        includeScreenshots: options.includeScreenshots,
+        maxArchiveBytes: options.maxArchiveBytes,
+        recentWindowMs: options.recentWindowMs
       });
 
       return normalizePipelineExportDownloadResult(exported);
@@ -2309,6 +2335,45 @@ function normalizeSamplingInterval(candidate: unknown, fallback: number): number
   }
 
   return Math.max(250, Math.round(value));
+}
+
+function resolveExportPolicy(value: unknown): ExportPolicy {
+  const row = asRecord(value);
+  const includeScreenshots =
+    typeof row?.includeScreenshots === "boolean"
+      ? row.includeScreenshots
+      : DEFAULT_EXPORT_POLICY.includeScreenshots;
+
+  return {
+    includeScreenshots,
+    maxArchiveBytes: normalizeExportBoundedInt(
+      row?.maxArchiveBytes,
+      DEFAULT_EXPORT_POLICY.maxArchiveBytes,
+      64 * 1024,
+      5 * 1024 * 1024 * 1024
+    ),
+    recentWindowMs: normalizeExportBoundedInt(
+      row?.recentWindowMs,
+      DEFAULT_EXPORT_POLICY.recentWindowMs,
+      1 * 60 * 1000,
+      30 * 24 * 60 * 60 * 1000
+    )
+  };
+}
+
+function normalizeExportBoundedInt(
+  candidate: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const value = asFiniteNumber(candidate);
+
+  if (value === null || value <= 0) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function toStatusSampling(runtime: SessionRuntime): RecordingSampling {

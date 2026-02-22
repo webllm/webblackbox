@@ -1,4 +1,9 @@
-import type { CaptureMode, FreezeReason, SamplingProfile } from "@webblackbox/protocol";
+import type {
+  CaptureMode,
+  ExportPolicy,
+  FreezeReason,
+  SamplingProfile
+} from "@webblackbox/protocol";
 
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
@@ -26,6 +31,7 @@ export type UiExportSessionMessage = {
   sid: string;
   passphrase?: string;
   saveAs?: boolean;
+  policy?: Partial<ExportPolicy>;
 };
 
 export type ContentEventBatchMessage = {

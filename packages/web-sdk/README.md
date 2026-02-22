@@ -39,6 +39,12 @@ await sdk.dispose();
 
 You can still override these through `options.config`.
 
+`export()` also applies default export policy (override-able per call):
+
+- `includeScreenshots: true`
+- `maxArchiveBytes: 100 * 1024 * 1024` (100MB)
+- `recentWindowMs: 20 * 60 * 1000` (recent 20 minutes)
+
 ## Extension reuse
 
 `apps/extension` reuses this package in lite start flow:

@@ -1,4 +1,4 @@
-import type { RecorderConfig } from "./types.js";
+import type { ExportPolicy, RecorderConfig } from "./types.js";
 
 export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
   mode: "lite",
@@ -23,4 +23,10 @@ export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
     hashSensitiveValues: true
   },
   sitePolicies: []
+};
+
+export const DEFAULT_EXPORT_POLICY: ExportPolicy = {
+  includeScreenshots: true,
+  maxArchiveBytes: 100 * 1024 * 1024,
+  recentWindowMs: 20 * 60 * 1000
 };
