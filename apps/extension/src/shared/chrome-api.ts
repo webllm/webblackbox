@@ -119,7 +119,15 @@ export type ChromeApi = {
     query(queryInfo: {
       active?: boolean;
       currentWindow?: boolean;
-    }): Promise<Array<{ id?: number }>>;
+      lastFocusedWindow?: boolean;
+    }): Promise<
+      Array<{
+        id?: number;
+        active?: boolean;
+        url?: string;
+        lastAccessed?: number;
+      }>
+    >;
     sendMessage(tabId: number, message: unknown): Promise<unknown>;
   };
 };

@@ -24,6 +24,7 @@ const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-fullchain-
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
+const usePopupUiActions = (process.env.WB_E2E_USE_POPUP_UI ?? "1") !== "0";
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 
 const chromeCandidates = [
@@ -144,6 +145,12 @@ async function main() {
 
   const start = await startSessionFromPopup(popupClient, captureMode, demoUrl);
   assert(start?.ok === true, `Failed to start ${captureMode} mode`, start);
+  const demoTab = await findTabByUrlFromPopup(popupClient, demoUrl);
+  assert(typeof demoTab?.id === "number", "Demo tab is not discoverable from popup", {
+    demoUrl,
+    demoTab,
+    start
+  });
 
   const indicator = await waitForIndicatorText(demoClient, `REC ${captureMode}`, 25_000);
   assert(typeof indicator === "string", "Recorder indicator did not appear", {
@@ -173,6 +180,12 @@ async function main() {
 
   const sid = activeSessions[0]?.sid;
   assert(typeof sid === "string" && sid.length > 0, "Missing session id", { activeSessions });
+  assert(activeSessions[0]?.tabId === demoTab.id, "Session started on unexpected tab", {
+    expectedTabId: demoTab.id,
+    activeSessions,
+    demoTab,
+    start
+  });
 
   const scenarioResult = await runDemoScenario(demoClient);
   assert(scenarioResult?.ok === true, "Demo scenario failed", scenarioResult);
@@ -779,6 +792,36 @@ async function closeTarget(urlBase, targetId) {
 }
 
 async function startSessionFromPopup(popupClient, mode, expectedUrl) {
+  if (usePopupUiActions) {
+    const expression = `
+      (() => {
+        const selector = ${JSON.stringify(mode === "lite" ? "[data-action='start-lite']" : "[data-action='start-full']")};
+        const button = document.querySelector(selector);
+        const tabLine =
+          Array.from(document.querySelectorAll('p'))
+            .map((line) => (line.textContent ?? '').trim())
+            .find((line) => line.startsWith('Tab:')) ?? null;
+        const statusLine =
+          Array.from(document.querySelectorAll('p'))
+            .map((line) => (line.textContent ?? '').trim())
+            .find((line) => line.startsWith('Status:')) ?? null;
+
+        if (!(button instanceof HTMLButtonElement)) {
+          return { ok: false, reason: 'start-button-not-found', selector, tabLine, statusLine };
+        }
+
+        if (button.disabled) {
+          return { ok: false, reason: 'start-button-disabled', selector, tabLine, statusLine };
+        }
+
+        button.click();
+        return { ok: true, mode: ${JSON.stringify(mode)}, via: 'popup-ui', tabLine, statusLine };
+      })()
+    `;
+
+    return popupClient.evaluate(expression);
+  }
+
   const expression = `
     (async () => {
       const tabs = await chrome.tabs.query({});
@@ -816,6 +859,27 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl) {
 }
 
 async function stopActiveSessionFromPopup(popupClient) {
+  if (usePopupUiActions) {
+    const expression = `
+      (() => {
+        const button = document.querySelector("[data-action='stop']");
+
+        if (!(button instanceof HTMLButtonElement)) {
+          return { ok: false, reason: 'stop-button-not-found' };
+        }
+
+        if (button.disabled) {
+          return { ok: false, reason: 'stop-button-disabled' };
+        }
+
+        button.click();
+        return { ok: true, via: 'popup-ui' };
+      })()
+    `;
+
+    return popupClient.evaluate(expression);
+  }
+
   const expression = `
     (async () => {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
@@ -835,6 +899,35 @@ async function stopActiveSessionFromPopup(popupClient) {
 }
 
 async function exportSessionFromPopup(popupClient, sid) {
+  if (usePopupUiActions) {
+    const expression = `
+      (() => {
+        const button = document.querySelector("[data-action='export']");
+
+        if (!(button instanceof HTMLButtonElement)) {
+          return { ok: false, reason: 'export-button-not-found' };
+        }
+
+        if (button.disabled) {
+          return { ok: false, reason: 'export-button-disabled' };
+        }
+
+        const previousPrompt = globalThis.prompt;
+
+        try {
+          globalThis.prompt = () => "";
+          button.click();
+        } finally {
+          globalThis.prompt = previousPrompt;
+        }
+
+        return { ok: true, sid: ${JSON.stringify(sid)}, via: 'popup-ui' };
+      })()
+    `;
+
+    return popupClient.evaluate(expression);
+  }
+
   const expression = `
     (async () => {
       await chrome.runtime.sendMessage({
@@ -855,6 +948,31 @@ async function readRuntimeSessions(popupClient) {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
       const rows = store['webblackbox.runtime.sessions'];
       return Array.isArray(rows) ? rows : [];
+    })()
+  `;
+
+  return popupClient.evaluate(expression);
+}
+
+async function findTabByUrlFromPopup(popupClient, expectedUrl) {
+  const expression = `
+    (async () => {
+      const tabs = await chrome.tabs.query({});
+      const match = tabs.find((tab) =>
+        typeof tab.id === 'number' &&
+        typeof tab.url === 'string' &&
+        tab.url.startsWith(${JSON.stringify(expectedUrl)})
+      );
+
+      if (!match || typeof match.id !== 'number') {
+        return null;
+      }
+
+      return {
+        id: match.id,
+        active: match.active === true,
+        url: match.url ?? null
+      };
     })()
   `;
 

@@ -29,8 +29,7 @@ if (root) {
 }
 
 async function bootstrap(container: HTMLElement): Promise<void> {
-  const tabs = (await chromeApi?.tabs?.query?.({ active: true, currentWindow: true })) ?? [];
-  state.tabId = typeof tabs[0]?.id === "number" ? tabs[0].id : null;
+  state.tabId = await getActiveTabId();
 
   port?.onMessage.addListener((message) => {
     applyMessage(message as ExtensionOutboundMessage);
@@ -41,23 +40,30 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 }
 
 function render(container: HTMLElement): void {
-  const tabSessions = state.sessions
+  const sortedSessions = [...state.sessions].sort((left, right) => {
+    const activeDiff = Number(right.active) - Number(left.active);
+
+    if (activeDiff !== 0) {
+      return activeDiff;
+    }
+
+    return right.startedAt - left.startedAt;
+  });
+  const tabSessions = sortedSessions
     .filter((item) => item.tabId === state.tabId)
-    .sort((left, right) => {
-      const activeDiff = Number(right.active) - Number(left.active);
-
-      if (activeDiff !== 0) {
-        return activeDiff;
-      }
-
-      return right.startedAt - left.startedAt;
-    });
-  const activeSession = tabSessions.find((item) => item.active);
-  const exportSession = activeSession ?? tabSessions[0];
+    .sort((left, right) => right.startedAt - left.startedAt);
+  const activeSession =
+    tabSessions.find((item) => item.active) ?? sortedSessions.find((item) => item.active);
+  const exportSession = activeSession ?? tabSessions[0] ?? sortedSessions[0];
+  const activeOnCurrentTab = activeSession && activeSession.tabId === state.tabId;
   const status = activeSession
-    ? `Recording (${activeSession.mode})`
+    ? activeOnCurrentTab
+      ? `Recording (${activeSession.mode})`
+      : `Recording (${activeSession.mode}) on Tab ${activeSession.tabId}`
     : exportSession
-      ? `Idle (Last ${exportSession.mode})`
+      ? exportSession.tabId === state.tabId
+        ? `Idle (Last ${exportSession.mode})`
+        : `Idle (Last ${exportSession.mode} on Tab ${exportSession.tabId})`
       : "Idle";
 
   container.innerHTML = `
@@ -84,38 +90,46 @@ function bindActions(
   activeSession?: SessionListItem,
   exportSession?: SessionListItem
 ): void {
-  container.querySelector("[data-action='start-lite']")?.addEventListener("click", () => {
-    if (typeof state.tabId !== "number") {
+  container.querySelector("[data-action='start-lite']")?.addEventListener("click", async () => {
+    const resolvedTabId = await getActiveTabId();
+    const tabId = typeof resolvedTabId === "number" ? resolvedTabId : state.tabId;
+
+    if (typeof tabId !== "number") {
       return;
     }
 
+    state.tabId = tabId;
     port?.postMessage({
       kind: "ui.start",
-      tabId: state.tabId,
+      tabId,
       mode: "lite"
     });
   });
 
-  container.querySelector("[data-action='start-full']")?.addEventListener("click", () => {
-    if (typeof state.tabId !== "number") {
+  container.querySelector("[data-action='start-full']")?.addEventListener("click", async () => {
+    const resolvedTabId = await getActiveTabId();
+    const tabId = typeof resolvedTabId === "number" ? resolvedTabId : state.tabId;
+
+    if (typeof tabId !== "number") {
       return;
     }
 
+    state.tabId = tabId;
     port?.postMessage({
       kind: "ui.start",
-      tabId: state.tabId,
+      tabId,
       mode: "full"
     });
   });
 
   container.querySelector("[data-action='stop']")?.addEventListener("click", () => {
-    if (!activeSession || typeof state.tabId !== "number") {
+    if (!activeSession) {
       return;
     }
 
     port?.postMessage({
       kind: "ui.stop",
-      tabId: state.tabId
+      tabId: activeSession.tabId
     });
   });
 
@@ -160,4 +174,61 @@ function applyMessage(message: ExtensionOutboundMessage): void {
       ? `Exported: ${message.fileName ?? message.sid}`
       : `Export failed: ${message.error ?? "Unknown error"}`;
   }
+}
+
+async function getActiveTabId(): Promise<number | null> {
+  const focusedTabs =
+    (await chromeApi?.tabs?.query?.({
+      active: true,
+      lastFocusedWindow: true
+    })) ?? [];
+  const focusedActiveRecordable = focusedTabs.find(
+    (tab) => typeof tab.id === "number" && isRecordableTabUrl(tab.url)
+  );
+
+  if (focusedActiveRecordable && typeof focusedActiveRecordable.id === "number") {
+    return focusedActiveRecordable.id;
+  }
+
+  const allTabs = (await chromeApi?.tabs?.query?.({})) ?? [];
+  const activeRecordable = allTabs.find(
+    (tab) => tab.active && typeof tab.id === "number" && isRecordableTabUrl(tab.url)
+  );
+
+  if (activeRecordable && typeof activeRecordable.id === "number") {
+    return activeRecordable.id;
+  }
+
+  const recordableByRecency = allTabs
+    .filter((tab) => typeof tab.id === "number" && isRecordableTabUrl(tab.url))
+    .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0));
+
+  if (recordableByRecency.length > 0 && typeof recordableByRecency[0]?.id === "number") {
+    return recordableByRecency[0].id;
+  }
+
+  const activeAny =
+    focusedTabs.find((tab) => tab.active && typeof tab.id === "number") ??
+    allTabs.find((tab) => tab.active && typeof tab.id === "number");
+  return activeAny && typeof activeAny.id === "number" ? activeAny.id : null;
+}
+
+function isRecordableTabUrl(url: string | undefined): boolean {
+  if (typeof url !== "string" || url.length === 0) {
+    return false;
+  }
+
+  if (url.startsWith("chrome-extension://")) {
+    return false;
+  }
+
+  if (url.startsWith("chrome://")) {
+    return false;
+  }
+
+  if (url === "about:blank") {
+    return false;
+  }
+
+  return true;
 }
