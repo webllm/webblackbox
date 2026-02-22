@@ -45,6 +45,24 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
       <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
       <input id="screenshotIdleMs" type="number" min="250" max="120000" value="${config.sampling.screenshotIdleMs}" />
 
+      <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
+      <input id="bodyCaptureMaxBytes" type="number" min="1024" max="1048576" value="${config.sampling.bodyCaptureMaxBytes}" />
+
+      <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
+        <input id="freezeOnError" type="checkbox" ${config.freezeOnError ? "checked" : ""} />
+        <label for="freezeOnError">Freeze on uncaught errors</label>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+        <input id="freezeOnNetworkFailure" type="checkbox" ${config.freezeOnNetworkFailure ? "checked" : ""} />
+        <label for="freezeOnNetworkFailure">Freeze on repeated network failures</label>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+        <input id="freezeOnLongTaskSpike" type="checkbox" ${config.freezeOnLongTaskSpike ? "checked" : ""} />
+        <label for="freezeOnLongTaskSpike">Freeze on long-task spikes</label>
+      </div>
+
       <label style="display:block;margin:12px 0 6px;">Blocked Selectors (one per line)</label>
       <textarea id="blockedSelectors" rows="6" style="width:100%;">${config.redaction.blockedSelectors.join("\n")}</textarea>
 
@@ -144,6 +162,10 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
     container.querySelector<HTMLInputElement>("#screenshotIdleMs")?.value ??
       DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
   );
+  const bodyCaptureMaxBytes = Number(
+    container.querySelector<HTMLInputElement>("#bodyCaptureMaxBytes")?.value ??
+      DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes
+  );
 
   const blockedSelectors = splitLines(
     container.querySelector<HTMLTextAreaElement>("#blockedSelectors")?.value
@@ -156,10 +178,22 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
   );
   const hashSensitiveValues =
     container.querySelector<HTMLInputElement>("#hashSensitiveValues")?.checked ?? true;
+  const freezeOnError =
+    container.querySelector<HTMLInputElement>("#freezeOnError")?.checked ??
+    DEFAULT_RECORDER_CONFIG.freezeOnError;
+  const freezeOnNetworkFailure =
+    container.querySelector<HTMLInputElement>("#freezeOnNetworkFailure")?.checked ??
+    DEFAULT_RECORDER_CONFIG.freezeOnNetworkFailure;
+  const freezeOnLongTaskSpike =
+    container.querySelector<HTMLInputElement>("#freezeOnLongTaskSpike")?.checked ??
+    DEFAULT_RECORDER_CONFIG.freezeOnLongTaskSpike;
 
   return {
     ...DEFAULT_RECORDER_CONFIG,
     ringBufferMinutes: Number.isFinite(ringBufferMinutes) ? Math.max(1, ringBufferMinutes) : 10,
+    freezeOnError,
+    freezeOnNetworkFailure,
+    freezeOnLongTaskSpike,
     sampling: {
       ...DEFAULT_RECORDER_CONFIG.sampling,
       actionWindowMs: Number.isFinite(actionWindowMs) ? Math.max(100, actionWindowMs) : 1500,
@@ -177,7 +211,10 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
         : DEFAULT_RECORDER_CONFIG.sampling.snapshotIntervalMs,
       screenshotIdleMs: Number.isFinite(screenshotIdleMs)
         ? Math.min(120_000, Math.max(250, screenshotIdleMs))
-        : DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
+        : DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs,
+      bodyCaptureMaxBytes: Number.isFinite(bodyCaptureMaxBytes)
+        ? Math.min(1_048_576, Math.max(1_024, Math.round(bodyCaptureMaxBytes)))
+        : DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes
     },
     redaction: {
       ...DEFAULT_RECORDER_CONFIG.redaction,

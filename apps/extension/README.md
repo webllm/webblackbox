@@ -68,8 +68,9 @@ The extension consists of multiple main components:
 #### Options Page (`options.html`)
 
 - Full recorder configuration UI
-- Capture mode selection (lite/full)
 - Sampling rate configuration
+- Freeze trigger toggles (error / network failure / long task)
+- Network body capture byte cap
 - Redaction rule management
 - Site-specific capture policies
 
@@ -146,7 +147,7 @@ The build output is in the `build/` directory. Build entries:
 
 ### Export
 
-1. User clicks **Export** in popup (or freeze condition triggers)
+1. User clicks **Export** in popup
 2. Service worker signals the pipeline to export
 3. Pipeline finalizes indexes, generates archive with optional encryption
 4. Service worker downloads the `.webblackbox` file via `chrome.downloads`
@@ -157,8 +158,8 @@ When a freeze condition is detected (uncaught error, network failure spike, long
 
 1. Recorder evaluates freeze policy
 2. Service worker receives freeze notification
-3. Ring buffer contents are preserved
-4. Pipeline can be exported with full context around the issue
+3. Notification is debounced to avoid UI thrash under repeated failures
+4. Session keeps recording until the user explicitly stops/exports
 
 ## Configuration
 

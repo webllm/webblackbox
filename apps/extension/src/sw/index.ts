@@ -7,6 +7,7 @@ import {
   createSessionId,
   DEFAULT_RECORDER_CONFIG,
   type CaptureMode,
+  type FreezeReason,
   type HashesManifest,
   type SessionMetadata,
   type WebBlackboxEvent
@@ -36,11 +37,22 @@ type SessionRuntime = {
   pipeline: SessionPipelineClient;
   cdpRouter: CdpRouter | null;
   enabledCdpSessions: Set<string>;
-  requestMeta: Map<string, { url?: string; mimeType?: string; status?: number }>;
+  requestMeta: Map<
+    string,
+    { url?: string; mimeType?: string; status?: number; resourceType?: string }
+  >;
   screenshotInterval: ReturnType<typeof setInterval> | null;
   lastPointer: PointerState | null;
   lastViewport: ViewportState | null;
   lastActionScreenshotMono: number;
+  lastIncidentCaptureAt: number;
+  lastNavigationSnapshotAt: number;
+  queueDepth: number;
+  droppedBestEffortTasks: number;
+  stopping: boolean;
+  responseBodyCaptures: number;
+  responseBodyCaptureTimestamps: number[];
+  lastFreezeNotices: Map<string, number>;
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
   heapSnapshotCapture: HeapSnapshotCaptureState | null;
@@ -137,6 +149,23 @@ const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
 const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
+const FULL_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
+const FULL_MODE_BODY_CAPTURE_MAX_PER_MINUTE = 80;
+const FULL_MODE_BODY_CAPTURE_MAX_PER_SESSION = 2_000;
+const FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS = 15_000;
+const FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS = 8_000;
+const FREEZE_NOTICE_COOLDOWN_MS = 20_000;
+const BEST_EFFORT_QUEUE_MAX_PENDING = 80;
+const SKIPPED_FULL_MODE_BODY_RESOURCE_TYPES = new Set(["Image", "Media", "Font"]);
+const FULL_MODE_FOLLOWUP_METHODS = new Set([
+  "Target.attachedToTarget",
+  "Target.detachedFromTarget",
+  "Network.responseReceived",
+  "Network.loadingFinished",
+  "Network.loadingFailed",
+  "Runtime.exceptionThrown",
+  "Page.frameNavigated"
+]);
 const LITE_DEFAULT_BODY_MIME_ALLOWLIST = [
   "text/*",
   "application/json",
@@ -409,6 +438,14 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     lastPointer: null,
     lastViewport: null,
     lastActionScreenshotMono: Number.NEGATIVE_INFINITY,
+    lastIncidentCaptureAt: Number.NEGATIVE_INFINITY,
+    lastNavigationSnapshotAt: Number.NEGATIVE_INFINITY,
+    queueDepth: 0,
+    droppedBestEffortTasks: 0,
+    stopping: false,
+    responseBodyCaptures: 0,
+    responseBodyCaptureTimestamps: [],
+    lastFreezeNotices: new Map<string, number>(),
     queue: Promise.resolve(),
     removeCdpListeners: [],
     heapSnapshotCapture: null,
@@ -427,13 +464,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
         });
       },
       onFreeze: (reason) => {
-        broadcast({ kind: "sw.freeze", sid: runtime.sid, reason });
-
-        if (runtime.mode === "full") {
-          enqueue(runtime, async () => {
-            await captureFullModeArtifacts(runtime, `freeze:${reason}`);
-          });
-        }
+        handleFreezeNotice(runtime, reason);
       }
     },
     undefined,
@@ -472,12 +503,11 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 async function stopSession(tabId: number): Promise<void> {
   const runtime = sessionsByTab.get(tabId);
 
-  if (!runtime) {
+  if (!runtime || runtime.stopping) {
     return;
   }
 
-  await runtime.queue;
-  await runtime.pipeline.flush().catch(() => undefined);
+  runtime.stopping = true;
   await teardownCaptureInstrumentation(runtime);
   sessionsByTab.delete(runtime.tabId);
   runtime.stoppedAt = Date.now();
@@ -511,6 +541,10 @@ async function exportSession(sid: string, passphrase?: string, saveAs = true): P
   }
 
   try {
+    if (!runtime.stoppedAt) {
+      await stopSession(runtime.tabId);
+    }
+
     const exported = await enqueueWithResult(runtime, async () => {
       return runtime.pipeline.exportAndDownload({
         passphrase
@@ -569,9 +603,13 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
 
   if (runtime.mode === "full" && shouldCaptureActionScreenshot(nextRawEvent, runtime)) {
     runtime.lastActionScreenshotMono = nextRawEvent.mono;
-    enqueue(runtime, async () => {
-      await captureScreenshot(runtime, `action:${nextRawEvent.rawType}`);
-    });
+    enqueue(
+      runtime,
+      async () => {
+        await captureScreenshot(runtime, `action:${nextRawEvent.rawType}`);
+      },
+      { bestEffort: true }
+    );
   }
 
   runtime.recorder.ingest(nextRawEvent);
@@ -1124,9 +1162,17 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         payload: normalizedPayload
       });
 
-      enqueue(runtime, async () => {
-        await processFullModeEvent(runtime, event.method, event.params ?? {}, event.sessionId);
-      });
+      if (!FULL_MODE_FOLLOWUP_METHODS.has(event.method)) {
+        return;
+      }
+
+      enqueue(
+        runtime,
+        async () => {
+          await processFullModeEvent(runtime, event.method, event.params ?? {}, event.sessionId);
+        },
+        { bestEffort: true }
+      );
     });
 
     const unsubscribeDetach = router.onDetach((event) => {
@@ -1155,9 +1201,13 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
     );
 
     runtime.screenshotInterval = globalThis.setInterval(() => {
-      enqueue(runtime, async () => {
-        await captureScreenshot(runtime, "interval");
-      });
+      enqueue(
+        runtime,
+        async () => {
+          await captureScreenshot(runtime, "interval");
+        },
+        { bestEffort: true }
+      );
     }, screenshotIntervalMs);
   } catch (error) {
     console.warn("[WebBlackbox] failed to attach debugger", error);
@@ -1171,6 +1221,10 @@ async function processFullModeEvent(
   params: unknown,
   sessionId?: string
 ): Promise<void> {
+  if (runtime.stopping) {
+    return;
+  }
+
   const payload = asRecord(params);
 
   if (method === "Target.attachedToTarget") {
@@ -1196,12 +1250,14 @@ async function processFullModeEvent(
   if (method === "Network.responseReceived") {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
     const response = asRecord(payload?.response);
+    const resourceType = typeof payload?.type === "string" ? payload.type : undefined;
 
     if (requestId) {
       runtime.requestMeta.set(requestId, {
         url: typeof response?.url === "string" ? response.url : undefined,
         mimeType: typeof response?.mimeType === "string" ? response.mimeType : undefined,
-        status: typeof response?.status === "number" ? response.status : undefined
+        status: typeof response?.status === "number" ? response.status : undefined,
+        resourceType
       });
     }
 
@@ -1211,19 +1267,34 @@ async function processFullModeEvent(
   if (method === "Network.loadingFinished") {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
 
-    if (requestId) {
+    if (requestId && shouldCaptureResponseBody(runtime, requestId, payload)) {
       await captureResponseBody(runtime, requestId, sessionId);
+    }
+
+    if (requestId) {
+      runtime.requestMeta.delete(requestId);
     }
 
     return;
   }
 
   if (method === "Runtime.exceptionThrown" || method === "Network.loadingFailed") {
-    await captureFullModeArtifacts(runtime, method);
+    if (method === "Network.loadingFailed") {
+      const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
+
+      if (requestId) {
+        runtime.requestMeta.delete(requestId);
+      }
+    }
+
+    if (shouldCaptureIncidentArtifacts(runtime)) {
+      await captureIncidentArtifacts(runtime, method);
+    }
+
     return;
   }
 
-  if (method === "Page.frameNavigated") {
+  if (method === "Page.frameNavigated" && shouldCaptureNavigationSnapshot(runtime)) {
     await captureDomSnapshot(runtime, "navigation");
   }
 }
@@ -1257,7 +1328,7 @@ async function captureResponseBody(
   requestId: string,
   sessionId?: string
 ): Promise<void> {
-  if (!runtime.cdpRouter) {
+  if (!runtime.cdpRouter || runtime.stopping) {
     return;
   }
 
@@ -1276,13 +1347,15 @@ async function captureResponseBody(
   const fullBytes = response.base64Encoded
     ? decodeBase64(response.body)
     : new TextEncoder().encode(response.body);
-  const truncated = fullBytes.byteLength > NETWORK_BODY_MAX_BYTES;
-  const sampledBytes = truncated ? fullBytes.slice(0, NETWORK_BODY_MAX_BYTES) : fullBytes;
+  const truncated = fullBytes.byteLength > FULL_MODE_BODY_CAPTURE_MAX_BYTES;
+  const sampledBytes = truncated ? fullBytes.slice(0, FULL_MODE_BODY_CAPTURE_MAX_BYTES) : fullBytes;
   const metadata = runtime.requestMeta.get(requestId);
   const hash = await runtime.pipeline.putBlob(
     metadata?.mimeType ?? "application/octet-stream",
     sampledBytes
   );
+
+  runtime.responseBodyCaptures += 1;
 
   ingestRawEvent({
     source: "system",
@@ -1301,6 +1374,137 @@ async function captureResponseBody(
       truncated
     }
   });
+}
+
+function shouldCaptureResponseBody(
+  runtime: SessionRuntime,
+  requestId: string,
+  loadingFinishedPayload: Record<string, unknown> | null
+): boolean {
+  if (runtime.mode !== "full" || runtime.stopping) {
+    return false;
+  }
+
+  if (runtime.responseBodyCaptures >= FULL_MODE_BODY_CAPTURE_MAX_PER_SESSION) {
+    return false;
+  }
+
+  const metadata = runtime.requestMeta.get(requestId);
+
+  if (!metadata) {
+    return false;
+  }
+
+  if (metadata.resourceType && SKIPPED_FULL_MODE_BODY_RESOURCE_TYPES.has(metadata.resourceType)) {
+    return false;
+  }
+
+  const normalizedMime = normalizeMimeType(metadata.mimeType ?? null);
+
+  if (normalizedMime && !isTextualMimeType(normalizedMime)) {
+    return false;
+  }
+
+  if (!normalizedMime && !isLikelyTextualResourceType(metadata.resourceType)) {
+    return false;
+  }
+
+  const encodedDataLength = asFiniteNumber(loadingFinishedPayload?.encodedDataLength);
+
+  if (
+    encodedDataLength !== null &&
+    Number.isFinite(encodedDataLength) &&
+    encodedDataLength > FULL_MODE_BODY_CAPTURE_MAX_BYTES * 2
+  ) {
+    return false;
+  }
+
+  const now = Date.now();
+  const threshold = now - 60_000;
+  runtime.responseBodyCaptureTimestamps = runtime.responseBodyCaptureTimestamps.filter(
+    (timestamp) => timestamp >= threshold
+  );
+
+  if (runtime.responseBodyCaptureTimestamps.length >= FULL_MODE_BODY_CAPTURE_MAX_PER_MINUTE) {
+    return false;
+  }
+
+  runtime.responseBodyCaptureTimestamps.push(now);
+  return true;
+}
+
+function isTextualMimeType(mimeType: string): boolean {
+  return (
+    mimeType.startsWith("text/") ||
+    mimeType.includes("json") ||
+    mimeType.includes("xml") ||
+    mimeType.includes("javascript") ||
+    mimeType.includes("ecmascript") ||
+    mimeType.includes("x-www-form-urlencoded")
+  );
+}
+
+function isLikelyTextualResourceType(resourceType?: string): boolean {
+  return (
+    resourceType === "Document" ||
+    resourceType === "XHR" ||
+    resourceType === "Fetch" ||
+    resourceType === "Script" ||
+    resourceType === "EventSource"
+  );
+}
+
+function shouldCaptureIncidentArtifacts(runtime: SessionRuntime): boolean {
+  if (runtime.stopping) {
+    return false;
+  }
+
+  const now = Date.now();
+
+  if (now - runtime.lastIncidentCaptureAt < FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS) {
+    return false;
+  }
+
+  runtime.lastIncidentCaptureAt = now;
+  return true;
+}
+
+async function captureIncidentArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
+  await Promise.allSettled([
+    captureScreenshot(runtime, reason),
+    captureTraceMetrics(runtime, reason)
+  ]);
+}
+
+function shouldCaptureNavigationSnapshot(runtime: SessionRuntime): boolean {
+  if (runtime.stopping) {
+    return false;
+  }
+
+  const now = Date.now();
+
+  if (now - runtime.lastNavigationSnapshotAt < FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS) {
+    return false;
+  }
+
+  runtime.lastNavigationSnapshotAt = now;
+  return true;
+}
+
+function handleFreezeNotice(runtime: SessionRuntime, reason: FreezeReason): void {
+  if (runtime.stopping) {
+    return;
+  }
+
+  const now = Date.now();
+  const lastNotifiedAt = runtime.lastFreezeNotices.get(reason) ?? Number.NEGATIVE_INFINITY;
+
+  if (now - lastNotifiedAt < FREEZE_NOTICE_COOLDOWN_MS) {
+    return;
+  }
+
+  runtime.lastFreezeNotices.set(reason, now);
+  broadcast({ kind: "sw.freeze", sid: runtime.sid, reason });
 }
 
 async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
@@ -1649,12 +1853,7 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
 }
 
 function shouldCaptureAdvancedProfiles(reason: string): boolean {
-  return (
-    reason.startsWith("freeze:") ||
-    reason === "Runtime.exceptionThrown" ||
-    reason === "Network.loadingFailed" ||
-    reason === "manual"
-  );
+  return reason === "manual";
 }
 
 function wait(durationMs: number): Promise<void> {
@@ -2209,10 +2408,29 @@ async function ensureOffscreenDocument(): Promise<void> {
   });
 }
 
-function enqueue(runtime: SessionRuntime, task: () => Promise<void>): void {
-  runtime.queue = runtime.queue.then(task).catch((error) => {
-    console.warn("[WebBlackbox] session queue error", error);
-  });
+function enqueue(
+  runtime: SessionRuntime,
+  task: () => Promise<void>,
+  options: { bestEffort?: boolean } = {}
+): boolean {
+  if (options.bestEffort) {
+    if (runtime.stopping || runtime.queueDepth >= BEST_EFFORT_QUEUE_MAX_PENDING) {
+      runtime.droppedBestEffortTasks += 1;
+      return false;
+    }
+  }
+
+  runtime.queueDepth += 1;
+  runtime.queue = runtime.queue
+    .then(task)
+    .catch((error) => {
+      console.warn("[WebBlackbox] session queue error", error);
+    })
+    .finally(() => {
+      runtime.queueDepth = Math.max(0, runtime.queueDepth - 1);
+    });
+
+  return true;
 }
 
 function enqueueWithResult<TResult>(
@@ -2244,6 +2462,8 @@ async function teardownCaptureInstrumentation(runtime: SessionRuntime): Promise<
   }
 
   runtime.enabledCdpSessions.clear();
+  runtime.requestMeta.clear();
+  runtime.responseBodyCaptureTimestamps.length = 0;
 
   if (runtime.screenshotInterval !== null) {
     clearInterval(runtime.screenshotInterval);
@@ -2353,10 +2573,7 @@ function broadcast(message: ExtensionOutboundMessage): void {
 }
 
 async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_RECORDER_CONFIG> {
-  const baseConfig: typeof DEFAULT_RECORDER_CONFIG = {
-    ...DEFAULT_RECORDER_CONFIG,
-    mode
-  };
+  const baseConfig = resolveModeBaseConfig(mode);
 
   const storedValues = await chromeApi?.storage?.local?.get(OPTIONS_STORAGE_KEY);
   const stored = asRecord(storedValues?.[OPTIONS_STORAGE_KEY]);
@@ -2383,6 +2600,32 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
     sitePolicies: Array.isArray(stored.sitePolicies)
       ? (stored.sitePolicies as typeof baseConfig.sitePolicies)
       : baseConfig.sitePolicies
+  };
+}
+
+function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFIG {
+  const base: typeof DEFAULT_RECORDER_CONFIG = {
+    ...DEFAULT_RECORDER_CONFIG,
+    mode
+  };
+
+  if (mode !== "full") {
+    return base;
+  }
+
+  return {
+    ...base,
+    freezeOnNetworkFailure: false,
+    freezeOnLongTaskSpike: false,
+    sampling: {
+      ...base.sampling,
+      mousemoveHz: 12,
+      scrollHz: 10,
+      domFlushMs: 180,
+      snapshotIntervalMs: 30_000,
+      screenshotIdleMs: 12_000,
+      bodyCaptureMaxBytes: FULL_MODE_BODY_CAPTURE_MAX_BYTES
+    }
   };
 }
 

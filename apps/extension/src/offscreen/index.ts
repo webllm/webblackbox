@@ -186,8 +186,7 @@ async function downloadExportedBundle(
   downloadUrl: string;
   integrity: unknown;
 }> {
-  const normalizedBytes = new Uint8Array(bytes.byteLength);
-  normalizedBytes.set(bytes);
+  const normalizedBytes = Uint8Array.from(bytes);
   const blob = new Blob([normalizedBytes], { type: "application/zip" });
   const downloadUrl = URL.createObjectURL(blob);
 

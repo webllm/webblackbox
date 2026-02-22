@@ -38,6 +38,7 @@ export class FlightRecorderPipeline {
   private readonly indexer = new EventIndexer();
 
   private readonly blobHashes = new Set<string>();
+  private readonly sessionBlobHashes = new Set<string>();
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = options.chunkCodec ?? "none";
@@ -71,6 +72,7 @@ export class FlightRecorderPipeline {
 
   public async putBlob(mime: string, bytes: Uint8Array): Promise<string> {
     const hash = await sha256Hex(bytes);
+    this.sessionBlobHashes.add(hash);
 
     if (this.blobHashes.has(hash)) {
       return hash;
@@ -105,7 +107,7 @@ export class FlightRecorderPipeline {
     await this.flush();
     const indexes = await this.finalizeIndexes();
     const chunks = await this.options.storage.listChunks(this.options.session.sid);
-    const blobs = await this.options.storage.listBlobs();
+    const blobs = await this.listSessionBlobs();
     const manifest = this.buildManifest(chunks);
 
     const { bytes, integrity } = await createWebBlackboxArchive(
@@ -129,6 +131,21 @@ export class FlightRecorderPipeline {
       bytes,
       integrity
     };
+  }
+
+  private async listSessionBlobs(): Promise<StoredBlob[]> {
+    const hashes = [...this.sessionBlobHashes].sort();
+    const blobs: StoredBlob[] = [];
+
+    for (const hash of hashes) {
+      const blob = await this.options.storage.getBlob(hash);
+
+      if (blob) {
+        blobs.push(blob);
+      }
+    }
+
+    return blobs;
   }
 
   private async persistChunk(

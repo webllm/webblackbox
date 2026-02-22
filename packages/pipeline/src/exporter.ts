@@ -38,6 +38,7 @@ export type ArchiveReadOptions = {
 
 const ENCRYPTION_KEY_DERIVATION_ITERATIONS = 120_000;
 const AES_GCM_IV_BYTES = 12;
+const LARGE_ARCHIVE_STORE_THRESHOLD_BYTES = 128 * 1024 * 1024;
 
 export async function createWebBlackboxArchive(
   input: ExportBundleInput,
@@ -85,12 +86,38 @@ export async function createWebBlackboxArchive(
 
   await addJsonFile(zip, "integrity/hashes.json", integrity, fileHashes);
 
-  const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  const estimatedPayloadBytes = estimateArchivePayloadBytes(input);
+  const preferStore =
+    Boolean(encryption) || estimatedPayloadBytes >= LARGE_ARCHIVE_STORE_THRESHOLD_BYTES;
+  const bytes = await zip.generateAsync({
+    type: "uint8array",
+    compression: preferStore ? "STORE" : "DEFLATE",
+    compressionOptions: preferStore ? undefined : { level: 6 }
+  });
 
   return {
     bytes,
     integrity
   };
+}
+
+function estimateArchivePayloadBytes(input: ExportBundleInput): number {
+  let total = 0;
+
+  for (const chunk of input.chunks) {
+    total += chunk.bytes.byteLength;
+  }
+
+  for (const blob of input.blobs) {
+    total += blob.bytes.byteLength;
+  }
+
+  total += new TextEncoder().encode(JSON.stringify(input.manifest)).byteLength;
+  total += new TextEncoder().encode(JSON.stringify(input.timeIndex)).byteLength;
+  total += new TextEncoder().encode(JSON.stringify(input.requestIndex)).byteLength;
+  total += new TextEncoder().encode(JSON.stringify(input.invertedIndex)).byteLength;
+
+  return total;
 }
 
 export type ParsedWebBlackboxArchive = {
