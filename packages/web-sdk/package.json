@@ -41,6 +41,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
   },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  },
   "dependencies": {
     "@webblackbox/pipeline": "workspace:*",
     "@webblackbox/protocol": "workspace:*",

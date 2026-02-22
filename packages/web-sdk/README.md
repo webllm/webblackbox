@@ -36,3 +36,25 @@ await sdk.dispose();
 - `injected` uses `@webblackbox/web-sdk/injected-hooks`
 
 This keeps capture logic centralized and shared across the SDK and extension lite mode.
+
+## Tests
+
+- Unit tests:
+  - `src/lite-materializer.test.ts`
+  - `src/injected-hooks.test.ts`
+- Integration tests:
+  - `src/lite-sdk.test.ts` (start/stop/ingest/export archive flow)
+
+Run with:
+
+```bash
+pnpm --filter @webblackbox/web-sdk test
+```
+
+For end-to-end full-chain verification (extension -> export -> player), use extension scripts:
+
+```bash
+pnpm --filter @webblackbox/extension e2e:fullchain:lite
+pnpm --filter @webblackbox/extension e2e:fullchain:lite:reload
+pnpm --filter @webblackbox/extension e2e:fullchain:full
+```
