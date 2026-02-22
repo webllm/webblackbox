@@ -553,6 +553,12 @@ function bindGlobalActions(): void {
 
     pausePlayback();
     state.selectedEventId = eventId;
+
+    if (state.activePanel !== "details") {
+      state.activePanel = "details";
+      renderPanelTabs();
+    }
+
     renderEventDetails();
     renderTimeline();
   });
@@ -2052,11 +2058,12 @@ function renderTimelineRow(event: WebBlackboxEvent): string {
   const model = state.model;
   const relativeMono = Math.max(0, event.mono - (model?.minMono ?? 0));
   const buttonClass = selectedClass ? `event ${selectedClass}` : "event";
+  const eventLabel = formatTimelineEventLabel(event.id);
 
   return `<li class="event-row"><button data-event-id="${escapeHtml(event.id)}" class="${buttonClass}">
+        <span class="id" title="${escapeHtml(event.id)}">${escapeHtml(eventLabel)}</span>
         <span class="tag">${escapeHtml(event.type)}</span>
         <span class="mono">${formatMono(relativeMono)}</span>
-        <span class="id">${escapeHtml(event.id)}</span>
       </button></li>`;
 }
 
@@ -3152,6 +3159,18 @@ function formatDelta(delta: number): string {
   }
 
   return String(delta);
+}
+
+function formatTimelineEventLabel(eventId: string): string {
+  const exactMatch = /^E-(\d+)$/.exec(eventId);
+  const anyNumber = /(\d+)(?!.*\d)/.exec(eventId);
+  const digits = exactMatch?.[1] ?? anyNumber?.[1];
+
+  if (!digits) {
+    return eventId;
+  }
+
+  return `#${digits.slice(-5).padStart(5, "0")}`;
 }
 
 function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | null {

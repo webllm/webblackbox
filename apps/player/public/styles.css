@@ -1018,6 +1018,8 @@ input[type="file"],
 
 .panel-tabs {
   display: flex;
+  flex-direction: row-reverse;
+  justify-content: flex-start;
   align-items: stretch;
   min-height: 24px;
   overflow-x: auto;
@@ -1025,7 +1027,7 @@ input[type="file"],
 
 .panel-tab {
   border: none;
-  border-right: 1px solid var(--sys-color-divider);
+  border-left: 1px solid var(--sys-color-divider);
   border-radius: 0;
   min-height: 24px;
   padding: 0 8px;
@@ -1192,7 +1194,7 @@ input[type="file"],
   background: transparent;
   text-align: left;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 62px 94px;
+  grid-template-columns: 74px minmax(0, 1fr) 62px;
   gap: 8px;
   align-items: center;
   cursor: pointer;
@@ -1238,7 +1240,7 @@ input[type="file"],
   color: #6b7280;
   font-size: 9px;
   font-family: var(--mono-font-family);
-  text-align: right;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
