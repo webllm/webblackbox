@@ -20,7 +20,7 @@
     "@webblackbox/pipeline": "workspace:*",
     "@webblackbox/protocol": "workspace:*",
     "@webblackbox/recorder": "workspace:*",
-    "@webblackbox/web-sdk": "workspace:*",
+    "webblackbox": "workspace:*",
     "html2canvas-pro": "^2.0.0"
   }
 }

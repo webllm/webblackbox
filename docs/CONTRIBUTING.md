@@ -50,9 +50,10 @@ typecheck → depends on ^typecheck
 
 1. Create directory under `packages/` or `apps/`
 2. Add `package.json` with workspace name (`@webblackbox/your-package`)
-3. Add `tsconfig.json` extending shared config
-4. Add `tsup.config.ts` for bundling (if library)
-5. Package will be auto-discovered by pnpm workspaces
+3. Use unscoped names only for designated public entry packages (current exception: `webblackbox`)
+4. Add `tsconfig.json` extending shared config
+5. Add `tsup.config.ts` for bundling (if library)
+6. Package will be auto-discovered by pnpm workspaces
 
 ### Adding Dependencies
 

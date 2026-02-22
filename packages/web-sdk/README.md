@@ -1,4 +1,4 @@
-# @webblackbox/web-sdk
+# webblackbox
 
 Browser-side SDK for WebBlackbox Lite capture.
 
@@ -12,7 +12,7 @@ Browser-side SDK for WebBlackbox Lite capture.
 ## Quick usage
 
 ```ts
-import { WebBlackboxLiteSdk } from "@webblackbox/web-sdk/lite-sdk";
+import { WebBlackboxLiteSdk } from "webblackbox/lite-sdk";
 
 const sdk = new WebBlackboxLiteSdk({
   showIndicator: true,
@@ -32,8 +32,8 @@ await sdk.dispose();
 
 `apps/extension` reuses this package in lite start flow:
 
-- `content` uses `@webblackbox/web-sdk/lite-capture-agent`
-- `injected` uses `@webblackbox/web-sdk/injected-hooks`
+- `content` uses `webblackbox/lite-capture-agent`
+- `injected` uses `webblackbox/injected-hooks`
 
 This keeps capture logic centralized and shared across the SDK and extension lite mode.
 
@@ -48,7 +48,7 @@ This keeps capture logic centralized and shared across the SDK and extension lit
 Run with:
 
 ```bash
-pnpm --filter @webblackbox/web-sdk test
+pnpm --filter webblackbox test
 ```
 
 For end-to-end full-chain verification (extension -> export -> player), use extension scripts:

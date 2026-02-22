@@ -1,5 +1,5 @@
 {
-  "name": "webblackbox",
+  "name": "@webblackbox/monorepo",
   "private": true,
   "version": "0.1.0",
   "description": "MCP engineering monorepo powered by pnpm + turbo",

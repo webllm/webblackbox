@@ -1,5 +1,5 @@
 {
-  "name": "@webblackbox/web-sdk",
+  "name": "webblackbox",
   "version": "0.1.0",
   "type": "module",
   "sideEffects": false,

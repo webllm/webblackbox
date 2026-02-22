@@ -1,3 +1,3 @@
-import { installInjectedLiteCaptureHooks } from "@webblackbox/web-sdk/injected-hooks";
+import { installInjectedLiteCaptureHooks } from "webblackbox/injected-hooks";
 
 installInjectedLiteCaptureHooks();

@@ -1,4 +1,4 @@
-import { LiteCaptureAgent } from "@webblackbox/web-sdk/lite-capture-agent";
+import { LiteCaptureAgent } from "webblackbox/lite-capture-agent";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 import { getChromeApi } from "../shared/chrome-api.js";

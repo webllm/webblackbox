@@ -80,6 +80,7 @@ webblackbox/
 │   ├── protocol/           # Event types, schemas, validation (Zod)
 │   ├── recorder/           # Event recording, normalization, ring buffer
 │   ├── pipeline/           # Chunking, compression, indexing, export
+│   ├── web-sdk/            # Browser lite capture SDK (published as `webblackbox`)
 │   ├── player-sdk/         # Playback, querying, analysis APIs
 │   ├── cdp-router/         # Chrome DevTools Protocol routing
 │   ├── mcp-core/           # MCP utility functions
@@ -95,6 +96,9 @@ webblackbox/
 extension ─────┬──→ cdp-router ──→ protocol
                ├──→ recorder ────→ protocol
                ├──→ pipeline ────→ protocol
+               ├──→ webblackbox ─┬──→ recorder ───→ protocol
+               │                 ├──→ pipeline ───→ protocol
+               │                 └──→ protocol
                └──→ protocol
 
 player ────────┬──→ player-sdk ──→ protocol
@@ -173,6 +177,15 @@ Processes recorded events into portable, indexed archives.
 - **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
 - **PipelineStorage** — Abstract storage interface with `MemoryPipelineStorage` implementation
 - **SHA-256** — Content-addressable blob deduplication
+
+### `webblackbox`
+
+Browser-side lite capture SDK (published under the unscoped npm name `webblackbox`).
+
+- **WebBlackboxLiteSdk** — Start/stop/flush/export `.webblackbox` archives directly in-page
+- **LiteCaptureAgent** — Reusable capture agent for DOM/input/screenshot/storage collection
+- **installInjectedLiteCaptureHooks** — Injected runtime hooks for console/network/storage/error capture
+- **materializeLiteRawEvent** — Shared lite raw-event materialization pipeline
 
 ### `@webblackbox/player-sdk`
 
