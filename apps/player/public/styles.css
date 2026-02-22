@@ -1115,6 +1115,20 @@ input[type="file"],
   text-transform: none;
 }
 
+.console-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-heading .ui-input {
+  margin-left: auto;
+  width: min(360px, 70%);
+  height: 20px;
+  min-height: 20px;
+  font-size: 10px;
+}
+
 .panel-hidden {
   display: none !important;
 }

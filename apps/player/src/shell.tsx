@@ -434,7 +434,14 @@ export function PlayerShell(): React.JSX.Element {
           </Card>
 
           <Card data-log-panel-target="console">
-            <h2>Console</h2>
+            <h2 className="console-heading">
+              <span>Console</span>
+              <Input
+                id="console-filter"
+                type="search"
+                placeholder="Filter logs by type or content"
+              />
+            </h2>
             <ul id="console-list" className="signal-list"></ul>
           </Card>
 

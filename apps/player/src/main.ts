@@ -148,6 +148,7 @@ type ScreenshotRecord = {
 type ArchiveModel = {
   events: WebBlackboxEvent[];
   consoleSignals: WebBlackboxEvent[];
+  consoleSignalSearchText: string[];
   eventById: Map<string, WebBlackboxEvent>;
   eventSearchText: string[];
   errorPrefix: number[];
@@ -181,6 +182,7 @@ type PlayerState = {
   selectedRequestId: string | null;
   textFilter: string;
   typeFilter: TimelineFilter;
+  consoleFilter: string;
   networkView: {
     query: string;
     method: string;
@@ -262,6 +264,7 @@ const state: PlayerState = {
   selectedRequestId: null,
   textFilter: "",
   typeFilter: "all",
+  consoleFilter: "",
   networkView: {
     query: "",
     method: "all",
@@ -328,6 +331,7 @@ const refs = {
   networkMethodFilter: getElement<HTMLSelectElement>("network-method-filter"),
   networkStatusFilter: getElement<HTMLSelectElement>("network-status-filter"),
   networkTypeFilter: getElement<HTMLSelectElement>("network-type-filter"),
+  consoleFilter: getElement<HTMLInputElement>("console-filter"),
   networkSummary: getElement<HTMLElement>("network-summary"),
   panelTabs: getElement<HTMLElement>("panel-tabs"),
   playbackToggle: getElement<HTMLButtonElement>("playback-toggle"),
@@ -432,6 +436,11 @@ function bindGlobalActions(): void {
   refs.networkTypeFilter.addEventListener("change", () => {
     state.networkView.type = refs.networkTypeFilter.value as NetworkTypeFilter;
     renderWaterfall();
+  });
+
+  refs.consoleFilter.addEventListener("input", () => {
+    state.consoleFilter = refs.consoleFilter.value.trim().toLowerCase();
+    renderConsoleSignals();
   });
 
   for (const button of networkSortButtons) {
@@ -2682,11 +2691,28 @@ function renderConsoleSignals(): void {
     state.playheadMono,
     (event) => event.mono
   );
-  const scoped = model.consoleSignals.slice(
-    Math.max(0, visibleCount - MAX_SIGNAL_ROWS),
-    visibleCount
-  );
+  const query = state.consoleFilter.trim();
+  const visibleSignals = model.consoleSignals.slice(0, visibleCount);
 
+  if (!query) {
+    const scoped = visibleSignals.slice(Math.max(0, visibleSignals.length - MAX_SIGNAL_ROWS));
+    renderSignalEvents(refs.consoleList, scoped);
+    return;
+  }
+
+  const filtered: WebBlackboxEvent[] = [];
+
+  for (let index = 0; index < visibleCount; index += 1) {
+    if (model.consoleSignalSearchText[index]?.includes(query)) {
+      const event = model.consoleSignals[index];
+
+      if (event) {
+        filtered.push(event);
+      }
+    }
+  }
+
+  const scoped = filtered.slice(Math.max(0, filtered.length - MAX_SIGNAL_ROWS));
   renderSignalEvents(refs.consoleList, scoped);
 }
 
@@ -3049,6 +3075,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     (left, right) => left.mono - right.mono || left.t - right.t
   );
   const consoleSignals: WebBlackboxEvent[] = [];
+  const consoleSignalSearchText: string[] = [];
   const eventById = new Map<string, WebBlackboxEvent>();
   const eventSearchText: string[] = [];
   const errorPrefix: number[] = [];
@@ -3066,8 +3093,10 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     if (event.type.startsWith("error.")) {
       errorCount += 1;
       consoleSignals.push(event);
+      consoleSignalSearchText.push(buildConsoleSignalSearchText(event));
     } else if (event.type.startsWith("console.")) {
       consoleSignals.push(event);
+      consoleSignalSearchText.push(buildConsoleSignalSearchText(event));
     }
 
     if (event.type === "network.request") {
@@ -3140,6 +3169,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   return {
     events,
     consoleSignals,
+    consoleSignalSearchText,
     eventById,
     eventSearchText,
     errorPrefix,
@@ -3432,11 +3462,32 @@ function renderSignalEvents(container: HTMLElement, events: WebBlackboxEvent[]):
 
   container.innerHTML = scoped
     .map((event) => {
-      const payload = JSON.stringify(event.data);
-      const text = payload.length > 120 ? `${payload.slice(0, 120)}...` : payload;
+      const text = stringifySignalPayload(event.data);
       return `<li class="signal"><span class="signal-type">${escapeHtml(event.type)}</span><span class="signal-text">${escapeHtml(text)}</span></li>`;
     })
     .join("");
+}
+
+function buildConsoleSignalSearchText(event: WebBlackboxEvent): string {
+  return `${event.type} ${stringifySignalPayload(event.data)}`.toLowerCase();
+}
+
+function stringifySignalPayload(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+
+    if (typeof serialized === "string") {
+      return serialized;
+    }
+  } catch {
+    return "[unserializable payload]";
+  }
+
+  return String(value);
 }
 
 async function getScreenshotUrlByShotId(shotId: string): Promise<string | null> {
