@@ -3369,14 +3369,14 @@ function readScreenshotMarker(data: Record<string, unknown> | null): ScreenshotM
   const viewport = asRecord(data?.viewport);
   const widthFromViewport = asFiniteNumber(viewport?.width);
   const heightFromViewport = asFiniteNumber(viewport?.height);
-  const widthFromLegacy = asFiniteNumber(data?.w);
-  const heightFromLegacy = asFiniteNumber(data?.h);
+  const widthFromFallback = asFiniteNumber(data?.w);
+  const heightFromFallback = asFiniteNumber(data?.h);
 
   return {
     x,
     y,
-    viewportWidth: widthFromViewport ?? widthFromLegacy ?? undefined,
-    viewportHeight: heightFromViewport ?? heightFromLegacy ?? undefined,
+    viewportWidth: widthFromViewport ?? widthFromFallback ?? undefined,
+    viewportHeight: heightFromViewport ?? heightFromFallback ?? undefined,
     reason: asString(data?.reason) ?? undefined
   };
 }
@@ -3388,14 +3388,14 @@ function readScreenshotContext(
   const viewport = asRecord(data?.viewport);
   const widthFromViewport = asFiniteNumber(viewport?.width);
   const heightFromViewport = asFiniteNumber(viewport?.height);
-  const widthFromLegacy = asFiniteNumber(data?.w);
-  const heightFromLegacy = asFiniteNumber(data?.h);
+  const widthFromFallback = asFiniteNumber(data?.w);
+  const heightFromFallback = asFiniteNumber(data?.h);
 
   if (
     widthFromViewport === null &&
     heightFromViewport === null &&
-    widthFromLegacy === null &&
-    heightFromLegacy === null
+    widthFromFallback === null &&
+    heightFromFallback === null
   ) {
     return {
       mono: event.mono
@@ -3404,8 +3404,8 @@ function readScreenshotContext(
 
   return {
     mono: event.mono,
-    viewportWidth: widthFromViewport ?? widthFromLegacy ?? undefined,
-    viewportHeight: heightFromViewport ?? heightFromLegacy ?? undefined
+    viewportWidth: widthFromViewport ?? widthFromFallback ?? undefined,
+    viewportHeight: heightFromViewport ?? heightFromFallback ?? undefined
   };
 }
 
