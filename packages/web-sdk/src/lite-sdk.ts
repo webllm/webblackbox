@@ -28,6 +28,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TAB_ID = -1;
+const LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
 
 export class WebBlackboxLiteSdk {
   private readonly sid: string;
@@ -424,6 +425,7 @@ function mergeRecorderConfig(
   config: WebBlackboxLiteSdkOptions["config"],
   sampling: WebBlackboxLiteSdkOptions["sampling"]
 ): RecorderConfig {
+  const baseConfig = resolveLiteSdkBaseConfig();
   const topLevelConfig = config ?? {};
   const {
     sampling: samplingFromConfig,
@@ -433,16 +435,16 @@ function mergeRecorderConfig(
   } = topLevelConfig;
 
   return {
-    ...DEFAULT_RECORDER_CONFIG,
+    ...baseConfig,
     ...topLevelOverrides,
     mode: "lite",
     sampling: {
-      ...DEFAULT_RECORDER_CONFIG.sampling,
+      ...baseConfig.sampling,
       ...samplingFromConfig,
       ...sampling
     },
     redaction: {
-      ...DEFAULT_RECORDER_CONFIG.redaction,
+      ...baseConfig.redaction,
       ...redactionFromConfig
     },
     sitePolicies: Array.isArray(sitePolicies)
@@ -453,7 +455,25 @@ function mergeRecorderConfig(
           pathDenylist: [...policy.pathDenylist],
           mode: "lite"
         }))
-      : [...DEFAULT_RECORDER_CONFIG.sitePolicies]
+      : [...baseConfig.sitePolicies]
+  };
+}
+
+function resolveLiteSdkBaseConfig(): RecorderConfig {
+  return {
+    ...DEFAULT_RECORDER_CONFIG,
+    mode: "lite",
+    freezeOnNetworkFailure: false,
+    freezeOnLongTaskSpike: false,
+    sampling: {
+      ...DEFAULT_RECORDER_CONFIG.sampling,
+      mousemoveHz: 14,
+      scrollHz: 10,
+      domFlushMs: 160,
+      snapshotIntervalMs: 30_000,
+      screenshotIdleMs: 12_000,
+      bodyCaptureMaxBytes: LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES
+    }
   };
 }
 

@@ -28,6 +28,17 @@ sdk.downloadArchive(exported);
 await sdk.dispose();
 ```
 
+## Default Safety Tuning
+
+`WebBlackboxLiteSdk` applies lite-focused runtime defaults to reduce long-session freezes and archive bloat:
+
+- Keeps `freezeOnError=true` for uncaught JS exceptions/rejections
+- Defaults `freezeOnNetworkFailure=false` and `freezeOnLongTaskSpike=false`
+- Uses lower-frequency sampling defaults (`mousemoveHz=14`, `scrollHz=10`, `domFlushMs=160`)
+- Caps default body capture at `128 KiB`
+
+You can still override these through `options.config`.
+
 ## Extension reuse
 
 `apps/extension` reuses this package in lite start flow:

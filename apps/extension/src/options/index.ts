@@ -53,15 +53,9 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
         <label for="freezeOnError">Freeze on uncaught errors</label>
       </div>
 
-      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
-        <input id="freezeOnNetworkFailure" type="checkbox" ${config.freezeOnNetworkFailure ? "checked" : ""} />
-        <label for="freezeOnNetworkFailure">Freeze on repeated network failures</label>
-      </div>
-
-      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
-        <input id="freezeOnLongTaskSpike" type="checkbox" ${config.freezeOnLongTaskSpike ? "checked" : ""} />
-        <label for="freezeOnLongTaskSpike">Freeze on long-task spikes</label>
-      </div>
+      <p style="margin:8px 0 0;font-size:12px;opacity:0.78;">
+        Runtime safety mode keeps performance-trigger freeze disabled for lite/full recording.
+      </p>
 
       <label style="display:block;margin:12px 0 6px;">Blocked Selectors (one per line)</label>
       <textarea id="blockedSelectors" rows="6" style="width:100%;">${config.redaction.blockedSelectors.join("\n")}</textarea>
@@ -101,7 +95,7 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
 
   resetButton?.addEventListener("click", async () => {
     await saveConfig(DEFAULT_RECORDER_CONFIG);
-    render(container, DEFAULT_RECORDER_CONFIG);
+    render(container, normalizeOptionsConfig(DEFAULT_RECORDER_CONFIG));
   });
 }
 
@@ -110,10 +104,10 @@ async function loadConfig(): Promise<typeof DEFAULT_RECORDER_CONFIG> {
   const stored = values?.[STORAGE_KEY];
 
   if (!stored || typeof stored !== "object") {
-    return DEFAULT_RECORDER_CONFIG;
+    return normalizeOptionsConfig(DEFAULT_RECORDER_CONFIG);
   }
 
-  return {
+  return normalizeOptionsConfig({
     ...DEFAULT_RECORDER_CONFIG,
     ...(stored as Partial<typeof DEFAULT_RECORDER_CONFIG>),
     sampling: {
@@ -124,12 +118,14 @@ async function loadConfig(): Promise<typeof DEFAULT_RECORDER_CONFIG> {
       ...DEFAULT_RECORDER_CONFIG.redaction,
       ...((stored as Partial<typeof DEFAULT_RECORDER_CONFIG>).redaction ?? {})
     }
-  };
+  });
 }
 
 async function saveConfig(config: typeof DEFAULT_RECORDER_CONFIG): Promise<void> {
+  const normalized = normalizeOptionsConfig(config);
+
   await chromeApi?.storage?.local.set({
-    [STORAGE_KEY]: config
+    [STORAGE_KEY]: normalized
   });
 }
 
@@ -181,19 +177,13 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
   const freezeOnError =
     container.querySelector<HTMLInputElement>("#freezeOnError")?.checked ??
     DEFAULT_RECORDER_CONFIG.freezeOnError;
-  const freezeOnNetworkFailure =
-    container.querySelector<HTMLInputElement>("#freezeOnNetworkFailure")?.checked ??
-    DEFAULT_RECORDER_CONFIG.freezeOnNetworkFailure;
-  const freezeOnLongTaskSpike =
-    container.querySelector<HTMLInputElement>("#freezeOnLongTaskSpike")?.checked ??
-    DEFAULT_RECORDER_CONFIG.freezeOnLongTaskSpike;
 
   return {
     ...DEFAULT_RECORDER_CONFIG,
     ringBufferMinutes: Number.isFinite(ringBufferMinutes) ? Math.max(1, ringBufferMinutes) : 10,
     freezeOnError,
-    freezeOnNetworkFailure,
-    freezeOnLongTaskSpike,
+    freezeOnNetworkFailure: false,
+    freezeOnLongTaskSpike: false,
     sampling: {
       ...DEFAULT_RECORDER_CONFIG.sampling,
       actionWindowMs: Number.isFinite(actionWindowMs) ? Math.max(100, actionWindowMs) : 1500,
@@ -223,6 +213,16 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
       redactBodyPatterns,
       hashSensitiveValues
     }
+  };
+}
+
+function normalizeOptionsConfig(
+  config: typeof DEFAULT_RECORDER_CONFIG
+): typeof DEFAULT_RECORDER_CONFIG {
+  return {
+    ...config,
+    freezeOnNetworkFailure: false,
+    freezeOnLongTaskSpike: false
   };
 }
 

@@ -150,6 +150,7 @@ const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
 const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
 const FULL_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
+const LITE_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
 const FULL_MODE_BODY_CAPTURE_MAX_PER_MINUTE = 80;
 const FULL_MODE_BODY_CAPTURE_MAX_PER_SESSION = 2_000;
 const FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS = 15_000;
@@ -2585,7 +2586,7 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   const sampling = asRecord(stored.sampling);
   const redaction = asRecord(stored.redaction);
 
-  return {
+  const mergedConfig = {
     ...baseConfig,
     ...stored,
     mode,
@@ -2601,6 +2602,8 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
       ? (stored.sitePolicies as typeof baseConfig.sitePolicies)
       : baseConfig.sitePolicies
   };
+
+  return applyModeRuntimeConfig(mode, mergedConfig);
 }
 
 function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFIG {
@@ -2609,8 +2612,21 @@ function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFI
     mode
   };
 
-  if (mode !== "full") {
-    return base;
+  if (mode === "full") {
+    return {
+      ...base,
+      freezeOnNetworkFailure: false,
+      freezeOnLongTaskSpike: false,
+      sampling: {
+        ...base.sampling,
+        mousemoveHz: 12,
+        scrollHz: 10,
+        domFlushMs: 180,
+        snapshotIntervalMs: 30_000,
+        screenshotIdleMs: 12_000,
+        bodyCaptureMaxBytes: FULL_MODE_BODY_CAPTURE_MAX_BYTES
+      }
+    };
   }
 
   return {
@@ -2619,14 +2635,29 @@ function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFI
     freezeOnLongTaskSpike: false,
     sampling: {
       ...base.sampling,
-      mousemoveHz: 12,
+      mousemoveHz: 14,
       scrollHz: 10,
-      domFlushMs: 180,
+      domFlushMs: 160,
       snapshotIntervalMs: 30_000,
       screenshotIdleMs: 12_000,
-      bodyCaptureMaxBytes: FULL_MODE_BODY_CAPTURE_MAX_BYTES
+      bodyCaptureMaxBytes: LITE_MODE_BODY_CAPTURE_MAX_BYTES
     }
   };
+}
+
+function applyModeRuntimeConfig(
+  mode: CaptureMode,
+  config: typeof DEFAULT_RECORDER_CONFIG
+): typeof DEFAULT_RECORDER_CONFIG {
+  if (mode === "full" || mode === "lite") {
+    return {
+      ...config,
+      freezeOnNetworkFailure: false,
+      freezeOnLongTaskSpike: false
+    };
+  }
+
+  return config;
 }
 
 async function persistRuntimeState(): Promise<void> {

@@ -204,4 +204,61 @@ describe("WebBlackboxLiteSdk", () => {
     await expect(sdk.start()).rejects.toThrow(/disposed/i);
     expect(() => sdk.emitMarker("after-dispose")).toThrow(/disposed/i);
   });
+
+  it("uses safer lite defaults and skips resource-error freeze", async () => {
+    const freezeSpy = vi.fn();
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-safe-defaults",
+      injectHooks: false,
+      useDefaultPlugins: false,
+      recorderHooks: {
+        onFreeze: freezeSpy
+      }
+    });
+
+    const config = sdk.getRecorderConfig();
+    expect(config.freezeOnError).toBe(true);
+    expect(config.freezeOnNetworkFailure).toBe(false);
+    expect(config.freezeOnLongTaskSpike).toBe(false);
+    expect(config.sampling).toMatchObject({
+      mousemoveHz: 14,
+      scrollHz: 10,
+      domFlushMs: 160,
+      snapshotIntervalMs: 30_000,
+      screenshotIdleMs: 12_000,
+      bodyCaptureMaxBytes: 128 * 1024
+    });
+
+    await sdk.start();
+
+    sdk.ingestRawEvent(
+      createRawEvent("resourceError", {
+        selector: "img.hero",
+        url: "https://cdn.example.com/hero.webp"
+      })
+    );
+
+    await sdk.flush();
+    expect(freezeSpy).not.toHaveBeenCalled();
+
+    await sdk.dispose();
+  });
+
+  it("respects explicit perf-freeze overrides", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-freeze-override",
+      injectHooks: false,
+      useDefaultPlugins: false,
+      config: {
+        freezeOnNetworkFailure: true,
+        freezeOnLongTaskSpike: true
+      }
+    });
+
+    const config = sdk.getRecorderConfig();
+    expect(config.freezeOnNetworkFailure).toBe(true);
+    expect(config.freezeOnLongTaskSpike).toBe(true);
+
+    await sdk.dispose();
+  });
 });

@@ -94,6 +94,25 @@ describe("recorder", () => {
     expect(result.freezeReason).toBe("error");
   });
 
+  it("does not freeze on resource load errors", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "resourceError",
+      sid: "S-2-resource",
+      tabId: 2,
+      t: Date.now(),
+      mono: 8,
+      payload: {
+        selector: "img.banner",
+        url: "https://cdn.example.com/banner.png"
+      }
+    });
+
+    expect(result.event?.type).toBe("error.resource");
+    expect(result.freezeReason).toBeUndefined();
+  });
+
   it("normalizes console payloads from cdp and injected hooks", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const base = Date.now();

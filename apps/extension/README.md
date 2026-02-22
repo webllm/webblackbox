@@ -154,7 +154,7 @@ The build output is in the `build/` directory. Build entries:
 
 ### Freeze
 
-When a freeze condition is detected (uncaught error, network failure spike, long task, or user marker):
+When a freeze condition is detected (uncaught JS error / unhandled rejection, or user marker by default):
 
 1. Recorder evaluates freeze policy
 2. Service worker receives freeze notification
@@ -163,7 +163,12 @@ When a freeze condition is detected (uncaught error, network failure spike, long
 
 ## Configuration
 
-The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. Default values are defined in `DEFAULT_RECORDER_CONFIG`. Users can modify settings through the Options page.
+The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. Default values are defined in `DEFAULT_RECORDER_CONFIG`, then mode-specific runtime safety tuning is applied:
+
+- `lite`: lower sampling pressure + perf-trigger freeze disabled (`freezeOnNetworkFailure=false`, `freezeOnLongTaskSpike=false`)
+- `full`: same perf-freeze disable + stricter sampling/body-capture limits
+
+Users can still tune other settings through the Options page.
 
 ## Requirements
 

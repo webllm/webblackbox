@@ -49,9 +49,7 @@ export class FreezePolicy {
 }
 
 function isErrorEvent(type: string): boolean {
-  return (
-    type === "error.exception" || type === "error.unhandledrejection" || type === "error.resource"
-  );
+  return type === "error.exception" || type === "error.unhandledrejection";
 }
 
 function readDuration(payload: unknown): number {
