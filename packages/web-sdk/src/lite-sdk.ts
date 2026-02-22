@@ -1,0 +1,495 @@
+import {
+  DEFAULT_RECORDER_CONFIG,
+  createSessionId,
+  type RecorderConfig,
+  type SessionMetadata,
+  type WebBlackboxEvent
+} from "@webblackbox/protocol";
+import {
+  FlightRecorderPipeline,
+  IndexedDbPipelineStorage,
+  MemoryPipelineStorage,
+  type PipelineStorage
+} from "@webblackbox/pipeline";
+import {
+  WebBlackboxRecorder,
+  createDefaultRecorderPlugins,
+  type RawRecorderEvent,
+  type RecorderPlugin
+} from "@webblackbox/recorder";
+
+import { installInjectedLiteCaptureHooks } from "./injected-hooks.js";
+import { LiteCaptureAgent } from "./lite-capture-agent.js";
+import { materializeLiteRawEvent, shouldMaterializeLiteRawEvent } from "./lite-materializer.js";
+import type {
+  WebBlackboxLiteExportOptions,
+  WebBlackboxLiteExportResult,
+  WebBlackboxLiteSdkOptions
+} from "./types.js";
+
+const DEFAULT_TAB_ID = -1;
+
+export class WebBlackboxLiteSdk {
+  private readonly sid: string;
+
+  private readonly tabId: number;
+
+  private readonly config: RecorderConfig;
+
+  private readonly session: SessionMetadata;
+
+  private readonly storage: PipelineStorage;
+
+  private readonly pipeline: FlightRecorderPipeline;
+
+  private readonly recorder: WebBlackboxRecorder;
+
+  private readonly captureAgent: LiteCaptureAgent;
+
+  private rawQueue: Promise<void> = Promise.resolve();
+
+  private pipelineQueue: Promise<void> = Promise.resolve();
+
+  private started = false;
+
+  private recording = false;
+
+  private disposed = false;
+
+  public constructor(options: WebBlackboxLiteSdkOptions = {}) {
+    this.sid = normalizeSessionId(options.sid);
+    this.tabId = normalizeTabId(options.tabId);
+    this.config = mergeRecorderConfig(options.config, options.sampling);
+    this.session = createSessionMetadata(this.sid, this.tabId, options);
+    this.storage = resolveStorage(options, this.sid);
+    this.pipeline = new FlightRecorderPipeline({
+      session: this.session,
+      storage: this.storage,
+      maxChunkBytes: options.maxChunkBytes
+    });
+
+    const recorderHooks = options.recorderHooks;
+    const plugins = resolveRecorderPlugins(options);
+
+    this.recorder = new WebBlackboxRecorder(
+      this.config,
+      {
+        onEvent: (event) => {
+          recorderHooks?.onEvent?.(event);
+          this.enqueuePipelineIngest(event);
+        },
+        onFreeze: (reason, event) => {
+          recorderHooks?.onFreeze?.(reason, event);
+        }
+      },
+      undefined,
+      plugins
+    );
+
+    this.captureAgent = new LiteCaptureAgent({
+      emitBatch: (events) => {
+        this.ingestRawEvents(events);
+      },
+      showIndicator: options.showIndicator
+    });
+
+    if (options.injectHooks !== false) {
+      installInjectedLiteCaptureHooks({
+        flag: options.injectHookFlag
+      });
+    }
+  }
+
+  public get sessionId(): string {
+    return this.sid;
+  }
+
+  public get isRecording(): boolean {
+    return this.recording;
+  }
+
+  public getSessionMetadata(): SessionMetadata {
+    return {
+      ...this.session,
+      tags: [...this.session.tags]
+    };
+  }
+
+  public getRecorderConfig(): RecorderConfig {
+    return {
+      ...this.config,
+      sampling: {
+        ...this.config.sampling
+      },
+      redaction: {
+        ...this.config.redaction,
+        redactHeaders: [...this.config.redaction.redactHeaders],
+        redactCookieNames: [...this.config.redaction.redactCookieNames],
+        redactBodyPatterns: [...this.config.redaction.redactBodyPatterns],
+        blockedSelectors: [...this.config.redaction.blockedSelectors]
+      },
+      sitePolicies: this.config.sitePolicies.map((policy) => ({
+        ...policy,
+        bodyMimeAllowlist: [...policy.bodyMimeAllowlist],
+        pathAllowlist: [...policy.pathAllowlist],
+        pathDenylist: [...policy.pathDenylist]
+      }))
+    };
+  }
+
+  public async start(): Promise<void> {
+    this.assertNotDisposed();
+
+    if (!this.started) {
+      await this.pipeline.start();
+      this.started = true;
+    }
+
+    if (this.recording) {
+      return;
+    }
+
+    this.recording = true;
+    this.captureAgent.setRecordingStatus({
+      active: true,
+      sid: this.sid,
+      tabId: this.tabId,
+      mode: "lite",
+      sampling: this.config.sampling
+    });
+  }
+
+  public async stop(): Promise<void> {
+    this.assertNotDisposed();
+
+    if (!this.started) {
+      return;
+    }
+
+    if (this.recording) {
+      this.recording = false;
+      this.captureAgent.setRecordingStatus({
+        active: false,
+        sid: this.sid,
+        tabId: this.tabId,
+        mode: "lite",
+        sampling: this.config.sampling
+      });
+    }
+
+    this.captureAgent.flush();
+    await this.waitForQueues();
+    await this.pipeline.flush();
+  }
+
+  public emitMarker(message: string): void {
+    this.assertNotDisposed();
+    this.captureAgent.emitMarker(message);
+  }
+
+  public ingestRawEvent(rawEvent: RawRecorderEvent): void {
+    this.ingestRawEvents([rawEvent]);
+  }
+
+  public ingestRawEvents(rawEvents: RawRecorderEvent[]): void {
+    this.assertNotDisposed();
+
+    if (!this.started || rawEvents.length === 0) {
+      return;
+    }
+
+    const normalized = rawEvents.map((rawEvent) => withSession(rawEvent, this.sid, this.tabId));
+
+    this.rawQueue = this.rawQueue
+      .then(async () => {
+        for (const rawEvent of normalized) {
+          await this.ingestOne(rawEvent);
+        }
+      })
+      .catch((error) => {
+        console.warn("[WebBlackboxLiteSdk] failed to ingest raw event batch", error);
+      });
+  }
+
+  public async flush(): Promise<void> {
+    this.assertNotDisposed();
+
+    if (!this.started) {
+      return;
+    }
+
+    this.captureAgent.flush();
+    await this.waitForQueues();
+    await this.pipeline.flush();
+  }
+
+  public async export(
+    options: WebBlackboxLiteExportOptions = {}
+  ): Promise<WebBlackboxLiteExportResult> {
+    this.assertNotDisposed();
+
+    if (!this.started) {
+      await this.start();
+    }
+
+    if (options.stopCapture !== false) {
+      await this.stop();
+    } else {
+      await this.flush();
+    }
+
+    await this.waitForQueues();
+
+    const exported = await this.pipeline.exportBundle({
+      passphrase: options.passphrase
+    });
+
+    return {
+      fileName: exported.fileName,
+      bytes: exported.bytes,
+      integrity: exported.integrity
+    };
+  }
+
+  public downloadArchive(result: WebBlackboxLiteExportResult, fileName = result.fileName): void {
+    WebBlackboxLiteSdk.downloadArchive(result, fileName);
+  }
+
+  public static downloadArchive(
+    result: Pick<WebBlackboxLiteExportResult, "bytes" | "fileName">,
+    fileName = result.fileName
+  ): void {
+    const bytes = new Uint8Array(result.bytes.byteLength);
+    bytes.set(result.bytes);
+
+    const blob = new Blob([bytes], {
+      type: "application/octet-stream"
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.style.display = "none";
+
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 0);
+  }
+
+  public async dispose(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+
+    if (this.started) {
+      await this.stop();
+    }
+
+    this.captureAgent.dispose();
+    this.disposed = true;
+  }
+
+  private async ingestOne(rawEvent: RawRecorderEvent): Promise<void> {
+    let nextRawEvent: RawRecorderEvent | null = rawEvent;
+
+    if (shouldMaterializeLiteRawEvent(rawEvent)) {
+      nextRawEvent = await materializeLiteRawEvent(rawEvent, {
+        config: this.config,
+        putBlob: (mime, bytes) => this.pipeline.putBlob(mime, bytes)
+      });
+    }
+
+    if (!nextRawEvent) {
+      return;
+    }
+
+    this.recorder.ingest(nextRawEvent);
+  }
+
+  private enqueuePipelineIngest(event: WebBlackboxEvent): void {
+    this.pipelineQueue = this.pipelineQueue
+      .then(async () => {
+        await this.pipeline.ingest(event);
+      })
+      .catch((error) => {
+        console.warn("[WebBlackboxLiteSdk] failed to ingest normalized event", error);
+      });
+  }
+
+  private async waitForQueues(): Promise<void> {
+    await this.rawQueue;
+    await this.pipelineQueue;
+  }
+
+  private assertNotDisposed(): void {
+    if (!this.disposed) {
+      return;
+    }
+
+    throw new Error("WebBlackboxLiteSdk has been disposed.");
+  }
+}
+
+function normalizeSessionId(value: string | undefined): string {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+
+  return createSessionId();
+}
+
+function normalizeTabId(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_TAB_ID;
+  }
+
+  return Math.round(value);
+}
+
+function createSessionMetadata(
+  sid: string,
+  tabId: number,
+  options: WebBlackboxLiteSdkOptions
+): SessionMetadata {
+  const startedAt = Date.now();
+  const url = resolveSessionUrl(options.url);
+  const title = resolveSessionTitle(options.title);
+  const tags = normalizeTags(options.tags);
+
+  return {
+    sid,
+    tabId,
+    startedAt,
+    mode: "lite",
+    url,
+    title,
+    tags
+  };
+}
+
+function resolveSessionUrl(value: string | undefined): string {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+
+  if (typeof location !== "undefined" && typeof location.href === "string") {
+    return location.href;
+  }
+
+  return "about:blank";
+}
+
+function resolveSessionTitle(value: string | undefined): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof document === "undefined") {
+    return undefined;
+  }
+
+  return document.title;
+}
+
+function normalizeTags(value: string[] | undefined): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const output: string[] = [];
+
+  for (const candidate of value) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+
+    const trimmed = candidate.trim();
+
+    if (!trimmed || output.includes(trimmed)) {
+      continue;
+    }
+
+    output.push(trimmed);
+  }
+
+  return output;
+}
+
+function mergeRecorderConfig(
+  config: WebBlackboxLiteSdkOptions["config"],
+  sampling: WebBlackboxLiteSdkOptions["sampling"]
+): RecorderConfig {
+  const topLevelConfig = config ?? {};
+  const {
+    sampling: samplingFromConfig,
+    redaction: redactionFromConfig,
+    sitePolicies,
+    ...topLevelOverrides
+  } = topLevelConfig;
+
+  return {
+    ...DEFAULT_RECORDER_CONFIG,
+    ...topLevelOverrides,
+    mode: "lite",
+    sampling: {
+      ...DEFAULT_RECORDER_CONFIG.sampling,
+      ...samplingFromConfig,
+      ...sampling
+    },
+    redaction: {
+      ...DEFAULT_RECORDER_CONFIG.redaction,
+      ...redactionFromConfig
+    },
+    sitePolicies: Array.isArray(sitePolicies)
+      ? sitePolicies.map((policy) => ({
+          ...policy,
+          bodyMimeAllowlist: [...policy.bodyMimeAllowlist],
+          pathAllowlist: [...policy.pathAllowlist],
+          pathDenylist: [...policy.pathDenylist],
+          mode: "lite"
+        }))
+      : [...DEFAULT_RECORDER_CONFIG.sitePolicies]
+  };
+}
+
+function resolveStorage(options: WebBlackboxLiteSdkOptions, sid: string): PipelineStorage {
+  if (options.pipelineStorage) {
+    return options.pipelineStorage;
+  }
+
+  if (options.storage === "indexeddb") {
+    if (typeof indexedDB === "undefined") {
+      console.warn("[WebBlackboxLiteSdk] indexedDB unavailable; falling back to memory storage");
+      return new MemoryPipelineStorage();
+    }
+
+    return new IndexedDbPipelineStorage(options.indexedDbName ?? `webblackbox-lite-${sid}`);
+  }
+
+  return new MemoryPipelineStorage();
+}
+
+function resolveRecorderPlugins(options: WebBlackboxLiteSdkOptions): RecorderPlugin[] {
+  if (Array.isArray(options.plugins)) {
+    return options.plugins;
+  }
+
+  if (options.useDefaultPlugins === false) {
+    return [];
+  }
+
+  return createDefaultRecorderPlugins();
+}
+
+function withSession(rawEvent: RawRecorderEvent, sid: string, tabId: number): RawRecorderEvent {
+  return {
+    ...rawEvent,
+    sid,
+    tabId
+  };
+}

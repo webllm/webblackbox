@@ -9,7 +9,15 @@
       "@webblackbox/cdp-router": ["../../packages/cdp-router/src/index.ts"],
       "@webblackbox/pipeline": ["../../packages/pipeline/src/index.ts"],
       "@webblackbox/protocol": ["../../packages/protocol/src/index.ts"],
-      "@webblackbox/recorder": ["../../packages/recorder/src/index.ts"]
+      "@webblackbox/recorder": ["../../packages/recorder/src/index.ts"],
+      "@webblackbox/web-sdk": ["../../packages/web-sdk/src/index.ts"],
+      "@webblackbox/web-sdk/injected-hooks": ["../../packages/web-sdk/src/injected-hooks.ts"],
+      "@webblackbox/web-sdk/lite-capture-agent": [
+        "../../packages/web-sdk/src/lite-capture-agent.ts"
+      ],
+      "@webblackbox/web-sdk/lite-materializer": ["../../packages/web-sdk/src/lite-materializer.ts"],
+      "@webblackbox/web-sdk/lite-sdk": ["../../packages/web-sdk/src/lite-sdk.ts"],
+      "@webblackbox/web-sdk/types": ["../../packages/web-sdk/src/types.ts"]
     }
   },
   "include": ["src/**/*.ts", "tsup.config.ts", "scripts/**/*.mjs"]

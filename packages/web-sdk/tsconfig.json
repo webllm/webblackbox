@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../config-typescript/node-lib.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@webblackbox/pipeline": ["../pipeline/src/index.ts"],
+      "@webblackbox/protocol": ["../protocol/src/index.ts"],
+      "@webblackbox/recorder": ["../recorder/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

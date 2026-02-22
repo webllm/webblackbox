@@ -65,6 +65,9 @@ importers:
       '@webblackbox/recorder':
         specifier: workspace:*
         version: link:../../packages/recorder
+      '@webblackbox/web-sdk':
+        specifier: workspace:*
+        version: link:../../packages/web-sdk
       html2canvas-pro:
         specifier: ^2.0.0
         version: 2.0.0
@@ -152,6 +155,21 @@ importers:
       '@webblackbox/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/web-sdk:
+    dependencies:
+      '@webblackbox/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
+      '@webblackbox/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@webblackbox/recorder':
+        specifier: workspace:*
+        version: link:../recorder
+      html2canvas-pro:
+        specifier: ^2.0.0
+        version: 2.0.0
 
 packages:
 
