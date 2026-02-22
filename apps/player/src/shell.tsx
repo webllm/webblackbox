@@ -8,17 +8,14 @@ import { Select } from "./components/ui/select.js";
 
 export function PlayerShell(): React.JSX.Element {
   return (
-    <section className="shell">
-      <header className="topbar card">
-        <div className="topbar-copy">
-          <p className="eyebrow">WebBlackbox</p>
-          <h1>Session Player</h1>
-          <p className="subhead">
-            Screenshot playback on top, timeline controls in the middle, and logs synced to playhead
-            below.
-          </p>
+    <main className="shell wb-shell">
+      <header className="toolbar card" role="banner">
+        <div className="toolbar-left">
+          <span className="brand">WebBlackbox</span>
+          <span className="toolbar-separator" aria-hidden="true"></span>
+          <span className="toolbar-title">Player</span>
         </div>
-        <div className="topbar-actions">
+        <div className="toolbar-loaders">
           <label className="upload" htmlFor="archive-input">
             Load Archive
           </label>
@@ -30,18 +27,70 @@ export function PlayerShell(): React.JSX.Element {
         </div>
       </header>
 
+      <section className="status-bar card" aria-live="polite">
+        <div className="status-metrics">
+          <span className="status-item">
+            <span className="status-label">Window</span>
+            <span id="playback-window-label" className="mono status-value">
+              0.00s / 0.00s
+            </span>
+          </span>
+          <span id="playback-window-events" className="status-item muted">
+            0 events | 0 errors | 0 requests
+          </span>
+          <span id="playback-window-panel" className="status-item muted">
+            Timeline panel
+          </span>
+        </div>
+        <div className="status-actions">
+          <label className="mask-wrap" htmlFor="mask-response-preview">
+            <Checkbox id="mask-response-preview" defaultChecked />
+            Mask response preview
+          </label>
+          <span id="feedback" className="feedback"></span>
+        </div>
+      </section>
+
       <Card className="stage-card">
-        <div className="stage-head">
-          <div>
-            <p className="eyebrow">Playback</p>
-            <h2 className="stage-title">Visual Timeline</h2>
+        <div className="stage-toolbar">
+          <div className="playback-buttons">
+            <Button
+              id="playback-back"
+              className="transport-btn transport-btn-step"
+              type="button"
+              variant="secondary"
+            >
+              -1s
+            </Button>
+            <Button
+              id="playback-toggle"
+              className="transport-btn transport-btn-play"
+              type="button"
+              variant="secondary"
+            >
+              Play
+            </Button>
+            <Button
+              id="playback-forward"
+              className="transport-btn transport-btn-step"
+              type="button"
+              variant="secondary"
+            >
+              +1s
+            </Button>
           </div>
-          <div className="stage-tools">
-            <label className="mask-wrap" htmlFor="mask-response-preview">
-              <Checkbox id="mask-response-preview" defaultChecked />
-              Mask preview
+          <div className="stage-toolbar-right">
+            <label className="rate-wrap" htmlFor="playback-rate">
+              Speed
+              <Select id="playback-rate" defaultValue="1">
+                <option value="0.5">0.5x</option>
+                <option value="1">1x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+                <option value="4">4x</option>
+              </Select>
             </label>
-            <div className="time-chip">
+            <div className="time-chip" aria-label="Playback time">
               <span id="playback-current" className="mono">
                 0.00s
               </span>
@@ -63,28 +112,6 @@ export function PlayerShell(): React.JSX.Element {
         </div>
 
         <div className="transport-row">
-          <div className="playback-buttons">
-            <Button id="playback-back" type="button" variant="outline">
-              -1s
-            </Button>
-            <Button id="playback-toggle" type="button">
-              Play
-            </Button>
-            <Button id="playback-forward" type="button" variant="outline">
-              +1s
-            </Button>
-            <label className="rate-wrap" htmlFor="playback-rate">
-              Speed
-              <Select id="playback-rate" defaultValue="1">
-                <option value="0.5">0.5x</option>
-                <option value="1">1x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2x</option>
-                <option value="4">4x</option>
-              </Select>
-            </label>
-          </div>
-
           <div className="playback-track-wrap">
             <div id="progress-shell" className="progress-shell">
               <Input
@@ -170,206 +197,192 @@ export function PlayerShell(): React.JSX.Element {
         </div>
       </Card>
 
-      <Card className="readout-card">
-        <div className="readout-clock">
-          <p className="eyebrow">Playback Window</p>
-          <p id="playback-window-label" className="readout-time mono">
-            0.00s / 0.00s
-          </p>
-        </div>
-        <div className="readout-metrics">
-          <p id="playback-window-events" className="readout-line">
-            0 events | 0 errors | 0 requests
-          </p>
-          <p id="playback-window-panel" className="readout-line muted">
-            Timeline panel
-          </p>
-          <p className="readout-line muted">
-            Shortcuts: Space play/pause, Left/Right seek, Home/End bounds, 1-8 panels
-          </p>
-        </div>
-      </Card>
-
-      <Card className="ops-card">
+      <section className="ops card">
         <section id="summary" className="summary"></section>
-
-        <section className="actions">
-          <Button id="export-report" type="button">
-            Export Bug Report
-          </Button>
-          <Button id="export-har" type="button">
-            Export HAR
-          </Button>
-          <Button id="export-playwright" type="button">
-            Export Playwright
-          </Button>
-          <Button id="export-playwright-mocks" type="button">
-            Export Playwright Mocks
-          </Button>
-          <Button id="export-github-issue" type="button">
-            Export GitHub Issue
-          </Button>
-          <Button id="export-jira-issue" type="button">
-            Export Jira Issue
-          </Button>
-          <span id="feedback" className="feedback"></span>
-        </section>
-
-        <section className="filters">
-          <Input id="text-filter" type="search" placeholder="Search timeline payloads" />
-          <Select id="type-filter">
-            <option value="all">All Timeline Events</option>
-            <option value="errors">Errors</option>
-            <option value="network">Network</option>
-            <option value="storage">Storage</option>
-            <option value="console">Console</option>
-          </Select>
-        </section>
-      </Card>
-
-      <section className="log-workbench">
-        <Card className="log-rail">
-          <section className="panel-tabs" id="panel-tabs">
-            <Button
-              className="panel-tab active"
-              data-log-panel="timeline"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Timeline
+        <div className="ops-grid">
+          <section className="filters">
+            <Input id="text-filter" type="search" placeholder="Filter timeline" />
+            <Select id="type-filter">
+              <option value="all">All Timeline Events</option>
+              <option value="errors">Errors</option>
+              <option value="network">Network</option>
+              <option value="storage">Storage</option>
+              <option value="console">Console</option>
+            </Select>
+          </section>
+          <section className="actions">
+            <Button id="export-report" type="button" variant="secondary">
+              Bug Report
             </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="details"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Event
+            <Button id="export-har" type="button" variant="secondary">
+              HAR
             </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="network"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Network
+            <Button id="export-playwright" type="button" variant="secondary">
+              Playwright
             </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="compare"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Compare
+            <Button id="export-playwright-mocks" type="button" variant="secondary">
+              PW Mocks
             </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="console"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Console
+            <Button id="export-github-issue" type="button" variant="secondary">
+              GitHub
             </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="realtime"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Realtime
-            </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="storage"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Storage
-            </Button>
-            <Button
-              className="panel-tab"
-              data-log-panel="perf"
-              data-count="0"
-              type="button"
-              variant="ghost"
-            >
-              Performance
+            <Button id="export-jira-issue" type="button" variant="secondary">
+              Jira
             </Button>
           </section>
-        </Card>
+        </div>
+      </section>
 
-        <section className="log-main">
-          <section className="log-grid">
-            <Card className="timeline-card" data-log-panel-target="timeline">
-              <h2>Timeline (&lt;= Playhead)</h2>
-              <ul id="timeline-list" className="event-list"></ul>
-            </Card>
-
-            <Card className="details-card" data-log-panel-target="details">
-              <h2>Event Details</h2>
-              <pre id="event-details" className="code"></pre>
-            </Card>
-
-            <Card className="network-card" data-log-panel-target="network">
-              <h2>Network Waterfall (&lt;= Playhead)</h2>
-              <div className="waterfall-wrap">
-                <table className="waterfall-table">
-                  <thead>
-                    <tr>
-                      <th align="left">Request</th>
-                      <th align="left">Status</th>
-                      <th align="left">Duration</th>
-                      <th align="left">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody id="waterfall-body"></tbody>
-                </table>
-              </div>
-              <div className="inline-actions">
-                <Button id="copy-curl" type="button" variant="secondary">
-                  Copy cURL
-                </Button>
-                <Button id="copy-fetch" type="button" variant="secondary">
-                  Copy fetch
-                </Button>
-              </div>
-              <pre id="request-details" className="code"></pre>
-            </Card>
-
-            <Card className="compare-card" data-log-panel-target="compare">
-              <h2>Compare Summary</h2>
-              <pre id="compare-details" className="code"></pre>
-            </Card>
-
-            <Card data-log-panel-target="console">
-              <h2>Console &amp; Errors (&lt;= Playhead)</h2>
-              <ul id="console-list" className="signal-list"></ul>
-            </Card>
-
-            <Card data-log-panel-target="realtime">
-              <h2>Realtime WS/SSE (&lt;= Playhead)</h2>
-              <ul id="realtime-list" className="signal-list"></ul>
-            </Card>
-
-            <Card data-log-panel-target="storage">
-              <h2>Storage Timeline (&lt;= Playhead)</h2>
-              <ul id="storage-list" className="signal-list"></ul>
-            </Card>
-
-            <Card data-log-panel-target="perf">
-              <h2>Performance Artifacts (&lt;= Playhead)</h2>
-              <ul id="perf-list" className="signal-list"></ul>
-            </Card>
-          </section>
+      <section className="panel-tabs-wrap card">
+        <section className="panel-tabs" id="panel-tabs" role="tablist" aria-label="Log panels">
+          <Button
+            className="panel-tab active"
+            data-log-panel="timeline"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Timeline
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="details"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Event
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="network"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Network
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="compare"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Compare
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="console"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Console
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="realtime"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Realtime
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="storage"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Storage
+          </Button>
+          <Button
+            className="panel-tab"
+            data-log-panel="perf"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Performance
+          </Button>
         </section>
       </section>
-    </section>
+
+      <section className="panel-stage">
+        <section className="log-grid" id="log-grid">
+          <Card className="timeline-card" data-log-panel-target="timeline">
+            <h2>Timeline</h2>
+            <ul id="timeline-list" className="event-list"></ul>
+          </Card>
+
+          <div
+            id="log-grid-divider"
+            className="log-grid-divider"
+            role="separator"
+            aria-label="Resize panels"
+            aria-orientation="vertical"
+            tabIndex={0}
+          ></div>
+
+          <Card className="details-card" data-log-panel-target="details">
+            <h2>Event Details</h2>
+            <pre id="event-details" className="code"></pre>
+          </Card>
+
+          <Card className="network-card" data-log-panel-target="network">
+            <h2>Network</h2>
+            <div className="waterfall-wrap">
+              <table className="waterfall-table">
+                <thead>
+                  <tr>
+                    <th align="left">Request</th>
+                    <th align="left">Status</th>
+                    <th align="left">Duration</th>
+                    <th align="left">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="waterfall-body"></tbody>
+              </table>
+            </div>
+            <div className="inline-actions">
+              <Button id="copy-curl" type="button" variant="secondary">
+                Copy cURL
+              </Button>
+              <Button id="copy-fetch" type="button" variant="secondary">
+                Copy fetch
+              </Button>
+            </div>
+            <pre id="request-details" className="code"></pre>
+          </Card>
+
+          <Card className="compare-card" data-log-panel-target="compare">
+            <h2>Compare</h2>
+            <pre id="compare-details" className="code"></pre>
+          </Card>
+
+          <Card data-log-panel-target="console">
+            <h2>Console</h2>
+            <ul id="console-list" className="signal-list"></ul>
+          </Card>
+
+          <Card data-log-panel-target="realtime">
+            <h2>Realtime</h2>
+            <ul id="realtime-list" className="signal-list"></ul>
+          </Card>
+
+          <Card data-log-panel-target="storage">
+            <h2>Storage</h2>
+            <ul id="storage-list" className="signal-list"></ul>
+          </Card>
+
+          <Card data-log-panel-target="perf">
+            <h2>Performance</h2>
+            <ul id="perf-list" className="signal-list"></ul>
+          </Card>
+        </section>
+      </section>
+    </main>
   );
 }

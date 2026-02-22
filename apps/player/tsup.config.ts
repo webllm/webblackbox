@@ -12,7 +12,7 @@ export default defineConfig({
   noExternal: [/.*/],
   sourcemap: true,
   outDir: "build",
-  clean: true,
+  clean: false,
   splitting: false,
   dts: false,
   esbuildOptions(options) {

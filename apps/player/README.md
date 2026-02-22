@@ -44,6 +44,8 @@ pnpm build
 3. If the archive is encrypted, enter the passphrase
 4. Explore the session using the interactive panels
 
+The player also supports legacy archives that use older index/integrity paths and legacy blob naming.
+
 ## Features
 
 ### Event Timeline

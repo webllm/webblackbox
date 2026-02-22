@@ -334,27 +334,39 @@ export class WebBlackboxPlayer {
       this.inverted.set(entry.term.toLowerCase(), [...entry.eventIds]);
     }
 
+    const legacyAliases = new Map<string, BlobRef | null>();
+
     for (const path of Object.keys(zip.files)) {
-      if (!path.startsWith("blobs/sha256-")) {
+      const parsed = parseBlobPath(path);
+
+      if (!parsed) {
         continue;
       }
 
-      const match = /^blobs\/sha256-([^.]+)\.(.+)$/.exec(path);
-
-      if (!match) {
-        continue;
-      }
-
-      const hash = match[1];
-      const extension = match[2];
-
-      if (!hash || !extension) {
-        continue;
-      }
-      this.blobsByHash.set(hash, {
+      const blobRef: BlobRef = {
         path,
-        mime: inferMime(extension)
-      });
+        mime: inferMime(parsed.extension)
+      };
+
+      // Always register exact path lookups to avoid collisions across extensions.
+      this.blobsByHash.set(path, blobRef);
+
+      if (parsed.kind === "prefixed") {
+        setBlobAliasIfAbsent(this.blobsByHash, parsed.hash, blobRef);
+        setBlobAliasIfAbsent(this.blobsByHash, `sha256-${parsed.hash}`, blobRef);
+        continue;
+      }
+
+      registerLegacyBlobAlias(legacyAliases, parsed.hash, blobRef);
+      registerLegacyBlobAlias(legacyAliases, `sha256-${parsed.hash}`, blobRef);
+    }
+
+    for (const [alias, blobRef] of legacyAliases) {
+      if (!blobRef) {
+        continue;
+      }
+
+      setBlobAliasIfAbsent(this.blobsByHash, alias, blobRef);
     }
   }
 
@@ -368,12 +380,24 @@ export class WebBlackboxPlayer {
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
     const encryptedFiles = manifest.encryption?.files ?? {};
-    const timeIndex = await readOptionalJson<ChunkTimeIndexEntry[]>(zip, "index/time.json", []);
-    const requestIndex = await readOptionalJson<RequestIndexEntry[]>(zip, "index/req.json", []);
-    const invertedIndex = await readOptionalJson<InvertedIndexEntry[]>(zip, "index/inv.json", []);
-    const integrity = await readOptionalJson<HashesManifest | null>(
+    const timeIndex = await readOptionalJsonFromPaths<ChunkTimeIndexEntry[]>(
       zip,
-      "integrity/hashes.json",
+      ["index/time.json", "indexes/time.json"],
+      []
+    );
+    const requestIndex = await readOptionalJsonFromPaths<RequestIndexEntry[]>(
+      zip,
+      ["index/req.json", "indexes/requests.json"],
+      []
+    );
+    const invertedIndex = await readOptionalJsonFromPaths<InvertedIndexEntry[]>(
+      zip,
+      ["index/inv.json", "indexes/inverted.json"],
+      []
+    );
+    const integrity = await readOptionalJsonFromPaths<HashesManifest | null>(
+      zip,
+      ["integrity/hashes.json", "integrity.json"],
       null
     );
     const events = await readEvents(zip, archiveKey, encryptedFiles);
@@ -469,7 +493,7 @@ export class WebBlackboxPlayer {
   }
 
   public async getBlob(hash: string): Promise<{ mime: string; bytes: Uint8Array } | null> {
-    const blob = this.blobsByHash.get(hash);
+    const blob = resolveBlobByKey(this.blobsByHash, hash);
 
     if (!blob) {
       return null;
@@ -2038,19 +2062,105 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   return JSON.parse(content) as TValue;
 }
 
-async function readOptionalJson<TValue>(
+async function readOptionalJsonFromPaths<TValue>(
   zip: JSZip,
-  path: string,
+  paths: string[],
   fallback: TValue
 ): Promise<TValue> {
-  const file = zip.file(path);
+  for (const path of paths) {
+    const file = zip.file(path);
 
-  if (!file) {
-    return fallback;
+    if (!file) {
+      continue;
+    }
+
+    const content = await file.async("string");
+    return JSON.parse(content) as TValue;
   }
 
-  const content = await file.async("string");
-  return JSON.parse(content) as TValue;
+  return fallback;
+}
+
+function parseBlobPath(
+  path: string
+): { hash: string; extension: string; kind: "prefixed" | "legacy" } | null {
+  const prefixed = /^blobs\/sha256-([^.]+)\.(.+)$/.exec(path);
+
+  if (prefixed) {
+    const hash = prefixed[1];
+    const extension = prefixed[2];
+    return hash && extension ? { hash, extension, kind: "prefixed" } : null;
+  }
+
+  const legacy = /^blobs\/([^./]+)\.(.+)$/.exec(path);
+
+  if (!legacy) {
+    return null;
+  }
+
+  const hash = legacy[1];
+  const extension = legacy[2];
+
+  if (!hash || !extension) {
+    return null;
+  }
+
+  return {
+    hash: hash.startsWith("sha256-") ? hash.slice("sha256-".length) : hash,
+    extension,
+    kind: "legacy"
+  };
+}
+
+function setBlobAliasIfAbsent(
+  blobsByHash: Map<string, BlobRef>,
+  alias: string,
+  blob: BlobRef
+): void {
+  if (!blobsByHash.has(alias)) {
+    blobsByHash.set(alias, blob);
+  }
+}
+
+function registerLegacyBlobAlias(
+  aliases: Map<string, BlobRef | null>,
+  alias: string,
+  blob: BlobRef
+): void {
+  const previous = aliases.get(alias);
+
+  if (previous === undefined) {
+    aliases.set(alias, blob);
+    return;
+  }
+
+  if (previous && previous.path !== blob.path) {
+    aliases.set(alias, null);
+  }
+}
+
+function resolveBlobByKey(blobsByHash: Map<string, BlobRef>, input: string): BlobRef | null {
+  const candidate = normalizeBlobHashCandidate(input);
+
+  if (!candidate) {
+    return null;
+  }
+
+  return blobsByHash.get(candidate) ?? null;
+}
+
+function normalizeBlobHashCandidate(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith("blobs/")) {
+    return trimmed;
+  }
+
+  return trimmed.startsWith("sha256-") ? trimmed.slice("sha256-".length) : trimmed;
 }
 
 function inferMime(extension: string): string {

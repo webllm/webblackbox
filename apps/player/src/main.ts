@@ -203,6 +203,10 @@ const PANEL_RENDER_BUCKET_MS = 120;
 const PLAYBACK_STEP_MS = 1_000;
 const RESPONSE_PREVIEW_COLLAPSED_CHARS = 900;
 const RESPONSE_PREVIEW_EXPANDED_CHARS = 10_000;
+const LOG_GRID_SPLIT_MIN = 26;
+const LOG_GRID_SPLIT_MAX = 74;
+const LOG_GRID_SPLIT_KEY_STEP = 2;
+const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
 const ACTION_MARKER_TYPES = new Set([
   "user.click",
   "user.dblclick",
@@ -266,6 +270,8 @@ const refs = {
   summary: getElement<HTMLElement>("summary"),
   compareDetails: getElement<HTMLElement>("compare-details"),
   feedback: getElement<HTMLElement>("feedback"),
+  logGrid: getElement<HTMLElement>("log-grid"),
+  logGridDivider: getElement<HTMLElement>("log-grid-divider"),
   textFilter: getElement<HTMLInputElement>("text-filter"),
   typeFilter: getElement<HTMLSelectElement>("type-filter"),
   panelTabs: getElement<HTMLElement>("panel-tabs"),
@@ -325,6 +331,8 @@ bindGlobalActions();
 void renderAll({ forcePanels: true, forceScreenshot: true });
 
 function bindGlobalActions(): void {
+  bindLogGridSplitter();
+
   refs.archiveInput.addEventListener("change", () => {
     void handlePrimaryArchiveChange();
   });
@@ -745,6 +753,98 @@ function bindGlobalActions(): void {
     );
     setFeedback("Jira issue template exported.");
   });
+}
+
+function bindLogGridSplitter(): void {
+  refs.logGridDivider.setAttribute("aria-valuemin", String(LOG_GRID_SPLIT_MIN));
+  refs.logGridDivider.setAttribute("aria-valuemax", String(LOG_GRID_SPLIT_MAX));
+
+  const savedSplit = readStoredNumber(LOG_GRID_SPLIT_STORAGE_KEY);
+
+  if (savedSplit !== null) {
+    applyLogGridSplit(savedSplit);
+  } else {
+    applyLogGridSplit(48);
+  }
+
+  let dragging = false;
+
+  refs.logGridDivider.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    dragging = true;
+    refs.logGridDivider.classList.add("dragging");
+    refs.logGridDivider.setPointerCapture(event.pointerId);
+    updateLogGridSplitByClientX(event.clientX);
+  });
+
+  refs.logGridDivider.addEventListener("pointermove", (event) => {
+    if (!dragging) {
+      return;
+    }
+
+    updateLogGridSplitByClientX(event.clientX);
+  });
+
+  const stopDragging = (event: PointerEvent): void => {
+    if (!dragging) {
+      return;
+    }
+
+    dragging = false;
+    refs.logGridDivider.classList.remove("dragging");
+
+    if (refs.logGridDivider.hasPointerCapture(event.pointerId)) {
+      refs.logGridDivider.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  refs.logGridDivider.addEventListener("pointerup", (event) => {
+    stopDragging(event);
+  });
+
+  refs.logGridDivider.addEventListener("pointercancel", (event) => {
+    stopDragging(event);
+  });
+
+  refs.logGridDivider.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+
+    event.preventDefault();
+    const current = getLogGridSplit();
+    const delta = event.key === "ArrowLeft" ? -LOG_GRID_SPLIT_KEY_STEP : LOG_GRID_SPLIT_KEY_STEP;
+    applyLogGridSplit(current + delta);
+  });
+}
+
+function getLogGridSplit(): number {
+  const value = Number.parseFloat(refs.logGrid.style.getPropertyValue("--log-grid-primary"));
+
+  if (!Number.isFinite(value)) {
+    return 50;
+  }
+
+  return value;
+}
+
+function applyLogGridSplit(value: number): void {
+  const clamped = clamp(value, LOG_GRID_SPLIT_MIN, LOG_GRID_SPLIT_MAX);
+  refs.logGrid.style.setProperty("--log-grid-primary", `${clamped.toFixed(2)}%`);
+  refs.logGridDivider.setAttribute("aria-valuenow", String(Math.round(clamped)));
+  writeStoredNumber(LOG_GRID_SPLIT_STORAGE_KEY, clamped);
+}
+
+function updateLogGridSplitByClientX(clientX: number): void {
+  const bounds = refs.logGrid.getBoundingClientRect();
+
+  if (bounds.width <= 0) {
+    return;
+  }
+
+  const relativeX = clientX - bounds.left;
+  const ratio = (relativeX / bounds.width) * 100;
+  applyLogGridSplit(ratio);
 }
 
 async function handlePrimaryArchiveChange(): Promise<void> {
@@ -2289,7 +2389,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     const data = asRecord(event.data);
 
     if (event.type === "screen.screenshot") {
-      const shotId = asString(data?.shotId);
+      const shotId = readScreenshotShotId(event, data);
 
       if (shotId) {
         const shot: ScreenshotRecord = {
@@ -2371,6 +2471,35 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
       actionSpans: derived.actionSpans.length
     }
   };
+}
+
+function readScreenshotShotId(
+  event: WebBlackboxEvent,
+  data: Record<string, unknown> | null
+): string | null {
+  const direct =
+    asString(data?.shotId) ??
+    asString(data?.hash) ??
+    asString(data?.contentHash) ??
+    asString(data?.blobHash) ??
+    asString(event.ref?.shot);
+
+  if (!direct) {
+    return null;
+  }
+
+  return normalizeBlobHashCandidate(direct);
+}
+
+function normalizeBlobHashCandidate(value: string): string {
+  const trimmed = value.trim();
+
+  if (trimmed.startsWith("blobs/")) {
+    return trimmed;
+  }
+
+  const prefixed = /^sha256-(.+)$/.exec(trimmed);
+  return prefixed?.[1] ?? trimmed;
 }
 
 function buildEventSearchText(event: WebBlackboxEvent): string {
@@ -2877,6 +3006,33 @@ function readPointerRatio(event: PointerEvent, container: HTMLElement): number {
 
   const offset = event.clientX - rect.left;
   return Math.max(0, Math.min(1, offset / rect.width));
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function readStoredNumber(key: string): number | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+
+    if (raw === null) {
+      return null;
+    }
+
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredNumber(key: string, value: number): void {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures in restricted contexts (private mode, policy blocks).
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
