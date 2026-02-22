@@ -544,6 +544,7 @@ input[type="file"],
   border-bottom: 1px solid var(--sys-color-divider);
   background: #20252c;
   overflow: hidden;
+  cursor: pointer;
 }
 
 .preview {
@@ -563,6 +564,7 @@ input[type="file"],
   text-align: center;
   font-size: 12px;
   background: rgba(23, 26, 34, 0.52);
+  pointer-events: none;
 }
 
 .transport-row {

@@ -355,6 +355,7 @@ const refs = {
   playbackWindowLabel: getElement<HTMLElement>("playback-window-label"),
   playbackWindowEvents: getElement<HTMLElement>("playback-window-events"),
   playbackWindowPanel: getElement<HTMLElement>("playback-window-panel"),
+  previewWrap: getElement<HTMLElement>("filmstrip-preview-wrap"),
   preview: getElement<HTMLImageElement>("filmstrip-preview"),
   stagePlaceholder: getElement<HTMLElement>("stage-placeholder"),
   filmstripMeta: getElement<HTMLElement>("filmstrip-meta"),
@@ -472,6 +473,14 @@ function bindGlobalActions(): void {
   });
 
   refs.playbackToggle.addEventListener("click", () => {
+    togglePlayback();
+  });
+
+  refs.previewWrap.addEventListener("click", () => {
+    if (!state.model) {
+      return;
+    }
+
     togglePlayback();
   });
 
@@ -710,11 +719,13 @@ function bindGlobalActions(): void {
   });
 
   refs.preview.addEventListener("load", () => {
+    refs.preview.hidden = false;
     updateStagePlaceholder();
     renderScreenshotOverlay();
   });
 
   refs.preview.addEventListener("error", () => {
+    refs.preview.hidden = true;
     clearScreenshotView("Failed to decode screenshot.");
   });
 
@@ -2786,6 +2797,7 @@ async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
 
   if (shotChanged) {
     state.screenshotShotId = shot.shotId;
+    refs.preview.hidden = true;
     refs.stagePlaceholder.hidden = false;
     refs.stagePlaceholder.textContent = "Loading screenshot...";
 
@@ -2933,6 +2945,7 @@ function clearScreenshotView(message: string): void {
   state.screenshotContext = null;
   state.screenshotMarker = null;
   state.screenshotTrail = [];
+  refs.preview.hidden = true;
   refs.preview.removeAttribute("src");
   refs.filmstripMeta.textContent = message;
   refs.stagePlaceholder.hidden = false;
