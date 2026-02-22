@@ -77,37 +77,47 @@ function render(container: HTMLElement): void {
         ? `Idle (Last ${exportSession.mode})`
         : `Idle (Last ${exportSession.mode} on Tab ${exportSession.tabId})`
       : "Idle";
+  const exportStatusClass = state.exportStatus?.startsWith("Export failed")
+    ? "wb-popup__status wb-popup__status--error"
+    : "wb-popup__status";
 
   container.innerHTML = `
-    <section class="card">
-      <h1>WebBlackbox</h1>
-      <p>Tab: ${state.tabId ?? "n/a"}</p>
-      <p>Status: ${status}</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button data-action="start-lite">Start Lite</button>
-        <button data-action="start-full">Start Full</button>
-        <button data-action="stop" ${activeSession ? "" : "disabled"}>Stop</button>
-        <button data-action="export" ${exportSession ? "" : "disabled"}>Export</button>
+    <section class="card wb-popup">
+      <header class="wb-popup__header">
+        <h1 class="wb-popup__title">WebBlackbox</h1>
+        <span class="wb-popup__badge">${activeSession ? "REC" : "IDLE"}</span>
+      </header>
+      <div class="wb-popup__meta">
+        <p class="wb-popup__meta-line"><span>Tab</span><strong>${state.tabId ?? "n/a"}</strong></p>
+        <p class="wb-popup__meta-line"><span>Status</span><strong>${status}</strong></p>
       </div>
-      <section style="margin-top:10px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;">
-        <p style="margin:0 0 8px;font-size:12px;font-weight:600;opacity:0.9;">Archive Policy</p>
-        <label style="display:flex;align-items:center;gap:8px;margin:0 0 8px;">
+      <div class="wb-popup__actions">
+        <button class="wb-btn wb-btn--brand" data-action="start-lite">Start Lite</button>
+        <button class="wb-btn wb-btn--brand-alt" data-action="start-full">Start Full</button>
+        <button class="wb-btn wb-btn--muted" data-action="stop" ${activeSession ? "" : "disabled"}>Stop</button>
+        <button class="wb-btn wb-btn--accent" data-action="export" ${
+          exportSession ? "" : "disabled"
+        }>Export</button>
+      </div>
+      <section class="wb-popup__policy">
+        <p class="wb-popup__policy-title">Archive Policy</p>
+        <label class="wb-toggle">
           <input id="export-include-screenshots" type="checkbox" ${
             state.exportPolicyForm.includeScreenshots ? "checked" : ""
           } />
-          <span style="font-size:12px;">Include screenshots</span>
+          <span>Include screenshots</span>
         </label>
-        <label style="display:block;font-size:12px;margin:0 0 4px;">Max archive size (MB)</label>
+        <label class="wb-field-label" for="export-max-size-mb">Max archive size (MB)</label>
         <input id="export-max-size-mb" type="number" min="1" max="4096" step="1" value="${
           state.exportPolicyForm.maxArchiveMb
-        }" style="width:100%;" />
-        <label style="display:block;font-size:12px;margin:8px 0 4px;">Recent window (minutes)</label>
+        }" class="wb-input" />
+        <label class="wb-field-label" for="export-recent-minutes">Recent window (minutes)</label>
         <input id="export-recent-minutes" type="number" min="1" max="43200" step="1" value="${
           state.exportPolicyForm.recentMinutes
-        }" style="width:100%;" />
+        }" class="wb-input" />
       </section>
-      <p style="margin-top:8px;font-size:12px;opacity:0.85;min-height:1.2em;">${state.exportStatus ?? ""}</p>
-      <p style="margin-top:10px;font-size:12px;opacity:0.75;">Marker: Ctrl/Cmd + Shift + M</p>
+      <p class="${exportStatusClass}">${state.exportStatus ?? ""}</p>
+      <p class="wb-popup__hint">Marker: Ctrl/Cmd + Shift + M</p>
     </section>
   `;
 
