@@ -111,6 +111,12 @@ type RecordingSampling = {
   screenshotIdleMs: number;
 };
 
+type LiteBodyCaptureRule = {
+  enabled: boolean;
+  maxBytes: number;
+  mimeAllowlist: string[];
+};
+
 const chromeApi = getChromeApi();
 
 const sessionsByTab = new Map<number, SessionRuntime>();
@@ -131,6 +137,16 @@ const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
 const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
+const LITE_DEFAULT_BODY_MIME_ALLOWLIST = [
+  "text/*",
+  "application/json",
+  "application/*+json",
+  "application/xml",
+  "application/*+xml",
+  "application/javascript",
+  "application/x-www-form-urlencoded"
+];
+const LITE_BODY_REDACTED_TOKEN = "[REDACTED]";
 const LITE_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
 const LITE_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const LITE_DOM_SNAPSHOT_MAX_BYTES = 1_500 * 1024;
@@ -599,6 +615,13 @@ function shouldMaterializeLiteContentEvent(
     return Array.isArray(payload.names);
   }
 
+  if (rawEvent.rawType === "networkBody") {
+    return (
+      (typeof payload.reqId === "string" || typeof payload.requestId === "string") &&
+      typeof payload.body === "string"
+    );
+  }
+
   return false;
 }
 
@@ -620,6 +643,10 @@ async function materializeLiteContentEvent(
     rawEvent.rawType === "cookieSnapshot"
   ) {
     return materializeLiteStorageSnapshot(runtime, rawEvent);
+  }
+
+  if (rawEvent.rawType === "networkBody") {
+    return materializeLiteNetworkBody(runtime, rawEvent);
   }
 
   return rawEvent;
@@ -786,6 +813,72 @@ async function materializeLiteStorageSnapshot(
   }
 
   return rawEvent;
+}
+
+async function materializeLiteNetworkBody(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): Promise<RawRecorderEvent | null> {
+  const payload = asRecord(rawEvent.payload);
+
+  if (!payload) {
+    return null;
+  }
+
+  const reqId = asString(payload.reqId) ?? asString(payload.requestId);
+  const body = asString(payload.body);
+  const encoding = asString(payload.encoding) ?? "utf8";
+  const url = asString(payload.url) ?? "";
+  const mimeType = normalizeMimeType(asString(payload.mimeType));
+
+  if (!reqId || !body || (encoding !== "utf8" && encoding !== "base64")) {
+    return null;
+  }
+
+  const captureRule = resolveLiteBodyCaptureRule(runtime, url, mimeType);
+
+  if (!captureRule.enabled || !isMimeAllowed(captureRule.mimeAllowlist, mimeType)) {
+    return null;
+  }
+
+  let bytes: Uint8Array;
+  let redacted = payload.redacted === true;
+
+  if (encoding === "utf8") {
+    const redaction = redactBodyText(body, runtime.config.redaction.redactBodyPatterns);
+    redacted = redacted || redaction.redacted;
+    bytes = new TextEncoder().encode(redaction.value);
+  } else {
+    bytes = decodeBase64(body);
+  }
+
+  if (bytes.byteLength === 0) {
+    return null;
+  }
+
+  const size = normalizeNonNegativeInt(payload.size) ?? bytes.byteLength;
+  const truncatedByInput = payload.truncated === true;
+  const maxBytes = captureRule.maxBytes;
+  const truncatedByLimit = bytes.byteLength > maxBytes;
+  const sampledBytes = truncatedByLimit ? bytes.slice(0, maxBytes) : bytes;
+  const contentHash = await runtime.pipeline.putBlob(
+    mimeType ?? "application/octet-stream",
+    sampledBytes
+  );
+
+  return {
+    ...rawEvent,
+    payload: {
+      reqId,
+      requestId: reqId,
+      contentHash,
+      mimeType,
+      size,
+      sampledSize: sampledBytes.byteLength,
+      truncated: truncatedByInput || truncatedByLimit || sampledBytes.byteLength < size,
+      redacted
+    }
+  };
 }
 
 function updateRuntimeInteractionState(runtime: SessionRuntime, rawEvent: RawRecorderEvent): void {
@@ -1637,6 +1730,212 @@ function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } | n
   } catch {
     return null;
   }
+}
+
+function resolveLiteBodyCaptureRule(
+  runtime: SessionRuntime,
+  url: string,
+  mimeType: string | undefined
+): LiteBodyCaptureRule {
+  const defaultRule: LiteBodyCaptureRule = {
+    enabled: true,
+    maxBytes: normalizeBodyCaptureMaxBytes(runtime.config.sampling.bodyCaptureMaxBytes),
+    mimeAllowlist: normalizeMimeAllowlist(LITE_DEFAULT_BODY_MIME_ALLOWLIST)
+  };
+
+  if (!url) {
+    return defaultRule;
+  }
+
+  let parsedUrl: URL | null = null;
+
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return defaultRule;
+  }
+
+  for (const policy of runtime.config.sitePolicies) {
+    if (!policy.enabled || policy.mode !== "lite") {
+      continue;
+    }
+
+    if (
+      !matchesSitePolicy(parsedUrl, policy.originPattern, policy.pathAllowlist, policy.pathDenylist)
+    ) {
+      continue;
+    }
+
+    if (!policy.allowBodyCapture) {
+      return {
+        ...defaultRule,
+        enabled: false
+      };
+    }
+
+    const allowlist =
+      policy.bodyMimeAllowlist.length > 0
+        ? normalizeMimeAllowlist(policy.bodyMimeAllowlist)
+        : defaultRule.mimeAllowlist;
+
+    if (!isMimeAllowed(allowlist, mimeType)) {
+      return {
+        enabled: false,
+        maxBytes: defaultRule.maxBytes,
+        mimeAllowlist: allowlist
+      };
+    }
+
+    return {
+      enabled: true,
+      maxBytes: defaultRule.maxBytes,
+      mimeAllowlist: allowlist
+    };
+  }
+
+  return defaultRule;
+}
+
+function normalizeBodyCaptureMaxBytes(candidate: unknown): number {
+  const value = asFiniteNumber(candidate);
+
+  if (value === null || value <= 0) {
+    return NETWORK_BODY_MAX_BYTES;
+  }
+
+  return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
+}
+
+function normalizeMimeAllowlist(values: string[]): string[] {
+  const output: string[] = [];
+
+  for (const value of values) {
+    const normalized = value.trim().toLowerCase();
+
+    if (!normalized || output.includes(normalized)) {
+      continue;
+    }
+
+    output.push(normalized);
+  }
+
+  return output;
+}
+
+function matchesSitePolicy(
+  targetUrl: URL,
+  originPattern: string,
+  pathAllowlist: string[],
+  pathDenylist: string[]
+): boolean {
+  if (!wildcardMatch(targetUrl.origin, originPattern.trim())) {
+    return false;
+  }
+
+  const path = `${targetUrl.pathname}${targetUrl.search}`;
+  const normalizedAllowlist = pathAllowlist.map((entry) => entry.trim()).filter(Boolean);
+  const normalizedDenylist = pathDenylist.map((entry) => entry.trim()).filter(Boolean);
+
+  if (
+    normalizedAllowlist.length > 0 &&
+    !normalizedAllowlist.some((entry) => wildcardMatch(path, entry))
+  ) {
+    return false;
+  }
+
+  if (normalizedDenylist.some((entry) => wildcardMatch(path, entry))) {
+    return false;
+  }
+
+  return true;
+}
+
+function wildcardMatch(value: string, pattern: string): boolean {
+  if (!pattern) {
+    return false;
+  }
+
+  if (pattern === "*") {
+    return true;
+  }
+
+  const regex = new RegExp(
+    `^${pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*")}$`,
+    "i"
+  );
+
+  return regex.test(value);
+}
+
+function isMimeAllowed(allowlist: string[], mimeType: string | undefined): boolean {
+  if (!mimeType) {
+    return true;
+  }
+
+  const normalizedMime = mimeType.toLowerCase();
+
+  return allowlist.some((rule) => {
+    if (rule.endsWith("/*")) {
+      const prefix = rule.slice(0, -1);
+      return normalizedMime.startsWith(prefix);
+    }
+
+    if (rule.includes("*")) {
+      return wildcardMatch(normalizedMime, rule);
+    }
+
+    return normalizedMime === rule;
+  });
+}
+
+function normalizeMimeType(value: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const [mime] = value.split(";");
+  const normalized = mime?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : undefined;
+}
+
+function redactBodyText(
+  value: string,
+  patterns: string[]
+): {
+  value: string;
+  redacted: boolean;
+} {
+  if (patterns.length === 0 || value.length === 0) {
+    return {
+      value,
+      redacted: false
+    };
+  }
+
+  let output = value;
+  let touched = false;
+
+  for (const pattern of patterns) {
+    const normalized = pattern.trim();
+
+    if (!normalized) {
+      continue;
+    }
+
+    const regex = new RegExp(normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+
+    if (!regex.test(output)) {
+      continue;
+    }
+
+    output = output.replace(regex, LITE_BODY_REDACTED_TOKEN);
+    touched = true;
+  }
+
+  return {
+    value: output,
+    redacted: touched
+  };
 }
 
 function normalizeFullModePayload(method: string, params: unknown): unknown {

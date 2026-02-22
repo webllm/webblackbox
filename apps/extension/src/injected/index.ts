@@ -3,6 +3,7 @@ type CapturePayload = Record<string, unknown>;
 const FLAG = "__WEBBLACKBOX_INJECTED__";
 const windowFlags = window as unknown as Record<string, unknown>;
 let networkRequestSeq = 0;
+const NETWORK_BODY_CAPTURE_MAX_BYTES = 512 * 1024;
 
 if (!windowFlags[FLAG]) {
   windowFlags[FLAG] = true;
@@ -299,6 +300,8 @@ function installNetworkHooks(): void {
         duration: monotonicTime() - startedMono
       });
 
+      void emitFetchResponseBody(reqId, requestMeta, response);
+
       return response;
     } catch (error) {
       emit("fetchError", {
@@ -444,6 +447,8 @@ function installNetworkHooks(): void {
         failed: Boolean(xhr.__wbFailed),
         duration: monotonicTime() - (xhr.__wbStartedMono ?? monotonicTime())
       });
+
+      void emitXhrResponseBody(reqId, xhr, contentType);
     });
 
     xhrSend.call(this, body as unknown as XMLHttpRequestBodyInit | null | undefined);
@@ -497,6 +502,185 @@ function installNetworkHooks(): void {
     window.EventSource = WebBlackboxEventSource as typeof EventSource;
     windowFlags.__WEBBLACKBOX_EVENTSOURCE_PATCHED__ = true;
   }
+}
+
+async function emitFetchResponseBody(
+  reqId: string,
+  requestMeta: {
+    method: string;
+    url: string;
+  },
+  response: Response
+): Promise<void> {
+  if (response.type === "opaque" || response.type === "opaqueredirect") {
+    return;
+  }
+
+  const contentType = normalizeContentType(response.headers.get("content-type"));
+
+  if (!isBodyCaptureMimeAllowed(contentType)) {
+    return;
+  }
+
+  let bodyText: string | null = null;
+
+  try {
+    bodyText = await response.clone().text();
+  } catch {
+    return;
+  }
+
+  if (!bodyText || bodyText.length === 0) {
+    return;
+  }
+
+  const clipped = clipUtf8Text(bodyText, NETWORK_BODY_CAPTURE_MAX_BYTES);
+  const sampledSize = new TextEncoder().encode(clipped.value).byteLength;
+
+  emit("networkBody", {
+    source: "fetch",
+    reqId,
+    requestId: reqId,
+    method: requestMeta.method,
+    url: response.url || requestMeta.url,
+    status: response.status,
+    mimeType: contentType,
+    encoding: "utf8",
+    body: clipped.value,
+    size: clipped.fullBytes,
+    sampledSize,
+    truncated: clipped.truncated
+  });
+}
+
+async function emitXhrResponseBody(
+  reqId: string,
+  xhr: XMLHttpRequest & {
+    __wbMethod?: string;
+    __wbUrl?: string;
+  },
+  contentType: string | undefined
+): Promise<void> {
+  if (!isBodyCaptureMimeAllowed(contentType)) {
+    return;
+  }
+
+  const bodyText = await readXhrBodyText(xhr);
+
+  if (!bodyText || bodyText.length === 0) {
+    return;
+  }
+
+  const clipped = clipUtf8Text(bodyText, NETWORK_BODY_CAPTURE_MAX_BYTES);
+  const sampledSize = new TextEncoder().encode(clipped.value).byteLength;
+
+  emit("networkBody", {
+    source: "xhr",
+    reqId,
+    requestId: reqId,
+    method: xhr.__wbMethod ?? "GET",
+    url: xhr.responseURL || xhr.__wbUrl || "unknown",
+    status: xhr.status,
+    statusText: xhr.statusText,
+    mimeType: contentType,
+    encoding: "utf8",
+    body: clipped.value,
+    size: clipped.fullBytes,
+    sampledSize,
+    truncated: clipped.truncated
+  });
+}
+
+async function readXhrBodyText(xhr: XMLHttpRequest): Promise<string | null> {
+  const responseType = xhr.responseType;
+
+  if (responseType === "" || responseType === "text") {
+    return typeof xhr.responseText === "string" ? xhr.responseText : null;
+  }
+
+  if (responseType === "json") {
+    if (xhr.response === null || xhr.response === undefined) {
+      return null;
+    }
+
+    try {
+      return JSON.stringify(xhr.response);
+    } catch {
+      return null;
+    }
+  }
+
+  if (responseType === "document") {
+    const responseDocument = xhr.responseXML;
+    return responseDocument?.documentElement?.outerHTML ?? null;
+  }
+
+  if (responseType === "arraybuffer" && xhr.response instanceof ArrayBuffer) {
+    try {
+      return new TextDecoder().decode(new Uint8Array(xhr.response));
+    } catch {
+      return null;
+    }
+  }
+
+  if (responseType === "blob" && xhr.response instanceof Blob) {
+    try {
+      return await xhr.response.text();
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function clipUtf8Text(
+  value: string,
+  maxBytes: number
+): { value: string; fullBytes: number; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const fullBytes = encoder.encode(value);
+
+  if (fullBytes.byteLength <= maxBytes) {
+    return {
+      value,
+      fullBytes: fullBytes.byteLength,
+      truncated: false
+    };
+  }
+
+  const roughRatio = Math.max(0.05, maxBytes / fullBytes.byteLength);
+  let targetChars = Math.max(1, Math.floor(value.length * roughRatio));
+  let clipped = value.slice(0, targetChars);
+  let clippedBytes = encoder.encode(clipped);
+
+  while (clippedBytes.byteLength > maxBytes && targetChars > 1) {
+    targetChars = Math.max(1, Math.floor(targetChars * 0.9));
+    clipped = value.slice(0, targetChars);
+    clippedBytes = encoder.encode(clipped);
+  }
+
+  return {
+    value: clipped,
+    fullBytes: fullBytes.byteLength,
+    truncated: true
+  };
+}
+
+function isBodyCaptureMimeAllowed(mimeType: string | undefined): boolean {
+  if (!mimeType) {
+    return true;
+  }
+
+  const normalized = mimeType.toLowerCase();
+
+  return (
+    normalized.startsWith("text/") ||
+    normalized.includes("json") ||
+    normalized.includes("xml") ||
+    normalized.includes("javascript") ||
+    normalized.includes("x-www-form-urlencoded")
+  );
 }
 
 function nextRequestId(prefix: "fetch" | "xhr" | "sse"): string {

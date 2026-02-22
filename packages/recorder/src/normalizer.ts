@@ -101,6 +101,13 @@ export class DefaultEventNormalizer implements EventNormalizer {
         };
       }
 
+      if (input.rawType === "networkBody") {
+        return {
+          eventType: "network.body",
+          payload: normalizeContentNetworkBodyPayload(asRecord(input.payload))
+        };
+      }
+
       const eventType = CONTENT_EVENT_MAP[input.rawType];
 
       if (!eventType) {
@@ -251,6 +258,25 @@ function normalizeContentNetworkFailedPayload(
     duration: asFiniteNumber(payload?.duration) ?? undefined,
     message: asString(payload?.message) ?? undefined,
     errorText: asString(payload?.errorText) ?? asString(payload?.message) ?? undefined
+  });
+}
+
+function normalizeContentNetworkBodyPayload(
+  payload: Record<string, unknown> | null
+): Record<string, unknown> {
+  const reqId =
+    readRequestId(payload) ??
+    buildFallbackReqId("GET", asString(payload?.url) ?? "unknown://request");
+
+  return stripUndefined({
+    reqId,
+    requestId: reqId,
+    contentHash: asString(payload?.contentHash) ?? asString(payload?.hash) ?? undefined,
+    mimeType: asString(payload?.mimeType) ?? undefined,
+    size: asFiniteNumber(payload?.size) ?? undefined,
+    sampledSize: asFiniteNumber(payload?.sampledSize) ?? undefined,
+    redacted: asBoolean(payload?.redacted),
+    truncated: asBoolean(payload?.truncated)
   });
 }
 

@@ -272,9 +272,28 @@ describe("recorder", () => {
       }
     });
 
+    const responseBody = recorder.ingest({
+      source: "content",
+      rawType: "networkBody",
+      sid: "S-network",
+      tabId: 15,
+      t: base + 55,
+      mono: 3.5,
+      payload: {
+        reqId: "fetch-a1",
+        contentHash: "blob-body-lite-1",
+        mimeType: "application/json",
+        size: 256,
+        sampledSize: 128,
+        redacted: true,
+        truncated: true
+      }
+    });
+
     expect(fetchRequest.event?.type).toBe("network.request");
     expect(fetchResponse.event?.type).toBe("network.response");
     expect(xhrFailed.event?.type).toBe("network.failed");
+    expect(responseBody.event?.type).toBe("network.body");
 
     const requestPayload = fetchRequest.event?.data as
       | {
@@ -310,6 +329,21 @@ describe("recorder", () => {
       | undefined;
     expect(failedPayload?.reqId).toBe("xhr-a2");
     expect(failedPayload?.errorText).toContain("timeout");
+
+    const bodyPayload = responseBody.event?.data as
+      | {
+          reqId?: string;
+          contentHash?: string;
+          sampledSize?: number;
+          redacted?: boolean;
+          truncated?: boolean;
+        }
+      | undefined;
+    expect(bodyPayload?.reqId).toBe("fetch-a1");
+    expect(bodyPayload?.contentHash).toBe("blob-body-lite-1");
+    expect(bodyPayload?.sampledSize).toBe(128);
+    expect(bodyPayload?.redacted).toBe(true);
+    expect(bodyPayload?.truncated).toBe(true);
   });
 
   it("maps lite storage snapshot raw types", () => {

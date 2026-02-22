@@ -840,6 +840,7 @@ function shouldBufferBeforeRecording(event: RawRecorderEvent): boolean {
     event.rawType === "console" ||
     event.rawType === "fetch" ||
     event.rawType === "xhr" ||
+    event.rawType === "networkBody" ||
     event.rawType === "fetchError" ||
     event.rawType === "pageError" ||
     event.rawType === "unhandledrejection" ||
