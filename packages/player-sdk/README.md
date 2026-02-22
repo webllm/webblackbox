@@ -12,7 +12,6 @@ The session playback and analysis SDK for WebBlackbox. Opens `.webblackbox` arch
 - **Performance Analysis** — Web Vitals, long tasks, CPU profiles, heap snapshots, traces
 - **Session Comparison** — Compare two sessions by event counts, error rates, and request patterns
 - **Code Generation** — Generate curl, fetch, HAR, Playwright scripts, bug reports, and issue templates
-- **Legacy Archive Compatibility** — Handles older `indexes/*` / `integrity.json` layouts and legacy blob paths
 
 ## Installation
 

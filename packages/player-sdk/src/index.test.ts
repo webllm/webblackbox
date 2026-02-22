@@ -46,41 +46,19 @@ describe("WebBlackboxPlayer", () => {
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
   });
 
-  it("opens legacy archive layouts and blob naming", async () => {
-    const bytes = await createLegacyFixtureArchive();
-    const player = await WebBlackboxPlayer.open(bytes);
+  it("rejects archives that use deprecated index/integrity layout paths", async () => {
+    const bytes = await createDeprecatedLayoutArchive();
 
-    const reqEvents = player.query({ requestId: "R-LEGACY-1" });
-    expect(reqEvents.map((event) => event.id)).toEqual(["E-L3", "E-L4"]);
-
-    const searchResults = player.search("legacy-api");
-    expect(searchResults[0]?.eventId).toBe("E-L3");
-
-    const blobByHash = await player.getBlob("blob1");
-    expect(blobByHash?.mime).toBe("image/webp");
-    expect(Array.from(blobByHash?.bytes ?? [])).toEqual([9, 8, 7]);
-
-    const blobByPrefixedHash = await player.getBlob("sha256-blob1");
-    expect(Array.from(blobByPrefixedHash?.bytes ?? [])).toEqual([9, 8, 7]);
-
-    const blobByPath = await player.getBlob("blobs/blob1.webp");
-    expect(Array.from(blobByPath?.bytes ?? [])).toEqual([9, 8, 7]);
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow("index/time.json");
   });
 
-  it("prefers exact legacy blob paths when hash aliases are ambiguous", async () => {
-    const bytes = await createLegacyAmbiguousBlobArchive();
+  it("does not resolve blobs that omit the sha256- prefix in path names", async () => {
+    const bytes = await createArchiveWithDeprecatedBlobPath();
     const player = await WebBlackboxPlayer.open(bytes);
-
-    const webpBlob = await player.getBlob("blobs/blob1.webp");
-    expect(webpBlob?.mime).toBe("image/webp");
-    expect(Array.from(webpBlob?.bytes ?? [])).toEqual([7, 8, 9]);
-
-    const jsonBlob = await player.getBlob("blobs/blob1.json");
-    expect(jsonBlob?.mime).toBe("application/json");
-    expect(new TextDecoder().decode(jsonBlob?.bytes ?? new Uint8Array())).toContain('"ok":true');
 
     await expect(player.getBlob("blob1")).resolves.toBeNull();
     await expect(player.getBlob("sha256-blob1")).resolves.toBeNull();
+    await expect(player.getBlob("blobs/blob1.webp")).resolves.toBeNull();
   });
 
   it("builds derived action spans", async () => {
@@ -309,60 +287,78 @@ async function createFixtureArchive(): Promise<Uint8Array> {
   return zip.generateAsync({ type: "uint8array" });
 }
 
-async function createLegacyFixtureArchive(): Promise<Uint8Array> {
+async function createDeprecatedLayoutArchive(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const manifest: ExportManifest = {
+    protocolVersion: 1,
+    createdAt: new Date(0).toISOString(),
+    mode: "lite",
+    site: {
+      origin: "https://example.com",
+      title: "Deprecated Layout"
+    },
+    chunkCodec: "none",
+    redactionProfile: {
+      redactHeaders: [],
+      redactCookieNames: [],
+      redactBodyPatterns: [],
+      blockedSelectors: [],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: 1,
+      chunkCount: 1,
+      blobCount: 0,
+      durationMs: 0
+    }
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("indexes/time.json", JSON.stringify([]));
+  zip.file("indexes/requests.json", JSON.stringify([]));
+  zip.file("indexes/inverted.json", JSON.stringify([]));
+  zip.file("integrity.json", JSON.stringify({ manifestSha256: "x", files: {} }));
+  zip.file(
+    "events/chunk-000001.ndjson",
+    JSON.stringify({
+      v: 1,
+      sid: "S-DEPRECATED",
+      tab: 1,
+      t: 1,
+      mono: 1,
+      type: "meta.session.start",
+      id: "E-1",
+      data: {}
+    })
+  );
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function createArchiveWithDeprecatedBlobPath(): Promise<Uint8Array> {
   const zip = new JSZip();
   const events: WebBlackboxEvent[] = [
     {
       v: 1,
-      sid: "S-LEGACY",
+      sid: "S-DEPRECATED-BLOB",
       tab: 1,
       t: 1000,
       mono: 1,
       type: "meta.session.start",
-      id: "E-L1",
+      id: "E-B1",
       data: {}
     },
     {
       v: 1,
-      sid: "S-LEGACY",
+      sid: "S-DEPRECATED-BLOB",
       tab: 1,
       t: 1001,
       mono: 2,
       type: "screen.screenshot",
-      id: "E-L2",
+      id: "E-B2",
       data: {
         shotId: "blobs/blob1.webp",
         format: "webp"
-      }
-    },
-    {
-      v: 1,
-      sid: "S-LEGACY",
-      tab: 1,
-      t: 1002,
-      mono: 3,
-      type: "network.request",
-      id: "E-L3",
-      ref: {
-        req: "R-LEGACY-1"
-      },
-      data: {
-        url: "https://example.com/legacy-api"
-      }
-    },
-    {
-      v: 1,
-      sid: "S-LEGACY",
-      tab: 1,
-      t: 1003,
-      mono: 4,
-      type: "network.response",
-      id: "E-L4",
-      ref: {
-        req: "R-LEGACY-1"
-      },
-      data: {
-        status: 200
       }
     }
   ];
@@ -373,7 +369,7 @@ async function createLegacyFixtureArchive(): Promise<Uint8Array> {
     mode: "lite",
     site: {
       origin: "https://example.com",
-      title: "Legacy Example"
+      title: "Deprecated Blob Path"
     },
     chunkCodec: "none",
     redactionProfile: {
@@ -387,86 +383,17 @@ async function createLegacyFixtureArchive(): Promise<Uint8Array> {
       eventCount: events.length,
       chunkCount: 1,
       blobCount: 1,
-      durationMs: 3
-    }
-  };
-
-  zip.file("manifest.json", JSON.stringify(manifest));
-  zip.file("indexes/time.json", JSON.stringify([]));
-  zip.file(
-    "indexes/requests.json",
-    JSON.stringify([{ reqId: "R-LEGACY-1", eventIds: ["E-L3", "E-L4"] }])
-  );
-  zip.file("indexes/inverted.json", JSON.stringify([{ term: "legacy-api", eventIds: ["E-L3"] }]));
-  zip.file("integrity.json", JSON.stringify({ manifestSha256: "legacy-x", files: {} }));
-  zip.file(
-    "events/chunk-legacy-000001.ndjson",
-    events.map((event) => JSON.stringify(event)).join("\n")
-  );
-  zip.file("blobs/blob1.webp", new Uint8Array([9, 8, 7]));
-
-  return zip.generateAsync({ type: "uint8array" });
-}
-
-async function createLegacyAmbiguousBlobArchive(): Promise<Uint8Array> {
-  const zip = new JSZip();
-  const events: WebBlackboxEvent[] = [
-    {
-      v: 1,
-      sid: "S-LEGACY-AMBIG",
-      tab: 1,
-      t: 1100,
-      mono: 1,
-      type: "meta.session.start",
-      id: "E-A1",
-      data: {}
-    },
-    {
-      v: 1,
-      sid: "S-LEGACY-AMBIG",
-      tab: 1,
-      t: 1101,
-      mono: 2,
-      type: "screen.screenshot",
-      id: "E-A2",
-      data: {
-        shotId: "blobs/blob1.webp",
-        format: "webp"
-      }
-    }
-  ];
-
-  const manifest: ExportManifest = {
-    protocolVersion: 1,
-    createdAt: new Date(0).toISOString(),
-    mode: "lite",
-    site: {
-      origin: "https://example.com",
-      title: "Legacy Ambiguous"
-    },
-    chunkCodec: "none",
-    redactionProfile: {
-      redactHeaders: [],
-      redactCookieNames: [],
-      redactBodyPatterns: [],
-      blockedSelectors: [],
-      hashSensitiveValues: true
-    },
-    stats: {
-      eventCount: events.length,
-      chunkCount: 1,
-      blobCount: 2,
       durationMs: 1
     }
   };
 
   zip.file("manifest.json", JSON.stringify(manifest));
-  zip.file(
-    "events/chunk-legacy-ambig-000001.ndjson",
-    events.map((event) => JSON.stringify(event)).join("\n")
-  );
-  zip.file("blobs/blob1.webp", new Uint8Array([7, 8, 9]));
-  zip.file("blobs/blob1.json", JSON.stringify({ ok: true }));
+  zip.file("index/time.json", JSON.stringify([]));
+  zip.file("index/req.json", JSON.stringify([]));
+  zip.file("index/inv.json", JSON.stringify([]));
+  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
+  zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
+  zip.file("blobs/blob1.webp", new Uint8Array([9, 8, 7]));
 
   return zip.generateAsync({ type: "uint8array" });
 }

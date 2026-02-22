@@ -64,7 +64,7 @@ export type PlayerArchive = {
   timeIndex: ChunkTimeIndexEntry[];
   requestIndex: RequestIndexEntry[];
   invertedIndex: InvertedIndexEntry[];
-  integrity: HashesManifest | null;
+  integrity: HashesManifest;
 };
 
 export type NetworkWaterfallEntry = {
@@ -334,8 +334,6 @@ export class WebBlackboxPlayer {
       this.inverted.set(entry.term.toLowerCase(), [...entry.eventIds]);
     }
 
-    const legacyAliases = new Map<string, BlobRef | null>();
-
     for (const path of Object.keys(zip.files)) {
       const parsed = parseBlobPath(path);
 
@@ -351,22 +349,8 @@ export class WebBlackboxPlayer {
       // Always register exact path lookups to avoid collisions across extensions.
       this.blobsByHash.set(path, blobRef);
 
-      if (parsed.kind === "prefixed") {
-        setBlobAliasIfAbsent(this.blobsByHash, parsed.hash, blobRef);
-        setBlobAliasIfAbsent(this.blobsByHash, `sha256-${parsed.hash}`, blobRef);
-        continue;
-      }
-
-      registerLegacyBlobAlias(legacyAliases, parsed.hash, blobRef);
-      registerLegacyBlobAlias(legacyAliases, `sha256-${parsed.hash}`, blobRef);
-    }
-
-    for (const [alias, blobRef] of legacyAliases) {
-      if (!blobRef) {
-        continue;
-      }
-
-      setBlobAliasIfAbsent(this.blobsByHash, alias, blobRef);
+      setBlobAliasIfAbsent(this.blobsByHash, parsed.hash, blobRef);
+      setBlobAliasIfAbsent(this.blobsByHash, `sha256-${parsed.hash}`, blobRef);
     }
   }
 
@@ -380,26 +364,10 @@ export class WebBlackboxPlayer {
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
     const encryptedFiles = manifest.encryption?.files ?? {};
-    const timeIndex = await readOptionalJsonFromPaths<ChunkTimeIndexEntry[]>(
-      zip,
-      ["index/time.json", "indexes/time.json"],
-      []
-    );
-    const requestIndex = await readOptionalJsonFromPaths<RequestIndexEntry[]>(
-      zip,
-      ["index/req.json", "indexes/requests.json"],
-      []
-    );
-    const invertedIndex = await readOptionalJsonFromPaths<InvertedIndexEntry[]>(
-      zip,
-      ["index/inv.json", "indexes/inverted.json"],
-      []
-    );
-    const integrity = await readOptionalJsonFromPaths<HashesManifest | null>(
-      zip,
-      ["integrity/hashes.json", "integrity.json"],
-      null
-    );
+    const timeIndex = await readJson<ChunkTimeIndexEntry[]>(zip, "index/time.json");
+    const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
+    const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
+    const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
     const events = await readEvents(zip, archiveKey, encryptedFiles);
 
     return new WebBlackboxPlayer(
@@ -2062,54 +2030,21 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   return JSON.parse(content) as TValue;
 }
 
-async function readOptionalJsonFromPaths<TValue>(
-  zip: JSZip,
-  paths: string[],
-  fallback: TValue
-): Promise<TValue> {
-  for (const path of paths) {
-    const file = zip.file(path);
-
-    if (!file) {
-      continue;
-    }
-
-    const content = await file.async("string");
-    return JSON.parse(content) as TValue;
-  }
-
-  return fallback;
-}
-
-function parseBlobPath(
-  path: string
-): { hash: string; extension: string; kind: "prefixed" | "legacy" } | null {
+function parseBlobPath(path: string): { hash: string; extension: string } | null {
   const prefixed = /^blobs\/sha256-([^.]+)\.(.+)$/.exec(path);
 
-  if (prefixed) {
-    const hash = prefixed[1];
-    const extension = prefixed[2];
-    return hash && extension ? { hash, extension, kind: "prefixed" } : null;
-  }
-
-  const legacy = /^blobs\/([^./]+)\.(.+)$/.exec(path);
-
-  if (!legacy) {
+  if (!prefixed) {
     return null;
   }
 
-  const hash = legacy[1];
-  const extension = legacy[2];
+  const hash = prefixed[1];
+  const extension = prefixed[2];
 
   if (!hash || !extension) {
     return null;
   }
 
-  return {
-    hash: hash.startsWith("sha256-") ? hash.slice("sha256-".length) : hash,
-    extension,
-    kind: "legacy"
-  };
+  return { hash, extension };
 }
 
 function setBlobAliasIfAbsent(
@@ -2119,23 +2054,6 @@ function setBlobAliasIfAbsent(
 ): void {
   if (!blobsByHash.has(alias)) {
     blobsByHash.set(alias, blob);
-  }
-}
-
-function registerLegacyBlobAlias(
-  aliases: Map<string, BlobRef | null>,
-  alias: string,
-  blob: BlobRef
-): void {
-  const previous = aliases.get(alias);
-
-  if (previous === undefined) {
-    aliases.set(alias, blob);
-    return;
-  }
-
-  if (previous && previous.path !== blob.path) {
-    aliases.set(alias, null);
   }
 }
 
