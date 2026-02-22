@@ -84,11 +84,13 @@ textarea {
 }
 
 .shell {
+  --stage-card-height: clamp(220px, 42vh, 620px);
   width: 100%;
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
-  grid-template-rows: auto auto auto auto auto 1fr;
+  grid-template-rows: auto auto auto 8px auto auto minmax(0, 1fr);
   gap: 0;
+  overflow: hidden;
 }
 
 .ui-card,
@@ -401,7 +403,35 @@ input[type="file"],
   border-top: none;
   display: grid;
   grid-template-rows: auto 1fr auto auto;
-  min-height: 320px;
+  min-height: 220px;
+  height: var(--stage-card-height);
+}
+
+.stage-divider {
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  border-bottom: 1px solid var(--sys-color-divider);
+  background: var(--sys-color-surface1);
+  cursor: row-resize;
+  position: relative;
+}
+
+.stage-divider::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+  background: var(--sys-color-divider);
+}
+
+.stage-divider:hover::before,
+.stage-divider.dragging::before {
+  height: 2px;
+  background: var(--sys-color-primary);
 }
 
 .stage-toolbar {
@@ -480,7 +510,7 @@ input[type="file"],
 
 .stage-frame {
   position: relative;
-  min-height: clamp(180px, 30vw, 320px);
+  min-height: 0;
   border-bottom: 1px solid var(--sys-color-divider);
   background: #20252c;
   overflow: hidden;
@@ -489,7 +519,8 @@ input[type="file"],
 .preview {
   display: block;
   width: 100%;
-  height: clamp(180px, 30vw, 320px);
+  height: 100%;
+  min-height: 120px;
   object-fit: contain;
 }
 

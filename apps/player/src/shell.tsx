@@ -8,7 +8,7 @@ import { Select } from "./components/ui/select.js";
 
 export function PlayerShell(): React.JSX.Element {
   return (
-    <main className="shell wb-shell">
+    <main id="player-shell" className="shell wb-shell">
       <header className="toolbar card" role="banner">
         <div className="toolbar-left">
           <span className="brand">WebBlackbox</span>
@@ -51,7 +51,7 @@ export function PlayerShell(): React.JSX.Element {
         </div>
       </section>
 
-      <Card className="stage-card">
+      <Card id="stage-card" className="stage-card">
         <div className="stage-toolbar">
           <div className="playback-buttons">
             <Button
@@ -196,6 +196,15 @@ export function PlayerShell(): React.JSX.Element {
           <ul id="filmstrip-list" className="shot-strip"></ul>
         </div>
       </Card>
+
+      <div
+        id="stage-divider"
+        className="stage-divider"
+        role="separator"
+        aria-label="Resize screenshot stage"
+        aria-orientation="horizontal"
+        tabIndex={0}
+      ></div>
 
       <section className="ops card">
         <section id="summary" className="summary"></section>

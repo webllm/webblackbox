@@ -207,6 +207,10 @@ const LOG_GRID_SPLIT_MIN = 26;
 const LOG_GRID_SPLIT_MAX = 74;
 const LOG_GRID_SPLIT_KEY_STEP = 2;
 const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
+const STAGE_HEIGHT_MIN_PX = 220;
+const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
+const STAGE_HEIGHT_KEY_STEP = 24;
+const STAGE_HEIGHT_STORAGE_KEY = "webblackbox.player.stageHeightPx";
 const ACTION_MARKER_TYPES = new Set([
   "user.click",
   "user.dblclick",
@@ -265,6 +269,9 @@ function mountPlayerShell(): void {
 mountPlayerShell();
 
 const refs = {
+  playerShell: getElement<HTMLElement>("player-shell"),
+  stageCard: getElement<HTMLElement>("stage-card"),
+  stageDivider: getElement<HTMLElement>("stage-divider"),
   archiveInput: getElement<HTMLInputElement>("archive-input"),
   compareInput: getElement<HTMLInputElement>("compare-input"),
   summary: getElement<HTMLElement>("summary"),
@@ -331,6 +338,7 @@ bindGlobalActions();
 void renderAll({ forcePanels: true, forceScreenshot: true });
 
 function bindGlobalActions(): void {
+  bindStageSplitter();
   bindLogGridSplitter();
 
   refs.archiveInput.addEventListener("change", () => {
@@ -613,6 +621,9 @@ function bindGlobalActions(): void {
   });
 
   window.addEventListener("resize", () => {
+    applyStageHeight(getStageHeightPx(), {
+      persist: false
+    });
     renderScreenshotOverlay();
   });
 
@@ -753,6 +764,110 @@ function bindGlobalActions(): void {
     );
     setFeedback("Jira issue template exported.");
   });
+}
+
+function bindStageSplitter(): void {
+  const savedHeight = readStoredNumber(STAGE_HEIGHT_STORAGE_KEY);
+  const initialHeight = savedHeight ?? refs.stageCard.getBoundingClientRect().height;
+  applyStageHeight(initialHeight, {
+    persist: false
+  });
+
+  let dragging = false;
+
+  refs.stageDivider.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    dragging = true;
+    refs.stageDivider.classList.add("dragging");
+    refs.stageDivider.setPointerCapture(event.pointerId);
+    updateStageHeightByClientY(event.clientY);
+  });
+
+  refs.stageDivider.addEventListener("pointermove", (event) => {
+    if (!dragging) {
+      return;
+    }
+
+    updateStageHeightByClientY(event.clientY);
+  });
+
+  const stopDragging = (event: PointerEvent): void => {
+    if (!dragging) {
+      return;
+    }
+
+    dragging = false;
+    refs.stageDivider.classList.remove("dragging");
+
+    if (refs.stageDivider.hasPointerCapture(event.pointerId)) {
+      refs.stageDivider.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  refs.stageDivider.addEventListener("pointerup", (event) => {
+    stopDragging(event);
+  });
+
+  refs.stageDivider.addEventListener("pointercancel", (event) => {
+    stopDragging(event);
+  });
+
+  refs.stageDivider.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+      return;
+    }
+
+    event.preventDefault();
+    const current = getStageHeightPx();
+    const delta = event.key === "ArrowUp" ? STAGE_HEIGHT_KEY_STEP : -STAGE_HEIGHT_KEY_STEP;
+    applyStageHeight(current + delta);
+  });
+}
+
+function getStageHeightPx(): number {
+  const styled = Number.parseFloat(refs.playerShell.style.getPropertyValue("--stage-card-height"));
+
+  if (Number.isFinite(styled) && styled > 0) {
+    return styled;
+  }
+
+  const measured = refs.stageCard.getBoundingClientRect().height;
+  return Number.isFinite(measured) && measured > 0 ? measured : STAGE_HEIGHT_MIN_PX;
+}
+
+function applyStageHeight(
+  value: number,
+  options: {
+    persist?: boolean;
+  } = {}
+): void {
+  const clamped = clamp(value, STAGE_HEIGHT_MIN_PX, getStageHeightMaxPx());
+  refs.playerShell.style.setProperty("--stage-card-height", `${clamped.toFixed(0)}px`);
+  refs.stageDivider.setAttribute("aria-valuemin", String(STAGE_HEIGHT_MIN_PX));
+  refs.stageDivider.setAttribute("aria-valuemax", String(Math.round(getStageHeightMaxPx())));
+  refs.stageDivider.setAttribute("aria-valuenow", String(Math.round(clamped)));
+
+  if (options.persist !== false) {
+    writeStoredNumber(STAGE_HEIGHT_STORAGE_KEY, clamped);
+  }
+}
+
+function updateStageHeightByClientY(clientY: number): void {
+  const bounds = refs.stageCard.getBoundingClientRect();
+
+  if (bounds.height <= 0) {
+    return;
+  }
+
+  applyStageHeight(clientY - bounds.top);
+}
+
+function getStageHeightMaxPx(): number {
+  const shellBounds = refs.playerShell.getBoundingClientRect();
+  const stageBounds = refs.stageCard.getBoundingClientRect();
+  const relativeTop = stageBounds.top - shellBounds.top;
+  const maxByViewport = shellBounds.height - relativeTop - STAGE_HEIGHT_BOTTOM_GUARD_PX;
+  return Math.max(STAGE_HEIGHT_MIN_PX + STAGE_HEIGHT_KEY_STEP, Math.floor(maxByViewport));
 }
 
 function bindLogGridSplitter(): void {
