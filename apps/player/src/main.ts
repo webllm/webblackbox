@@ -272,6 +272,7 @@ const refs = {
   playerShell: getElement<HTMLElement>("player-shell"),
   stageCard: getElement<HTMLElement>("stage-card"),
   stageDivider: getElement<HTMLElement>("stage-divider"),
+  archiveDropOverlay: getElement<HTMLElement>("archive-drop-overlay"),
   archiveInput: getElement<HTMLInputElement>("archive-input"),
   compareInput: getElement<HTMLInputElement>("compare-input"),
   summary: getElement<HTMLElement>("summary"),
@@ -340,6 +341,7 @@ void renderAll({ forcePanels: true, forceScreenshot: true });
 function bindGlobalActions(): void {
   bindStageSplitter();
   bindLogGridSplitter();
+  bindArchiveDropTarget();
 
   refs.archiveInput.addEventListener("change", () => {
     void handlePrimaryArchiveChange();
@@ -766,6 +768,74 @@ function bindGlobalActions(): void {
   });
 }
 
+function bindArchiveDropTarget(): void {
+  let dragDepth = 0;
+
+  const showOverlay = (): void => {
+    refs.archiveDropOverlay.hidden = false;
+  };
+
+  const hideOverlay = (): void => {
+    refs.archiveDropOverlay.hidden = true;
+  };
+
+  window.addEventListener("dragenter", (event) => {
+    if (!hasFilePayload(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepth += 1;
+    showOverlay();
+  });
+
+  window.addEventListener("dragover", (event) => {
+    if (!hasFilePayload(event)) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+
+    showOverlay();
+  });
+
+  window.addEventListener("dragleave", (event) => {
+    if (!hasFilePayload(event)) {
+      return;
+    }
+
+    dragDepth = Math.max(0, dragDepth - 1);
+
+    if (dragDepth === 0) {
+      hideOverlay();
+    }
+  });
+
+  window.addEventListener("drop", (event) => {
+    if (!hasFilePayload(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepth = 0;
+    hideOverlay();
+
+    const file = pickArchiveFile(event.dataTransfer?.files ?? null);
+
+    if (!file) {
+      setFeedback("No supported archive found in drop payload.");
+      return;
+    }
+
+    refs.archiveInput.value = "";
+    void loadPrimaryArchiveFile(file);
+  });
+}
+
 function bindStageSplitter(): void {
   const savedHeight = readStoredNumber(STAGE_HEIGHT_STORAGE_KEY);
   const initialHeight = savedHeight ?? refs.stageCard.getBoundingClientRect().height;
@@ -969,6 +1039,10 @@ async function handlePrimaryArchiveChange(): Promise<void> {
     return;
   }
 
+  await loadPrimaryArchiveFile(file);
+}
+
+async function loadPrimaryArchiveFile(file: File): Promise<void> {
   pausePlayback();
   hideProgressHover();
   state.lastPanelBucket = Number.NEGATIVE_INFINITY;
@@ -3121,6 +3195,29 @@ function readPointerRatio(event: PointerEvent, container: HTMLElement): number {
 
   const offset = event.clientX - rect.left;
   return Math.max(0, Math.min(1, offset / rect.width));
+}
+
+function hasFilePayload(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types;
+
+  if (!types) {
+    return false;
+  }
+
+  return Array.from(types).includes("Files");
+}
+
+function pickArchiveFile(files: FileList | null): File | null {
+  if (!files || files.length === 0) {
+    return null;
+  }
+
+  const supported = Array.from(files).find((file) => {
+    const lowerName = file.name.toLowerCase();
+    return lowerName.endsWith(".webblackbox") || lowerName.endsWith(".zip");
+  });
+
+  return supported ?? null;
 }
 
 function clamp(value: number, min: number, max: number): number {

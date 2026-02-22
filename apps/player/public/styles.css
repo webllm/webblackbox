@@ -93,6 +93,36 @@ textarea {
   overflow: hidden;
 }
 
+.archive-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  background: rgba(11, 18, 32, 0.3);
+  pointer-events: none;
+}
+
+.archive-drop-overlay-card {
+  min-width: min(520px, 92vw);
+  min-height: 180px;
+  border: 2px dashed #8ab4f8;
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.96);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.2);
+  color: #0f172a;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 20px;
+}
+
+.archive-drop-overlay-card strong {
+  font-size: 20px;
+  font-weight: 600;
+}
+
 .ui-card,
 .card {
   border: 1px solid var(--sys-color-divider);

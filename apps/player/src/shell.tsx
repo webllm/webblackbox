@@ -392,6 +392,13 @@ export function PlayerShell(): React.JSX.Element {
           </Card>
         </section>
       </section>
+
+      <div id="archive-drop-overlay" className="archive-drop-overlay" hidden>
+        <div className="archive-drop-overlay-card">
+          <strong>Drop Archive to Load</strong>
+          <span className="mono">Supports .webblackbox and .zip</span>
+        </div>
+      </div>
     </main>
   );
 }
