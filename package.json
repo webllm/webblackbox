@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "turbo run dev --parallel",
     "build": "turbo run build",
+    "player:host": "pnpm --filter @webblackbox/player build && pnpm --filter @webblackbox/player serve",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",

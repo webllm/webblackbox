@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node scripts/copy-assets.mjs && tsup --config tsup.config.ts --watch",
     "build": "tsup --config tsup.config.ts --clean && node scripts/copy-assets.mjs",
-    "serve": "npx -y http-server -p 4173",
+    "serve": "npx -y http-server ./ -p 4173",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
