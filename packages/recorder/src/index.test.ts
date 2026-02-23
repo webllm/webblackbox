@@ -430,6 +430,34 @@ describe("recorder", () => {
     expect(buffer.snapshot().map((event) => event.id)).toEqual(["E-2"]);
   });
 
+  it("keeps size/snapshot consistent after repeated prune and clear cycles", () => {
+    const buffer = new EventRingBuffer(1);
+    const base = Date.now() - 300_000;
+
+    for (let index = 0; index < 5_000; index += 1) {
+      buffer.push({
+        v: 1,
+        sid: "S",
+        tab: 1,
+        t: base + index * 100,
+        mono: index * 100,
+        type: "sys.notice",
+        id: `E-${index}`,
+        data: {}
+      });
+    }
+
+    const snapshot = buffer.snapshot();
+    expect(snapshot.length).toBe(buffer.size());
+    expect(snapshot.length).toBeLessThan(1_000);
+    expect(snapshot[0]?.id).toBeDefined();
+    expect(snapshot[snapshot.length - 1]?.id).toBe("E-4999");
+
+    buffer.clear();
+    expect(buffer.size()).toBe(0);
+    expect(buffer.snapshot()).toEqual([]);
+  });
+
   it("applies route and error plugins", () => {
     const recorder = new WebBlackboxRecorder(
       TEST_CONFIG,

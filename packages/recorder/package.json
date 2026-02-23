@@ -18,7 +18,8 @@
     "build": "tsup src/index.ts --format esm --dts --clean",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "bench": "tsx scripts/benchmark.ts"
   },
   "dependencies": {
     "@webblackbox/protocol": "workspace:*"

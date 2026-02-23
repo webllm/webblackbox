@@ -107,6 +107,12 @@ player ────────┬──→ player-sdk ──→ protocol
 mcp-server ────→ mcp-core
 ```
 
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Performance Benchmarks](docs/PERFORMANCE.md)
+- [Contributing](docs/CONTRIBUTING.md)
+
 ## Packages
 
 ### `@webblackbox/protocol`
@@ -551,6 +557,9 @@ All WebBlackbox data uses protocol version `1`. The version is embedded in every
 | `pnpm dev`              | Start all packages in watch mode        |
 | `pnpm build`            | Build all packages (dependency-ordered) |
 | `pnpm test`             | Run all tests                           |
+| `pnpm bench`            | Run recorder + pipeline benchmarks      |
+| `pnpm bench:recorder`   | Run recorder benchmarks                 |
+| `pnpm bench:pipeline`   | Run pipeline benchmarks                 |
 | `pnpm typecheck`        | TypeScript type checking                |
 | `pnpm lint`             | ESLint checks                           |
 | `pnpm format`           | Format code with Prettier               |
