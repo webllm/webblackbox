@@ -31,6 +31,9 @@ import type {
 
 const DEFAULT_TAB_ID = -1;
 const LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
+const PIPELINE_BATCH_MAX_EVENTS = 160;
+const PIPELINE_BATCH_FLUSH_DELAY_MS = 120;
+const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
 
 export class WebBlackboxLiteSdk {
   private readonly sid: string;
@@ -52,6 +55,12 @@ export class WebBlackboxLiteSdk {
   private rawQueue: Promise<void> = Promise.resolve();
 
   private pipelineQueue: Promise<void> = Promise.resolve();
+
+  private readonly pipelineEventBuffer: WebBlackboxEvent[] = [];
+
+  private pipelineFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private pipelineFlushScheduled = false;
 
   private started = false;
 
@@ -316,17 +325,72 @@ export class WebBlackboxLiteSdk {
   }
 
   private enqueuePipelineIngest(event: WebBlackboxEvent): void {
+    this.pipelineEventBuffer.push(event);
+
+    if (this.pipelineEventBuffer.length >= PIPELINE_BATCH_MAX_EVENTS) {
+      this.flushPipelineBufferIntoQueue();
+      return;
+    }
+
+    if (this.pipelineFlushTimer !== null || this.pipelineFlushScheduled) {
+      return;
+    }
+
+    this.pipelineFlushTimer = setTimeout(() => {
+      this.pipelineFlushTimer = null;
+      this.flushPipelineBufferIntoQueue();
+    }, PIPELINE_BATCH_FLUSH_DELAY_MS);
+  }
+
+  private flushPipelineBufferIntoQueue(): void {
+    if (this.pipelineFlushTimer !== null) {
+      clearTimeout(this.pipelineFlushTimer);
+      this.pipelineFlushTimer = null;
+    }
+
+    if (this.pipelineFlushScheduled || this.pipelineEventBuffer.length === 0) {
+      return;
+    }
+
+    this.pipelineFlushScheduled = true;
+
     this.pipelineQueue = this.pipelineQueue
       .then(async () => {
-        await this.pipeline.ingest(event);
+        while (this.pipelineEventBuffer.length > 0) {
+          const batch = this.pipelineEventBuffer.splice(0, PIPELINE_BATCH_DRAIN_CHUNK_EVENTS);
+
+          if (batch.length === 0) {
+            break;
+          }
+
+          await this.pipeline.ingestBatch(batch);
+
+          if (this.pipelineEventBuffer.length > 0) {
+            await waitForNextTick();
+          }
+        }
       })
       .catch((error) => {
-        console.warn("[WebBlackboxLiteSdk] failed to ingest normalized event", error);
+        console.warn("[WebBlackboxLiteSdk] failed to ingest normalized event batch", error);
+      })
+      .finally(() => {
+        this.pipelineFlushScheduled = false;
+
+        if (this.pipelineEventBuffer.length > 0) {
+          this.flushPipelineBufferIntoQueue();
+        }
       });
   }
 
   private async waitForQueues(): Promise<void> {
     await this.rawQueue;
+
+    if (this.pipelineFlushTimer !== null) {
+      clearTimeout(this.pipelineFlushTimer);
+      this.pipelineFlushTimer = null;
+    }
+
+    this.flushPipelineBufferIntoQueue();
     await this.pipelineQueue;
   }
 
@@ -549,4 +613,10 @@ function withSession(rawEvent: RawRecorderEvent, sid: string, tabId: number): Ra
     sid,
     tabId
   };
+}
+
+function waitForNextTick(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }

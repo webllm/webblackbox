@@ -7,10 +7,11 @@ import { PORT_NAMES } from "../shared/messages.js";
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
   requestId: string;
-  op: "start" | "ingest" | "flush" | "putBlob" | "exportDownload" | "close";
+  op: "start" | "ingest" | "ingestBatch" | "flush" | "putBlob" | "exportDownload" | "close";
   sid: string;
   session?: SessionMetadata;
   event?: WebBlackboxEvent;
+  events?: WebBlackboxEvent[];
   mime?: string;
   bytes?: Uint8Array;
   passphrase?: string;
@@ -140,6 +141,15 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     return null;
   }
 
+  if (message.op === "ingestBatch") {
+    if (!Array.isArray(message.events) || message.events.length === 0) {
+      return null;
+    }
+
+    await pipeline.ingestBatch(message.events);
+    return null;
+  }
+
   if (message.op === "flush") {
     await pipeline.flush();
     return null;
@@ -192,8 +202,13 @@ async function downloadExportedBundle(
   downloadUrl: string;
   integrity: unknown;
 }> {
-  const normalizedBytes = Uint8Array.from(bytes);
-  const blob = new Blob([normalizedBytes], { type: "application/zip" });
+  const blobPart: BlobPart =
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength &&
+    bytes.buffer instanceof ArrayBuffer
+      ? bytes.buffer
+      : Uint8Array.from(bytes);
+  const blob = new Blob([blobPart], { type: "application/zip" });
   const downloadUrl = URL.createObjectURL(blob);
 
   scheduleObjectUrlRevoke(downloadUrl);

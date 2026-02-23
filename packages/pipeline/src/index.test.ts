@@ -72,6 +72,30 @@ describe("pipeline", () => {
     expect(indexes.request.some((entry) => entry.reqId === "R-1")).toBe(true);
   });
 
+  it("ingests batches without losing index coverage", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 120
+    });
+
+    await pipeline.start();
+    await pipeline.ingestBatch([
+      createEvent("E-batch-1", "network.request", 11, { reqId: "R-batch" }),
+      createEvent("E-batch-2", "network.response", 12, { reqId: "R-batch", status: 200 }),
+      createEvent("E-batch-3", "console.entry", 13, { text: "batch" })
+    ]);
+    await pipeline.flush();
+    await pipeline.finalizeIndexes();
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const indexes = await storage.getIndexes(SESSION.sid);
+
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(indexes.request.some((entry) => entry.reqId === "R-batch")).toBe(true);
+  });
+
   it("deduplicates blobs by sha256", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({

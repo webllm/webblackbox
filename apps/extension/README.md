@@ -139,7 +139,7 @@ The build output is in the `build/` directory. Build entries:
 1. User clicks **Start** in popup
 2. Service worker creates session, attaches CDP debugger, initializes recorder
 3. Content script begins capturing user events and DOM mutations
-4. Injected script begins capturing console and storage events
+4. In `lite` mode, injected script captures console/network/storage events
 5. CDP provides network, runtime exception, and page navigation events
 6. Service worker normalizes all events through the recorder
 7. Normalized events are batched and sent to the offscreen pipeline
@@ -168,6 +168,11 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
 
 - `lite`: lower sampling pressure + perf-trigger freeze disabled (`freezeOnNetworkFailure=false`, `freezeOnLongTaskSpike=false`)
 - `full`: same perf-freeze disable + stricter sampling/body-capture limits
+  - page-side heavy capture loops (SnapDOM screenshots, outerHTML snapshots, storage snapshots) are skipped to reduce main-thread impact
+  - `injected` fetch/xhr/console patching is not enabled (CDP is the primary source in full mode)
+  - screenshot/trace artifacts are still captured from the SW/CDP pipeline path
+
+The SW ↔ offscreen pipeline path also uses ingest batching with chunked drain to reduce message round-trips and avoid giant postMessage payloads under high event volume.
 
 Users can still tune other settings through the Options page.
 

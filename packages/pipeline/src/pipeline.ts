@@ -87,6 +87,22 @@ export class FlightRecorderPipeline {
     await this.persistChunk(chunk.meta.chunkId, chunk.meta.seq, chunk.events, chunk.bytes);
   }
 
+  public async ingestBatch(events: WebBlackboxEvent[]): Promise<void> {
+    if (events.length === 0) {
+      return;
+    }
+
+    for (const event of events) {
+      const chunk = await this.chunker.append(event);
+
+      if (!chunk) {
+        continue;
+      }
+
+      await this.persistChunk(chunk.meta.chunkId, chunk.meta.seq, chunk.events, chunk.bytes);
+    }
+  }
+
   public async flush(): Promise<void> {
     const chunk = await this.chunker.flush();
 
@@ -171,43 +187,22 @@ export class FlightRecorderPipeline {
     const prepared = await this.prepareExportChunks(rawChunks, exportPolicy);
     const blobsByHash = await this.listSessionBlobMap();
     let selected = this.selectChunksBySize(prepared, blobsByHash, exportPolicy.maxArchiveBytes);
-    let exportData = this.buildExportSnapshot(selected, blobsByHash);
-    let manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
-    let archive = await createWebBlackboxArchive(
-      {
-        manifest,
-        chunks: exportData.chunks,
-        blobs: exportData.blobs,
-        timeIndex: exportData.indexes.time,
-        requestIndex: exportData.indexes.request,
-        invertedIndex: exportData.indexes.inverted
-      },
-      {
-        passphrase: options.passphrase
-      }
-    );
+    let archive = await this.createArchiveForSelection(selected, blobsByHash, options.passphrase);
 
-    while (
+    if (
       exportPolicy.maxArchiveBytes !== null &&
       archive.bytes.byteLength > exportPolicy.maxArchiveBytes &&
       selected.length > 0
     ) {
-      selected = selected.slice(1);
-      exportData = this.buildExportSnapshot(selected, blobsByHash);
-      manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
-      archive = await createWebBlackboxArchive(
-        {
-          manifest,
-          chunks: exportData.chunks,
-          blobs: exportData.blobs,
-          timeIndex: exportData.indexes.time,
-          requestIndex: exportData.indexes.request,
-          invertedIndex: exportData.indexes.inverted
-        },
-        {
-          passphrase: options.passphrase
-        }
+      const fitted = await this.fitSelectionToArchiveLimit(
+        selected,
+        blobsByHash,
+        exportPolicy.maxArchiveBytes,
+        options.passphrase
       );
+
+      selected = fitted.selected;
+      archive = fitted.archive;
     }
 
     const { bytes, integrity } = archive;
@@ -384,6 +379,81 @@ export class FlightRecorderPipeline {
       chunks,
       blobs,
       indexes: indexer.snapshot()
+    };
+  }
+
+  private async createArchiveForSelection(
+    selectedChunks: PreparedExportChunk[],
+    blobsByHash: Map<string, StoredBlob>,
+    passphrase?: string
+  ): Promise<Awaited<ReturnType<typeof createWebBlackboxArchive>>> {
+    const exportData = this.buildExportSnapshot(selectedChunks, blobsByHash);
+    const manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
+
+    return createWebBlackboxArchive(
+      {
+        manifest,
+        chunks: exportData.chunks,
+        blobs: exportData.blobs,
+        timeIndex: exportData.indexes.time,
+        requestIndex: exportData.indexes.request,
+        invertedIndex: exportData.indexes.inverted
+      },
+      {
+        passphrase
+      }
+    );
+  }
+
+  private async fitSelectionToArchiveLimit(
+    selected: PreparedExportChunk[],
+    blobsByHash: Map<string, StoredBlob>,
+    maxArchiveBytes: number,
+    passphrase?: string
+  ): Promise<{
+    selected: PreparedExportChunk[];
+    archive: Awaited<ReturnType<typeof createWebBlackboxArchive>>;
+  }> {
+    let left = 1;
+    let right = selected.length;
+    let bestSelection: PreparedExportChunk[] | null = null;
+    let bestArchive: Awaited<ReturnType<typeof createWebBlackboxArchive>> | null = null;
+
+    while (left <= right) {
+      const dropCount = Math.floor((left + right) / 2);
+      const candidateSelection = selected.slice(dropCount);
+      const candidateArchive = await this.createArchiveForSelection(
+        candidateSelection,
+        blobsByHash,
+        passphrase
+      );
+
+      if (candidateArchive.bytes.byteLength <= maxArchiveBytes) {
+        bestSelection = candidateSelection;
+        bestArchive = candidateArchive;
+        right = dropCount - 1;
+      } else {
+        left = dropCount + 1;
+      }
+    }
+
+    if (bestSelection && bestArchive) {
+      return {
+        selected: bestSelection,
+        archive: bestArchive
+      };
+    }
+
+    const emptySelection = selected.slice(selected.length);
+    const emptyArchive = await this.createArchiveForSelection(
+      emptySelection,
+      blobsByHash,
+      passphrase
+    );
+
+    return {
+      selected: emptySelection,
+      archive: emptyArchive
     };
   }
 

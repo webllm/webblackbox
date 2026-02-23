@@ -51,6 +51,9 @@ type SessionRuntime = {
   lastNavigationSnapshotAt: number;
   queueDepth: number;
   droppedBestEffortTasks: number;
+  pipelineEventBuffer: WebBlackboxEvent[];
+  pipelineFlushTimer: ReturnType<typeof setTimeout> | null;
+  pipelineFlushQueued: boolean;
   stopping: boolean;
   responseBodyCaptures: number;
   responseBodyCaptureTimestamps: number[];
@@ -91,6 +94,7 @@ type PipelineExportDownloadResult = {
 type SessionPipelineClient = {
   start: (session: SessionMetadata) => Promise<void>;
   ingest: (event: WebBlackboxEvent) => Promise<void>;
+  ingestBatch: (events: WebBlackboxEvent[]) => Promise<void>;
   flush: () => Promise<void>;
   putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
   exportAndDownload: (options?: {
@@ -105,10 +109,11 @@ type SessionPipelineClient = {
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
   requestId: string;
-  op: "start" | "ingest" | "flush" | "putBlob" | "exportDownload" | "close";
+  op: "start" | "ingest" | "ingestBatch" | "flush" | "putBlob" | "exportDownload" | "close";
   sid: string;
   session?: SessionMetadata;
   event?: WebBlackboxEvent;
+  events?: WebBlackboxEvent[];
   mime?: string;
   bytes?: Uint8Array;
   passphrase?: string;
@@ -156,7 +161,7 @@ const pendingOffscreenRequests = new Map<
 let offscreenRequestSeq = 0;
 
 const OFFSCREEN_PATH = "offscreen.html";
-const SCREENSHOT_ACTION_COOLDOWN_MS = 450;
+const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
 const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
 const FULL_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
@@ -164,10 +169,40 @@ const LITE_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
 const FULL_MODE_BODY_CAPTURE_MAX_PER_MINUTE = 80;
 const FULL_MODE_BODY_CAPTURE_MAX_PER_SESSION = 2_000;
 const FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS = 15_000;
-const FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS = 8_000;
+const FULL_MODE_MIN_SCREENSHOT_INTERVAL_MS = 12_000;
+const FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS = 30_000;
 const FREEZE_NOTICE_COOLDOWN_MS = 20_000;
 const BEST_EFFORT_QUEUE_MAX_PENDING = 80;
+const PIPELINE_BATCH_MAX_EVENTS = 160;
+const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
+const PIPELINE_BATCH_FLUSH_MS = 120;
+const CONTENT_EVENT_SLICE_BUDGET_MS = 8;
 const SKIPPED_FULL_MODE_BODY_RESOURCE_TYPES = new Set(["Image", "Media", "Font"]);
+const SKIPPED_FULL_MODE_CONTENT_RAW_TYPES = new Set([
+  "mousemove",
+  "scroll",
+  "mutation",
+  "vitals",
+  "longtask",
+  "snapshot",
+  "screenshot",
+  "localStorageSnapshot",
+  "indexedDbSnapshot",
+  "cookieSnapshot",
+  "networkBody",
+  "fetch",
+  "xhr",
+  "fetchError",
+  "console",
+  "pageError",
+  "unhandledrejection",
+  "resourceError",
+  "localStorageOp",
+  "sessionStorageOp",
+  "indexedDbOp",
+  "sse",
+  "notice"
+]);
 const FULL_MODE_FOLLOWUP_METHODS = new Set([
   "Target.attachedToTarget",
   "Target.detachedFromTarget",
@@ -191,12 +226,29 @@ const LITE_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
 const LITE_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const LITE_DOM_SNAPSHOT_MAX_BYTES = 1_500 * 1024;
 const LITE_STORAGE_SNAPSHOT_MAX_BYTES = 600 * 1024;
+const FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS = 300;
+const FULL_MODE_LOCAL_STORAGE_SNAPSHOT_EXPR = `(() => {
+  const count = localStorage.length;
+  const maxItems = Math.min(count, ${FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS});
+  const entries = [];
+  for (let index = 0; index < maxItems; index += 1) {
+    const key = localStorage.key(index);
+    if (!key) {
+      continue;
+    }
+    const value = localStorage.getItem(key) ?? "";
+    entries.push([key, value.length]);
+  }
+  return JSON.stringify({ count, truncated: count > maxItems, entries });
+})()`;
 const CPU_PROFILE_SAMPLE_MS = 350;
 const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
 const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
 const STOPPED_SESSION_TTL_MS = 10 * 60_000;
-const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "keydown", "marker"]);
+const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
+const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
+const PERF_WARN_MS = 40;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -269,7 +321,10 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
     return;
   }
 
-  await ensureInjectedHooks(tabId);
+  if (shouldInjectHooksForMode(runtime.mode)) {
+    await ensureInjectedHooks(tabId);
+  }
+
   syncContentPortRecordingState(port);
 }
 
@@ -378,7 +433,9 @@ async function handleInboundMessage(
       return;
     }
 
-    await ensureInjectedHooks(tabId);
+    if (shouldInjectHooksForMode(runtime.mode)) {
+      await ensureInjectedHooks(tabId);
+    }
 
     if (port?.name === PORT_NAMES.content) {
       syncContentPortRecordingState(port);
@@ -396,11 +453,18 @@ async function handleInboundMessage(
       return;
     }
 
+    let sliceStartedAt = perfNow();
+
     for (const rawEvent of message.events) {
       ingestRawEvent({
         ...rawEvent,
         tabId
       });
+
+      if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
+        await wait(0);
+        sliceStartedAt = perfNow();
+      }
     }
   }
 }
@@ -458,6 +522,9 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     lastNavigationSnapshotAt: Number.NEGATIVE_INFINITY,
     queueDepth: 0,
     droppedBestEffortTasks: 0,
+    pipelineEventBuffer: [],
+    pipelineFlushTimer: null,
+    pipelineFlushQueued: false,
     stopping: false,
     responseBodyCaptures: 0,
     responseBodyCaptureTimestamps: [],
@@ -475,9 +542,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     },
     {
       onEvent: (event) => {
-        enqueue(runtime, async () => {
-          await runtime.pipeline.ingest(event);
-        });
+        enqueuePipelineEvent(runtime, event);
       },
       onFreeze: (reason) => {
         handleFreezeNotice(runtime, reason);
@@ -500,7 +565,9 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     payload: recorderConfig
   });
 
-  await ensureInjectedHooks(tabId);
+  if (shouldInjectHooksForMode(mode)) {
+    await ensureInjectedHooks(tabId);
+  }
 
   if (mode === "full") {
     await attachCdp(runtime);
@@ -524,6 +591,7 @@ async function stopSession(tabId: number): Promise<void> {
   }
 
   runtime.stopping = true;
+  await flushBufferedPipelineEvents(runtime);
   await teardownCaptureInstrumentation(runtime);
   sessionsByTab.delete(runtime.tabId);
   runtime.stoppedAt = Date.now();
@@ -566,6 +634,8 @@ async function exportSession(
       await stopSession(runtime.tabId);
     }
 
+    await flushBufferedPipelineEvents(runtime);
+
     const exported = await enqueueWithResult(runtime, async () => {
       return runtime.pipeline.exportAndDownload({
         passphrase,
@@ -604,6 +674,14 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
     return;
   }
 
+  if (runtime.stopping && rawEvent.source !== "system") {
+    return;
+  }
+
+  if (shouldSkipFullModeContentRawEvent(runtime, rawEvent)) {
+    return;
+  }
+
   const nextRawEvent: RawRecorderEvent = {
     ...rawEvent,
     sid: runtime.sid
@@ -637,6 +715,17 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
   }
 
   runtime.recorder.ingest(nextRawEvent);
+}
+
+function shouldSkipFullModeContentRawEvent(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): boolean {
+  return (
+    runtime.mode === "full" &&
+    rawEvent.source === "content" &&
+    SKIPPED_FULL_MODE_CONTENT_RAW_TYPES.has(rawEvent.rawType)
+  );
 }
 
 function shouldMaterializeLiteContentEvent(
@@ -1005,7 +1094,101 @@ function shouldCaptureActionScreenshot(
     return false;
   }
 
+  if (runtime.queueDepth >= Math.floor(BEST_EFFORT_QUEUE_MAX_PENDING / 3)) {
+    return false;
+  }
+
   return true;
+}
+
+function enqueuePipelineEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
+  runtime.pipelineEventBuffer.push(event);
+
+  if (runtime.pipelineEventBuffer.length >= PIPELINE_BATCH_MAX_EVENTS) {
+    queuePipelineBatchFlush(runtime);
+    return;
+  }
+
+  if (runtime.pipelineFlushTimer !== null || runtime.pipelineFlushQueued) {
+    return;
+  }
+
+  runtime.pipelineFlushTimer = setTimeout(() => {
+    runtime.pipelineFlushTimer = null;
+    queuePipelineBatchFlush(runtime);
+  }, PIPELINE_BATCH_FLUSH_MS);
+}
+
+function queuePipelineBatchFlush(runtime: SessionRuntime): void {
+  if (runtime.pipelineFlushTimer !== null) {
+    clearTimeout(runtime.pipelineFlushTimer);
+    runtime.pipelineFlushTimer = null;
+  }
+
+  if (runtime.pipelineFlushQueued || runtime.pipelineEventBuffer.length === 0) {
+    return;
+  }
+
+  runtime.pipelineFlushQueued = true;
+
+  enqueue(runtime, async () => {
+    try {
+      await drainPipelineBufferBatches(runtime, "queue");
+    } finally {
+      runtime.pipelineFlushQueued = false;
+
+      if (runtime.pipelineEventBuffer.length > 0 && !runtime.stopping) {
+        queuePipelineBatchFlush(runtime);
+      }
+    }
+  });
+}
+
+async function flushBufferedPipelineEvents(runtime: SessionRuntime): Promise<void> {
+  if (runtime.pipelineFlushTimer !== null) {
+    clearTimeout(runtime.pipelineFlushTimer);
+    runtime.pipelineFlushTimer = null;
+  }
+
+  if (runtime.pipelineEventBuffer.length === 0 && !runtime.pipelineFlushQueued) {
+    return;
+  }
+
+  await enqueueWithResult(runtime, async () => {
+    await drainPipelineBufferBatches(runtime, "drain");
+  });
+}
+
+async function drainPipelineBufferBatches(
+  runtime: SessionRuntime,
+  reason: "queue" | "drain"
+): Promise<void> {
+  let flushed = 0;
+
+  while (runtime.pipelineEventBuffer.length > 0) {
+    const batch = runtime.pipelineEventBuffer.splice(0, PIPELINE_BATCH_DRAIN_CHUNK_EVENTS);
+
+    if (batch.length === 0) {
+      break;
+    }
+
+    flushed += batch.length;
+    await runtime.pipeline.ingestBatch(batch);
+
+    if (runtime.pipelineEventBuffer.length > 0) {
+      await wait(0);
+    }
+  }
+
+  if (shouldLogPerf() && flushed > 0) {
+    console.info("[WebBlackbox][perf] pipeline buffer flushed", {
+      sid: runtime.sid,
+      reason,
+      flushed,
+      queueDepth: runtime.queueDepth,
+      stopping: runtime.stopping
+    });
+  }
 }
 
 function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
@@ -1022,6 +1205,13 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         op: "ingest",
         sid,
         event
+      });
+    },
+    ingestBatch: async (events) => {
+      await requestOffscreenPipeline<void>({
+        op: "ingestBatch",
+        sid,
+        events
       });
     },
     flush: async () => {
@@ -1062,6 +1252,7 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
 async function requestOffscreenPipeline<TResult>(
   request: Omit<OffscreenPipelineRequest, "kind" | "requestId">
 ): Promise<TResult> {
+  const startedAt = perfNow();
   const port = await ensureOffscreenPortReady();
   const requestId = `off-${Date.now()}-${offscreenRequestSeq}`;
   offscreenRequestSeq += 1;
@@ -1084,6 +1275,16 @@ async function requestOffscreenPipeline<TResult>(
       ...request
     });
   });
+
+  const durationMs = perfNow() - startedAt;
+
+  if (durationMs >= PERF_WARN_MS && shouldLogPerf()) {
+    console.info("[WebBlackbox][perf] offscreen request", {
+      op: request.op,
+      durationMs: Number(durationMs.toFixed(2)),
+      queuePending: pendingOffscreenRequests.size
+    });
+  }
 
   return result as TResult;
 }
@@ -1220,11 +1421,20 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
     runtime.cdpRouter = router;
 
-    await captureFullModeArtifacts(runtime, "session-start");
+    enqueue(
+      runtime,
+      async () => {
+        await captureFullModeArtifacts(runtime, "session-start");
+      },
+      { bestEffort: true }
+    );
 
-    const screenshotIntervalMs = normalizeSamplingInterval(
-      runtime.config.sampling.screenshotIdleMs,
-      DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
+    const screenshotIntervalMs = Math.max(
+      FULL_MODE_MIN_SCREENSHOT_INTERVAL_MS,
+      normalizeSamplingInterval(
+        runtime.config.sampling.screenshotIdleMs,
+        DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
+      )
     );
 
     runtime.screenshotInterval = globalThis.setInterval(() => {
@@ -1508,6 +1718,10 @@ function shouldCaptureNavigationSnapshot(runtime: SessionRuntime): boolean {
     return false;
   }
 
+  if (runtime.queueDepth >= Math.floor(BEST_EFFORT_QUEUE_MAX_PENDING / 4)) {
+    return false;
+  }
+
   const now = Date.now();
 
   if (now - runtime.lastNavigationSnapshotAt < FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS) {
@@ -1537,10 +1751,12 @@ function handleFreezeNotice(runtime: SessionRuntime, reason: FreezeReason): void
 async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
   const tasks: Array<Promise<void>> = [
     captureScreenshot(runtime, reason),
-    captureDomSnapshot(runtime, reason),
-    captureStorageSnapshots(runtime, reason),
     captureTraceMetrics(runtime, reason)
   ];
+
+  if (reason !== "session-start") {
+    tasks.push(captureDomSnapshot(runtime, reason), captureStorageSnapshots(runtime, reason));
+  }
 
   if (shouldCaptureAdvancedProfiles(reason)) {
     tasks.push(captureAdvancedProfiles(runtime, reason));
@@ -1557,7 +1773,7 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
   const screenshot = await runtime.cdpRouter
     .send<{ data?: string }>({ tabId: runtime.tabId }, "Page.captureScreenshot", {
       format: "webp",
-      quality: 70,
+      quality: 62,
       fromSurface: true
     })
     .catch(() => undefined);
@@ -1584,7 +1800,7 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
     payload: {
       shotId: hash,
       format: "webp",
-      quality: 70,
+      quality: 62,
       w: viewport?.width,
       h: viewport?.height,
       viewport: viewport
@@ -1615,7 +1831,9 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
 
   const snapshot = await runtime.cdpRouter
     .send<Record<string, unknown>>({ tabId: runtime.tabId }, "DOMSnapshot.captureSnapshot", {
-      computedStyles: ["display", "visibility", "opacity", "width", "height"]
+      computedStyles: [],
+      includeDOMRects: false,
+      includePaintOrder: false
     })
     .catch(() => undefined);
 
@@ -1657,7 +1875,11 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     .catch(() => undefined);
 
   if (cookies?.cookies) {
-    const bytes = new TextEncoder().encode(JSON.stringify(cookies.cookies));
+    const cookieNames = cookies.cookies
+      .map((entry) => asString(asRecord(entry)?.name))
+      .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      .slice(0, FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS);
+    const bytes = new TextEncoder().encode(JSON.stringify(cookieNames));
     const hash = await runtime.pipeline.putBlob("application/json", bytes);
 
     ingestRawEvent({
@@ -1670,20 +1892,20 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       payload: {
         hash,
         count: cookies.cookies.length,
+        sampledCount: cookieNames.length,
+        truncated: cookies.cookies.length > cookieNames.length,
         redacted: true,
         reason
       }
     });
   }
 
-  const localStorageData = await evaluateExpression(
-    runtime,
-    "JSON.stringify(Object.fromEntries(Array.from({ length: localStorage.length }, (_, i) => [localStorage.key(i), localStorage.getItem(localStorage.key(i))])))"
-  );
+  const localStorageData = await evaluateExpression(runtime, FULL_MODE_LOCAL_STORAGE_SNAPSHOT_EXPR);
 
   if (typeof localStorageData === "string") {
     const bytes = new TextEncoder().encode(localStorageData);
     const hash = await runtime.pipeline.putBlob("application/json", bytes);
+    const parsed = parseStorageSnapshotMeta(localStorageData);
 
     ingestRawEvent({
       source: "system",
@@ -1694,7 +1916,9 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       mono: monotonicTime(),
       payload: {
         hash,
-        count: Object.keys(JSON.parse(localStorageData) as Record<string, unknown>).length,
+        count: parsed?.count,
+        sampledCount: parsed?.sampledCount,
+        truncated: parsed?.truncated,
         reason
       }
     });
@@ -2246,6 +2470,28 @@ function asStringArray(value: unknown, limit: number): string[] {
   return output;
 }
 
+function parseStorageSnapshotMeta(
+  serialized: string
+): { count?: number; sampledCount?: number; truncated?: boolean } | null {
+  try {
+    const parsed = JSON.parse(serialized) as {
+      count?: unknown;
+      entries?: unknown;
+      truncated?: unknown;
+    };
+    const count = normalizeNonNegativeInt(parsed.count);
+    const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+
+    return {
+      count,
+      sampledCount: entries.length,
+      truncated: parsed.truncated === true
+    };
+  } catch {
+    return null;
+  }
+}
+
 function encodeTextWithByteLimit(
   value: string,
   maxBytes: number
@@ -2388,6 +2634,10 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
   };
 }
 
+function shouldInjectHooksForMode(mode: CaptureMode): boolean {
+  return mode === "lite";
+}
+
 function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDownloadResult {
   const row = asRecord(raw);
 
@@ -2482,6 +2732,15 @@ function enqueue(
   if (options.bestEffort) {
     if (runtime.stopping || runtime.queueDepth >= BEST_EFFORT_QUEUE_MAX_PENDING) {
       runtime.droppedBestEffortTasks += 1;
+
+      if (shouldLogPerf() && runtime.droppedBestEffortTasks % 50 === 0) {
+        console.info("[WebBlackbox][perf] dropped best-effort queue tasks", {
+          sid: runtime.sid,
+          dropped: runtime.droppedBestEffortTasks,
+          queueDepth: runtime.queueDepth
+        });
+      }
+
       return false;
     }
   }
@@ -2515,6 +2774,11 @@ function enqueueWithResult<TResult>(
 }
 
 async function teardownCaptureInstrumentation(runtime: SessionRuntime): Promise<void> {
+  if (runtime.pipelineFlushTimer !== null) {
+    clearTimeout(runtime.pipelineFlushTimer);
+    runtime.pipelineFlushTimer = null;
+  }
+
   if (runtime.cdpRouter) {
     await runtime.cdpRouter.detach(runtime.tabId).catch(() => undefined);
 
@@ -2557,6 +2821,7 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
     runtime.cleanupTimer = null;
   }
 
+  await flushBufferedPipelineEvents(runtime);
   await runtime.queue;
   await runtime.pipeline.flush().catch(() => undefined);
   await runtime.pipeline.close().catch(() => undefined);
@@ -2854,4 +3119,19 @@ function monotonicTime(): number {
   }
 
   return performance.timeOrigin + performance.now();
+}
+
+function perfNow(): number {
+  if (typeof performance === "undefined") {
+    return Date.now();
+  }
+
+  return performance.now();
+}
+
+function shouldLogPerf(): boolean {
+  return (
+    (globalThis as unknown as Record<string, unknown>)[PERF_LOG_FLAG] === true ||
+    (globalThis as unknown as Record<string, unknown>).__WEBBLACKBOX_PERF_LOGS__ === true
+  );
 }

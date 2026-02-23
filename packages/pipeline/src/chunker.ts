@@ -24,9 +24,8 @@ export class EventChunker {
   ) {}
 
   public async append(event: WebBlackboxEvent): Promise<FinalizedChunk | null> {
-    const encoded = encodeEventsNdjson([event]);
     this.pending.push(event);
-    this.pendingBytes += encoded.byteLength;
+    this.pendingBytes += estimateEventNdjsonBytes(event);
 
     if (this.pendingBytes < this.maxChunkBytes) {
       return null;
@@ -72,4 +71,8 @@ export class EventChunker {
       events
     };
   }
+}
+
+function estimateEventNdjsonBytes(event: WebBlackboxEvent): number {
+  return JSON.stringify(event).length + 1;
 }

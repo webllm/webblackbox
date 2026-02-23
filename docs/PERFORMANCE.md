@@ -11,6 +11,15 @@ WebBlackbox sessions can run for long periods and produce large archives. We tra
 - archive size impact after filtering
 - ring buffer pruning cost
 
+In addition, runtime capture now prefers lower page-thread overhead:
+
+- extension `full` mode keeps heavy screenshot/DOM/storage capture on the SW/CDP side
+- content-script side in `full` mode skips page-thread SnapDOM/outerHTML/storage snapshot loops
+- extension `full` mode does not inject fetch/xhr/console hooks into the page
+- pipeline ingest is batched across SW ↔ offscreen and web-sdk recorder ↔ pipeline boundaries
+- pipeline drain is chunked to avoid giant `postMessage` payloads during stop/export
+- injected network body capture is rate-limited (count + bytes per minute) to reduce page jank
+
 ## Quick start
 
 From repo root:
@@ -88,3 +97,16 @@ For release branches, keep a small baseline history in CI artifacts and fail if:
 - filtered archive size increases unexpectedly for the same fixture input
 
 Because benchmark noise exists across machines, compare trends on the same runner class instead of absolute numbers from laptops.
+
+## Runtime Perf Logs
+
+For live troubleshooting on real pages, enable optional perf logs:
+
+- Extension SW: open service worker devtools, run `globalThis.__WEBBLACKBOX_PERF__ = true`
+- Web SDK page: run `window.__WEBBLACKBOX_PERF__ = true`
+
+When enabled, logs include:
+
+- slow offscreen requests (`[WebBlackbox][perf] offscreen request`)
+- pipeline batch flush/drain size
+- dropped low-priority events under backpressure

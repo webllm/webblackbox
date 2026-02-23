@@ -2,6 +2,13 @@ type CapturePayload = Record<string, unknown>;
 
 const DEFAULT_FLAG = "__WEBBLACKBOX_INJECTED__";
 const NETWORK_BODY_CAPTURE_MAX_BYTES = 512 * 1024;
+const NETWORK_BODY_CAPTURE_MAX_PER_MINUTE = 45;
+const NETWORK_BODY_CAPTURE_MAX_BYTES_PER_MINUTE = 8 * 1024 * 1024;
+const NOISY_CONSOLE_MAX_PER_SEC = 40;
+const NOISY_CONSOLE_METHODS = new Set(["log", "info", "debug", "dir", "dirxml", "table"]);
+const SAFE_SERIALIZE_MAX_DEPTH = 3;
+const SAFE_SERIALIZE_MAX_PROPERTIES = 24;
+const SAFE_SERIALIZE_MAX_STRING_CHARS = 1_200;
 
 export const INJECTED_MESSAGE_SOURCE = "webblackbox-injected";
 
@@ -34,6 +41,9 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   const flag = options.flag ?? DEFAULT_FLAG;
   const windowFlags = window as unknown as Record<string, unknown>;
   let networkRequestSeq = 0;
+  let bodyWindowStartedAt = Date.now();
+  let bodyWindowCount = 0;
+  let bodyWindowBytes = 0;
 
   if (windowFlags[flag]) {
     return;
@@ -68,6 +78,28 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     return performance.timeOrigin + performance.now();
   }
 
+  function allowBodyCapture(sampledBytes: number): boolean {
+    const now = Date.now();
+
+    if (now - bodyWindowStartedAt >= 60_000) {
+      bodyWindowStartedAt = now;
+      bodyWindowCount = 0;
+      bodyWindowBytes = 0;
+    }
+
+    if (bodyWindowCount >= NETWORK_BODY_CAPTURE_MAX_PER_MINUTE) {
+      return false;
+    }
+
+    if (bodyWindowBytes + sampledBytes > NETWORK_BODY_CAPTURE_MAX_BYTES_PER_MINUTE) {
+      return false;
+    }
+
+    bodyWindowCount += 1;
+    bodyWindowBytes += sampledBytes;
+    return true;
+  }
+
   function installConsoleHooks(): void {
     const consoleMethods = [
       "log",
@@ -91,6 +123,8 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       "clear"
     ] as const;
     const consoleRecord = console as unknown as Record<string, (...args: unknown[]) => unknown>;
+    let noisyWindowStartedAt = Date.now();
+    let noisyWindowCount = 0;
 
     for (const method of consoleMethods) {
       const original = consoleRecord[method];
@@ -104,8 +138,25 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           return Reflect.apply(original, console, args);
         }
 
+        const now = Date.now();
+
+        if (now - noisyWindowStartedAt >= 1_000) {
+          noisyWindowStartedAt = now;
+          noisyWindowCount = 0;
+        }
+
+        if (NOISY_CONSOLE_METHODS.has(method)) {
+          noisyWindowCount += 1;
+
+          if (noisyWindowCount > NOISY_CONSOLE_MAX_PER_SEC) {
+            return Reflect.apply(original, console, args);
+          }
+        }
+
         const level = consoleMethodToLevel(method);
-        const serializedArgs = args.map((value) => safeSerialize(value));
+        const serializedArgs = args.slice(0, 10).map((value) => safeSerialize(value));
+        const includeStack =
+          method === "error" || method === "warn" || method === "assert" || method === "trace";
 
         emit("console", {
           source: "injected",
@@ -113,7 +164,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           level,
           args: serializedArgs,
           text: formatConsoleText(serializedArgs),
-          stackTop: readStackTop()
+          stackTop: includeStack ? readStackTop() : undefined
         });
 
         return Reflect.apply(original, console, args);
@@ -570,6 +621,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     const clipped = clipUtf8Text(bodyText, NETWORK_BODY_CAPTURE_MAX_BYTES);
     const sampledSize = new TextEncoder().encode(clipped.value).byteLength;
 
+    if (!allowBodyCapture(sampledSize)) {
+      return;
+    }
+
     emit("networkBody", {
       source: "fetch",
       reqId,
@@ -606,6 +661,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
     const clipped = clipUtf8Text(bodyText, NETWORK_BODY_CAPTURE_MAX_BYTES);
     const sampledSize = new TextEncoder().encode(clipped.value).byteLength;
+
+    if (!allowBodyCapture(sampledSize)) {
+      return;
+    }
 
     emit("networkBody", {
       source: "xhr",
@@ -898,15 +957,22 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     return undefined;
   }
 
-  function safeSerialize(value: unknown): unknown {
+  function safeSerialize(value: unknown, depth = 0): unknown {
+    if (depth >= SAFE_SERIALIZE_MAX_DEPTH) {
+      return summarizeValue(value);
+    }
+
     if (
       value === null ||
       value === undefined ||
-      typeof value === "string" ||
       typeof value === "number" ||
       typeof value === "boolean"
     ) {
       return value;
+    }
+
+    if (typeof value === "string") {
+      return compactString(value, SAFE_SERIALIZE_MAX_STRING_CHARS);
     }
 
     if (typeof value === "bigint") {
@@ -935,20 +1001,20 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     }
 
     if (Array.isArray(value)) {
-      return value.slice(0, 20).map((entry) => safeSerialize(entry));
+      return value.slice(0, 20).map((entry) => safeSerialize(entry, depth + 1));
     }
 
     if (value instanceof Map) {
       return {
         map: [...value.entries()]
           .slice(0, 20)
-          .map(([key, entry]) => [safeSerialize(key), safeSerialize(entry)])
+          .map(([key, entry]) => [safeSerialize(key, depth + 1), safeSerialize(entry, depth + 1)])
       };
     }
 
     if (value instanceof Set) {
       return {
-        set: [...value.values()].slice(0, 20).map((entry) => safeSerialize(entry))
+        set: [...value.values()].slice(0, 20).map((entry) => safeSerialize(entry, depth + 1))
       };
     }
 
@@ -979,12 +1045,12 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       let count = 0;
 
       for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-        if (count >= 30) {
+        if (count >= SAFE_SERIALIZE_MAX_PROPERTIES) {
           output.__truncated = true;
           break;
         }
 
-        output[key] = safeSerialize(entry);
+        output[key] = safeSerialize(entry, depth + 1);
         count += 1;
       }
 
@@ -992,5 +1058,41 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     }
 
     return String(value);
+  }
+
+  function summarizeValue(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return `[Array(${value.length})]`;
+    }
+
+    if (value instanceof Map) {
+      return `[Map(${value.size})]`;
+    }
+
+    if (value instanceof Set) {
+      return `[Set(${value.size})]`;
+    }
+
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+
+    if (value instanceof URL) {
+      return value.toString();
+    }
+
+    if (value && typeof value === "object") {
+      return `[${value.constructor?.name || "Object"}]`;
+    }
+
+    return String(value);
+  }
+
+  function compactString(value: string, maxLength: number): string {
+    if (value.length <= maxLength) {
+      return value;
+    }
+
+    return `${value.slice(0, maxLength - 3)}...`;
   }
 }
