@@ -231,4 +231,56 @@ describe("pipeline", () => {
     expect(parsed.events.length).toBeGreaterThan(0);
     expect(parsed.events.length).toBeLessThan(60);
   });
+
+  it("purges session-scoped chunks/indexes/integrity and blob refs on close", async () => {
+    const storage = new MemoryPipelineStorage();
+    const sessionA: SessionMetadata = {
+      ...SESSION,
+      sid: "S-purge-a"
+    };
+    const sessionB: SessionMetadata = {
+      ...SESSION,
+      sid: "S-purge-b"
+    };
+    const pipelineA = new FlightRecorderPipeline({
+      session: sessionA,
+      storage,
+      maxChunkBytes: 128
+    });
+    const pipelineB = new FlightRecorderPipeline({
+      session: sessionB,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipelineA.start();
+    await pipelineB.start();
+
+    const sharedBytes = new TextEncoder().encode("shared-blob");
+    await pipelineA.putBlob("text/plain", sharedBytes);
+    await pipelineB.putBlob("text/plain", sharedBytes);
+
+    await pipelineA.ingest(createEvent("E-pa-1", "user.click", 1));
+    await pipelineA.flush();
+    await pipelineA.finalizeIndexes();
+    await pipelineB.ingest(createEvent("E-pb-1", "user.click", 2));
+    await pipelineB.flush();
+    await pipelineB.finalizeIndexes();
+
+    await pipelineA.close({ purge: true });
+
+    expect(await storage.getSession(sessionA.sid)).toBeUndefined();
+    expect(await storage.listChunks(sessionA.sid)).toHaveLength(0);
+    expect(await storage.getIntegrity(sessionA.sid)).toBeUndefined();
+    expect(await storage.getIndexes(sessionA.sid)).toEqual({
+      time: [],
+      request: [],
+      inverted: []
+    });
+    expect(await storage.getSession(sessionB.sid)).toBeDefined();
+    expect((await storage.listBlobs()).length).toBe(1);
+
+    await pipelineB.close({ purge: true });
+    expect((await storage.listBlobs()).length).toBe(0);
+  });
 });

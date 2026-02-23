@@ -113,6 +113,19 @@ export class FlightRecorderPipeline {
     await this.persistChunk(chunk.meta.chunkId, chunk.meta.seq, chunk.events, chunk.bytes);
   }
 
+  public async close(options: { purge?: boolean } = {}): Promise<void> {
+    await this.flush();
+
+    if (options.purge) {
+      await this.options.storage.deleteSession(this.options.session.sid, [
+        ...this.sessionBlobHashes
+      ]);
+    }
+
+    this.sessionBlobHashes.clear();
+    this.blobHashes.clear();
+  }
+
   public async putBlob(mime: string, bytes: Uint8Array): Promise<string> {
     const hash = await sha256Hex(bytes);
     this.sessionBlobHashes.add(hash);

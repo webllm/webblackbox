@@ -40,6 +40,7 @@ export type PipelineStorage = {
   getIndexes(sid: string): Promise<StoredIndexes>;
   putIntegrity(sid: string, manifest: HashesManifest): Promise<void>;
   getIntegrity(sid: string): Promise<HashesManifest | undefined>;
+  deleteSession(sid: string, blobHashes?: string[]): Promise<void>;
 };
 
 const EMPTY_INDEXES: StoredIndexes = {
@@ -118,6 +119,30 @@ export class MemoryPipelineStorage implements PipelineStorage {
   public async getIntegrity(sid: string): Promise<HashesManifest | undefined> {
     return this.integrity.get(sid);
   }
+
+  public async deleteSession(sid: string, blobHashes: string[] = []): Promise<void> {
+    this.sessions.delete(sid);
+    this.chunks.delete(sid);
+    this.indexes.delete(sid);
+    this.integrity.delete(sid);
+
+    for (const hash of blobHashes) {
+      const blob = this.blobs.get(hash);
+
+      if (!blob) {
+        continue;
+      }
+
+      if (blob.refCount <= 1) {
+        this.blobs.delete(hash);
+      } else {
+        this.blobs.set(hash, {
+          ...blob,
+          refCount: blob.refCount - 1
+        });
+      }
+    }
+  }
 }
 
 type DbRow<TData> = {
@@ -125,11 +150,19 @@ type DbRow<TData> = {
   value: TData;
 };
 
-type ChunkRow = DbRow<StoredChunk>;
+type ChunkRow = {
+  key: string;
+  sid: string;
+  seq: number;
+  value: StoredChunk;
+};
 type BlobRow = DbRow<StoredBlob>;
 type SessionRow = DbRow<SessionMetadata>;
 type IndexRow = DbRow<StoredIndexes>;
 type IntegrityRow = DbRow<HashesManifest>;
+
+const DB_VERSION = 2;
+const CHUNKS_BY_SID_SEQ_INDEX = "by-sid-seq";
 
 export class IndexedDbPipelineStorage implements PipelineStorage {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -151,17 +184,32 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   public async putChunk(chunk: StoredChunk): Promise<void> {
     await this.put<ChunkRow>("chunks", {
       key: this.chunkKey(chunk.sid, chunk.meta.chunkId),
+      sid: chunk.sid,
+      seq: chunk.meta.seq,
       value: chunk
     });
   }
 
   public async listChunks(sid: string): Promise<StoredChunk[]> {
-    const rows = await this.getAll<ChunkRow>("chunks");
+    const db = await this.db();
 
-    return rows
-      .map((row) => row.value)
-      .filter((chunk) => chunk.sid === sid)
-      .sort((left, right) => left.meta.seq - right.meta.seq);
+    return runTransaction(db, "chunks", "readonly", (store) => {
+      if (!store.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
+        return requestToPromise<ChunkRow[]>(store.getAll()).then((rows) =>
+          rows
+            .map((row) => row.value)
+            .filter((chunk) => chunk.sid === sid)
+            .sort((left, right) => left.meta.seq - right.meta.seq)
+        );
+      }
+
+      const index = store.index(CHUNKS_BY_SID_SEQ_INDEX);
+      const range = IDBKeyRange.bound([sid, 0], [sid, Number.MAX_SAFE_INTEGER]);
+
+      return requestToPromise<ChunkRow[]>(index.getAll(range)).then((rows) =>
+        rows.map((row) => row.value)
+      );
+    });
   }
 
   public async getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined> {
@@ -223,6 +271,25 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     return row?.value;
   }
 
+  public async deleteSession(sid: string, blobHashes: string[] = []): Promise<void> {
+    const db = await this.db();
+
+    await runTransaction(db, "sessions", "readwrite", (store) => {
+      return requestToPromise(store.delete(sid));
+    });
+    await runTransaction(db, "indexes", "readwrite", (store) => {
+      return requestToPromise(store.delete(sid));
+    });
+    await runTransaction(db, "integrity", "readwrite", (store) => {
+      return requestToPromise(store.delete(sid));
+    });
+    await this.deleteChunksBySid(sid);
+
+    for (const hash of blobHashes) {
+      await this.decrementOrDeleteBlob(hash);
+    }
+  }
+
   private chunkKey(sid: string, chunkId: string): string {
     return `${sid}:${chunkId}`;
   }
@@ -265,7 +332,7 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     }
 
     return new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, 1);
+      const request = indexedDB.open(this.dbName, DB_VERSION);
 
       request.onupgradeneeded = () => {
         const db = request.result;
@@ -274,6 +341,13 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
           if (!db.objectStoreNames.contains(storeName)) {
             db.createObjectStore(storeName, { keyPath: "key" });
           }
+        }
+
+        const transaction = request.transaction;
+        const chunksStore = transaction?.objectStore("chunks");
+
+        if (chunksStore && !chunksStore.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
+          chunksStore.createIndex(CHUNKS_BY_SID_SEQ_INDEX, ["sid", "seq"], { unique: false });
         }
       };
 
@@ -284,6 +358,52 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       request.onerror = () => {
         reject(request.error ?? new Error("Failed to open IndexedDB"));
       };
+    });
+  }
+
+  private async deleteChunksBySid(sid: string): Promise<void> {
+    const db = await this.db();
+
+    await runTransaction(db, "chunks", "readwrite", (store) => {
+      if (store.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
+        const index = store.index(CHUNKS_BY_SID_SEQ_INDEX);
+        const range = IDBKeyRange.bound([sid, 0], [sid, Number.MAX_SAFE_INTEGER]);
+        return deleteByCursor(index.openCursor(range));
+      }
+
+      return requestToPromise<ChunkRow[]>(store.getAll()).then(async (rows) => {
+        for (const row of rows) {
+          if (row.value.sid !== sid) {
+            continue;
+          }
+
+          await requestToPromise(store.delete(row.key));
+        }
+      });
+    });
+  }
+
+  private async decrementOrDeleteBlob(hash: string): Promise<void> {
+    const existing = await this.getBlob(hash);
+
+    if (!existing) {
+      return;
+    }
+
+    if (existing.refCount <= 1) {
+      const db = await this.db();
+      await runTransaction(db, "blobs", "readwrite", (store) => {
+        return requestToPromise(store.delete(hash));
+      });
+      return;
+    }
+
+    await this.put<BlobRow>("blobs", {
+      key: hash,
+      value: {
+        ...existing,
+        refCount: existing.refCount - 1
+      }
     });
   }
 }
@@ -317,6 +437,26 @@ function requestToPromise<TResult>(request: IDBRequest<TResult>): Promise<TResul
 
     request.onerror = () => {
       reject(request.error ?? new Error("IndexedDB request failed"));
+    };
+  });
+}
+
+function deleteByCursor(request: IDBRequest<IDBCursorWithValue | null>): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    request.onerror = () => {
+      reject(request.error ?? new Error("IndexedDB cursor iteration failed"));
+    };
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+
+      if (!cursor) {
+        resolve();
+        return;
+      }
+
+      cursor.delete();
+      cursor.continue();
     };
   });
 }

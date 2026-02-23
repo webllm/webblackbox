@@ -34,6 +34,11 @@ export type UiExportSessionMessage = {
   policy?: Partial<ExportPolicy>;
 };
 
+export type UiDeleteSessionMessage = {
+  kind: "ui.delete";
+  sid: string;
+};
+
 export type ContentEventBatchMessage = {
   kind: "content.events";
   events: RawRecorderEvent[];
@@ -52,6 +57,7 @@ export type ExtensionInboundMessage =
   | UiStartSessionMessage
   | UiStopSessionMessage
   | UiExportSessionMessage
+  | UiDeleteSessionMessage
   | ContentEventBatchMessage
   | ContentMarkerMessage
   | ContentReadyMessage;

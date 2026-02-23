@@ -280,7 +280,10 @@ async function main() {
     playerResult
   );
 
-  const hasApiRequest = playerResult.waterfallSamples.some((sample) => sample.includes("/api/"));
+  const hasApiRequest = [
+    ...(playerResult.waterfallSamples ?? []),
+    ...(playerResult.waterfallSampleUrls ?? [])
+  ].some((sample) => sample.includes("/api/"));
   assert(hasApiRequest, "Player waterfall does not include demo API requests", playerResult);
 
   const requiredEventTypes =
@@ -293,7 +296,7 @@ async function main() {
           "dom.snapshot",
           "storage.local.snapshot"
         ]
-      : ["user.mousemove", "screen.screenshot", "console.entry"];
+      : ["user.click", "screen.screenshot", "console.entry"];
 
   for (const eventType of requiredEventTypes) {
     await waitForPlayerEventType(playerClient, eventType, 20_000);
@@ -1187,9 +1190,14 @@ async function waitForPlayerLoad(playerClient, timeoutMs) {
         const eventCount = document.querySelectorAll('#timeline-list .event').length;
         const waterfallRows = document.querySelectorAll('#waterfall-body tr').length;
         const feedback = (document.getElementById('feedback')?.textContent ?? '').trim();
-        const samples = Array.from(document.querySelectorAll('#waterfall-body .waterfall-btn'))
-          .map((el) => (el.textContent ?? '').trim())
-          .slice(0, 12);
+        const sampleButtons = Array.from(document.querySelectorAll('#waterfall-body .waterfall-btn'))
+          .slice(0, 12)
+          .map((el) => ({
+            label: (el.textContent ?? '').trim(),
+            title: (el.getAttribute('title') ?? '').trim()
+          }));
+        const samples = sampleButtons.map((sample) => sample.label);
+        const sampleUrls = sampleButtons.map((sample) => sample.title);
 
         if (eventCount === 0) {
           return null;
@@ -1199,7 +1207,8 @@ async function waitForPlayerLoad(playerClient, timeoutMs) {
           eventCount,
           waterfallCount: waterfallRows,
           feedback,
-          waterfallSamples: samples
+          waterfallSamples: samples,
+          waterfallSampleUrls: sampleUrls
         };
       })()
     `);

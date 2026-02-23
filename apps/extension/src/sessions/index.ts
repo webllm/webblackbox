@@ -27,7 +27,7 @@ if (root) {
 function render(container: HTMLElement): void {
   const sessionRows =
     sessions.length === 0
-      ? '<tr><td colspan="7">No sessions.</td></tr>'
+      ? '<tr><td colspan="8">No sessions.</td></tr>'
       : sessions
           .map((session) => {
             return `
@@ -41,6 +41,7 @@ function render(container: HTMLElement): void {
                 <td><button data-stop="${session.tabId}" ${
                   session.active ? "" : "disabled"
                 }>Stop</button></td>
+                <td><button data-delete="${session.sid}">Delete</button></td>
               </tr>
             `;
           })
@@ -59,6 +60,7 @@ function render(container: HTMLElement): void {
             <th align="left">Status</th>
             <th align="left">Export</th>
             <th align="left">Stop</th>
+            <th align="left">Delete</th>
           </tr>
         </thead>
         <tbody>${sessionRows}</tbody>
@@ -105,6 +107,27 @@ function bindActions(container: HTMLElement): void {
       port?.postMessage({
         kind: "ui.stop",
         tabId
+      });
+    });
+  });
+
+  container.querySelectorAll<HTMLButtonElement>("button[data-delete]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sid = button.getAttribute("data-delete");
+
+      if (!sid) {
+        return;
+      }
+
+      const confirmed = confirm(`Delete session ${sid}? This removes local archive data.`);
+
+      if (!confirmed) {
+        return;
+      }
+
+      port?.postMessage({
+        kind: "ui.delete",
+        sid
       });
     });
   });

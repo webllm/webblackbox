@@ -18,6 +18,7 @@ type OffscreenPipelineRequest = {
   includeScreenshots?: boolean;
   maxArchiveBytes?: number;
   recentWindowMs?: number;
+  purge?: boolean;
 };
 
 type OffscreenPipelineResponse = {
@@ -180,7 +181,9 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
   }
 
   if (message.op === "close") {
-    await pipeline.flush().catch(() => undefined);
+    await pipeline.close({
+      purge: message.purge === true
+    });
     pipelines.delete(message.sid);
     return null;
   }

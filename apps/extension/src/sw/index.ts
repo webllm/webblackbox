@@ -103,7 +103,7 @@ type SessionPipelineClient = {
     maxArchiveBytes?: number;
     recentWindowMs?: number;
   }) => Promise<PipelineExportDownloadResult>;
-  close: () => Promise<void>;
+  close: (options?: { purge?: boolean }) => Promise<void>;
 };
 
 type OffscreenPipelineRequest = {
@@ -120,6 +120,7 @@ type OffscreenPipelineRequest = {
   includeScreenshots?: boolean;
   maxArchiveBytes?: number;
   recentWindowMs?: number;
+  purge?: boolean;
 };
 
 type OffscreenPipelineResponse = {
@@ -249,6 +250,8 @@ const STOPPED_SESSION_TTL_MS = 10 * 60_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
 const PERF_WARN_MS = 40;
+const OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
+const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -400,6 +403,11 @@ async function handleInboundMessage(
     return;
   }
 
+  if (message.kind === "ui.delete") {
+    await deleteSessionBySid(message.sid);
+    return;
+  }
+
   if (message.kind === "content.marker") {
     const tabId = senderTabId ?? port?.sender?.tab?.id;
 
@@ -467,6 +475,20 @@ async function handleInboundMessage(
       }
     }
   }
+}
+
+async function deleteSessionBySid(sid: string): Promise<void> {
+  const runtime = sessionsBySid.get(sid);
+
+  if (!runtime) {
+    return;
+  }
+
+  if (!runtime.stoppedAt) {
+    await stopSession(runtime.tabId);
+  }
+
+  await disposeStoppedSession(runtime);
 }
 
 async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
@@ -1240,10 +1262,11 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
 
       return normalizePipelineExportDownloadResult(exported);
     },
-    close: async () => {
+    close: async (options = {}) => {
       await requestOffscreenPipeline<void>({
         op: "close",
-        sid
+        sid,
+        purge: options.purge
       });
     }
   };
@@ -1255,13 +1278,14 @@ async function requestOffscreenPipeline<TResult>(
   const startedAt = perfNow();
   const port = await ensureOffscreenPortReady();
   const requestId = `off-${Date.now()}-${offscreenRequestSeq}`;
+  const timeoutMs = resolveOffscreenRequestTimeoutMs(request.op);
   offscreenRequestSeq += 1;
 
   const result = await new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
       pendingOffscreenRequests.delete(requestId);
       reject(new Error(`Timed out waiting for offscreen response: ${request.op}`));
-    }, 30_000);
+    }, timeoutMs);
 
     pendingOffscreenRequests.set(requestId, {
       resolve,
@@ -1287,6 +1311,14 @@ async function requestOffscreenPipeline<TResult>(
   }
 
   return result as TResult;
+}
+
+function resolveOffscreenRequestTimeoutMs(requestOp: OffscreenPipelineRequest["op"]): number {
+  if (requestOp === "exportDownload") {
+    return OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS;
+  }
+
+  return OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS;
 }
 
 async function ensureOffscreenPortReady(): Promise<PortLike> {
@@ -2824,7 +2856,11 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
   await flushBufferedPipelineEvents(runtime);
   await runtime.queue;
   await runtime.pipeline.flush().catch(() => undefined);
-  await runtime.pipeline.close().catch(() => undefined);
+  await runtime.pipeline
+    .close({
+      purge: true
+    })
+    .catch(() => undefined);
   sessionsBySid.delete(runtime.sid);
 
   if (sessionsByTab.size === 0) {
