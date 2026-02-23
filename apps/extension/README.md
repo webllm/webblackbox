@@ -42,7 +42,7 @@ The extension consists of multiple main components:
 - Captures user interaction events (click, input, scroll, keydown, etc.)
 - Captures DOM mutations via MutationObserver
 - Takes DOM snapshots at configured intervals
-- Captures screenshots via html2canvas-pro
+- Captures screenshots via SnapDOM
 - Forwards events to the service worker via `chrome.runtime.connect` + `port.postMessage`
 
 #### Injected Script (`injected.js`)

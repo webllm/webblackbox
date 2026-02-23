@@ -48,6 +48,6 @@
     "@webblackbox/pipeline": "workspace:*",
     "@webblackbox/protocol": "workspace:*",
     "@webblackbox/recorder": "workspace:*",
-    "html2canvas-pro": "^2.0.0"
+    "@zumer/snapdom": "^2.0.2"
   }
 }

@@ -122,7 +122,7 @@ WebBlackbox captures events from three sources:
 - **User interactions** — click, dblclick, keydown, input, submit, scroll, mousemove, focus, blur, resize, visibilitychange
 - **DOM mutations** — Batched MutationObserver records
 - **DOM snapshots** — Full page snapshots at intervals
-- **Screenshots** — html2canvas-pro captures on idle and after actions
+- **Screenshots** — SnapDOM captures on idle and after actions
 
 #### Injected Script
 

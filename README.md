@@ -275,7 +275,7 @@ Model Context Protocol server for AI-assisted session analysis.
 | Git Hooks       | Husky, lint-staged               |
 | Versioning      | Changesets                       |
 | Archive Format  | JSZip                            |
-| Screenshots     | html2canvas-pro                  |
+| Screenshots     | @zumer/snapdom                   |
 | Encryption      | Web Crypto API (AES-GCM, PBKDF2) |
 
 ## Getting Started
