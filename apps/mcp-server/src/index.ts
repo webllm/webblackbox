@@ -10,6 +10,10 @@ import {
   nowUtcIsoString
 } from "@webblackbox/mcp-core";
 import {
+  compareSessions,
+  compareSessionsInput,
+  generateBugReportBundle,
+  generateBugReportInput,
   listArchives,
   listArchivesInput,
   networkIssuesInput,
@@ -145,6 +149,68 @@ export function createServer(): McpServer {
           passphrase,
           minDurationMs,
           limit
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "generate_bug_report",
+    "Generate markdown/GitHub/Jira issue artifacts from one archive.",
+    generateBugReportInput,
+    async ({
+      path,
+      passphrase,
+      title,
+      maxItems,
+      monoStart,
+      monoEnd,
+      labels,
+      assignees,
+      issueType,
+      projectKey,
+      priority
+    }) => {
+      return toTextPayload(
+        await generateBugReportBundle({
+          path,
+          passphrase,
+          title,
+          maxItems,
+          monoStart,
+          monoEnd,
+          labels,
+          assignees,
+          issueType,
+          projectKey,
+          priority
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "compare_sessions",
+    "Compare two archives and summarize event/network/storage deltas.",
+    compareSessionsInput,
+    async ({
+      leftPath,
+      rightPath,
+      leftPassphrase,
+      rightPassphrase,
+      topTypeDeltas,
+      topRequestDiffs,
+      includeStorageHashes
+    }) => {
+      return toTextPayload(
+        await compareSessions({
+          leftPath,
+          rightPath,
+          leftPassphrase,
+          rightPassphrase,
+          topTypeDeltas,
+          topRequestDiffs,
+          includeStorageHashes
         })
       );
     }

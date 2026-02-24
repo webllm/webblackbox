@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { listArchives } from "./session-tools.js";
+import { compareSessions, generateBugReportBundle, listArchives } from "./session-tools.js";
 
 const tempDirs: string[] = [];
 
@@ -62,5 +62,27 @@ describe("session tools", () => {
       limit: 1
     });
     expect(recursive.count).toBe(1);
+  });
+
+  it("throws helpful errors when report archive is missing", async () => {
+    const missing = join(tmpdir(), `wb-mcp-missing-${Date.now()}.webblackbox`);
+
+    await expect(
+      generateBugReportBundle({
+        path: missing
+      })
+    ).rejects.toThrowError("Failed to open archive");
+  });
+
+  it("throws helpful errors when compare archive is missing", async () => {
+    const missingLeft = join(tmpdir(), `wb-mcp-missing-left-${Date.now()}.webblackbox`);
+    const missingRight = join(tmpdir(), `wb-mcp-missing-right-${Date.now()}.webblackbox`);
+
+    await expect(
+      compareSessions({
+        leftPath: missingLeft,
+        rightPath: missingRight
+      })
+    ).rejects.toThrowError("Failed to open archive");
   });
 });

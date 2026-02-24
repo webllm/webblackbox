@@ -39,12 +39,14 @@ pnpm build
 
 ### Session analysis tools
 
-| Tool              | Description                                                                 |
-| ----------------- | --------------------------------------------------------------------------- |
-| `list_archives`   | Scan a directory for `.webblackbox` / `.zip` archives                       |
-| `session_summary` | Open one archive and return totals, top event types, top errors, slow/fails |
-| `query_events`    | Query events by text/type/level/request/time range with pagination          |
-| `network_issues`  | Return failed and slow network requests sorted by severity                  |
+| Tool                  | Description                                                                 |
+| --------------------- | --------------------------------------------------------------------------- |
+| `list_archives`       | Scan a directory for `.webblackbox` / `.zip` archives                       |
+| `session_summary`     | Open one archive and return totals, top event types, top errors, slow/fails |
+| `query_events`        | Query events by text/type/level/request/time range with pagination          |
+| `network_issues`      | Return failed and slow network requests sorted by severity                  |
+| `generate_bug_report` | Generate markdown + GitHub/Jira issue artifacts from one archive            |
+| `compare_sessions`    | Compare two archives (event/network/storage deltas)                         |
 
 ## Notes
 

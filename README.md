@@ -268,6 +268,8 @@ Model Context Protocol server for AI-assisted session analysis.
 - Archive discovery (`list_archives`)
 - Session summary and triage (`session_summary`, `network_issues`)
 - Event-level querying (`query_events`)
+- Report generation (`generate_bug_report`)
+- Cross-session diffing (`compare_sessions`)
 
 ## Technology Stack
 

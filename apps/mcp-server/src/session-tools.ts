@@ -13,6 +13,8 @@ const MAX_TOP_N = 50;
 const DEFAULT_SLOW_REQUEST_MS = 1_000;
 const DEFAULT_DATA_PREVIEW_CHARS = 2_000;
 const MAX_DATA_PREVIEW_CHARS = 10_000;
+const DEFAULT_COMPARE_TOP = 15;
+const MAX_COMPARE_TOP = 100;
 
 export const listArchivesInput = {
   dir: z.string().min(1).optional().describe("Directory to scan. Defaults to current working dir."),
@@ -131,6 +133,85 @@ export type NetworkIssuesArgs = {
   passphrase?: string;
   minDurationMs?: number;
   limit?: number;
+};
+
+export const generateBugReportInput = {
+  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
+  title: z.string().min(1).max(512).optional().describe("Optional report title."),
+  maxItems: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_QUERY_LIMIT)
+    .optional()
+    .describe(`Max rows in report sections (1-${MAX_QUERY_LIMIT}).`),
+  monoStart: z.number().finite().optional().describe("Optional mono range start."),
+  monoEnd: z.number().finite().optional().describe("Optional mono range end."),
+  labels: z.array(z.string().min(1).max(64)).max(25).optional().describe("GitHub/Jira labels."),
+  assignees: z.array(z.string().min(1).max(64)).max(20).optional().describe("GitHub assignees."),
+  issueType: z.string().min(1).max(64).optional().describe("Jira issue type."),
+  projectKey: z.string().min(1).max(32).optional().describe("Jira project key."),
+  priority: z.string().min(1).max(64).optional().describe("Jira priority.")
+};
+
+export type GenerateBugReportArgs = {
+  path: string;
+  passphrase?: string;
+  title?: string;
+  maxItems?: number;
+  monoStart?: number;
+  monoEnd?: number;
+  labels?: string[];
+  assignees?: string[];
+  issueType?: string;
+  projectKey?: string;
+  priority?: string;
+};
+
+export const compareSessionsInput = {
+  leftPath: z.string().min(1).describe("Baseline archive path."),
+  rightPath: z.string().min(1).describe("Compared archive path."),
+  leftPassphrase: z
+    .string()
+    .min(1)
+    .max(4096)
+    .optional()
+    .describe("Passphrase for baseline archive (if encrypted)."),
+  rightPassphrase: z
+    .string()
+    .min(1)
+    .max(4096)
+    .optional()
+    .describe("Passphrase for compared archive (if encrypted)."),
+  topTypeDeltas: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_COMPARE_TOP)
+    .optional()
+    .describe(`Top N event-type deltas to return (1-${MAX_COMPARE_TOP}).`),
+  topRequestDiffs: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_COMPARE_TOP)
+    .optional()
+    .describe(`Top N slow/failed request diffs to return (1-${MAX_COMPARE_TOP}).`),
+  includeStorageHashes: z
+    .boolean()
+    .optional()
+    .describe("Include hash-only diff arrays for storage comparison.")
+};
+
+export type CompareSessionsArgs = {
+  leftPath: string;
+  rightPath: string;
+  leftPassphrase?: string;
+  rightPassphrase?: string;
+  topTypeDeltas?: number;
+  topRequestDiffs?: number;
+  includeStorageHashes?: boolean;
 };
 
 export async function listArchives(args: ListArchivesArgs = {}): Promise<{
@@ -426,6 +507,220 @@ export async function summarizeNetworkIssues(args: NetworkIssuesArgs): Promise<{
   };
 }
 
+export async function generateBugReportBundle(args: GenerateBugReportArgs): Promise<{
+  archive: string;
+  range: {
+    monoStart: number | null;
+    monoEnd: number | null;
+  };
+  markdown: string;
+  github: unknown;
+  jira: unknown;
+}> {
+  const archivePath = resolveArchivePath(args.path);
+  const player = await openArchivePlayer(archivePath, args.passphrase);
+  const maxItems = clampInt(args.maxItems ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
+  const range = buildRange(args.monoStart, args.monoEnd);
+  const labels = sanitizeStringArray(args.labels);
+  const assignees = sanitizeStringArray(args.assignees);
+  const title = normalizeOptionalString(args.title);
+  const issueType = normalizeOptionalString(args.issueType);
+  const projectKey = normalizeOptionalString(args.projectKey);
+  const priority = normalizeOptionalString(args.priority);
+  const markdown = player.generateBugReport({
+    title,
+    range: range ?? undefined,
+    maxItems
+  });
+  const github = player.generateGitHubIssueTemplate({
+    title,
+    range: range ?? undefined,
+    maxItems,
+    labels,
+    assignees
+  });
+  const jira = player.generateJiraIssueTemplate({
+    title,
+    range: range ?? undefined,
+    maxItems,
+    labels,
+    issueType,
+    projectKey,
+    priority
+  });
+
+  return {
+    archive: archivePath,
+    range: {
+      monoStart: range?.monoStart ?? null,
+      monoEnd: range?.monoEnd ?? null
+    },
+    markdown,
+    github,
+    jira
+  };
+}
+
+export async function compareSessions(args: CompareSessionsArgs): Promise<{
+  left: {
+    path: string;
+    origin: string;
+    mode: string;
+    totals: {
+      events: number;
+      errors: number;
+      requests: number;
+      durationMs: number;
+    };
+    network: {
+      total: number;
+      failed: number;
+      slowOver1000ms: number;
+      p95DurationMs: number;
+    };
+  };
+  right: {
+    path: string;
+    origin: string;
+    mode: string;
+    totals: {
+      events: number;
+      errors: number;
+      requests: number;
+      durationMs: number;
+    };
+    network: {
+      total: number;
+      failed: number;
+      slowOver1000ms: number;
+      p95DurationMs: number;
+    };
+  };
+  summary: {
+    eventDelta: number;
+    errorDelta: number;
+    requestDelta: number;
+    durationDeltaMs: number;
+  };
+  topTypeDeltas: Array<{
+    type: string;
+    left: number;
+    right: number;
+    delta: number;
+  }>;
+  networkDiff: {
+    failedDelta: number;
+    slowDelta: number;
+    p95DurationDeltaMs: number;
+    topFailedRequests: Array<{
+      side: "left" | "right";
+      reqId: string;
+      method: string;
+      url: string;
+      status: number | null;
+      durationMs: number;
+    }>;
+    topSlowRequests: Array<{
+      side: "left" | "right";
+      reqId: string;
+      method: string;
+      url: string;
+      status: number | null;
+      durationMs: number;
+    }>;
+  };
+  storageDiff: {
+    leftEvents: number;
+    rightEvents: number;
+    kindDeltas: Array<{
+      kind: string;
+      left: number;
+      right: number;
+      delta: number;
+    }>;
+    hashOnlyLeft?: string[];
+    hashOnlyRight?: string[];
+  };
+}> {
+  const leftPath = resolveArchivePath(args.leftPath);
+  const rightPath = resolveArchivePath(args.rightPath);
+  const leftPlayer = await openArchivePlayer(leftPath, args.leftPassphrase);
+  const rightPlayer = await openArchivePlayer(rightPath, args.rightPassphrase);
+  const topTypeDeltas = clampInt(args.topTypeDeltas ?? DEFAULT_COMPARE_TOP, 1, MAX_COMPARE_TOP);
+  const topRequestDiffs = clampInt(args.topRequestDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
+  const includeStorageHashes = args.includeStorageHashes === true;
+  const comparison = leftPlayer.compareWith(rightPlayer);
+  const storageComparison = leftPlayer.compareStorageWith(rightPlayer);
+  const leftDerived = leftPlayer.buildDerived();
+  const rightDerived = rightPlayer.buildDerived();
+  const leftWaterfall = leftPlayer.getNetworkWaterfall();
+  const rightWaterfall = rightPlayer.getNetworkWaterfall();
+  const leftNet = summarizeNetworkMetrics(leftWaterfall, 1_000);
+  const rightNet = summarizeNetworkMetrics(rightWaterfall, 1_000);
+  const leftFailed = collectFailedRequests(leftWaterfall, "left", topRequestDiffs);
+  const rightFailed = collectFailedRequests(rightWaterfall, "right", topRequestDiffs);
+  const leftSlow = collectSlowRequests(leftWaterfall, "left", topRequestDiffs);
+  const rightSlow = collectSlowRequests(rightWaterfall, "right", topRequestDiffs);
+  const leftDuration = computeDurationMs(leftPlayer.events);
+  const rightDuration = computeDurationMs(rightPlayer.events);
+
+  return {
+    left: {
+      path: leftPath,
+      origin: leftPlayer.archive.manifest.site.origin,
+      mode: leftPlayer.archive.manifest.mode,
+      totals: {
+        events: leftDerived.totals.events,
+        errors: leftDerived.totals.errors,
+        requests: leftDerived.totals.requests,
+        durationMs: leftDuration
+      },
+      network: leftNet
+    },
+    right: {
+      path: rightPath,
+      origin: rightPlayer.archive.manifest.site.origin,
+      mode: rightPlayer.archive.manifest.mode,
+      totals: {
+        events: rightDerived.totals.events,
+        errors: rightDerived.totals.errors,
+        requests: rightDerived.totals.requests,
+        durationMs: rightDuration
+      },
+      network: rightNet
+    },
+    summary: {
+      eventDelta: comparison.eventDelta,
+      errorDelta: comparison.errorDelta,
+      requestDelta: comparison.requestDelta,
+      durationDeltaMs: Number((rightDuration - leftDuration).toFixed(2))
+    },
+    topTypeDeltas: comparison.typeDeltas.slice(0, topTypeDeltas),
+    networkDiff: {
+      failedDelta: rightNet.failed - leftNet.failed,
+      slowDelta: rightNet.slowOver1000ms - leftNet.slowOver1000ms,
+      p95DurationDeltaMs: Number((rightNet.p95DurationMs - leftNet.p95DurationMs).toFixed(2)),
+      topFailedRequests: [...leftFailed, ...rightFailed]
+        .sort((left, right) => right.durationMs - left.durationMs)
+        .slice(0, topRequestDiffs),
+      topSlowRequests: [...leftSlow, ...rightSlow]
+        .sort((left, right) => right.durationMs - left.durationMs)
+        .slice(0, topRequestDiffs)
+    },
+    storageDiff: {
+      leftEvents: storageComparison.leftEvents,
+      rightEvents: storageComparison.rightEvents,
+      kindDeltas: storageComparison.kindDeltas,
+      ...(includeStorageHashes
+        ? {
+            hashOnlyLeft: storageComparison.hashOnlyLeft.slice(0, MAX_QUERY_LIMIT),
+            hashOnlyRight: storageComparison.hashOnlyRight.slice(0, MAX_QUERY_LIMIT)
+          }
+        : {})
+    }
+  };
+}
+
 async function openArchivePlayer(path: string, passphrase?: string): Promise<WebBlackboxPlayer> {
   try {
     const bytes = await readFile(path);
@@ -540,6 +835,131 @@ function mapToSortedEntries(source: Map<string, number>, limit: number): Array<[
   return [...source.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
     .slice(0, limit);
+}
+
+function buildRange(
+  monoStart: number | undefined,
+  monoEnd: number | undefined
+): {
+  monoStart?: number;
+  monoEnd?: number;
+} | null {
+  const hasStart = typeof monoStart === "number" && Number.isFinite(monoStart);
+  const hasEnd = typeof monoEnd === "number" && Number.isFinite(monoEnd);
+
+  if (!hasStart && !hasEnd) {
+    return null;
+  }
+
+  return {
+    monoStart: hasStart ? monoStart : undefined,
+    monoEnd: hasEnd ? monoEnd : undefined
+  };
+}
+
+function summarizeNetworkMetrics(
+  entries: Array<{ failed: boolean; status?: number; durationMs: number }>,
+  slowThresholdMs: number
+): {
+  total: number;
+  failed: number;
+  slowOver1000ms: number;
+  p95DurationMs: number;
+} {
+  const durations = entries.map((entry) => entry.durationMs).sort((left, right) => left - right);
+  const p95DurationMs = percentile(durations, 95);
+
+  return {
+    total: entries.length,
+    failed: entries.filter((entry) => isFailedRequest(entry)).length,
+    slowOver1000ms: entries.filter((entry) => entry.durationMs >= slowThresholdMs).length,
+    p95DurationMs
+  };
+}
+
+function collectFailedRequests(
+  entries: Array<{
+    reqId: string;
+    method: string;
+    url: string;
+    status?: number;
+    durationMs: number;
+    failed: boolean;
+  }>,
+  side: "left" | "right",
+  limit: number
+): Array<{
+  side: "left" | "right";
+  reqId: string;
+  method: string;
+  url: string;
+  status: number | null;
+  durationMs: number;
+}> {
+  return entries
+    .filter((entry) => isFailedRequest(entry))
+    .sort((left, right) => right.durationMs - left.durationMs)
+    .slice(0, limit)
+    .map((entry) => ({
+      side,
+      reqId: entry.reqId,
+      method: entry.method,
+      url: entry.url,
+      status: typeof entry.status === "number" ? entry.status : null,
+      durationMs: Number(entry.durationMs.toFixed(2))
+    }));
+}
+
+function collectSlowRequests(
+  entries: Array<{
+    reqId: string;
+    method: string;
+    url: string;
+    status?: number;
+    durationMs: number;
+  }>,
+  side: "left" | "right",
+  limit: number
+): Array<{
+  side: "left" | "right";
+  reqId: string;
+  method: string;
+  url: string;
+  status: number | null;
+  durationMs: number;
+}> {
+  return entries
+    .slice()
+    .sort((left, right) => right.durationMs - left.durationMs)
+    .slice(0, limit)
+    .map((entry) => ({
+      side,
+      reqId: entry.reqId,
+      method: entry.method,
+      url: entry.url,
+      status: typeof entry.status === "number" ? entry.status : null,
+      durationMs: Number(entry.durationMs.toFixed(2))
+    }));
+}
+
+function computeDurationMs(events: Array<{ mono: number }>): number {
+  if (events.length < 2) {
+    return 0;
+  }
+
+  return Number((events[events.length - 1]!.mono - events[0]!.mono).toFixed(2));
+}
+
+function percentile(sortedNumbers: number[], p: number): number {
+  if (sortedNumbers.length === 0) {
+    return 0;
+  }
+
+  const rank = Math.min(
+    sortedNumbers.length - 1,
+    Math.max(0, Math.ceil((p / 100) * sortedNumbers.length) - 1)
+  );
+  return Number((sortedNumbers[rank] ?? 0).toFixed(2));
 }
 
 function buildErrorFingerprint(event: { type: string; data: unknown }): string {
