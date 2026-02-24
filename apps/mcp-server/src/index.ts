@@ -9,6 +9,16 @@ import {
   nowUtcInput,
   nowUtcIsoString
 } from "@webblackbox/mcp-core";
+import {
+  listArchives,
+  listArchivesInput,
+  networkIssuesInput,
+  queryEvents,
+  queryEventsInput,
+  sessionSummaryInput,
+  summarizeNetworkIssues,
+  summarizeSession
+} from "./session-tools.js";
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -62,6 +72,84 @@ export function createServer(): McpServer {
     };
   });
 
+  server.tool(
+    "list_archives",
+    "List local .webblackbox/.zip archives from a directory.",
+    listArchivesInput,
+    async ({ dir, recursive, limit }) => {
+      return toTextPayload(await listArchives({ dir, recursive, limit }));
+    }
+  );
+
+  server.tool(
+    "session_summary",
+    "Open an archive and return session-level summary metrics and top issues.",
+    sessionSummaryInput,
+    async ({ path, passphrase, slowRequestMs, topN }) => {
+      return toTextPayload(
+        await summarizeSession({
+          path,
+          passphrase,
+          slowRequestMs,
+          topN
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "query_events",
+    "Query events in an archive by text/type/level/request/range with pagination.",
+    queryEventsInput,
+    async ({
+      path,
+      passphrase,
+      text,
+      types,
+      levels,
+      requestId,
+      monoStart,
+      monoEnd,
+      offset,
+      limit,
+      includeData,
+      maxDataChars
+    }) => {
+      return toTextPayload(
+        await queryEvents({
+          path,
+          passphrase,
+          text,
+          types,
+          levels,
+          requestId,
+          monoStart,
+          monoEnd,
+          offset,
+          limit,
+          includeData,
+          maxDataChars
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "network_issues",
+    "Summarize failed and slow network requests from an archive.",
+    networkIssuesInput,
+    async ({ path, passphrase, minDurationMs, limit }) => {
+      return toTextPayload(
+        await summarizeNetworkIssues({
+          path,
+          passphrase,
+          minDurationMs,
+          limit
+        })
+      );
+    }
+  );
+
   return server;
 }
 
@@ -76,4 +164,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.error("Failed to start MCP server:", error);
     process.exit(1);
   });
+}
+
+function toTextPayload(value: unknown): { content: Array<{ type: "text"; text: string }> } {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(value, null, 2)
+      }
+    ]
+  };
 }

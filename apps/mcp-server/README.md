@@ -28,7 +28,7 @@ pnpm build
 
 ## Available Tools
 
-The MCP server exposes tools from `@webblackbox/mcp-core`:
+### Utility tools
 
 | Tool          | Description               |
 | ------------- | ------------------------- |
@@ -37,4 +37,17 @@ The MCP server exposes tools from `@webblackbox/mcp-core`:
 | `now_utc`     | Get current UTC timestamp |
 | `echo`        | Echo text back            |
 
-Additional session analysis tools are planned for future releases.
+### Session analysis tools
+
+| Tool              | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
+| `list_archives`   | Scan a directory for `.webblackbox` / `.zip` archives                       |
+| `session_summary` | Open one archive and return totals, top event types, top errors, slow/fails |
+| `query_events`    | Query events by text/type/level/request/time range with pagination          |
+| `network_issues`  | Return failed and slow network requests sorted by severity                  |
+
+## Notes
+
+- Archive paths are resolved from the current working directory if relative.
+- Encrypted archives require `passphrase`.
+- `query_events` defaults to payload-hidden output (`includeData=false`) to avoid huge responses.

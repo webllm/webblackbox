@@ -265,6 +265,10 @@ React 19 application for session playback with:
 
 Model Context Protocol server for AI-assisted session analysis.
 
+- Archive discovery (`list_archives`)
+- Session summary and triage (`session_summary`, `network_issues`)
+- Event-level querying (`query_events`)
+
 ## Technology Stack
 
 | Component       | Technology                       |
