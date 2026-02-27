@@ -28,6 +28,16 @@ import {
   type ExtensionOutboundMessage,
   type SessionListItem
 } from "../shared/messages.js";
+import {
+  isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
+  isMimeAllowed as isMimeAllowedUtil,
+  isTextualMimeType as isTextualMimeTypeUtil,
+  normalizeMimeType as normalizeMimeTypeUtil,
+  redactBodyText as redactBodyTextUtil,
+  resolveFullBodyCaptureRule as resolveFullBodyCaptureRuleUtil,
+  resolveLiteBodyCaptureRule as resolveLiteBodyCaptureRuleUtil,
+  transformResponseBodyForCapture
+} from "./body-capture-utils.js";
 
 type SessionRuntime = {
   sid: string;
@@ -1624,26 +1634,17 @@ async function captureResponseBody(
     return;
   }
 
-  const originalBytes = response.base64Encoded
-    ? decodeBase64(response.body)
-    : new TextEncoder().encode(response.body);
-  let bodyBytes = originalBytes;
-  let redacted = false;
-
-  if (!response.base64Encoded && runtime.config.redaction.redactBodyPatterns.length > 0) {
-    const redaction = redactBodyText(response.body, runtime.config.redaction.redactBodyPatterns);
-
-    if (redaction.redacted) {
-      bodyBytes = new TextEncoder().encode(redaction.value);
-      redacted = true;
-    }
-  }
-
-  const truncated = bodyBytes.byteLength > captureRule.maxBytes;
-  const sampledBytes = truncated ? bodyBytes.slice(0, captureRule.maxBytes) : bodyBytes;
+  const transformed = transformResponseBodyForCapture({
+    body: response.body,
+    base64Encoded: response.base64Encoded === true,
+    redactPatterns: runtime.config.redaction.redactBodyPatterns,
+    maxBytes: captureRule.maxBytes,
+    redactionToken: LITE_BODY_REDACTED_TOKEN,
+    decodeBase64
+  });
   const hash = await runtime.pipeline.putBlob(
     metadata?.mimeType ?? "application/octet-stream",
-    sampledBytes
+    transformed.sampledBytes
   );
 
   runtime.responseBodyCaptures += 1;
@@ -1659,10 +1660,10 @@ async function captureResponseBody(
       reqId: requestId,
       contentHash: hash,
       mimeType: metadata?.mimeType,
-      size: originalBytes.byteLength,
-      sampledSize: sampledBytes.byteLength,
-      redacted,
-      truncated
+      size: transformed.originalBytes.byteLength,
+      sampledSize: transformed.sampledBytes.byteLength,
+      redacted: transformed.redacted,
+      truncated: transformed.truncated
     }
   });
 }
@@ -1730,24 +1731,11 @@ function shouldCaptureResponseBody(
 }
 
 function isTextualMimeType(mimeType: string): boolean {
-  return (
-    mimeType.startsWith("text/") ||
-    mimeType.includes("json") ||
-    mimeType.includes("xml") ||
-    mimeType.includes("javascript") ||
-    mimeType.includes("ecmascript") ||
-    mimeType.includes("x-www-form-urlencoded")
-  );
+  return isTextualMimeTypeUtil(mimeType);
 }
 
 function isLikelyTextualResourceType(resourceType?: string): boolean {
-  return (
-    resourceType === "Document" ||
-    resourceType === "XHR" ||
-    resourceType === "Fetch" ||
-    resourceType === "Script" ||
-    resourceType === "EventSource"
-  );
+  return isLikelyTextualResourceTypeUtil(resourceType);
 }
 
 function shouldCaptureIncidentArtifacts(runtime: SessionRuntime): boolean {
@@ -2246,63 +2234,10 @@ function resolveLiteBodyCaptureRule(
   url: string,
   mimeType: string | undefined
 ): LiteBodyCaptureRule {
-  const defaultRule: LiteBodyCaptureRule = {
-    enabled: true,
-    maxBytes: normalizeBodyCaptureMaxBytes(runtime.config.sampling.bodyCaptureMaxBytes),
-    mimeAllowlist: normalizeMimeAllowlist(LITE_DEFAULT_BODY_MIME_ALLOWLIST)
-  };
-
-  if (!url) {
-    return defaultRule;
-  }
-
-  let parsedUrl: URL | null = null;
-
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return defaultRule;
-  }
-
-  for (const policy of runtime.config.sitePolicies) {
-    if (!policy.enabled || policy.mode !== "lite") {
-      continue;
-    }
-
-    if (
-      !matchesSitePolicy(parsedUrl, policy.originPattern, policy.pathAllowlist, policy.pathDenylist)
-    ) {
-      continue;
-    }
-
-    if (!policy.allowBodyCapture) {
-      return {
-        ...defaultRule,
-        enabled: false
-      };
-    }
-
-    const allowlist =
-      policy.bodyMimeAllowlist.length > 0
-        ? normalizeMimeAllowlist(policy.bodyMimeAllowlist)
-        : defaultRule.mimeAllowlist;
-
-    if (!isMimeAllowed(allowlist, mimeType)) {
-      return {
-        enabled: false,
-        maxBytes: defaultRule.maxBytes,
-        mimeAllowlist: allowlist
-      };
-    }
-
-    return {
-      enabled: true,
-      maxBytes: defaultRule.maxBytes,
-      mimeAllowlist: allowlist
-    };
-  }
-
-  return defaultRule;
+  return resolveLiteBodyCaptureRuleUtil(runtime.config, url, mimeType, {
+    defaultMimeAllowlist: LITE_DEFAULT_BODY_MIME_ALLOWLIST,
+    fallbackMaxBytes: NETWORK_BODY_MAX_BYTES
+  });
 }
 
 function resolveFullBodyCaptureRule(
@@ -2310,171 +2245,18 @@ function resolveFullBodyCaptureRule(
   url: string,
   mimeType: string | undefined
 ): LiteBodyCaptureRule {
-  const defaultRule: LiteBodyCaptureRule = {
-    enabled: true,
-    maxBytes: normalizeBodyCaptureMaxBytes(runtime.config.sampling.bodyCaptureMaxBytes),
-    mimeAllowlist: normalizeMimeAllowlist(LITE_DEFAULT_BODY_MIME_ALLOWLIST)
-  };
-
-  if (!url) {
-    return isMimeAllowed(defaultRule.mimeAllowlist, mimeType)
-      ? defaultRule
-      : { ...defaultRule, enabled: false };
-  }
-
-  let parsedUrl: URL | null = null;
-
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return isMimeAllowed(defaultRule.mimeAllowlist, mimeType)
-      ? defaultRule
-      : { ...defaultRule, enabled: false };
-  }
-
-  for (const policy of runtime.config.sitePolicies) {
-    if (!policy.enabled || policy.mode !== "full") {
-      continue;
-    }
-
-    if (
-      !matchesSitePolicy(parsedUrl, policy.originPattern, policy.pathAllowlist, policy.pathDenylist)
-    ) {
-      continue;
-    }
-
-    if (!policy.allowBodyCapture) {
-      return {
-        ...defaultRule,
-        enabled: false
-      };
-    }
-
-    const allowlist =
-      policy.bodyMimeAllowlist.length > 0
-        ? normalizeMimeAllowlist(policy.bodyMimeAllowlist)
-        : defaultRule.mimeAllowlist;
-
-    if (!isMimeAllowed(allowlist, mimeType)) {
-      return {
-        enabled: false,
-        maxBytes: defaultRule.maxBytes,
-        mimeAllowlist: allowlist
-      };
-    }
-
-    return {
-      enabled: true,
-      maxBytes: defaultRule.maxBytes,
-      mimeAllowlist: allowlist
-    };
-  }
-
-  return isMimeAllowed(defaultRule.mimeAllowlist, mimeType)
-    ? defaultRule
-    : { ...defaultRule, enabled: false };
-}
-
-function normalizeBodyCaptureMaxBytes(candidate: unknown): number {
-  const value = asFiniteNumber(candidate);
-
-  if (value === null || value <= 0) {
-    return NETWORK_BODY_MAX_BYTES;
-  }
-
-  return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
-}
-
-function normalizeMimeAllowlist(values: string[]): string[] {
-  const output: string[] = [];
-
-  for (const value of values) {
-    const normalized = value.trim().toLowerCase();
-
-    if (!normalized || output.includes(normalized)) {
-      continue;
-    }
-
-    output.push(normalized);
-  }
-
-  return output;
-}
-
-function matchesSitePolicy(
-  targetUrl: URL,
-  originPattern: string,
-  pathAllowlist: string[],
-  pathDenylist: string[]
-): boolean {
-  if (!wildcardMatch(targetUrl.origin, originPattern.trim())) {
-    return false;
-  }
-
-  const path = `${targetUrl.pathname}${targetUrl.search}`;
-  const normalizedAllowlist = pathAllowlist.map((entry) => entry.trim()).filter(Boolean);
-  const normalizedDenylist = pathDenylist.map((entry) => entry.trim()).filter(Boolean);
-
-  if (
-    normalizedAllowlist.length > 0 &&
-    !normalizedAllowlist.some((entry) => wildcardMatch(path, entry))
-  ) {
-    return false;
-  }
-
-  if (normalizedDenylist.some((entry) => wildcardMatch(path, entry))) {
-    return false;
-  }
-
-  return true;
-}
-
-function wildcardMatch(value: string, pattern: string): boolean {
-  if (!pattern) {
-    return false;
-  }
-
-  if (pattern === "*") {
-    return true;
-  }
-
-  const regex = new RegExp(
-    `^${pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*")}$`,
-    "i"
-  );
-
-  return regex.test(value);
-}
-
-function isMimeAllowed(allowlist: string[], mimeType: string | undefined): boolean {
-  if (!mimeType) {
-    return true;
-  }
-
-  const normalizedMime = mimeType.toLowerCase();
-
-  return allowlist.some((rule) => {
-    if (rule.endsWith("/*")) {
-      const prefix = rule.slice(0, -1);
-      return normalizedMime.startsWith(prefix);
-    }
-
-    if (rule.includes("*")) {
-      return wildcardMatch(normalizedMime, rule);
-    }
-
-    return normalizedMime === rule;
+  return resolveFullBodyCaptureRuleUtil(runtime.config, url, mimeType, {
+    defaultMimeAllowlist: LITE_DEFAULT_BODY_MIME_ALLOWLIST,
+    fallbackMaxBytes: NETWORK_BODY_MAX_BYTES
   });
 }
 
-function normalizeMimeType(value: string | null): string | undefined {
-  if (!value) {
-    return undefined;
-  }
+function isMimeAllowed(allowlist: string[], mimeType: string | undefined): boolean {
+  return isMimeAllowedUtil(allowlist, mimeType);
+}
 
-  const [mime] = value.split(";");
-  const normalized = mime?.trim().toLowerCase();
-  return normalized && normalized.length > 0 ? normalized : undefined;
+function normalizeMimeType(value: string | null): string | undefined {
+  return normalizeMimeTypeUtil(value);
 }
 
 function redactBodyText(
@@ -2484,37 +2266,7 @@ function redactBodyText(
   value: string;
   redacted: boolean;
 } {
-  if (patterns.length === 0 || value.length === 0) {
-    return {
-      value,
-      redacted: false
-    };
-  }
-
-  let output = value;
-  let touched = false;
-
-  for (const pattern of patterns) {
-    const normalized = pattern.trim();
-
-    if (!normalized) {
-      continue;
-    }
-
-    const regex = new RegExp(normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-
-    if (!regex.test(output)) {
-      continue;
-    }
-
-    output = output.replace(regex, LITE_BODY_REDACTED_TOKEN);
-    touched = true;
-  }
-
-  return {
-    value: output,
-    redacted: touched
-  };
+  return redactBodyTextUtil(value, patterns, LITE_BODY_REDACTED_TOKEN);
 }
 
 function normalizeFullModePayload(method: string, params: unknown): unknown {
