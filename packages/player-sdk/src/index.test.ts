@@ -22,6 +22,7 @@ describe("WebBlackboxPlayer", () => {
 
     const textEvents = player.query({ text: "boom" });
     expect(textEvents.map((event) => event.id)).toContain("E-5");
+    expect(player.query({ text: "example.com/api" }).map((event) => event.id)).toContain("E-3");
 
     const searchResults = player.search("api");
     expect(searchResults[0]?.eventId).toBe("E-3");

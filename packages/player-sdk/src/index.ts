@@ -394,10 +394,18 @@ export class WebBlackboxPlayer {
     const requestedIds = query.requestId
       ? new Set(this.requestToEventIds.get(query.requestId) ?? [])
       : null;
+    const textCandidateIds = text ? collectInvertedCandidateIds(this.inverted, text) : null;
+    const candidateIds = intersectCandidateIds(requestedIds, textCandidateIds);
+
+    if (candidateIds && candidateIds.size === 0) {
+      return [];
+    }
+
+    const sourceEvents = candidateIds ? toSortedEvents(candidateIds, this.eventsById) : this.events;
 
     const matched: WebBlackboxEvent[] = [];
 
-    for (const event of this.events) {
+    for (const event of sourceEvents) {
       if (!withinRange(event, query.range)) {
         continue;
       }
@@ -407,10 +415,6 @@ export class WebBlackboxPlayer {
       }
 
       if (levels && (!event.lvl || !levels.has(event.lvl))) {
-        continue;
-      }
-
-      if (requestedIds && !requestedIds.has(event.id)) {
         continue;
       }
 
@@ -433,6 +437,11 @@ export class WebBlackboxPlayer {
 
     const eventIds = this.inverted.get(normalizedTerm);
     const ranked = new Map<string, number>();
+    const candidateIds = collectInvertedCandidateIds(this.inverted, normalizedTerm);
+    const sourceEvents =
+      candidateIds && candidateIds.size > 0
+        ? toSortedEvents(candidateIds, this.eventsById)
+        : this.events;
 
     if (eventIds) {
       for (const eventId of eventIds) {
@@ -440,7 +449,7 @@ export class WebBlackboxPlayer {
       }
     }
 
-    for (const event of this.events) {
+    for (const event of sourceEvents) {
       const score = computeTextScore(event, normalizedTerm);
 
       if (score <= 0) {
@@ -1978,6 +1987,79 @@ function matchesText(event: WebBlackboxEvent, term: string): boolean {
   }
 
   return JSON.stringify(event.data).toLowerCase().includes(term);
+}
+
+function collectInvertedCandidateIds(
+  inverted: Map<string, string[]>,
+  query: string
+): Set<string> | null {
+  const normalized = query.trim().toLowerCase();
+
+  if (!normalized) {
+    return null;
+  }
+
+  const tokens = normalized
+    .split(/[^a-zA-Z0-9_:.\-/]+/g)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+  const keys = new Set<string>([normalized, ...tokens]);
+  const output = new Set<string>();
+
+  for (const key of keys) {
+    const eventIds = inverted.get(key);
+
+    if (!eventIds) {
+      continue;
+    }
+
+    for (const eventId of eventIds) {
+      output.add(eventId);
+    }
+  }
+
+  return output.size > 0 ? output : null;
+}
+
+function intersectCandidateIds(
+  left: Set<string> | null,
+  right: Set<string> | null
+): Set<string> | null {
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  const [smaller, larger] = left.size <= right.size ? [left, right] : [right, left];
+  const intersection = new Set<string>();
+
+  for (const value of smaller) {
+    if (larger.has(value)) {
+      intersection.add(value);
+    }
+  }
+
+  return intersection;
+}
+
+function toSortedEvents(
+  candidateIds: Set<string>,
+  eventsById: Map<string, WebBlackboxEvent>
+): WebBlackboxEvent[] {
+  const output: WebBlackboxEvent[] = [];
+
+  for (const eventId of candidateIds) {
+    const event = eventsById.get(eventId);
+
+    if (event) {
+      output.push(event);
+    }
+  }
+
+  return output.sort((left, right) => left.mono - right.mono || left.t - right.t);
 }
 
 function computeTextScore(event: WebBlackboxEvent, term: string): number {
