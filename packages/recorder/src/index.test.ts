@@ -195,6 +195,45 @@ describe("recorder", () => {
     expect(lateEvent.event?.ref?.act).toBeUndefined();
   });
 
+  it("generates unique fallback request ids for repeated content fetches", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const now = Date.now();
+
+    const first = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-req-fallback",
+      tabId: 4,
+      t: now,
+      mono: 10,
+      payload: {
+        url: "https://example.com/api/items",
+        method: "GET",
+        phase: "start"
+      }
+    });
+    const second = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-req-fallback",
+      tabId: 4,
+      t: now + 1,
+      mono: 11,
+      payload: {
+        url: "https://example.com/api/items",
+        method: "GET",
+        phase: "start"
+      }
+    });
+
+    const firstReqId = (first.event?.data as { reqId?: string } | undefined)?.reqId;
+    const secondReqId = (second.event?.data as { reqId?: string } | undefined)?.reqId;
+
+    expect(firstReqId).toBeDefined();
+    expect(secondReqId).toBeDefined();
+    expect(firstReqId).not.toBe(secondReqId);
+  });
+
   it("returns freeze reason for error events", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const result = recorder.ingest({

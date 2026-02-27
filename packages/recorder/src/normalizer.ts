@@ -48,6 +48,7 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   cookieSnapshot: "storage.cookie.snapshot",
   sse: "network.sse.message"
 };
+let fallbackRequestSequence = 0;
 
 export class DefaultEventNormalizer implements EventNormalizer {
   public normalize(
@@ -290,7 +291,8 @@ function readRequestId(payload: Record<string, unknown> | null): string | null {
 }
 
 function buildFallbackReqId(method: string, url: string): string {
-  return `content-${method.toUpperCase()}-${compactText(url, 120)}`;
+  fallbackRequestSequence = (fallbackRequestSequence + 1) >>> 0;
+  return `content-${method.toUpperCase()}-${compactText(url, 120)}-${fallbackRequestSequence.toString(36)}`;
 }
 
 function normalizeHeaderRecord(value: unknown): Record<string, string> | undefined {
