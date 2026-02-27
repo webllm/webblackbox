@@ -347,6 +347,7 @@ const DEFAULT_TIMELINE_SCREENSHOT_LOOKAHEAD_MS = 2000;
 const DEFAULT_TIMELINE_REQUEST_LIMIT = 5;
 const DEFAULT_TIMELINE_ERROR_LIMIT = 5;
 const DEFAULT_DECODED_CHUNK_CACHE_SIZE = 12;
+const STREAM_CODEC_TIMEOUT_MS = 5_000;
 
 type EventChunkSource = {
   chunkId: string;
@@ -2524,17 +2525,16 @@ async function tryDecodeChunkWithStreams(
   bytes: Uint8Array,
   codec: ChunkCodec
 ): Promise<Uint8Array | null> {
-  if (typeof DecompressionStream === "undefined") {
+  if (typeof DecompressionStream === "undefined" || typeof Blob === "undefined") {
     return null;
   }
 
   for (const format of codecFormats(codec)) {
     try {
-      const stream = new DecompressionStream(format as CompressionFormat);
-      const writer = stream.writable.getWriter();
-      await writer.write(toArrayBuffer(bytes));
-      await writer.close();
-      return await readReadableStream(stream.readable);
+      const stream = new Blob([toArrayBuffer(bytes)])
+        .stream()
+        .pipeThrough(new DecompressionStream(format as CompressionFormat));
+      return await readReadableStreamWithTimeout(stream, codec, format);
     } catch {
       continue;
     }
@@ -2573,6 +2573,37 @@ async function readReadableStream(stream: ReadableStream<Uint8Array>): Promise<U
   }
 
   return output;
+}
+
+async function readReadableStreamWithTimeout(
+  stream: ReadableStream<Uint8Array>,
+  codec: ChunkCodec,
+  format: string
+): Promise<Uint8Array> {
+  return withTimeout(
+    readReadableStream(stream),
+    STREAM_CODEC_TIMEOUT_MS,
+    `Chunk codec '${codec}' decode timed out for format '${format}'.`
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(message));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function tryDecodeChunkWithNodeZlib(

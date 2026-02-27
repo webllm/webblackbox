@@ -10,6 +10,7 @@ type NodeZlibLike = {
 };
 
 const warnedFallbackCodecs = new Set<ChunkCodec>();
+const STREAM_CODEC_TIMEOUT_MS = 5_000;
 
 export function encodeEventsNdjson(events: WebBlackboxEvent[]): Uint8Array {
   const lines = events.map((event) => JSON.stringify(event)).join("\n");
@@ -123,21 +124,20 @@ async function tryWithWebStreams(
 
   if (
     (mode === "compress" && typeof compressionCtor === "undefined") ||
-    (mode === "decompress" && typeof decompressionCtor === "undefined")
+    (mode === "decompress" && typeof decompressionCtor === "undefined") ||
+    typeof Blob === "undefined"
   ) {
     return null;
   }
 
   for (const format of codecFormats(codec)) {
     try {
-      const stream =
+      const transform =
         mode === "compress"
           ? new CompressionStream(format as CompressionFormat)
           : new DecompressionStream(format as CompressionFormat);
-      const writer = stream.writable.getWriter();
-      await writer.write(toArrayBuffer(input));
-      await writer.close();
-      return await readReadableStream(stream.readable);
+      const output = new Blob([toArrayBuffer(input)]).stream().pipeThrough(transform);
+      return await readReadableStreamWithTimeout(output, mode, codec, format);
     } catch {
       continue;
     }
@@ -176,6 +176,38 @@ async function readReadableStream(stream: ReadableStream<Uint8Array>): Promise<U
   }
 
   return output;
+}
+
+async function readReadableStreamWithTimeout(
+  stream: ReadableStream<Uint8Array>,
+  mode: "compress" | "decompress",
+  codec: ChunkCodec,
+  format: string
+): Promise<Uint8Array> {
+  return withTimeout(
+    readReadableStream(stream),
+    STREAM_CODEC_TIMEOUT_MS,
+    `Chunk codec '${codec}' ${mode} timed out for format '${format}'.`
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(message));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function tryWithNodeZlib(
