@@ -30,12 +30,10 @@ pnpm build
 
 ### Utility tools
 
-| Tool          | Description               |
-| ------------- | ------------------------- |
-| `health`      | Health check              |
-| `add_numbers` | Add two numbers           |
-| `now_utc`     | Get current UTC timestamp |
-| `echo`        | Echo text back            |
+| Tool      | Description               |
+| --------- | ------------------------- |
+| `health`  | Health check              |
+| `now_utc` | Get current UTC timestamp |
 
 ### Session analysis tools
 

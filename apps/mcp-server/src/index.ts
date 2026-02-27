@@ -1,14 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
-import {
-  addNumbers,
-  addNumbersInput,
-  echo,
-  echoInput,
-  nowUtcInput,
-  nowUtcIsoString
-} from "@webblackbox/mcp-core";
+import { nowUtcInput, nowUtcIsoString } from "@webblackbox/mcp-core";
 import {
   compareSessions,
   compareSessionsInput,
@@ -49,36 +42,12 @@ export function createServer(): McpServer {
     };
   });
 
-  server.tool("add_numbers", "Add two numbers", addNumbersInput, async ({ a, b }) => {
-    const result = addNumbers({ a, b });
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: String(result)
-        }
-      ]
-    };
-  });
-
   server.tool("now_utc", "Get current UTC time as an ISO string", nowUtcInput, async () => {
     return {
       content: [
         {
           type: "text",
           text: nowUtcIsoString()
-        }
-      ]
-    };
-  });
-
-  server.tool("echo", "Echo plain text", echoInput, async ({ text }) => {
-    return {
-      content: [
-        {
-          type: "text",
-          text: echo({ text })
         }
       ]
     };
