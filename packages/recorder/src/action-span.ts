@@ -9,6 +9,7 @@ const ACTION_START_EVENTS = new Set([
 ]);
 
 const KEYBOARD_ACTION_KEYS = new Set(["Enter", "NumpadEnter", "Space"]);
+const NETWORK_TERMINAL_EVENTS = new Set(["network.finished", "network.failed"]);
 
 type ActionState = {
   id: string;
@@ -52,14 +53,18 @@ export class ActionSpanTracker {
       }
     }
 
+    const reqId = this.readReqId(event);
+
     if (!actionId && event.type.startsWith("network.")) {
-      const reqId = this.readReqId(event);
       actionId = reqId ? this.reqToAction.get(reqId) : undefined;
     }
 
     if (!actionId && event.type.startsWith("dom.")) {
-      const reqId = this.readReqId(event);
       actionId = reqId ? this.reqToAction.get(reqId) : undefined;
+    }
+
+    if (reqId && NETWORK_TERMINAL_EVENTS.has(event.type)) {
+      this.reqToAction.delete(reqId);
     }
 
     if (actionId) {

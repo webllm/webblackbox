@@ -147,6 +147,54 @@ describe("recorder", () => {
     expect(result.event?.ref?.act).toBeDefined();
   });
 
+  it("releases request-action mapping after terminal network events", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const now = Date.now();
+
+    recorder.ingest({
+      source: "content",
+      rawType: "click",
+      sid: "S-action-cleanup",
+      tabId: 10,
+      t: now,
+      mono: 100,
+      payload: { selector: "button.submit" }
+    });
+
+    const requestEvent = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-action-cleanup",
+      tabId: 10,
+      t: now + 20,
+      mono: 120,
+      payload: { reqId: "R-cleanup", url: "https://example.com/api", method: "GET", phase: "start" }
+    });
+    expect(requestEvent.event?.ref?.act).toBeDefined();
+
+    recorder.ingest({
+      source: "cdp",
+      rawType: "Network.loadingFinished",
+      sid: "S-action-cleanup",
+      tabId: 10,
+      t: now + 40,
+      mono: 140,
+      payload: { reqId: "R-cleanup" }
+    });
+
+    const lateEvent = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-action-cleanup",
+      tabId: 10,
+      t: now + 2_500,
+      mono: 2_500,
+      payload: { reqId: "R-cleanup", url: "https://example.com/api", method: "GET", phase: "end" }
+    });
+
+    expect(lateEvent.event?.ref?.act).toBeUndefined();
+  });
+
   it("returns freeze reason for error events", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const result = recorder.ingest({
