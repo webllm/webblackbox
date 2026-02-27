@@ -135,6 +135,36 @@ describe("pipeline", () => {
     expect(parsed.integrity).not.toBeNull();
   });
 
+  it("writes provided redaction profile into export manifest", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128,
+      redactionProfile: {
+        redactHeaders: ["authorization"],
+        redactCookieNames: ["session"],
+        redactBodyPatterns: ["token"],
+        blockedSelectors: ["input[type='password']"],
+        hashSensitiveValues: false
+      }
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-redaction-1", "user.click", Date.now()));
+
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.manifest.redactionProfile).toEqual({
+      redactHeaders: ["authorization"],
+      redactCookieNames: ["session"],
+      redactBodyPatterns: ["token"],
+      blockedSelectors: ["input[type='password']"],
+      hashSensitiveValues: false
+    });
+  });
+
   it("supports AES-GCM export encryption with passphrase", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({

@@ -1,5 +1,5 @@
 import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/pipeline";
-import type { SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
+import type { RedactionProfile, SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { PORT_NAMES } from "../shared/messages.js";
@@ -10,6 +10,7 @@ type OffscreenPipelineRequest = {
   op: "start" | "ingest" | "ingestBatch" | "flush" | "putBlob" | "exportDownload" | "close";
   sid: string;
   session?: SessionMetadata;
+  redactionProfile?: RedactionProfile;
   event?: WebBlackboxEvent;
   events?: WebBlackboxEvent[];
   mime?: string;
@@ -119,7 +120,8 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     const pipeline = new FlightRecorderPipeline({
       session: message.session,
       storage,
-      maxChunkBytes: 512 * 1024
+      maxChunkBytes: 512 * 1024,
+      redactionProfile: message.redactionProfile
     });
 
     await pipeline.start();

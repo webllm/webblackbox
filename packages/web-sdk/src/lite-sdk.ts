@@ -77,7 +77,8 @@ export class WebBlackboxLiteSdk {
     this.pipeline = new FlightRecorderPipeline({
       session: this.session,
       storage: this.storage,
-      maxChunkBytes: options.maxChunkBytes
+      maxChunkBytes: options.maxChunkBytes,
+      redactionProfile: this.config.redaction
     });
 
     const recorderHooks = options.recorderHooks;

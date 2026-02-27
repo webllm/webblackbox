@@ -11,6 +11,7 @@ import {
   type ExportPolicy,
   type FreezeReason,
   type HashesManifest,
+  type RedactionProfile,
   type SessionMetadata,
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
@@ -92,7 +93,7 @@ type PipelineExportDownloadResult = {
 };
 
 type SessionPipelineClient = {
-  start: (session: SessionMetadata) => Promise<void>;
+  start: (session: SessionMetadata, redactionProfile: RedactionProfile) => Promise<void>;
   ingest: (event: WebBlackboxEvent) => Promise<void>;
   ingestBatch: (events: WebBlackboxEvent[]) => Promise<void>;
   flush: () => Promise<void>;
@@ -112,6 +113,7 @@ type OffscreenPipelineRequest = {
   op: "start" | "ingest" | "ingestBatch" | "flush" | "putBlob" | "exportDownload" | "close";
   sid: string;
   session?: SessionMetadata;
+  redactionProfile?: RedactionProfile;
   event?: WebBlackboxEvent;
   events?: WebBlackboxEvent[];
   mime?: string;
@@ -514,7 +516,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   const recorderPlugins = createDefaultRecorderPlugins();
   const pipeline = createOffscreenPipelineClient(sid);
-  await pipeline.start(metadata);
+  await pipeline.start(metadata, recorderConfig.redaction);
 
   const runtime: SessionRuntime = {
     sid,
@@ -1215,11 +1217,12 @@ async function drainPipelineBufferBatches(
 
 function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
   return {
-    start: async (session) => {
+    start: async (session, redactionProfile) => {
       await requestOffscreenPipeline<void>({
         op: "start",
         sid,
-        session
+        session,
+        redactionProfile
       });
     },
     ingest: async (event) => {

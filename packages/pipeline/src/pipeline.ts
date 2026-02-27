@@ -2,6 +2,7 @@ import type {
   ExportManifest,
   HashesManifest,
   InvertedIndexEntry,
+  RedactionProfile,
   RequestIndexEntry,
   SessionMetadata,
   WebBlackboxEvent
@@ -21,6 +22,7 @@ export type FlightRecorderPipelineOptions = {
   storage: PipelineStorage;
   maxChunkBytes?: number;
   chunkCodec?: (typeof CHUNK_CODECS)[number];
+  redactionProfile?: RedactionProfile;
 };
 
 export type ExportResult = {
@@ -515,7 +517,7 @@ export class FlightRecorderPipeline {
         title: this.options.session.title
       },
       chunkCodec: this.options.chunkCodec ?? "none",
-      redactionProfile: {
+      redactionProfile: this.options.redactionProfile ?? {
         redactHeaders: [],
         redactCookieNames: [],
         redactBodyPatterns: [],
