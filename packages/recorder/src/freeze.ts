@@ -18,7 +18,7 @@ export class FreezePolicy {
       this.recordFailure(event.t);
 
       if (this.networkFailures.length >= NETWORK_FAILURE_THRESHOLD) {
-        return "perf";
+        return "error";
       }
     }
 

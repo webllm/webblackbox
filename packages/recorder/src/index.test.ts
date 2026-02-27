@@ -249,6 +249,43 @@ describe("recorder", () => {
     expect(result.freezeReason).toBe("error");
   });
 
+  it("treats repeated network failures as error freeze", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const base = Date.now();
+
+    recorder.ingest({
+      source: "content",
+      rawType: "fetchError",
+      sid: "S-network-freeze",
+      tabId: 2,
+      t: base,
+      mono: 10,
+      payload: { reqId: "R-1", url: "https://example.com/a", message: "timeout" }
+    });
+    recorder.ingest({
+      source: "content",
+      rawType: "fetchError",
+      sid: "S-network-freeze",
+      tabId: 2,
+      t: base + 100,
+      mono: 20,
+      payload: { reqId: "R-2", url: "https://example.com/b", message: "timeout" }
+    });
+
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "fetchError",
+      sid: "S-network-freeze",
+      tabId: 2,
+      t: base + 200,
+      mono: 30,
+      payload: { reqId: "R-3", url: "https://example.com/c", message: "timeout" }
+    });
+
+    expect(result.event?.type).toBe("network.failed");
+    expect(result.freezeReason).toBe("error");
+  });
+
   it("does not freeze on resource load errors", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const result = recorder.ingest({
