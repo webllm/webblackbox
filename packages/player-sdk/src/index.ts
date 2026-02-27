@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 
 import type {
+  ChunkCodec,
   ChunkTimeIndexEntry,
   EventLevel,
   ExportManifest,
@@ -307,6 +308,12 @@ type ArchiveEncryptedFileMeta = {
   ivBase64: string;
 };
 
+type NodeZlibLike = {
+  gunzipSync?: (input: Uint8Array) => Uint8Array;
+  brotliDecompressSync?: (input: Uint8Array) => Uint8Array;
+  zstdDecompressSync?: (input: Uint8Array) => Uint8Array;
+};
+
 const ACTION_TRIGGER_TYPES = new Set<WebBlackboxEventType>([
   "user.click",
   "user.dblclick",
@@ -428,7 +435,8 @@ export class WebBlackboxPlayer {
     const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
     const events = await readEvents(zip, archiveKey, encryptedFiles, {
       range: options.range,
-      timeIndex
+      timeIndex,
+      defaultCodec: manifest.chunkCodec
     });
 
     return new WebBlackboxPlayer(
@@ -2257,12 +2265,19 @@ async function readEvents(
   options: {
     range?: PlayerRange;
     timeIndex?: ChunkTimeIndexEntry[];
+    defaultCodec?: ChunkCodec;
   } = {}
 ): Promise<WebBlackboxEvent[]> {
   let eventPaths = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
     .sort();
   const { range, timeIndex } = options;
+  const defaultCodec = options.defaultCodec ?? "none";
+  const chunkCodecById = new Map(
+    (Array.isArray(timeIndex) ? timeIndex : []).map(
+      (entry) => [entry.chunkId, entry.codec] as const
+    )
+  );
 
   if (range && Array.isArray(timeIndex) && timeIndex.length > 0) {
     const chunkPaths = timeIndex
@@ -2284,7 +2299,10 @@ async function readEvents(
 
     const rawBytes = await file.async("uint8array");
     const bytes = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
-    const content = new TextDecoder().decode(bytes);
+    const chunkId = parseChunkIdFromPath(path);
+    const codec = (chunkId ? chunkCodecById.get(chunkId) : undefined) ?? defaultCodec;
+    const decodedChunkBytes = await decodeChunkBytes(bytes, codec);
+    const content = new TextDecoder().decode(decodedChunkBytes);
     const lines = content.split(/\r?\n/).filter(Boolean);
 
     for (const line of lines) {
@@ -2330,6 +2348,148 @@ async function decryptArchiveBytes(
   }
 
   return decryptBytes(bytes, archiveKey, fromBase64(encryptedFile.ivBase64));
+}
+
+async function decodeChunkBytes(bytes: Uint8Array, codec: ChunkCodec): Promise<Uint8Array> {
+  if (codec === "none") {
+    return bytes;
+  }
+
+  const fromStreams = await tryDecodeChunkWithStreams(bytes, codec);
+
+  if (fromStreams) {
+    return fromStreams;
+  }
+
+  const fromNodeZlib = await tryDecodeChunkWithNodeZlib(bytes, codec);
+
+  if (fromNodeZlib) {
+    return fromNodeZlib;
+  }
+
+  throw new Error(`Archive chunk codec '${codec}' is not supported in this runtime.`);
+}
+
+async function tryDecodeChunkWithStreams(
+  bytes: Uint8Array,
+  codec: ChunkCodec
+): Promise<Uint8Array | null> {
+  if (typeof DecompressionStream === "undefined") {
+    return null;
+  }
+
+  for (const format of codecFormats(codec)) {
+    try {
+      const stream = new DecompressionStream(format as CompressionFormat);
+      const writer = stream.writable.getWriter();
+      await writer.write(toArrayBuffer(bytes));
+      await writer.close();
+      return await readReadableStream(stream.readable);
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function readReadableStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalLength = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+    chunks.push(chunk);
+    totalLength += chunk.byteLength;
+  }
+
+  const output = new Uint8Array(totalLength);
+  let cursor = 0;
+
+  for (const chunk of chunks) {
+    output.set(chunk, cursor);
+    cursor += chunk.byteLength;
+  }
+
+  return output;
+}
+
+async function tryDecodeChunkWithNodeZlib(
+  bytes: Uint8Array,
+  codec: ChunkCodec
+): Promise<Uint8Array | null> {
+  const zlib = await loadNodeZlib();
+
+  if (!zlib) {
+    return null;
+  }
+
+  try {
+    if (codec === "gzip" && typeof zlib.gunzipSync === "function") {
+      return cloneBytes(zlib.gunzipSync(bytes));
+    }
+
+    if (codec === "br" && typeof zlib.brotliDecompressSync === "function") {
+      return cloneBytes(zlib.brotliDecompressSync(bytes));
+    }
+
+    if (codec === "zst" && typeof zlib.zstdDecompressSync === "function") {
+      return cloneBytes(zlib.zstdDecompressSync(bytes));
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function loadNodeZlib(): Promise<NodeZlibLike | null> {
+  if (
+    typeof process === "undefined" ||
+    typeof process.versions !== "object" ||
+    typeof process.versions?.node !== "string"
+  ) {
+    return null;
+  }
+
+  try {
+    const module = await import("node:zlib");
+    return module as unknown as NodeZlibLike;
+  } catch {
+    return null;
+  }
+}
+
+function codecFormats(codec: ChunkCodec): string[] {
+  if (codec === "gzip") {
+    return ["gzip"];
+  }
+
+  if (codec === "br") {
+    return ["brotli", "br"];
+  }
+
+  if (codec === "zst") {
+    return ["zstd", "zst"];
+  }
+
+  return [];
+}
+
+function parseChunkIdFromPath(path: string): string | null {
+  const match = /^events\/(.+)\.ndjson$/.exec(path);
+  return match?.[1] ?? null;
 }
 
 function withinRange(event: WebBlackboxEvent, range?: PlayerRange): boolean {
@@ -2686,6 +2846,12 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function cloneBytes(bytes: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy;
 }
 
 async function normalizeOpenInput(input: PlayerOpenInput): Promise<Uint8Array> {

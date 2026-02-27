@@ -10,7 +10,7 @@ import type {
 
 import { CHUNK_CODECS } from "@webblackbox/protocol";
 
-import { decodeEventsNdjson, encodeEventsNdjson } from "./codec.js";
+import { decodeChunkEvents, encodeChunkEvents } from "./codec.js";
 import { EventChunker } from "./chunker.js";
 import { createWebBlackboxArchive } from "./exporter.js";
 import { sha256Hex } from "./hash.js";
@@ -88,7 +88,13 @@ export class FlightRecorderPipeline {
       return;
     }
 
-    await this.persistChunk(chunk.meta.chunkId, chunk.meta.seq, chunk.events, chunk.bytes);
+    await this.persistChunk(
+      chunk.meta.chunkId,
+      chunk.meta.seq,
+      chunk.meta.codec,
+      chunk.events,
+      chunk.bytes
+    );
   }
 
   public async ingestBatch(events: WebBlackboxEvent[]): Promise<void> {
@@ -103,7 +109,13 @@ export class FlightRecorderPipeline {
         continue;
       }
 
-      await this.persistChunk(chunk.meta.chunkId, chunk.meta.seq, chunk.events, chunk.bytes);
+      await this.persistChunk(
+        chunk.meta.chunkId,
+        chunk.meta.seq,
+        chunk.meta.codec,
+        chunk.events,
+        chunk.bytes
+      );
     }
   }
 
@@ -114,7 +126,13 @@ export class FlightRecorderPipeline {
       return;
     }
 
-    await this.persistChunk(chunk.meta.chunkId, chunk.meta.seq, chunk.events, chunk.bytes);
+    await this.persistChunk(
+      chunk.meta.chunkId,
+      chunk.meta.seq,
+      chunk.meta.codec,
+      chunk.events,
+      chunk.bytes
+    );
   }
 
   public async close(options: { purge?: boolean } = {}): Promise<void> {
@@ -264,7 +282,7 @@ export class FlightRecorderPipeline {
     const referencedHashes = new Set<string>();
 
     for (const chunk of chunks) {
-      const events = decodeEventsNdjson(chunk.bytes);
+      const events = await decodeChunkEvents(chunk.bytes, chunk.meta.codec);
       const hashes = collectBlobHashesFromEvents(events);
 
       for (const hash of hashes) {
@@ -292,7 +310,7 @@ export class FlightRecorderPipeline {
     const output: PreparedExportChunk[] = [];
 
     for (const chunk of chunks) {
-      const decoded = decodeEventsNdjson(chunk.bytes);
+      const decoded = await decodeChunkEvents(chunk.bytes, chunk.meta.codec);
       const filtered = decoded.filter((event) => shouldIncludeEvent(event, exportPolicy));
 
       if (filtered.length === 0) {
@@ -310,7 +328,8 @@ export class FlightRecorderPipeline {
         continue;
       }
 
-      const bytes = encodeEventsNdjson(filtered);
+      const encoded = await encodeChunkEvents(filtered, chunk.meta.codec);
+      const bytes = encoded.bytes;
       const first = filtered[0];
       const last = filtered[filtered.length - 1];
 
@@ -325,6 +344,7 @@ export class FlightRecorderPipeline {
             monoEnd: last?.mono ?? chunk.meta.monoEnd,
             eventCount: filtered.length,
             byteLength: bytes.byteLength,
+            codec: encoded.codec,
             sha256: await sha256Hex(bytes)
           },
           bytes
@@ -503,6 +523,7 @@ export class FlightRecorderPipeline {
   private async persistChunk(
     chunkId: string,
     seq: number,
+    codec: (typeof CHUNK_CODECS)[number],
     events: WebBlackboxEvent[],
     bytes: Uint8Array
   ): Promise<void> {
@@ -521,7 +542,7 @@ export class FlightRecorderPipeline {
         monoEnd: last?.mono ?? 0,
         eventCount: events.length,
         byteLength: bytes.byteLength,
-        codec: this.chunkCodec,
+        codec,
         sha256: hash
       },
       bytes
@@ -535,6 +556,7 @@ export class FlightRecorderPipeline {
   private buildManifest(chunks: StoredChunk[], blobCount: number): ExportManifest {
     const first = chunks[0]?.meta.tStart ?? this.options.session.startedAt;
     const last = chunks[chunks.length - 1]?.meta.tEnd ?? this.options.session.startedAt;
+    const chunkCodec = chunks[0]?.meta.codec ?? this.chunkCodec;
 
     return {
       protocolVersion: 1,
@@ -544,7 +566,7 @@ export class FlightRecorderPipeline {
         origin: this.options.session.url,
         title: this.options.session.title
       },
-      chunkCodec: this.chunkCodec,
+      chunkCodec,
       redactionProfile: this.options.redactionProfile ?? {
         redactHeaders: [],
         redactCookieNames: [],
@@ -642,12 +664,9 @@ function normalizeBoundedPositiveInt(value: unknown): number | null {
 function resolveChunkCodec(
   codec: (typeof CHUNK_CODECS)[number] | undefined
 ): (typeof CHUNK_CODECS)[number] {
-  if (!codec || codec === "none") {
+  if (!codec) {
     return "none";
   }
 
-  console.warn(
-    `[WebBlackbox] chunk codec '${codec}' is not implemented yet; falling back to 'none'.`
-  );
-  return "none";
+  return CHUNK_CODECS.includes(codec) ? codec : "none";
 }

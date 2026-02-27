@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 
 import type {
+  ChunkCodec,
   ChunkTimeIndexEntry,
   ExportEncryption,
   ExportManifest,
@@ -10,7 +11,7 @@ import type {
   WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { decodeEventsNdjson } from "./codec.js";
+import { decodeChunkEvents } from "./codec.js";
 import { sha256Hex } from "./hash.js";
 import type { StoredBlob, StoredChunk } from "./storage.js";
 
@@ -144,6 +145,7 @@ export async function readWebBlackboxArchive(
   const eventEntries = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
     .sort();
+  const chunkCodecById = new Map(timeIndex.map((entry) => [entry.chunkId, entry.codec] as const));
 
   const events: WebBlackboxEvent[] = [];
 
@@ -156,7 +158,10 @@ export async function readWebBlackboxArchive(
 
     const content = await file.async("uint8array");
     const decoded = await decryptArchiveFile(path, content, manifest, archiveKey);
-    events.push(...decodeEventsNdjson(decoded));
+    const chunkId = parseChunkIdFromPath(path);
+    const codec =
+      (chunkId ? chunkCodecById.get(chunkId) : undefined) ?? (manifest.chunkCodec as ChunkCodec);
+    events.push(...(await decodeChunkEvents(decoded, codec)));
   }
 
   const integrityFile = zip.file("integrity/hashes.json");
@@ -435,4 +440,9 @@ function inferFileExtension(mime: string): string {
   }
 
   return "bin";
+}
+
+function parseChunkIdFromPath(path: string): string | null {
+  const match = /^events\/(.+)\.ndjson$/.exec(path);
+  return match?.[1] ?? null;
 }

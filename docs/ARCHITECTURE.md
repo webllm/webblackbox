@@ -160,7 +160,7 @@ When a freeze is triggered, the ring buffer contents are preserved, providing fu
 Events are grouped into size-bounded chunks (default: 512KB). Each chunk is:
 
 1. Serialized as NDJSON (newline-delimited JSON)
-2. Encoded as NDJSON (`chunkCodec` currently resolves to `none`)
+2. Encoded with chunk codecs (`none`, `gzip`, `br`, `zst`)
 3. Hashed with SHA-256 for integrity
 4. Stored with metadata (timestamps, event count, byte length)
 

@@ -73,25 +73,41 @@ describe("pipeline", () => {
     expect(indexes.request.some((entry) => entry.reqId === "R-1")).toBe(true);
   });
 
-  it("falls back to codec=none when compression codecs are requested", async () => {
-    const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
-      session: SESSION,
-      storage,
-      maxChunkBytes: 100,
-      chunkCodec: "gzip"
-    });
+  it("encodes and decodes chunk codecs when runtime support is available", async () => {
+    for (const codec of ["gzip", "br", "zst"] as const) {
+      const storage = new MemoryPipelineStorage();
+      const pipeline = new FlightRecorderPipeline({
+        session: {
+          ...SESSION,
+          sid: `S-codec-${codec}`
+        },
+        storage,
+        maxChunkBytes: 100,
+        chunkCodec: codec
+      });
 
-    await pipeline.start();
-    await pipeline.ingest(createEvent("E-codec-1", "network.request", 1));
-    await pipeline.flush();
+      await pipeline.start();
+      await pipeline.ingest(
+        createEvent(`E-codec-${codec}`, "network.request", 1, {
+          reqId: `R-${codec}`,
+          payload: "x".repeat(5000)
+        })
+      );
+      await pipeline.flush();
 
-    const chunks = await storage.listChunks(SESSION.sid);
-    const exported = await pipeline.exportBundle();
-    const parsed = await readWebBlackboxArchive(exported.bytes);
+      const chunks = await storage.listChunks(`S-codec-${codec}`);
+      const exported = await pipeline.exportBundle();
+      const parsed = await readWebBlackboxArchive(exported.bytes);
+      const runtimeCodec = chunks[0]?.meta.codec ?? "none";
 
-    expect(chunks[0]?.meta.codec).toBe("none");
-    expect(parsed.manifest.chunkCodec).toBe("none");
+      expect(parsed.events.some((event) => event.id === `E-codec-${codec}`)).toBe(true);
+      expect(parsed.timeIndex[0]?.codec).toBe(runtimeCodec);
+      expect(parsed.manifest.chunkCodec).toBe(runtimeCodec);
+
+      if (runtimeCodec !== "none") {
+        expect(runtimeCodec).toBe(codec);
+      }
+    }
   });
 
   it("ingests batches without losing index coverage", async () => {

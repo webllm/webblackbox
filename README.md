@@ -179,7 +179,7 @@ Processes recorded events into portable, indexed archives.
 - **FlightRecorderPipeline** — Main pipeline orchestrator: ingestion, chunking, blob storage, index building, and archive export
 - **EventChunker** — Groups events into size-bounded chunks with configurable codecs
 - **EventIndexer** — Builds time-based, request-based, and inverted text search indexes
-- **Codec** — Encode/decode events as NDJSON (`chunkCodec` currently resolves to `none`)
+- **Codec** — Encode/decode events with chunk codecs (`none`, `gzip`, `br`, `zst`)
 - **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
 - **PipelineStorage** — Abstract storage interface with `MemoryPipelineStorage` implementation
 - **SHA-256** — Content-addressable blob deduplication

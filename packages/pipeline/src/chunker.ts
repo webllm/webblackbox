@@ -2,7 +2,7 @@ import type { ChunkCodec, ChunkTimeIndexEntry, WebBlackboxEvent } from "@webblac
 
 import { createChunkId } from "@webblackbox/protocol";
 
-import { encodeEventsNdjson } from "./codec.js";
+import { encodeChunkEvents } from "./codec.js";
 import { sha256Hex } from "./hash.js";
 
 export type FinalizedChunk = {
@@ -46,7 +46,8 @@ export class EventChunker {
     this.sequence += 1;
 
     const events = [...this.pending];
-    const bytes = encodeEventsNdjson(events);
+    const encoded = await encodeChunkEvents(events, this.codec);
+    const bytes = encoded.bytes;
     const first = events[0];
     const last = events[events.length - 1];
     const hash = await sha256Hex(bytes);
@@ -64,7 +65,7 @@ export class EventChunker {
         monoEnd: last?.mono ?? 0,
         eventCount: events.length,
         byteLength: bytes.byteLength,
-        codec: this.codec,
+        codec: encoded.codec,
         sha256: hash
       },
       bytes,

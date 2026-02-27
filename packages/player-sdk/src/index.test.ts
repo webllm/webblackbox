@@ -1,3 +1,4 @@
+import * as zlib from "node:zlib";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 
@@ -64,6 +65,20 @@ describe("WebBlackboxPlayer", () => {
 
     expect(player.events.map((event) => event.id)).toEqual(["E-2"]);
     expect(player.query().map((event) => event.id)).toEqual(["E-2"]);
+  });
+
+  it("opens archives with compressed chunk codecs", async () => {
+    const codecs = supportedCompressedCodecsForTest();
+    expect(codecs.length).toBeGreaterThan(0);
+
+    for (const codec of codecs) {
+      const bytes = await createCompressedCodecArchive(codec);
+      const player = await WebBlackboxPlayer.open(bytes);
+
+      expect(player.archive.manifest.chunkCodec).toBe(codec);
+      expect(player.events.map((event) => event.id)).toEqual(["E-C-1", "E-C-2"]);
+      expect(player.query({ requestId: `R-${codec}` }).map((event) => event.id)).toEqual(["E-C-2"]);
+    }
   });
 
   it("opens encrypted archives when passphrase is provided", async () => {
@@ -514,6 +529,136 @@ async function createTwoChunkFixtureArchive(): Promise<Uint8Array> {
   );
 
   return zip.generateAsync({ type: "uint8array" });
+}
+
+function supportedCompressedCodecsForTest(): Array<"gzip" | "br" | "zst"> {
+  const codecs: Array<"gzip" | "br" | "zst"> = [];
+  const zstdCompressSync = (
+    zlib as unknown as { zstdCompressSync?: (input: Uint8Array) => Uint8Array }
+  ).zstdCompressSync;
+
+  if (typeof zlib.gzipSync === "function") {
+    codecs.push("gzip");
+  }
+
+  if (typeof zlib.brotliCompressSync === "function") {
+    codecs.push("br");
+  }
+
+  if (typeof zstdCompressSync === "function") {
+    codecs.push("zst");
+  }
+
+  return codecs;
+}
+
+async function createCompressedCodecArchive(codec: "gzip" | "br" | "zst"): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const events: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: `S-C-${codec}`,
+      tab: 3,
+      t: 4000,
+      mono: 40,
+      type: "meta.session.start",
+      id: "E-C-1",
+      data: {}
+    },
+    {
+      v: 1,
+      sid: `S-C-${codec}`,
+      tab: 3,
+      t: 4001,
+      mono: 41,
+      type: "network.request",
+      id: "E-C-2",
+      ref: {
+        req: `R-${codec}`
+      },
+      data: {
+        requestId: `R-${codec}`,
+        request: {
+          method: "GET",
+          url: `https://example.com/api/${codec}`
+        }
+      }
+    }
+  ];
+  const ndjson = new TextEncoder().encode(events.map((event) => JSON.stringify(event)).join("\n"));
+  const chunkBytes = compressBytesForCodec(ndjson, codec);
+  const timeIndex: ChunkTimeIndexEntry[] = [
+    {
+      chunkId: "chunk-000001",
+      seq: 1,
+      tStart: 4000,
+      tEnd: 4001,
+      monoStart: 40,
+      monoEnd: 41,
+      eventCount: events.length,
+      byteLength: chunkBytes.byteLength,
+      codec,
+      sha256: `sha-${codec}`
+    }
+  ];
+  const manifest: ExportManifest = {
+    protocolVersion: 1,
+    createdAt: new Date(0).toISOString(),
+    mode: "full",
+    site: {
+      origin: "https://example.com",
+      title: "Compressed Codec"
+    },
+    chunkCodec: codec,
+    redactionProfile: {
+      redactHeaders: [],
+      redactCookieNames: [],
+      redactBodyPatterns: [],
+      blockedSelectors: [],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: events.length,
+      chunkCount: 1,
+      blobCount: 0,
+      durationMs: 1
+    }
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("index/time.json", JSON.stringify(timeIndex));
+  zip.file("index/req.json", JSON.stringify([{ reqId: `R-${codec}`, eventIds: ["E-C-2"] }]));
+  zip.file("index/inv.json", JSON.stringify([{ term: codec, eventIds: ["E-C-2"] }]));
+  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
+  zip.file("events/chunk-000001.ndjson", chunkBytes);
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+function compressBytesForCodec(input: Uint8Array, codec: "gzip" | "br" | "zst"): Uint8Array {
+  const zstdCompressSync = (
+    zlib as unknown as { zstdCompressSync?: (input: Uint8Array) => Uint8Array }
+  ).zstdCompressSync;
+
+  if (codec === "gzip") {
+    return toUint8Array(zlib.gzipSync(input));
+  }
+
+  if (codec === "br") {
+    return toUint8Array(zlib.brotliCompressSync(input));
+  }
+
+  if (typeof zstdCompressSync !== "function") {
+    throw new Error("zstd compression is unavailable in this runtime.");
+  }
+
+  return toUint8Array(zstdCompressSync(input));
+}
+
+function toUint8Array(value: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(value.byteLength);
+  bytes.set(value);
+  return bytes;
 }
 
 async function createArchiveWithDeprecatedBlobPath(): Promise<Uint8Array> {
