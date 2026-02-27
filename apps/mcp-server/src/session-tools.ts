@@ -295,6 +295,13 @@ export const compareSessionsInput = {
     .max(MAX_COMPARE_TOP)
     .optional()
     .describe(`Top N slow/failed request diffs to return (1-${MAX_COMPARE_TOP}).`),
+  topErrorDiffs: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_COMPARE_TOP)
+    .optional()
+    .describe(`Top N error fingerprint deltas to return (1-${MAX_COMPARE_TOP}).`),
   includeStorageHashes: z
     .boolean()
     .optional()
@@ -308,6 +315,7 @@ export type CompareSessionsArgs = {
   rightPassphrase?: string;
   topTypeDeltas?: number;
   topRequestDiffs?: number;
+  topErrorDiffs?: number;
   includeStorageHashes?: boolean;
 };
 
@@ -957,6 +965,14 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
     right: number;
     delta: number;
   }>;
+  errorDiff: {
+    fingerprintRegressions: Array<{
+      fingerprint: string;
+      leftCount: number;
+      rightCount: number;
+      delta: number;
+    }>;
+  };
   networkDiff: {
     failedDelta: number;
     slowDelta: number;
@@ -1013,6 +1029,7 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
   const rightPlayer = await openArchivePlayer(rightPath, args.rightPassphrase);
   const topTypeDeltas = clampInt(args.topTypeDeltas ?? DEFAULT_COMPARE_TOP, 1, MAX_COMPARE_TOP);
   const topRequestDiffs = clampInt(args.topRequestDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
+  const topErrorDiffs = clampInt(args.topErrorDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
   const includeStorageHashes = args.includeStorageHashes === true;
   const comparison = leftPlayer.compareWith(rightPlayer);
   const storageComparison = leftPlayer.compareStorageWith(rightPlayer);
@@ -1033,6 +1050,11 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
   )
     ? comparison.endpointRegressions
     : [];
+  const fingerprintRegressions = buildErrorFingerprintRegressions(
+    leftPlayer.events,
+    rightPlayer.events,
+    topErrorDiffs
+  );
 
   return {
     left: {
@@ -1066,6 +1088,9 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
       durationDeltaMs: Number((rightDuration - leftDuration).toFixed(2))
     },
     topTypeDeltas: comparison.typeDeltas.slice(0, topTypeDeltas),
+    errorDiff: {
+      fingerprintRegressions
+    },
     networkDiff: {
       failedDelta: rightNet.failed - leftNet.failed,
       slowDelta: rightNet.slowOver1000ms - leftNet.slowOver1000ms,
@@ -1211,6 +1236,59 @@ function mapToSortedEntries(source: Map<string, number>, limit: number): Array<[
   return [...source.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
     .slice(0, limit);
+}
+
+function buildErrorFingerprintRegressions(
+  leftEvents: Array<{ type: string; lvl?: string; data: unknown }>,
+  rightEvents: Array<{ type: string; lvl?: string; data: unknown }>,
+  limit: number
+): Array<{
+  fingerprint: string;
+  leftCount: number;
+  rightCount: number;
+  delta: number;
+}> {
+  const leftCounts = collectErrorFingerprintCounts(leftEvents);
+  const rightCounts = collectErrorFingerprintCounts(rightEvents);
+  const fingerprints = new Set([...leftCounts.keys(), ...rightCounts.keys()]);
+
+  return [...fingerprints]
+    .map((fingerprint) => {
+      const leftCount = leftCounts.get(fingerprint) ?? 0;
+      const rightCount = rightCounts.get(fingerprint) ?? 0;
+
+      return {
+        fingerprint,
+        leftCount,
+        rightCount,
+        delta: rightCount - leftCount
+      };
+    })
+    .filter((row) => row.delta !== 0)
+    .sort(
+      (left, right) =>
+        Math.abs(right.delta) - Math.abs(left.delta) ||
+        right.rightCount - left.rightCount ||
+        left.fingerprint.localeCompare(right.fingerprint)
+    )
+    .slice(0, limit);
+}
+
+function collectErrorFingerprintCounts(
+  events: Array<{ type: string; lvl?: string; data: unknown }>
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const event of events) {
+    if (!event.type.startsWith("error.") && event.lvl !== "error") {
+      continue;
+    }
+
+    const fingerprint = buildErrorFingerprint(event);
+    counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
+  }
+
+  return counts;
 }
 
 function buildRange(

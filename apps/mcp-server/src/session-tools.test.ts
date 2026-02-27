@@ -159,6 +159,16 @@ describe("session tools", () => {
     });
 
     expect(result.summary.errorDelta).toBeGreaterThan(0);
+    expect(result.errorDiff.fingerprintRegressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          fingerprint: "error.exception:Checkout failed",
+          leftCount: 0,
+          rightCount: 1,
+          delta: 1
+        })
+      ])
+    );
     expect(result.networkDiff.endpointRegressions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
