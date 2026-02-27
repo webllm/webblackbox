@@ -169,7 +169,11 @@ export type PerformanceArtifactEntry = {
 };
 
 export type PlayerComparison = {
+  leftSessionId: string;
+  rightSessionId: string;
+  /** @deprecated Use leftSessionId instead. */
   leftSid: string;
+  /** @deprecated Use rightSessionId instead. */
   rightSid: string;
   eventDelta: number;
   errorDelta: number;
@@ -905,6 +909,8 @@ export class WebBlackboxPlayer {
     const rightSessionId = other.events[0]?.sid ?? other.archive.manifest.site.origin;
 
     return {
+      leftSessionId,
+      rightSessionId,
       leftSid: leftSessionId,
       rightSid: rightSessionId,
       eventDelta: other.events.length - this.events.length,

@@ -297,6 +297,8 @@ const jira = player.generateJiraIssueTemplate({
 const other = await WebBlackboxPlayer.open(otherArchiveBytes);
 
 const comparison = player.compareWith(other);
+console.log(comparison.leftSessionId); // Baseline session ID
+console.log(comparison.rightSessionId); // Compared session ID
 console.log(comparison.eventDelta); // Event count difference
 console.log(comparison.errorDelta); // Error count difference
 console.log(comparison.requestDelta); // Request count difference

@@ -237,6 +237,8 @@ describe("WebBlackboxPlayer", () => {
     const right = await WebBlackboxPlayer.open(await createRichFixtureArchive());
 
     const comparison = left.compareWith(right);
+    expect(comparison.leftSessionId).toBe("S-1");
+    expect(comparison.rightSessionId).toBe("S-2");
     expect(comparison.leftSid).toBe("S-1");
     expect(comparison.rightSid).toBe("S-2");
     expect(comparison.eventDelta).toBeGreaterThan(0);
