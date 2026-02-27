@@ -5,6 +5,7 @@ The session playback and analysis SDK for WebBlackbox. Opens `.webblackbox` arch
 ## Overview
 
 - **WebBlackboxPlayer** — Main player class for loading and analyzing sessions
+- **Lazy Chunk Decode** — Events are decoded on demand per chunk with LRU cache eviction
 - **Event Querying** — Filter events by type, level, time range, text, and request ID
 - **Network Analysis** — Waterfall visualization, realtime stream timeline, request detail extraction
 - **Storage Analysis** — Timeline of cookie, localStorage, IndexedDB, and cache operations

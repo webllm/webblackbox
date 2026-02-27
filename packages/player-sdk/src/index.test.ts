@@ -67,6 +67,29 @@ describe("WebBlackboxPlayer", () => {
     expect(player.query().map((event) => event.id)).toEqual(["E-2"]);
   });
 
+  it("parses chunks lazily when queried", async () => {
+    const bytes = await createLazyParseFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+
+    expect(
+      player.query({
+        range: {
+          monoStart: 0,
+          monoEnd: 50
+        }
+      })
+    ).toEqual([expect.objectContaining({ id: "E-L-1" })]);
+
+    expect(() =>
+      player.query({
+        range: {
+          monoStart: 90,
+          monoEnd: 120
+        }
+      })
+    ).toThrow(/chunk-000002/i);
+  });
+
   it("opens archives with compressed chunk codecs", async () => {
     const codecs = supportedCompressedCodecsForTest();
     expect(codecs.length).toBeGreaterThan(0);
@@ -527,6 +550,86 @@ async function createTwoChunkFixtureArchive(): Promise<Uint8Array> {
     "events/chunk-000002.ndjson",
     eventsChunk2.map((event) => JSON.stringify(event)).join("\n")
   );
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function createLazyParseFixtureArchive(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const validEvents: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: "S-LAZY",
+      tab: 1,
+      t: 5000,
+      mono: 10,
+      type: "user.click",
+      id: "E-L-1",
+      data: {
+        target: "button.safe"
+      }
+    }
+  ];
+  const timeIndex: ChunkTimeIndexEntry[] = [
+    {
+      chunkId: "chunk-000001",
+      seq: 1,
+      tStart: 5000,
+      tEnd: 5000,
+      monoStart: 10,
+      monoEnd: 10,
+      eventCount: 1,
+      byteLength: 128,
+      codec: "none",
+      sha256: "sha-lazy-1"
+    },
+    {
+      chunkId: "chunk-000002",
+      seq: 2,
+      tStart: 5100,
+      tEnd: 5100,
+      monoStart: 100,
+      monoEnd: 100,
+      eventCount: 1,
+      byteLength: 128,
+      codec: "none",
+      sha256: "sha-lazy-2"
+    }
+  ];
+  const manifest: ExportManifest = {
+    protocolVersion: 1,
+    createdAt: new Date(0).toISOString(),
+    mode: "full",
+    site: {
+      origin: "https://example.com",
+      title: "Lazy Parse"
+    },
+    chunkCodec: "none",
+    redactionProfile: {
+      redactHeaders: [],
+      redactCookieNames: [],
+      redactBodyPatterns: [],
+      blockedSelectors: [],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: 2,
+      chunkCount: 2,
+      blobCount: 0,
+      durationMs: 100
+    }
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("index/time.json", JSON.stringify(timeIndex));
+  zip.file("index/req.json", JSON.stringify([]));
+  zip.file("index/inv.json", JSON.stringify([]));
+  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
+  zip.file(
+    "events/chunk-000001.ndjson",
+    validEvents.map((event) => JSON.stringify(event)).join("\n")
+  );
+  zip.file("events/chunk-000002.ndjson", "{ invalid-json-line");
 
   return zip.generateAsync({ type: "uint8array" });
 }

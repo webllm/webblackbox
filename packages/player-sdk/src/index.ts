@@ -346,17 +346,36 @@ const DEFAULT_ACTION_WINDOW_MS = 1500;
 const DEFAULT_TIMELINE_SCREENSHOT_LOOKAHEAD_MS = 2000;
 const DEFAULT_TIMELINE_REQUEST_LIMIT = 5;
 const DEFAULT_TIMELINE_ERROR_LIMIT = 5;
+const DEFAULT_DECODED_CHUNK_CACHE_SIZE = 12;
+
+type EventChunkSource = {
+  chunkId: string;
+  path: string;
+  seq: number;
+  monoStart: number;
+  monoEnd: number;
+  bytes: Uint8Array;
+};
+
+type EventChunkDescriptor = {
+  chunkId: string;
+  path: string;
+  seq: number;
+  monoStart: number;
+  monoEnd: number;
+  codec: ChunkCodec;
+};
 
 export class WebBlackboxPlayer {
   public readonly status: PlayerStatus = "loaded";
 
   public readonly archive: PlayerArchive;
 
-  public readonly events: WebBlackboxEvent[];
-
   private readonly zip: JSZip;
 
-  private readonly eventsById = new Map<string, WebBlackboxEvent>();
+  private readonly eventChunks: EventChunkSource[];
+
+  private readonly decodedChunkCache = new Map<string, WebBlackboxEvent[]>();
 
   private readonly requestToEventIds = new Map<string, string[]>();
 
@@ -371,7 +390,7 @@ export class WebBlackboxPlayer {
   private constructor(
     zip: JSZip,
     archive: PlayerArchive,
-    events: WebBlackboxEvent[],
+    eventChunks: EventChunkSource[],
     archiveKey: CryptoKey | null,
     encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
   ) {
@@ -379,17 +398,7 @@ export class WebBlackboxPlayer {
     this.archive = archive;
     this.archiveKey = archiveKey;
     this.encryptedFiles = encryptedFiles;
-    this.events = [...events].sort((left, right) => left.mono - right.mono || left.t - right.t);
-
-    for (const event of this.events) {
-      this.eventsById.set(event.id, event);
-
-      if (event.ref?.req) {
-        const current = this.requestToEventIds.get(event.ref.req) ?? [];
-        current.push(event.id);
-        this.requestToEventIds.set(event.ref.req, current);
-      }
-    }
+    this.eventChunks = [...eventChunks].sort((left, right) => left.seq - right.seq);
 
     for (const entry of archive.requestIndex) {
       this.requestToEventIds.set(entry.reqId, [...entry.eventIds]);
@@ -419,6 +428,10 @@ export class WebBlackboxPlayer {
     }
   }
 
+  public get events(): WebBlackboxEvent[] {
+    return this.query();
+  }
+
   public static async open(
     input: PlayerOpenInput,
     options: PlayerOpenOptions = {}
@@ -433,7 +446,7 @@ export class WebBlackboxPlayer {
     const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
     const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
     const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
-    const events = await readEvents(zip, archiveKey, encryptedFiles, {
+    const eventChunks = await readEventChunkSources(zip, archiveKey, encryptedFiles, {
       range: options.range,
       timeIndex,
       defaultCodec: manifest.chunkCodec
@@ -448,21 +461,28 @@ export class WebBlackboxPlayer {
         invertedIndex,
         integrity
       },
-      events,
+      eventChunks,
       archiveKey,
       encryptedFiles
     );
   }
 
   public query(query: PlayerQuery = {}): WebBlackboxEvent[] {
+    if (
+      query.range?.monoStart !== undefined &&
+      query.range?.monoEnd !== undefined &&
+      query.range.monoStart > query.range.monoEnd
+    ) {
+      return [];
+    }
+
     const offset = Math.max(0, query.offset ?? 0);
     const limit = Math.max(1, query.limit ?? Number.POSITIVE_INFINITY);
     const types = query.types ? new Set(query.types) : null;
     const levels = query.levels ? new Set(query.levels) : null;
     const text = query.text?.trim().toLowerCase();
-    const requestedIds = query.requestId
-      ? new Set(this.requestToEventIds.get(query.requestId) ?? [])
-      : null;
+    const indexedRequestIds = query.requestId ? this.requestToEventIds.get(query.requestId) : null;
+    const requestedIds = query.requestId && indexedRequestIds ? new Set(indexedRequestIds) : null;
     const textCandidateIds = text ? collectInvertedCandidateIds(this.inverted, text) : null;
     const candidateIds = intersectCandidateIds(requestedIds, textCandidateIds);
 
@@ -470,33 +490,51 @@ export class WebBlackboxPlayer {
       return [];
     }
 
-    const sourceEvents = candidateIds
-      ? toSortedEvents(candidateIds, this.eventsById)
-      : sliceEventsByRange(this.events, query.range);
-
     const matched: WebBlackboxEvent[] = [];
+    let skipped = 0;
 
-    for (const event of sourceEvents) {
-      if (!withinRange(event, query.range)) {
-        continue;
+    for (const chunk of this.getChunksForRange(query.range)) {
+      const sourceEvents = this.getChunkEvents(chunk);
+
+      for (const event of sourceEvents) {
+        if (candidateIds && !candidateIds.has(event.id)) {
+          continue;
+        }
+
+        if (query.requestId && extractReqId(event) !== query.requestId) {
+          continue;
+        }
+
+        if (!withinRange(event, query.range)) {
+          continue;
+        }
+
+        if (types && !types.has(event.type)) {
+          continue;
+        }
+
+        if (levels && (!event.lvl || !levels.has(event.lvl))) {
+          continue;
+        }
+
+        if (text && !matchesText(event, text)) {
+          continue;
+        }
+
+        if (skipped < offset) {
+          skipped += 1;
+          continue;
+        }
+
+        matched.push(event);
+
+        if (matched.length >= limit) {
+          return matched;
+        }
       }
-
-      if (types && !types.has(event.type)) {
-        continue;
-      }
-
-      if (levels && (!event.lvl || !levels.has(event.lvl))) {
-        continue;
-      }
-
-      if (text && !matchesText(event, text)) {
-        continue;
-      }
-
-      matched.push(event);
     }
 
-    return matched.slice(offset, offset + limit);
+    return matched;
   }
 
   public search(term: string, limit = 100): PlayerSearchResult[] {
@@ -509,10 +547,7 @@ export class WebBlackboxPlayer {
     const eventIds = this.inverted.get(normalizedTerm);
     const ranked = new Map<string, number>();
     const candidateIds = collectInvertedCandidateIds(this.inverted, normalizedTerm);
-    const sourceEvents =
-      candidateIds && candidateIds.size > 0
-        ? toSortedEvents(candidateIds, this.eventsById)
-        : this.events;
+    const eventsById = new Map<string, WebBlackboxEvent>();
 
     if (eventIds) {
       for (const eventId of eventIds) {
@@ -520,24 +555,82 @@ export class WebBlackboxPlayer {
       }
     }
 
-    for (const event of sourceEvents) {
-      const score = computeTextScore(event, normalizedTerm);
+    for (const chunk of this.eventChunks) {
+      const sourceEvents = this.getChunkEvents(chunk);
 
-      if (score <= 0) {
-        continue;
+      for (const event of sourceEvents) {
+        if (candidateIds && !candidateIds.has(event.id)) {
+          continue;
+        }
+
+        const score = computeTextScore(event, normalizedTerm);
+
+        if (score <= 0 && !ranked.has(event.id)) {
+          continue;
+        }
+
+        const previous = ranked.get(event.id) ?? 0;
+        ranked.set(event.id, Math.max(previous, score));
+        eventsById.set(event.id, event);
       }
-
-      const previous = ranked.get(event.id) ?? 0;
-      ranked.set(event.id, Math.max(previous, score));
     }
 
     return [...ranked.entries()]
-      .map(([eventId, score]) => ({ eventId, score, event: this.eventsById.get(eventId) }))
+      .map(([eventId, score]) => ({ eventId, score, event: eventsById.get(eventId) }))
       .filter((entry): entry is { eventId: string; score: number; event: WebBlackboxEvent } =>
         Boolean(entry.event)
       )
       .sort((left, right) => right.score - left.score || left.event.mono - right.event.mono)
       .slice(0, Math.max(1, limit));
+  }
+
+  private getChunksForRange(range?: PlayerRange): EventChunkSource[] {
+    if (!range) {
+      return this.eventChunks;
+    }
+
+    return this.eventChunks.filter((chunk) => chunkSourceIntersectsRange(chunk, range));
+  }
+
+  private getChunkEvents(chunk: EventChunkSource): WebBlackboxEvent[] {
+    const cached = this.decodedChunkCache.get(chunk.chunkId);
+
+    if (cached) {
+      this.decodedChunkCache.delete(chunk.chunkId);
+      this.decodedChunkCache.set(chunk.chunkId, cached);
+      return cached;
+    }
+
+    const parsed = parseChunkEvents(chunk);
+    this.decodedChunkCache.set(chunk.chunkId, parsed);
+
+    while (this.decodedChunkCache.size > DEFAULT_DECODED_CHUNK_CACHE_SIZE) {
+      const oldest = this.decodedChunkCache.keys().next().value;
+
+      if (!oldest) {
+        break;
+      }
+
+      this.decodedChunkCache.delete(oldest);
+    }
+
+    return parsed;
+  }
+
+  private findEventById(eventId: string): WebBlackboxEvent | null {
+    if (!eventId.trim()) {
+      return null;
+    }
+
+    for (const chunk of this.eventChunks) {
+      const event = this.getChunkEvents(chunk).find((entry) => entry.id === eventId);
+
+      if (event) {
+        return event;
+      }
+    }
+
+    return null;
   }
 
   public async getBlob(hash: string): Promise<{ mime: string; bytes: Uint8Array } | null> {
@@ -891,8 +984,10 @@ export class WebBlackboxPlayer {
   }
 
   public compareWith(other: WebBlackboxPlayer): PlayerComparison {
-    const leftCounts = buildTypeCounts(this.events);
-    const rightCounts = buildTypeCounts(other.events);
+    const leftEvents = this.events;
+    const rightEvents = other.events;
+    const leftCounts = buildTypeCounts(leftEvents);
+    const rightCounts = buildTypeCounts(rightEvents);
     const types = new Set([...leftCounts.keys(), ...rightCounts.keys()]);
 
     const typeDeltas = [...types]
@@ -913,22 +1008,22 @@ export class WebBlackboxPlayer {
       other.getNetworkWaterfall()
     );
 
-    const leftSessionId = this.events[0]?.sid ?? this.archive.manifest.site.origin;
-    const rightSessionId = other.events[0]?.sid ?? other.archive.manifest.site.origin;
+    const leftSessionId = leftEvents[0]?.sid ?? this.archive.manifest.site.origin;
+    const rightSessionId = rightEvents[0]?.sid ?? other.archive.manifest.site.origin;
 
     return {
       leftSessionId,
       rightSessionId,
       leftSid: leftSessionId,
       rightSid: rightSessionId,
-      eventDelta: other.events.length - this.events.length,
+      eventDelta: rightEvents.length - leftEvents.length,
       errorDelta:
-        other.events.filter((event) => event.type.startsWith("error.")).length -
-        this.events.filter((event) => event.type.startsWith("error.")).length,
+        rightEvents.filter((event) => event.type.startsWith("error.")).length -
+        leftEvents.filter((event) => event.type.startsWith("error.")).length,
       requestDelta:
-        other.events.filter((event) => event.type === "network.request").length -
-        this.events.filter((event) => event.type === "network.request").length,
-      durationDeltaMs: computeDuration(other.events) - computeDuration(this.events),
+        rightEvents.filter((event) => event.type === "network.request").length -
+        leftEvents.filter((event) => event.type === "network.request").length,
+      durationDeltaMs: computeDuration(rightEvents) - computeDuration(leftEvents),
       typeDeltas,
       endpointRegressions
     };
@@ -1267,7 +1362,7 @@ export class WebBlackboxPlayer {
       }
     }
 
-    const event = this.eventsById.get(snapshot.eventId);
+    const event = this.findEventById(snapshot.eventId);
     const payload = asRecord(event?.data);
     const htmlSnippet = asString(payload?.htmlSnippet);
 
@@ -2258,7 +2353,7 @@ async function resolveArchiveReadKey(
   );
 }
 
-async function readEvents(
+async function readEventChunkSources(
   zip: JSZip,
   archiveKey: CryptoKey | null,
   encryptedFiles: Record<string, ArchiveEncryptedFileMeta>,
@@ -2267,30 +2362,12 @@ async function readEvents(
     timeIndex?: ChunkTimeIndexEntry[];
     defaultCodec?: ChunkCodec;
   } = {}
-): Promise<WebBlackboxEvent[]> {
-  let eventPaths = Object.keys(zip.files)
-    .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
-    .sort();
-  const { range, timeIndex } = options;
-  const defaultCodec = options.defaultCodec ?? "none";
-  const chunkCodecById = new Map(
-    (Array.isArray(timeIndex) ? timeIndex : []).map(
-      (entry) => [entry.chunkId, entry.codec] as const
-    )
-  );
+): Promise<EventChunkSource[]> {
+  const descriptors = buildEventChunkDescriptors(zip, options);
+  const chunks: EventChunkSource[] = [];
 
-  if (range && Array.isArray(timeIndex) && timeIndex.length > 0) {
-    const chunkPaths = timeIndex
-      .filter((entry) => chunkIntersectsRange(entry, range))
-      .sort((left, right) => left.seq - right.seq)
-      .map((entry) => `events/${entry.chunkId}.ndjson`);
-
-    eventPaths = chunkPaths;
-  }
-
-  const events: WebBlackboxEvent[] = [];
-
-  for (const path of eventPaths) {
+  for (const descriptor of descriptors) {
+    const { path } = descriptor;
     const file = zip.file(path);
 
     if (!file) {
@@ -2298,25 +2375,98 @@ async function readEvents(
     }
 
     const rawBytes = await file.async("uint8array");
-    const bytes = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
-    const chunkId = parseChunkIdFromPath(path);
-    const codec = (chunkId ? chunkCodecById.get(chunkId) : undefined) ?? defaultCodec;
-    const decodedChunkBytes = await decodeChunkBytes(bytes, codec);
-    const content = new TextDecoder().decode(decodedChunkBytes);
-    const lines = content.split(/\r?\n/).filter(Boolean);
+    const decrypted = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
+    const bytes = await decodeChunkBytes(decrypted, descriptor.codec);
 
-    for (const line of lines) {
-      const event = JSON.parse(line) as WebBlackboxEvent;
+    chunks.push({
+      chunkId: descriptor.chunkId,
+      path,
+      seq: descriptor.seq,
+      monoStart: descriptor.monoStart,
+      monoEnd: descriptor.monoEnd,
+      bytes
+    });
+  }
 
-      if (range && !withinRange(event, range)) {
-        continue;
-      }
+  return chunks.sort((left, right) => left.seq - right.seq);
+}
 
-      events.push(event);
+function buildEventChunkDescriptors(
+  zip: JSZip,
+  options: {
+    range?: PlayerRange;
+    timeIndex?: ChunkTimeIndexEntry[];
+    defaultCodec?: ChunkCodec;
+  }
+): EventChunkDescriptor[] {
+  const { range, timeIndex } = options;
+  const defaultCodec = options.defaultCodec ?? "none";
+
+  if (Array.isArray(timeIndex) && timeIndex.length > 0) {
+    return timeIndex
+      .filter((entry) => !range || chunkIntersectsRange(entry, range))
+      .sort((left, right) => left.seq - right.seq)
+      .map((entry) => ({
+        chunkId: entry.chunkId,
+        path: `events/${entry.chunkId}.ndjson`,
+        seq: entry.seq,
+        monoStart: entry.monoStart,
+        monoEnd: entry.monoEnd,
+        codec: entry.codec
+      }));
+  }
+
+  return Object.keys(zip.files)
+    .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
+    .sort()
+    .map((path, index) => ({
+      chunkId: parseChunkIdFromPath(path) ?? `chunk-${String(index + 1).padStart(6, "0")}`,
+      path,
+      seq: index + 1,
+      monoStart: Number.NEGATIVE_INFINITY,
+      monoEnd: Number.POSITIVE_INFINITY,
+      codec: defaultCodec
+    }));
+}
+
+function parseChunkEvents(chunk: EventChunkSource): WebBlackboxEvent[] {
+  const content = new TextDecoder().decode(chunk.bytes);
+  const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const events: WebBlackboxEvent[] = [];
+
+  for (const line of lines) {
+    try {
+      events.push(JSON.parse(line) as WebBlackboxEvent);
+    } catch (error) {
+      throw new Error(
+        `Failed to parse chunk '${chunk.chunkId}' from '${chunk.path}': ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
     }
   }
 
   return events;
+}
+
+function chunkSourceIntersectsRange(chunk: EventChunkSource, range: PlayerRange): boolean {
+  if (
+    Number.isFinite(chunk.monoEnd) &&
+    range.monoStart !== undefined &&
+    chunk.monoEnd < range.monoStart
+  ) {
+    return false;
+  }
+
+  if (
+    Number.isFinite(chunk.monoStart) &&
+    range.monoEnd !== undefined &&
+    chunk.monoStart > range.monoEnd
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 function chunkIntersectsRange(entry: ChunkTimeIndexEntry, range: PlayerRange): boolean {
@@ -2508,59 +2658,6 @@ function withinRange(event: WebBlackboxEvent, range?: PlayerRange): boolean {
   return true;
 }
 
-function sliceEventsByRange(events: WebBlackboxEvent[], range?: PlayerRange): WebBlackboxEvent[] {
-  if (!range) {
-    return events;
-  }
-
-  const start = range.monoStart ?? Number.NEGATIVE_INFINITY;
-  const end = range.monoEnd ?? Number.POSITIVE_INFINITY;
-
-  if (start > end) {
-    return [];
-  }
-
-  const from = lowerBoundByMono(events, start);
-  const to = upperBoundByMono(events, end);
-  return events.slice(from, to);
-}
-
-function lowerBoundByMono(events: WebBlackboxEvent[], target: number): number {
-  let low = 0;
-  let high = events.length;
-
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    const mono = events[mid]?.mono ?? Number.POSITIVE_INFINITY;
-
-    if (mono < target) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-
-  return low;
-}
-
-function upperBoundByMono(events: WebBlackboxEvent[], target: number): number {
-  let low = 0;
-  let high = events.length;
-
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    const mono = events[mid]?.mono ?? Number.NEGATIVE_INFINITY;
-
-    if (mono <= target) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-
-  return low;
-}
-
 function matchesText(event: WebBlackboxEvent, term: string): boolean {
   if (event.type.toLowerCase().includes(term)) {
     return true;
@@ -2627,23 +2724,6 @@ function intersectCandidateIds(
   }
 
   return intersection;
-}
-
-function toSortedEvents(
-  candidateIds: Set<string>,
-  eventsById: Map<string, WebBlackboxEvent>
-): WebBlackboxEvent[] {
-  const output: WebBlackboxEvent[] = [];
-
-  for (const eventId of candidateIds) {
-    const event = eventsById.get(eventId);
-
-    if (event) {
-      output.push(event);
-    }
-  }
-
-  return output.sort((left, right) => left.mono - right.mono || left.t - right.t);
 }
 
 function computeTextScore(event: WebBlackboxEvent, term: string): number {
