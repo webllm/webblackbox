@@ -96,6 +96,36 @@ describe("pipeline", () => {
     expect(indexes.request.some((entry) => entry.reqId === "R-batch")).toBe(true);
   });
 
+  it("skips oversized hash/base64-like terms in inverted index", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 256
+    });
+    const shaLike = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const base64Like = "a".repeat(120);
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-inv-1", "sys.notice", Date.now(), {
+        reqId: "R-inv-1",
+        message: "normal-term",
+        hash: shaLike,
+        blob: base64Like
+      })
+    );
+    await pipeline.flush();
+    await pipeline.finalizeIndexes();
+
+    const indexes = await storage.getIndexes(SESSION.sid);
+    const terms = new Set(indexes.inverted.map((entry) => entry.term));
+
+    expect(terms.has("normal-term")).toBe(true);
+    expect(terms.has(shaLike)).toBe(false);
+    expect(terms.has(base64Like)).toBe(false);
+  });
+
   it("deduplicates blobs by sha256", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
