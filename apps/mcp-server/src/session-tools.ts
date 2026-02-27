@@ -302,6 +302,20 @@ export const compareSessionsInput = {
     .max(MAX_COMPARE_TOP)
     .optional()
     .describe(`Top N error fingerprint deltas to return (1-${MAX_COMPARE_TOP}).`),
+  topActionDiffs: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_COMPARE_TOP)
+    .optional()
+    .describe(`Top N action-trigger deltas to return (1-${MAX_COMPARE_TOP}).`),
+  topPerfDiffs: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_COMPARE_TOP)
+    .optional()
+    .describe(`Top N performance metric deltas to return (1-${MAX_COMPARE_TOP}).`),
   includeStorageHashes: z
     .boolean()
     .optional()
@@ -316,6 +330,8 @@ export type CompareSessionsArgs = {
   topTypeDeltas?: number;
   topRequestDiffs?: number;
   topErrorDiffs?: number;
+  topActionDiffs?: number;
+  topPerfDiffs?: number;
   includeStorageHashes?: boolean;
 };
 
@@ -959,6 +975,24 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
     requestDelta: number;
     durationDeltaMs: number;
   };
+  actionDiff: {
+    actionDelta: number;
+    errorActionDelta: number;
+    requestActionDelta: number;
+    p95DurationDeltaMs: number;
+    triggerRegressions: Array<{
+      triggerType: string;
+      leftCount: number;
+      rightCount: number;
+      delta: number;
+      leftErrorRate: number;
+      rightErrorRate: number;
+      errorRateDelta: number;
+      leftP95DurationMs: number;
+      rightP95DurationMs: number;
+      p95DurationDeltaMs: number;
+    }>;
+  };
   topTypeDeltas: Array<{
     type: string;
     left: number;
@@ -1010,6 +1044,28 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
       durationMs: number;
     }>;
   };
+  perfDiff: {
+    kindRegressions: Array<{
+      kind: string;
+      leftCount: number;
+      rightCount: number;
+      delta: number;
+    }>;
+    longtask: {
+      leftCount: number;
+      rightCount: number;
+      delta: number;
+      leftP95DurationMs: number;
+      rightP95DurationMs: number;
+      p95DurationDeltaMs: number;
+    };
+    vitalRegressions: Array<{
+      metric: string;
+      leftP95: number;
+      rightP95: number;
+      delta: number;
+    }>;
+  };
   storageDiff: {
     leftEvents: number;
     rightEvents: number;
@@ -1030,6 +1086,8 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
   const topTypeDeltas = clampInt(args.topTypeDeltas ?? DEFAULT_COMPARE_TOP, 1, MAX_COMPARE_TOP);
   const topRequestDiffs = clampInt(args.topRequestDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
   const topErrorDiffs = clampInt(args.topErrorDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
+  const topActionDiffs = clampInt(args.topActionDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
+  const topPerfDiffs = clampInt(args.topPerfDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
   const includeStorageHashes = args.includeStorageHashes === true;
   const comparison = leftPlayer.compareWith(rightPlayer);
   const storageComparison = leftPlayer.compareStorageWith(rightPlayer);
@@ -1054,6 +1112,28 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
     leftPlayer.events,
     rightPlayer.events,
     topErrorDiffs
+  );
+  const leftActions = leftPlayer.getActionTimeline();
+  const rightActions = rightPlayer.getActionTimeline();
+  const leftActionMetrics = summarizeActionMetrics(leftActions);
+  const rightActionMetrics = summarizeActionMetrics(rightActions);
+  const actionTriggerRegressions = buildActionTriggerRegressions(
+    leftActions,
+    rightActions,
+    topActionDiffs
+  );
+  const leftPerfArtifacts = leftPlayer.getPerformanceArtifacts();
+  const rightPerfArtifacts = rightPlayer.getPerformanceArtifacts();
+  const longtaskDiff = buildLongtaskRegression(leftPerfArtifacts, rightPerfArtifacts);
+  const perfKindRegressions = buildPerfKindRegressions(
+    leftPerfArtifacts,
+    rightPerfArtifacts,
+    topPerfDiffs
+  );
+  const vitalRegressions = buildVitalRegressions(
+    leftPerfArtifacts,
+    rightPerfArtifacts,
+    topPerfDiffs
   );
 
   return {
@@ -1087,6 +1167,15 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
       requestDelta: comparison.requestDelta,
       durationDeltaMs: Number((rightDuration - leftDuration).toFixed(2))
     },
+    actionDiff: {
+      actionDelta: rightActionMetrics.total - leftActionMetrics.total,
+      errorActionDelta: rightActionMetrics.errorActions - leftActionMetrics.errorActions,
+      requestActionDelta: rightActionMetrics.requestActions - leftActionMetrics.requestActions,
+      p95DurationDeltaMs: Number(
+        (rightActionMetrics.p95DurationMs - leftActionMetrics.p95DurationMs).toFixed(2)
+      ),
+      triggerRegressions: actionTriggerRegressions
+    },
     topTypeDeltas: comparison.typeDeltas.slice(0, topTypeDeltas),
     errorDiff: {
       fingerprintRegressions
@@ -1102,6 +1191,11 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
       topSlowRequests: [...leftSlow, ...rightSlow]
         .sort((left, right) => right.durationMs - left.durationMs)
         .slice(0, topRequestDiffs)
+    },
+    perfDiff: {
+      kindRegressions: perfKindRegressions,
+      longtask: longtaskDiff,
+      vitalRegressions
     },
     storageDiff: {
       leftEvents: storageComparison.leftEvents,
@@ -1291,6 +1385,309 @@ function collectErrorFingerprintCounts(
   return counts;
 }
 
+type ActionTimelineLike = {
+  triggerType: string | null;
+  durationMs: number;
+  errorCount: number;
+  requestCount: number;
+};
+
+type PerformanceArtifactLike = {
+  kind: string;
+  snapshot?: unknown;
+};
+
+function summarizeActionMetrics(actions: ActionTimelineLike[]): {
+  total: number;
+  errorActions: number;
+  requestActions: number;
+  p95DurationMs: number;
+} {
+  const durations = actions.map((action) => action.durationMs).sort((left, right) => left - right);
+
+  return {
+    total: actions.length,
+    errorActions: actions.filter((action) => action.errorCount > 0).length,
+    requestActions: actions.filter((action) => action.requestCount > 0).length,
+    p95DurationMs: percentile(durations, 95)
+  };
+}
+
+function buildActionTriggerRegressions(
+  leftActions: ActionTimelineLike[],
+  rightActions: ActionTimelineLike[],
+  limit: number
+): Array<{
+  triggerType: string;
+  leftCount: number;
+  rightCount: number;
+  delta: number;
+  leftErrorRate: number;
+  rightErrorRate: number;
+  errorRateDelta: number;
+  leftP95DurationMs: number;
+  rightP95DurationMs: number;
+  p95DurationDeltaMs: number;
+}> {
+  const leftStats = collectActionTriggerStats(leftActions);
+  const rightStats = collectActionTriggerStats(rightActions);
+  const triggerTypes = new Set([...leftStats.keys(), ...rightStats.keys()]);
+
+  return [...triggerTypes]
+    .map((triggerType) => {
+      const left = leftStats.get(triggerType) ?? emptyActionTriggerStat();
+      const right = rightStats.get(triggerType) ?? emptyActionTriggerStat();
+      const leftErrorRate = Number(
+        (left.count > 0 ? left.errorActions / left.count : 0).toFixed(4)
+      );
+      const rightErrorRate = Number(
+        (right.count > 0 ? right.errorActions / right.count : 0).toFixed(4)
+      );
+      const leftP95DurationMs = percentile(left.durations, 95);
+      const rightP95DurationMs = percentile(right.durations, 95);
+      const errorRateDelta = Number((rightErrorRate - leftErrorRate).toFixed(4));
+      const p95DurationDeltaMs = Number((rightP95DurationMs - leftP95DurationMs).toFixed(2));
+
+      return {
+        triggerType,
+        leftCount: left.count,
+        rightCount: right.count,
+        delta: right.count - left.count,
+        leftErrorRate,
+        rightErrorRate,
+        errorRateDelta,
+        leftP95DurationMs: Number(leftP95DurationMs.toFixed(2)),
+        rightP95DurationMs: Number(rightP95DurationMs.toFixed(2)),
+        p95DurationDeltaMs
+      };
+    })
+    .filter((row) => row.delta !== 0 || row.errorRateDelta !== 0 || row.p95DurationDeltaMs !== 0)
+    .sort(
+      (left, right) =>
+        Math.abs(right.delta) - Math.abs(left.delta) ||
+        Math.abs(right.errorRateDelta) - Math.abs(left.errorRateDelta) ||
+        Math.abs(right.p95DurationDeltaMs) - Math.abs(left.p95DurationDeltaMs) ||
+        left.triggerType.localeCompare(right.triggerType)
+    )
+    .slice(0, limit);
+}
+
+function collectActionTriggerStats(
+  actions: ActionTimelineLike[]
+): Map<string, { count: number; errorActions: number; durations: number[] }> {
+  const stats = new Map<string, { count: number; errorActions: number; durations: number[] }>();
+
+  for (const action of actions) {
+    const triggerType = action.triggerType ?? "unknown";
+    const current = stats.get(triggerType) ?? emptyActionTriggerStat();
+    current.count += 1;
+
+    if (action.errorCount > 0) {
+      current.errorActions += 1;
+    }
+
+    current.durations.push(action.durationMs);
+    stats.set(triggerType, current);
+  }
+
+  for (const stat of stats.values()) {
+    stat.durations.sort((left, right) => left - right);
+  }
+
+  return stats;
+}
+
+function emptyActionTriggerStat(): { count: number; errorActions: number; durations: number[] } {
+  return {
+    count: 0,
+    errorActions: 0,
+    durations: []
+  };
+}
+
+function buildPerfKindRegressions(
+  leftArtifacts: PerformanceArtifactLike[],
+  rightArtifacts: PerformanceArtifactLike[],
+  limit: number
+): Array<{
+  kind: string;
+  leftCount: number;
+  rightCount: number;
+  delta: number;
+}> {
+  const leftCounts = collectPerfKindCounts(leftArtifacts);
+  const rightCounts = collectPerfKindCounts(rightArtifacts);
+  const kinds = new Set([...leftCounts.keys(), ...rightCounts.keys()]);
+
+  return [...kinds]
+    .map((kind) => {
+      const leftCount = leftCounts.get(kind) ?? 0;
+      const rightCount = rightCounts.get(kind) ?? 0;
+
+      return {
+        kind,
+        leftCount,
+        rightCount,
+        delta: rightCount - leftCount
+      };
+    })
+    .filter((row) => row.delta !== 0)
+    .sort(
+      (left, right) =>
+        Math.abs(right.delta) - Math.abs(left.delta) || left.kind.localeCompare(right.kind)
+    )
+    .slice(0, limit);
+}
+
+function collectPerfKindCounts(artifacts: PerformanceArtifactLike[]): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const artifact of artifacts) {
+    counts.set(artifact.kind, (counts.get(artifact.kind) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function buildLongtaskRegression(
+  leftArtifacts: PerformanceArtifactLike[],
+  rightArtifacts: PerformanceArtifactLike[]
+): {
+  leftCount: number;
+  rightCount: number;
+  delta: number;
+  leftP95DurationMs: number;
+  rightP95DurationMs: number;
+  p95DurationDeltaMs: number;
+} {
+  const leftDurations = collectLongtaskDurations(leftArtifacts);
+  const rightDurations = collectLongtaskDurations(rightArtifacts);
+  const leftP95DurationMs = percentile(leftDurations, 95);
+  const rightP95DurationMs = percentile(rightDurations, 95);
+
+  return {
+    leftCount: leftDurations.length,
+    rightCount: rightDurations.length,
+    delta: rightDurations.length - leftDurations.length,
+    leftP95DurationMs: Number(leftP95DurationMs.toFixed(2)),
+    rightP95DurationMs: Number(rightP95DurationMs.toFixed(2)),
+    p95DurationDeltaMs: Number((rightP95DurationMs - leftP95DurationMs).toFixed(2))
+  };
+}
+
+function collectLongtaskDurations(artifacts: PerformanceArtifactLike[]): number[] {
+  const durations = artifacts
+    .filter((artifact) => artifact.kind === "longtask")
+    .map((artifact) => asFiniteNumber(asRecord(artifact.snapshot)?.duration))
+    .filter((duration): duration is number => typeof duration === "number" && duration >= 0)
+    .sort((left, right) => left - right);
+
+  return durations;
+}
+
+function buildVitalRegressions(
+  leftArtifacts: PerformanceArtifactLike[],
+  rightArtifacts: PerformanceArtifactLike[],
+  limit: number
+): Array<{
+  metric: string;
+  leftP95: number;
+  rightP95: number;
+  delta: number;
+}> {
+  const leftMetrics = collectVitalMetricValues(leftArtifacts);
+  const rightMetrics = collectVitalMetricValues(rightArtifacts);
+  const metrics = new Set([...leftMetrics.keys(), ...rightMetrics.keys()]);
+
+  return [...metrics]
+    .map((metric) => {
+      const leftP95 = percentile(leftMetrics.get(metric) ?? [], 95);
+      const rightP95 = percentile(rightMetrics.get(metric) ?? [], 95);
+
+      return {
+        metric,
+        leftP95: Number(leftP95.toFixed(2)),
+        rightP95: Number(rightP95.toFixed(2)),
+        delta: Number((rightP95 - leftP95).toFixed(2))
+      };
+    })
+    .filter((row) => row.leftP95 !== row.rightP95)
+    .sort(
+      (left, right) =>
+        Math.abs(right.delta) - Math.abs(left.delta) || left.metric.localeCompare(right.metric)
+    )
+    .slice(0, limit);
+}
+
+function collectVitalMetricValues(artifacts: PerformanceArtifactLike[]): Map<string, number[]> {
+  const metrics = new Map<string, number[]>();
+
+  for (const artifact of artifacts) {
+    if (artifact.kind !== "vitals") {
+      continue;
+    }
+
+    const payload = asRecord(artifact.snapshot);
+
+    if (!payload) {
+      continue;
+    }
+
+    const metricFromPair = normalizeVitalMetricName(asString(payload.metric));
+    const metricValue = asFiniteNumber(payload.value);
+
+    if (metricFromPair && typeof metricValue === "number") {
+      pushMetricValue(metrics, metricFromPair, metricValue);
+    }
+
+    for (const name of ["lcp", "cls", "inp", "fid", "ttfb"] as const) {
+      const value = asFiniteNumber(payload[name]);
+
+      if (typeof value === "number") {
+        pushMetricValue(metrics, name, value);
+      }
+    }
+  }
+
+  for (const values of metrics.values()) {
+    values.sort((left, right) => left - right);
+  }
+
+  return metrics;
+}
+
+function pushMetricValue(map: Map<string, number[]>, metric: string, value: number): void {
+  const values = map.get(metric) ?? [];
+  values.push(value);
+  map.set(metric, values);
+}
+
+function normalizeVitalMetricName(metric: string | undefined): string | null {
+  if (!metric) {
+    return null;
+  }
+
+  const normalized = metric.trim().toLowerCase();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "largest-contentful-paint") {
+    return "lcp";
+  }
+
+  if (normalized === "first-input") {
+    return "fid";
+  }
+
+  if (normalized === "layout-shift") {
+    return "cls";
+  }
+
+  return normalized;
+}
+
 function buildRange(
   monoStart: number | undefined,
   monoEnd: number | undefined
@@ -1440,6 +1837,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return undefined;
 }
 
 function compactText(value: string, maxChars: number): string {

@@ -248,7 +248,7 @@ export function createServer(): McpServer {
 
   server.tool(
     "compare_sessions",
-    "Compare two archives and summarize event/error/network/storage deltas.",
+    "Compare two archives and summarize event/action/error/network/perf/storage deltas.",
     compareSessionsInput,
     async ({
       leftPath,
@@ -258,6 +258,8 @@ export function createServer(): McpServer {
       topTypeDeltas,
       topRequestDiffs,
       topErrorDiffs,
+      topActionDiffs,
+      topPerfDiffs,
       includeStorageHashes
     }) => {
       return toTextPayload(
@@ -269,6 +271,8 @@ export function createServer(): McpServer {
           topTypeDeltas,
           topRequestDiffs,
           topErrorDiffs,
+          topActionDiffs,
+          topPerfDiffs,
           includeStorageHashes
         })
       );

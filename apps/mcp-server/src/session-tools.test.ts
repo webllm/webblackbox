@@ -180,6 +180,28 @@ describe("session tools", () => {
         })
       ])
     );
+    expect(result.actionDiff.triggerRegressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          triggerType: "user.click",
+          delta: 1
+        })
+      ])
+    );
+    expect(result.perfDiff.longtask).toEqual(
+      expect.objectContaining({
+        leftCount: 1,
+        rightCount: 2,
+        delta: 1
+      })
+    );
+    expect(result.perfDiff.vitalRegressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          metric: "lcp"
+        })
+      ])
+    );
   });
 
   it("throws helpful errors when report archive is missing", async () => {
@@ -374,6 +396,39 @@ function createBaselineEvents(): WebBlackboxEvent[] {
           mimeType: "application/json"
         }
       }
+    },
+    {
+      v: 1,
+      sid: "S-B-1",
+      tab: 1,
+      t: 1_004,
+      mono: 5,
+      type: "perf.longtask",
+      id: "E-B-5",
+      ref: {
+        act: "A-1"
+      },
+      data: {
+        name: "baseline-longtask",
+        startTime: 4.2,
+        duration: 80
+      }
+    },
+    {
+      v: 1,
+      sid: "S-B-1",
+      tab: 1,
+      t: 1_005,
+      mono: 5.5,
+      type: "perf.vitals",
+      id: "E-B-6",
+      ref: {
+        act: "A-1"
+      },
+      data: {
+        metric: "largest-contentful-paint",
+        value: 1_800
+      }
     }
   ];
 }
@@ -499,6 +554,73 @@ function createRegressionEvents(): WebBlackboxEvent[] {
         reason: "action",
         format: "webp",
         size: 256
+      }
+    },
+    {
+      v: 1,
+      sid: "S-R-1",
+      tab: 1,
+      t: 2_007,
+      mono: 20,
+      type: "user.click",
+      id: "E-R-8",
+      ref: {
+        act: "A-3"
+      },
+      data: {
+        target: {
+          selector: "button.retry"
+        }
+      }
+    },
+    {
+      v: 1,
+      sid: "S-R-1",
+      tab: 1,
+      t: 2_008,
+      mono: 21,
+      type: "perf.longtask",
+      id: "E-R-9",
+      ref: {
+        act: "A-3"
+      },
+      data: {
+        name: "regression-longtask-a",
+        startTime: 20.1,
+        duration: 120
+      }
+    },
+    {
+      v: 1,
+      sid: "S-R-1",
+      tab: 1,
+      t: 2_009,
+      mono: 22,
+      type: "perf.longtask",
+      id: "E-R-10",
+      ref: {
+        act: "A-3"
+      },
+      data: {
+        name: "regression-longtask-b",
+        startTime: 21.4,
+        duration: 180
+      }
+    },
+    {
+      v: 1,
+      sid: "S-R-1",
+      tab: 1,
+      t: 2_010,
+      mono: 23,
+      type: "perf.vitals",
+      id: "E-R-11",
+      ref: {
+        act: "A-3"
+      },
+      data: {
+        metric: "largest-contentful-paint",
+        value: 3_200
       }
     }
   ];
