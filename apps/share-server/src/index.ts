@@ -460,6 +460,12 @@ function redactText(input: string, maxLength = 120): string {
     .replaceAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
     .replaceAll(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [redacted-token]")
     .replaceAll(/([?&](?:token|auth|password|secret|api[_-]?key)=)[^&]+/gi, "$1[redacted]")
+    .replaceAll(/\b((?:token|auth|password|secret|api[_-]?key)\s*=\s*)[^\s,&;]+/gi, "$1[redacted]")
+    .replaceAll(/\b((?:token|auth|password|secret|api[_-]?key)\s*:\s*)[^\s,;]+/gi, "$1[redacted]")
+    .replaceAll(
+      /("?(?:token|auth|password|secret|api[_-]?key)"?\s*:\s*)"([^"\\]*(?:\\.[^"\\]*)*)"/gi,
+      '$1"[redacted]"'
+    )
     .replaceAll(/[A-Fa-f0-9]{32,}/g, "[redacted-hex]")
     .replaceAll(/[A-Za-z0-9+/]{48,}={0,2}/g, "[redacted-base64]");
 
