@@ -620,6 +620,7 @@ export class WebBlackboxPlayer {
       screenshotLookaheadMs?: number;
       requestLimit?: number;
       errorLimit?: number;
+      derived?: PlayerDerivedView;
     } = {}
   ): ActionTimelineEntry[] {
     const { range } = options;
@@ -630,7 +631,7 @@ export class WebBlackboxPlayer {
     );
     const requestLimit = Math.max(1, options.requestLimit ?? DEFAULT_TIMELINE_REQUEST_LIMIT);
     const errorLimit = Math.max(1, options.errorLimit ?? DEFAULT_TIMELINE_ERROR_LIMIT);
-    const derived = this.buildDerived(range);
+    const derived = options.derived ?? this.buildDerived(range);
     const scopedEvents = this.query({ range });
     const scopedById = new Map(scopedEvents.map((event) => [event.id, event]));
     const requestById = new Map(

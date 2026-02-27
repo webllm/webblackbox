@@ -767,7 +767,8 @@ export async function summarizeActions(args: SummarizeActionsArgs): Promise<{
   const limit = clampInt(args.limit ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
   const actions = player.getActionTimeline({
     range: range ?? undefined,
-    limit
+    limit,
+    derived
   });
 
   return {
