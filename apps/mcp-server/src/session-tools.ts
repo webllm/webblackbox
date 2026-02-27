@@ -852,7 +852,7 @@ export async function findRootCauseCandidates(args: RootCauseCandidatesArgs): Pr
     const nearbyNetwork = waterfall
       .filter(
         (entry) =>
-          (entry.failed || (typeof entry.status === "number" && entry.status >= 500)) &&
+          (entry.failed || (typeof entry.status === "number" && entry.status >= 400)) &&
           entry.endMono <= event.mono &&
           entry.endMono >= event.mono - windowMs
       )
