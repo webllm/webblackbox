@@ -184,6 +184,9 @@ type PlayerState = {
   comparePlayer: WebBlackboxPlayer | null;
   compareSummary: PlayerComparison | null;
   model: ArchiveModel | null;
+  loadedArchiveBytes: Uint8Array | null;
+  loadedArchiveName: string | null;
+  shareServerBaseUrl: string;
   selectedEventId: string | null;
   selectedActionId: string | null;
   selectedRequestId: string | null;
@@ -251,6 +254,7 @@ const LOG_GRID_SPLIT_MIN = 26;
 const LOG_GRID_SPLIT_MAX = 74;
 const LOG_GRID_SPLIT_KEY_STEP = 2;
 const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
+const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
 const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
@@ -268,6 +272,9 @@ const state: PlayerState = {
   comparePlayer: null,
   compareSummary: null,
   model: null,
+  loadedArchiveBytes: null,
+  loadedArchiveName: null,
+  shareServerBaseUrl: readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? "http://localhost:8787",
   selectedEventId: null,
   selectedActionId: null,
   selectedRequestId: null,
@@ -389,7 +396,9 @@ const refs = {
   exportPlaywright: getElement<HTMLButtonElement>("export-playwright"),
   exportPlaywrightMocks: getElement<HTMLButtonElement>("export-playwright-mocks"),
   exportGitHubIssue: getElement<HTMLButtonElement>("export-github-issue"),
-  exportJiraIssue: getElement<HTMLButtonElement>("export-jira-issue")
+  exportJiraIssue: getElement<HTMLButtonElement>("export-jira-issue"),
+  shareUpload: getElement<HTMLButtonElement>("share-upload"),
+  loadShareUrl: getElement<HTMLButtonElement>("load-share-url")
 };
 
 const panelTabButtons = Array.from(
@@ -934,6 +943,14 @@ function bindGlobalActions(): void {
     );
     setFeedback("Jira issue template exported.");
   });
+
+  refs.shareUpload.addEventListener("click", () => {
+    void shareLoadedArchive();
+  });
+
+  refs.loadShareUrl.addEventListener("click", () => {
+    void loadArchiveFromSharePrompt();
+  });
 }
 
 function bindArchiveDropTarget(): void {
@@ -1211,13 +1228,17 @@ async function handlePrimaryArchiveChange(): Promise<void> {
 }
 
 async function loadPrimaryArchiveFile(file: File): Promise<void> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  await loadPrimaryArchiveBytes(bytes, file.name);
+}
+
+async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): Promise<void> {
   pausePlayback();
   hideProgressHover();
   state.lastPanelBucket = Number.NEGATIVE_INFINITY;
 
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const player = await openArchiveWithPassphraseFallback(bytes, file.name);
+    const player = await openArchiveWithPassphraseFallback(bytes, sourceName);
     const model = buildArchiveModel(player);
 
     resetScreenshotResources();
@@ -1225,6 +1246,8 @@ async function loadPrimaryArchiveFile(file: File): Promise<void> {
 
     state.player = player;
     state.model = model;
+    state.loadedArchiveBytes = Uint8Array.from(bytes);
+    state.loadedArchiveName = sourceName;
     state.selectedEventId = model.events[model.events.length - 1]?.id ?? null;
     state.selectedActionId = model.actionTimeline[model.actionTimeline.length - 1]?.actId ?? null;
     state.selectedRequestId = model.waterfall[model.waterfall.length - 1]?.reqId ?? null;
@@ -1233,9 +1256,9 @@ async function loadPrimaryArchiveFile(file: File): Promise<void> {
     refreshCompareSummary();
 
     await renderAll({ forcePanels: true, forceScreenshot: true });
-    setFeedback(`Loaded ${file.name}`);
+    setFeedback(`Loaded ${sourceName}`);
   } catch (error) {
-    setFeedback(`Failed to load ${file.name}: ${String(error)}`);
+    setFeedback(`Failed to load ${sourceName}: ${String(error)}`);
   }
 }
 
@@ -1279,6 +1302,202 @@ async function exportPlaywrightMocks(): Promise<void> {
   const script = await player.generatePlaywrightMockScript({ maxMocks: 25 });
   downloadTextFile("webblackbox-replay-mocks.spec.ts", script, "text/plain");
   setFeedback("Playwright mock script exported.");
+}
+
+async function shareLoadedArchive(): Promise<void> {
+  const bytes = state.loadedArchiveBytes;
+
+  if (!bytes) {
+    setFeedback("Load an archive before sharing.");
+    return;
+  }
+
+  const promptedBaseUrl = prompt("Share server URL", state.shareServerBaseUrl);
+
+  if (promptedBaseUrl === null) {
+    return;
+  }
+
+  const normalizedBaseUrl = normalizeShareServerBaseUrl(promptedBaseUrl);
+
+  if (!normalizedBaseUrl) {
+    setFeedback("Invalid share server URL.");
+    return;
+  }
+
+  const passphraseInput = prompt(
+    "Optional passphrase for server-side archive analysis (leave empty for unencrypted or private metadata).",
+    ""
+  );
+
+  if (passphraseInput === null) {
+    return;
+  }
+
+  state.shareServerBaseUrl = normalizedBaseUrl;
+  writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
+
+  const headers: Record<string, string> = {
+    "content-type": "application/octet-stream",
+    "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox"
+  };
+  const passphrase = passphraseInput.trim();
+
+  if (passphrase.length > 0) {
+    headers["x-webblackbox-passphrase"] = passphrase;
+  }
+
+  try {
+    const response = await fetch(`${normalizedBaseUrl}/api/share/upload`, {
+      method: "POST",
+      headers,
+      body: toArrayBuffer(bytes)
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `HTTP ${response.status}`);
+    }
+
+    const payload = (await response.json()) as {
+      shareId?: unknown;
+      shareUrl?: unknown;
+    };
+    const shareId =
+      typeof payload.shareId === "string" && payload.shareId.length > 0 ? payload.shareId : null;
+    const shareUrl =
+      typeof payload.shareUrl === "string" && payload.shareUrl.length > 0
+        ? payload.shareUrl
+        : shareId
+          ? `${normalizedBaseUrl}/share/${shareId}`
+          : null;
+
+    if (!shareUrl) {
+      throw new Error("Share server did not return a share URL.");
+    }
+
+    await copyText(shareUrl);
+    setFeedback(`Shared archive. URL copied: ${shareUrl}`);
+  } catch (error) {
+    setFeedback(`Share failed: ${String(error)}`);
+  }
+}
+
+async function loadArchiveFromSharePrompt(): Promise<void> {
+  const input = prompt(
+    "Paste a share URL (/share/:id), an archive API URL, or a share id.",
+    `${state.shareServerBaseUrl}/share/`
+  );
+
+  if (input === null) {
+    return;
+  }
+
+  const resolved = resolveShareArchiveRequest(input);
+
+  if (!resolved) {
+    setFeedback("Invalid share reference.");
+    return;
+  }
+
+  state.shareServerBaseUrl = resolved.baseUrl;
+  writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
+
+  try {
+    const response = await fetch(resolved.archiveUrl);
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `HTTP ${response.status}`);
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    await loadPrimaryArchiveBytes(bytes, `shared-${resolved.shareId}.webblackbox`);
+    setFeedback(`Loaded shared archive ${resolved.shareId}.`);
+  } catch (error) {
+    setFeedback(`Failed to load shared archive: ${String(error)}`);
+  }
+}
+
+type ShareArchiveRequest = {
+  shareId: string;
+  baseUrl: string;
+  archiveUrl: string;
+};
+
+function resolveShareArchiveRequest(input: string): ShareArchiveRequest | null {
+  const trimmed = input.trim();
+
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  if (/^[a-zA-Z0-9_-]{8,}$/.test(trimmed)) {
+    const baseUrl = state.shareServerBaseUrl;
+    return {
+      shareId: trimmed,
+      baseUrl,
+      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(trimmed)}/archive`
+    };
+  }
+
+  let parsed: URL;
+
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(parsed.pathname);
+
+  if (sharePageMatch?.[1]) {
+    const shareId = sharePageMatch[1];
+    const baseUrl = parsed.origin;
+    return {
+      shareId,
+      baseUrl,
+      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive`
+    };
+  }
+
+  const archiveMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/archive$/.exec(parsed.pathname);
+
+  if (archiveMatch?.[1]) {
+    return {
+      shareId: archiveMatch[1],
+      baseUrl: parsed.origin,
+      archiveUrl: parsed.toString()
+    };
+  }
+
+  const metadataMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/meta$/.exec(parsed.pathname);
+
+  if (metadataMatch?.[1]) {
+    const shareId = metadataMatch[1];
+    return {
+      shareId,
+      baseUrl: parsed.origin,
+      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive`
+    };
+  }
+
+  return null;
+}
+
+function normalizeShareServerBaseUrl(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
 function togglePlayback(): void {
@@ -1410,6 +1629,7 @@ function renderPlaybackChrome(): void {
   refs.playbackRate.disabled = !hasModel;
   refs.maskResponsePreview.disabled = !hasModel;
   refs.playbackProgress.disabled = !hasModel;
+  refs.shareUpload.disabled = state.loadedArchiveBytes === null;
 
   refs.playbackToggle.textContent = state.isPlaying ? "Pause" : "Play";
 
@@ -4101,9 +4321,32 @@ function readStoredNumber(key: string): number | null {
   }
 }
 
+function readStoredText(key: string): string | null {
+  try {
+    const value = window.localStorage.getItem(key);
+
+    if (value === null) {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
 function writeStoredNumber(key: string, value: number): void {
   try {
     window.localStorage.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures in restricted contexts (private mode, policy blocks).
+  }
+}
+
+function writeStoredText(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
   } catch {
     // Ignore storage failures in restricted contexts (private mode, policy blocks).
   }
@@ -4121,6 +4364,12 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function toArrayBuffer(input: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(input.byteLength);
+  copy.set(input);
+  return copy.buffer;
 }
 
 function getElement<TElement extends HTMLElement>(id: string): TElement {

@@ -105,6 +105,7 @@ pnpm build
 - GitHub issue templates
 - Jira issue templates
 - HAR export
+- Share upload and link-based reload via `@webblackbox/share-server`
 
 ### Session Comparison
 

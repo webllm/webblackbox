@@ -4,11 +4,12 @@ This document describes the high-level architecture of WebBlackbox, the design d
 
 ## System Overview
 
-WebBlackbox is a three-tier system:
+WebBlackbox is a three-tier core system with an optional collaboration tier:
 
 1. **Recording Tier** — A Chrome extension captures events from multiple sources
 2. **Processing Tier** — A pipeline chunks, compresses, indexes, and archives events
 3. **Playback Tier** — A Player SDK and React UI provide analysis and visualization
+4. **Collaboration Tier (optional)** — `share-server` stores uploaded archives and emits redacted secondary indexes for share links
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

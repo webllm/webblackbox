@@ -14,6 +14,7 @@ Think of it as a "black box" for your web app: always recording in the backgroun
 - **Encrypted Archives** — AES-GCM encryption with PBKDF2 key derivation for secure sharing
 - **Rich Playback** — React-based player with timeline, network waterfall, console panel, storage inspector, and DOM diff analysis
 - **Export Capabilities** — Generate bug reports, HAR files, Playwright test scripts, curl/fetch commands, and GitHub/Jira issue templates
+- **Cloud Share Link (optional)** — Upload archives to the share server with redacted server-side metadata for collaboration
 - **MCP Integration** — Model Context Protocol server for AI-assisted session analysis
 - **Extensible Plugin System** — Custom recorder plugins with hooks for event processing
 
@@ -75,7 +76,8 @@ webblackbox/
 ├── apps/
 │   ├── extension/          # Chrome extension (Manifest V3)
 │   ├── player/             # React-based session playback UI
-│   └── mcp-server/         # Model Context Protocol server
+│   ├── mcp-server/         # Model Context Protocol server
+│   └── share-server/       # Optional cloud share and metadata index service
 ├── packages/
 │   ├── protocol/           # Event types, schemas, validation (Zod)
 │   ├── recorder/           # Event recording, normalization, ring buffer
@@ -105,6 +107,8 @@ player ────────┬──→ player-sdk ──→ protocol
                └──→ protocol
 
 mcp-server ────→ mcp-core
+
+share-server ──→ player-sdk ──→ protocol
 ```
 
 ## Documentation

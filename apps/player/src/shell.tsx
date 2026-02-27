@@ -238,6 +238,12 @@ export function PlayerShell(): React.JSX.Element {
             <Button id="export-jira-issue" type="button" variant="secondary">
               Jira
             </Button>
+            <Button id="share-upload" type="button" variant="secondary">
+              Share
+            </Button>
+            <Button id="load-share-url" type="button" variant="secondary">
+              Load Shared
+            </Button>
           </section>
         </div>
       </section>
