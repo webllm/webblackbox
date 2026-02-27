@@ -83,6 +83,9 @@ importers:
       '@webblackbox/player-sdk':
         specifier: workspace:*
         version: link:../../packages/player-sdk
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
       zod:
         specifier: ^4.1.11
         version: 4.3.6
@@ -117,6 +120,12 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
+
+  apps/share-server:
+    dependencies:
+      '@webblackbox/player-sdk':
+        specifier: workspace:*
+        version: link:../../packages/player-sdk
 
   packages/cdp-router:
     dependencies:

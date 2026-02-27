@@ -19,6 +19,7 @@
     "@modelcontextprotocol/sdk": "^1.21.1",
     "@webblackbox/mcp-core": "workspace:*",
     "@webblackbox/player-sdk": "workspace:*",
+    "jszip": "^3.10.1",
     "zod": "^4.1.11"
   }
 }
