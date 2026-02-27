@@ -1613,12 +1613,31 @@ async function captureResponseBody(
     return;
   }
 
-  const fullBytes = response.base64Encoded
+  const metadata = runtime.requestMeta.get(requestId);
+  const normalizedMime = normalizeMimeType(metadata?.mimeType ?? null);
+  const captureRule = resolveFullBodyCaptureRule(runtime, metadata?.url ?? "", normalizedMime);
+
+  if (!captureRule.enabled) {
+    return;
+  }
+
+  const originalBytes = response.base64Encoded
     ? decodeBase64(response.body)
     : new TextEncoder().encode(response.body);
-  const truncated = fullBytes.byteLength > FULL_MODE_BODY_CAPTURE_MAX_BYTES;
-  const sampledBytes = truncated ? fullBytes.slice(0, FULL_MODE_BODY_CAPTURE_MAX_BYTES) : fullBytes;
-  const metadata = runtime.requestMeta.get(requestId);
+  let bodyBytes = originalBytes;
+  let redacted = false;
+
+  if (!response.base64Encoded && runtime.config.redaction.redactBodyPatterns.length > 0) {
+    const redaction = redactBodyText(response.body, runtime.config.redaction.redactBodyPatterns);
+
+    if (redaction.redacted) {
+      bodyBytes = new TextEncoder().encode(redaction.value);
+      redacted = true;
+    }
+  }
+
+  const truncated = bodyBytes.byteLength > captureRule.maxBytes;
+  const sampledBytes = truncated ? bodyBytes.slice(0, captureRule.maxBytes) : bodyBytes;
   const hash = await runtime.pipeline.putBlob(
     metadata?.mimeType ?? "application/octet-stream",
     sampledBytes
@@ -1637,9 +1656,9 @@ async function captureResponseBody(
       reqId: requestId,
       contentHash: hash,
       mimeType: metadata?.mimeType,
-      size: fullBytes.byteLength,
+      size: originalBytes.byteLength,
       sampledSize: sampledBytes.byteLength,
-      redacted: true,
+      redacted,
       truncated
     }
   });
@@ -1669,6 +1688,11 @@ function shouldCaptureResponseBody(
   }
 
   const normalizedMime = normalizeMimeType(metadata.mimeType ?? null);
+  const captureRule = resolveFullBodyCaptureRule(runtime, metadata.url ?? "", normalizedMime);
+
+  if (!captureRule.enabled) {
+    return false;
+  }
 
   if (normalizedMime && !isTextualMimeType(normalizedMime)) {
     return false;
@@ -1683,7 +1707,7 @@ function shouldCaptureResponseBody(
   if (
     encodedDataLength !== null &&
     Number.isFinite(encodedDataLength) &&
-    encodedDataLength > FULL_MODE_BODY_CAPTURE_MAX_BYTES * 2
+    encodedDataLength > captureRule.maxBytes * 2
   ) {
     return false;
   }
@@ -2276,6 +2300,76 @@ function resolveLiteBodyCaptureRule(
   }
 
   return defaultRule;
+}
+
+function resolveFullBodyCaptureRule(
+  runtime: SessionRuntime,
+  url: string,
+  mimeType: string | undefined
+): LiteBodyCaptureRule {
+  const defaultRule: LiteBodyCaptureRule = {
+    enabled: true,
+    maxBytes: normalizeBodyCaptureMaxBytes(runtime.config.sampling.bodyCaptureMaxBytes),
+    mimeAllowlist: normalizeMimeAllowlist(LITE_DEFAULT_BODY_MIME_ALLOWLIST)
+  };
+
+  if (!url) {
+    return isMimeAllowed(defaultRule.mimeAllowlist, mimeType)
+      ? defaultRule
+      : { ...defaultRule, enabled: false };
+  }
+
+  let parsedUrl: URL | null = null;
+
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return isMimeAllowed(defaultRule.mimeAllowlist, mimeType)
+      ? defaultRule
+      : { ...defaultRule, enabled: false };
+  }
+
+  for (const policy of runtime.config.sitePolicies) {
+    if (!policy.enabled || policy.mode !== "full") {
+      continue;
+    }
+
+    if (
+      !matchesSitePolicy(parsedUrl, policy.originPattern, policy.pathAllowlist, policy.pathDenylist)
+    ) {
+      continue;
+    }
+
+    if (!policy.allowBodyCapture) {
+      return {
+        ...defaultRule,
+        enabled: false
+      };
+    }
+
+    const allowlist =
+      policy.bodyMimeAllowlist.length > 0
+        ? normalizeMimeAllowlist(policy.bodyMimeAllowlist)
+        : defaultRule.mimeAllowlist;
+
+    if (!isMimeAllowed(allowlist, mimeType)) {
+      return {
+        enabled: false,
+        maxBytes: defaultRule.maxBytes,
+        mimeAllowlist: allowlist
+      };
+    }
+
+    return {
+      enabled: true,
+      maxBytes: defaultRule.maxBytes,
+      mimeAllowlist: allowlist
+    };
+  }
+
+  return isMimeAllowed(defaultRule.mimeAllowlist, mimeType)
+    ? defaultRule
+    : { ...defaultRule, enabled: false };
 }
 
 function normalizeBodyCaptureMaxBytes(candidate: unknown): number {
