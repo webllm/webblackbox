@@ -8,7 +8,8 @@ import {
   exportHarFromArchive,
   generateBugReportBundle,
   generatePlaywrightFromArchive,
-  listArchives
+  listArchives,
+  summarizeActions
 } from "./session-tools.js";
 
 const tempDirs: string[] = [];
@@ -107,6 +108,16 @@ describe("session tools", () => {
 
     await expect(
       generatePlaywrightFromArchive({
+        path: missing
+      })
+    ).rejects.toThrowError("Failed to open archive");
+  });
+
+  it("throws helpful errors when summarizing actions for missing archive", async () => {
+    const missing = join(tmpdir(), `wb-mcp-missing-actions-${Date.now()}.webblackbox`);
+
+    await expect(
+      summarizeActions({
         path: missing
       })
     ).rejects.toThrowError("Failed to open archive");

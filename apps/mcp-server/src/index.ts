@@ -24,6 +24,8 @@ import {
   queryEvents,
   queryEventsInput,
   sessionSummaryInput,
+  summarizeActions,
+  summarizeActionsInput,
   summarizeNetworkIssues,
   summarizeSession
 } from "./session-tools.js";
@@ -233,6 +235,23 @@ export function createServer(): McpServer {
           includeHarReplay,
           monoStart,
           monoEnd
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "summarize_actions",
+    "Summarize action spans (trigger, duration, request/error counts) from an archive.",
+    summarizeActionsInput,
+    async ({ path, passphrase, monoStart, monoEnd, limit }) => {
+      return toTextPayload(
+        await summarizeActions({
+          path,
+          passphrase,
+          monoStart,
+          monoEnd,
+          limit
         })
       );
     }

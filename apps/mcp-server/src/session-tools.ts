@@ -183,6 +183,28 @@ export type ExportHarArgs = {
   monoEnd?: number;
 };
 
+export const summarizeActionsInput = {
+  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
+  monoStart: z.number().finite().optional().describe("Optional mono range start."),
+  monoEnd: z.number().finite().optional().describe("Optional mono range end."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_QUERY_LIMIT)
+    .optional()
+    .describe(`Maximum action spans to return (1-${MAX_QUERY_LIMIT}).`)
+};
+
+export type SummarizeActionsArgs = {
+  path: string;
+  passphrase?: string;
+  monoStart?: number;
+  monoEnd?: number;
+  limit?: number;
+};
+
 export const generatePlaywrightInput = {
   path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
@@ -658,6 +680,64 @@ export async function generatePlaywrightFromArchive(args: GeneratePlaywrightArgs
       monoEnd: range?.monoEnd ?? null
     },
     script
+  };
+}
+
+export async function summarizeActions(args: SummarizeActionsArgs): Promise<{
+  archive: string;
+  range: {
+    monoStart: number | null;
+    monoEnd: number | null;
+  };
+  totals: {
+    actions: number;
+    events: number;
+    errors: number;
+    requests: number;
+  };
+  actions: Array<{
+    actId: string;
+    triggerEventId: string;
+    triggerType: string | null;
+    startMono: number;
+    endMono: number;
+    durationMs: number;
+    eventCount: number;
+    requestCount: number;
+    errorCount: number;
+  }>;
+}> {
+  const archivePath = resolveArchivePath(args.path);
+  const player = await openArchivePlayer(archivePath, args.passphrase);
+  const range = buildRange(args.monoStart, args.monoEnd);
+  const derived = player.buildDerived(range ?? undefined);
+  const limit = clampInt(args.limit ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
+  const eventTypeById = new Map(player.events.map((event) => [event.id, event.type]));
+  const actions = derived.actionSpans.slice(0, limit).map((span) => ({
+    actId: span.actId,
+    triggerEventId: span.triggerEventId,
+    triggerType: eventTypeById.get(span.triggerEventId) ?? null,
+    startMono: span.startMono,
+    endMono: span.endMono,
+    durationMs: Number((span.endMono - span.startMono).toFixed(2)),
+    eventCount: span.eventIds.length,
+    requestCount: span.requestCount,
+    errorCount: span.errorCount
+  }));
+
+  return {
+    archive: archivePath,
+    range: {
+      monoStart: range?.monoStart ?? null,
+      monoEnd: range?.monoEnd ?? null
+    },
+    totals: {
+      actions: derived.actionSpans.length,
+      events: derived.totals.events,
+      errors: derived.totals.errors,
+      requests: derived.totals.requests
+    },
+    actions
   };
 }
 
