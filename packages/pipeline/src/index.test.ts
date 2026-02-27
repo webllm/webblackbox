@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import JSZip from "jszip";
 
 import type { SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
 
@@ -163,6 +164,34 @@ describe("pipeline", () => {
 
     expect(first).toBe(second);
     expect((await storage.listBlobs()).length).toBe(1);
+  });
+
+  it("exports only blobs referenced by retained events", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    const referenced = await pipeline.putBlob("image/webp", new Uint8Array([1, 2, 3]));
+    const orphan = await pipeline.putBlob("application/json", new TextEncoder().encode('{"x":1}'));
+
+    await pipeline.ingest(
+      createEvent("E-ref-blob", "screen.screenshot", Date.now(), {
+        shotId: referenced,
+        format: "webp",
+        size: 3
+      })
+    );
+
+    const exported = await pipeline.exportBundle();
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const blobPaths = Object.keys(zip.files).filter((path) => path.startsWith("blobs/"));
+
+    expect(blobPaths.some((path) => path.includes(referenced))).toBe(true);
+    expect(blobPaths.some((path) => path.includes(orphan))).toBe(false);
   });
 
   it("exports and reads .webblackbox archive", async () => {

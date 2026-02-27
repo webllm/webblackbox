@@ -173,7 +173,7 @@ export class FlightRecorderPipeline {
     if (!hasCustomSelection) {
       const indexes = await this.finalizeIndexes();
       const chunks = await this.options.storage.listChunks(this.options.session.sid);
-      const blobs = await this.listSessionBlobs();
+      const blobs = await this.listReferencedSessionBlobsFromChunks(chunks);
       const manifest = this.buildManifest(chunks, blobs.length);
 
       const { bytes, integrity } = await createWebBlackboxArchive(
@@ -257,6 +257,32 @@ export class FlightRecorderPipeline {
     }
 
     return byHash;
+  }
+
+  private async listReferencedSessionBlobsFromChunks(chunks: StoredChunk[]): Promise<StoredBlob[]> {
+    const blobsByHash = await this.listSessionBlobMap();
+    const referencedHashes = new Set<string>();
+
+    for (const chunk of chunks) {
+      const events = decodeEventsNdjson(chunk.bytes);
+      const hashes = collectBlobHashesFromEvents(events);
+
+      for (const hash of hashes) {
+        referencedHashes.add(hash);
+      }
+    }
+
+    const referenced: StoredBlob[] = [];
+
+    for (const hash of [...referencedHashes].sort()) {
+      const blob = blobsByHash.get(hash);
+
+      if (blob) {
+        referenced.push(blob);
+      }
+    }
+
+    return referenced;
   }
 
   private async prepareExportChunks(
