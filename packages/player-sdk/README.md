@@ -34,6 +34,11 @@ const player = await WebBlackboxPlayer.open(archiveBytes, {
   passphrase: "my-secret"
 });
 
+// Preload only a monotonic time window (loads intersecting chunks only)
+const scopedPlayer = await WebBlackboxPlayer.open(archiveBytes, {
+  range: { monoStart: 12000, monoEnd: 45000 }
+});
+
 console.log(player.status); // "loaded"
 console.log(player.archive.manifest); // ExportManifest
 console.log(player.events.length); // Total event count
@@ -210,6 +215,12 @@ for (const span of derived.actionSpans) {
 console.log(derived.totals.events); // Total event count
 console.log(derived.totals.errors); // Total error count
 console.log(derived.totals.requests); // Total request count
+
+// Timeline view with request/error/screenshot context per action
+const timeline = player.getActionTimeline({
+  range: { monoStart: 0, monoEnd: 60000 },
+  limit: 20
+});
 ```
 
 ## Code Generation
@@ -240,7 +251,8 @@ const harPartial = player.exportHar({ monoStart: 0, monoEnd: 30000 });
 ```typescript
 const report = player.generateBugReport({
   title: "Login fails with 500 error",
-  description: "Steps to reproduce..."
+  range: { monoStart: 0, monoEnd: 30000 },
+  maxItems: 30
 });
 // Returns markdown-formatted bug report with session context
 ```
@@ -250,12 +262,16 @@ const report = player.generateBugReport({
 ```typescript
 // Generate test script from recorded user actions
 const testScript = player.generatePlaywrightScript({
-  baseUrl: "https://example.com"
+  name: "checkout flow",
+  startUrl: "https://example.com",
+  includeHarReplay: true
 });
 
 // Generate mock script with captured network responses
 const mockScript = await player.generatePlaywrightMockScript({
-  baseUrl: "https://example.com"
+  name: "checkout flow",
+  startUrl: "https://example.com",
+  maxMocks: 50
 });
 ```
 
@@ -290,6 +306,12 @@ for (const td of comparison.typeDeltas) {
   console.log(`${td.type}: ${td.left} vs ${td.right} (${td.delta})`);
 }
 
+for (const row of comparison.endpointRegressions) {
+  console.log(`${row.method} ${row.endpoint}`);
+  console.log(`failure rate delta: ${row.failureRateDelta}`);
+  console.log(`p95 delta(ms): ${row.p95DurationDeltaMs}`);
+}
+
 // Storage comparison
 const storageDiff = player.compareStorageWith(other);
 
@@ -306,6 +328,7 @@ type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 
 type PlayerOpenOptions = {
   passphrase?: string;
+  range?: PlayerRange;
 };
 
 type PlayerQuery = {
