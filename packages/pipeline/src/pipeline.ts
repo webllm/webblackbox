@@ -149,7 +149,7 @@ export class FlightRecorderPipeline {
       refCount: 1
     };
 
-    await this.options.storage.putBlob(blob);
+    await this.options.storage.putBlob(blob, this.options.session.sid);
     return hash;
   }
 

@@ -10,6 +10,7 @@ The event processing pipeline for WebBlackbox. Handles chunking, indexing, blob 
 - **Codec** — NDJSON encoding/decoding (`chunkCodec` values other than `none` currently fall back to `none`)
 - **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
 - **PipelineStorage** — Abstract storage interface with in-memory implementation
+- **IndexedDB Quota Recovery** — Indexed storage evicts oldest sessions on quota pressure (best-effort)
 
 ## Usage
 
@@ -173,7 +174,7 @@ class CustomStorage implements PipelineStorage {
   async getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined> {
     /* ... */
   }
-  async putBlob(blob: StoredBlob): Promise<void> {
+  async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     /* ... */
   }
   async getBlob(hash: string): Promise<StoredBlob | undefined> {

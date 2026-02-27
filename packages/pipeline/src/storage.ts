@@ -6,6 +6,8 @@ import type {
   SessionMetadata
 } from "@webblackbox/protocol";
 
+import { decodeEventsNdjson } from "./codec.js";
+
 export type StoredChunk = {
   sid: string;
   meta: ChunkTimeIndexEntry;
@@ -33,7 +35,7 @@ export type PipelineStorage = {
   putChunk(chunk: StoredChunk): Promise<void>;
   listChunks(sid: string): Promise<StoredChunk[]>;
   getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined>;
-  putBlob(blob: StoredBlob): Promise<void>;
+  putBlob(blob: StoredBlob, sidHint?: string): Promise<void>;
   getBlob(hash: string): Promise<StoredBlob | undefined>;
   listBlobs(): Promise<StoredBlob[]>;
   putIndexes(sid: string, indexes: StoredIndexes): Promise<void>;
@@ -48,6 +50,8 @@ const EMPTY_INDEXES: StoredIndexes = {
   request: [],
   inverted: []
 };
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
+const MAX_QUOTA_RECOVERY_ATTEMPTS = 2;
 
 export class MemoryPipelineStorage implements PipelineStorage {
   private readonly sessions = new Map<string, SessionMetadata>();
@@ -84,7 +88,8 @@ export class MemoryPipelineStorage implements PipelineStorage {
     return chunks.find((chunk) => chunk.meta.chunkId === chunkId);
   }
 
-  public async putBlob(blob: StoredBlob): Promise<void> {
+  public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
+    void sidHint;
     const existing = this.blobs.get(blob.hash);
 
     if (existing) {
@@ -170,10 +175,17 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   public constructor(private readonly dbName = "webblackbox-pipeline") {}
 
   public async putSession(metadata: SessionMetadata): Promise<void> {
-    await this.put<SessionRow>("sessions", {
-      key: metadata.sid,
-      value: metadata
-    });
+    await this.put<SessionRow>(
+      "sessions",
+      {
+        key: metadata.sid,
+        value: metadata
+      },
+      {
+        allowQuotaRecovery: true,
+        protectedSid: metadata.sid
+      }
+    );
   }
 
   public async getSession(sid: string): Promise<SessionMetadata | undefined> {
@@ -182,12 +194,19 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async putChunk(chunk: StoredChunk): Promise<void> {
-    await this.put<ChunkRow>("chunks", {
-      key: this.chunkKey(chunk.sid, chunk.meta.chunkId),
-      sid: chunk.sid,
-      seq: chunk.meta.seq,
-      value: chunk
-    });
+    await this.put<ChunkRow>(
+      "chunks",
+      {
+        key: this.chunkKey(chunk.sid, chunk.meta.chunkId),
+        sid: chunk.sid,
+        seq: chunk.meta.seq,
+        value: chunk
+      },
+      {
+        allowQuotaRecovery: true,
+        protectedSid: chunk.sid
+      }
+    );
   }
 
   public async listChunks(sid: string): Promise<StoredChunk[]> {
@@ -217,24 +236,37 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     return row?.value;
   }
 
-  public async putBlob(blob: StoredBlob): Promise<void> {
+  public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     const existing = await this.getBlob(blob.hash);
 
     if (existing) {
-      await this.put<BlobRow>("blobs", {
-        key: blob.hash,
-        value: {
-          ...existing,
-          refCount: existing.refCount + 1
+      await this.put<BlobRow>(
+        "blobs",
+        {
+          key: blob.hash,
+          value: {
+            ...existing,
+            refCount: existing.refCount + 1
+          }
+        },
+        {
+          allowQuotaRecovery: false
         }
-      });
+      );
       return;
     }
 
-    await this.put<BlobRow>("blobs", {
-      key: blob.hash,
-      value: blob
-    });
+    await this.put<BlobRow>(
+      "blobs",
+      {
+        key: blob.hash,
+        value: blob
+      },
+      {
+        allowQuotaRecovery: true,
+        protectedSid: sidHint
+      }
+    );
   }
 
   public async getBlob(hash: string): Promise<StoredBlob | undefined> {
@@ -248,10 +280,17 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async putIndexes(sid: string, indexes: StoredIndexes): Promise<void> {
-    await this.put<IndexRow>("indexes", {
-      key: sid,
-      value: indexes
-    });
+    await this.put<IndexRow>(
+      "indexes",
+      {
+        key: sid,
+        value: indexes
+      },
+      {
+        allowQuotaRecovery: true,
+        protectedSid: sid
+      }
+    );
   }
 
   public async getIndexes(sid: string): Promise<StoredIndexes> {
@@ -260,10 +299,17 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async putIntegrity(sid: string, manifest: HashesManifest): Promise<void> {
-    await this.put<IntegrityRow>("integrity", {
-      key: sid,
-      value: manifest
-    });
+    await this.put<IntegrityRow>(
+      "integrity",
+      {
+        key: sid,
+        value: manifest
+      },
+      {
+        allowQuotaRecovery: true,
+        protectedSid: sid
+      }
+    );
   }
 
   public async getIntegrity(sid: string): Promise<HashesManifest | undefined> {
@@ -302,12 +348,40 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     return this.dbPromise;
   }
 
-  private async put<TRow>(storeName: string, value: TRow): Promise<void> {
-    const db = await this.db();
+  private async put<TRow>(
+    storeName: string,
+    value: TRow,
+    options: {
+      allowQuotaRecovery?: boolean;
+      protectedSid?: string;
+    } = {}
+  ): Promise<void> {
+    const allowQuotaRecovery = options.allowQuotaRecovery === true;
+    const recoveryAttempts = allowQuotaRecovery ? MAX_QUOTA_RECOVERY_ATTEMPTS : 0;
+    let attempt = 0;
 
-    await runTransaction(db, storeName, "readwrite", (store) => {
-      store.put(value);
-    });
+    while (true) {
+      const db = await this.db();
+
+      try {
+        await runTransaction(db, storeName, "readwrite", (store) => {
+          store.put(value);
+        });
+        return;
+      } catch (error) {
+        if (!isQuotaExceededError(error) || attempt >= recoveryAttempts) {
+          throw error;
+        }
+
+        attempt += 1;
+
+        const recovered = await this.recoverQuotaPressure(options.protectedSid);
+
+        if (!recovered) {
+          throw error;
+        }
+      }
+    }
   }
 
   private async get<TRow>(storeName: string, key: string): Promise<TRow | undefined> {
@@ -324,6 +398,57 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     return runTransaction(db, storeName, "readonly", (store) => {
       return requestToPromise<TRow[]>(store.getAll());
     });
+  }
+
+  private async recoverQuotaPressure(protectedSid?: string): Promise<boolean> {
+    const before = await getNavigatorStorageEstimate();
+    const evictedSid = await this.evictOldestSession(protectedSid);
+
+    if (!evictedSid) {
+      console.warn(
+        "[WebBlackbox] IndexedDB quota pressure detected, no evictable sessions remain",
+        {
+          protectedSid,
+          usage: before?.usage ?? null,
+          quota: before?.quota ?? null
+        }
+      );
+      return false;
+    }
+
+    const after = await getNavigatorStorageEstimate();
+
+    console.warn("[WebBlackbox] IndexedDB quota pressure detected, evicted oldest session", {
+      evictedSid,
+      protectedSid,
+      usageBefore: before?.usage ?? null,
+      usageAfter: after?.usage ?? null,
+      quota: after?.quota ?? before?.quota ?? null
+    });
+
+    return true;
+  }
+
+  private async evictOldestSession(protectedSid?: string): Promise<string | null> {
+    const rows = await this.getAll<SessionRow>("sessions");
+    const candidates = rows
+      .map((row) => row.value)
+      .filter((session) => session.sid !== protectedSid)
+      .sort((left, right) => left.startedAt - right.startedAt);
+    const oldest = candidates[0];
+
+    if (!oldest) {
+      return null;
+    }
+
+    await this.deleteSessionWithBlobCleanup(oldest.sid);
+    return oldest.sid;
+  }
+
+  private async deleteSessionWithBlobCleanup(sid: string): Promise<void> {
+    const chunks = await this.listChunks(sid);
+    const blobHashes = collectBlobHashesFromChunks(chunks);
+    await this.deleteSession(sid, [...blobHashes]);
   }
 
   private open(): Promise<IDBDatabase> {
@@ -398,13 +523,96 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       return;
     }
 
-    await this.put<BlobRow>("blobs", {
-      key: hash,
-      value: {
-        ...existing,
-        refCount: existing.refCount - 1
+    await this.put<BlobRow>(
+      "blobs",
+      {
+        key: hash,
+        value: {
+          ...existing,
+          refCount: existing.refCount - 1
+        }
+      },
+      {
+        allowQuotaRecovery: false
       }
-    });
+    );
+  }
+}
+
+function isQuotaExceededError(error: unknown): boolean {
+  const DomException = globalThis.DOMException;
+
+  if (!DomException || !(error instanceof DomException)) {
+    return false;
+  }
+
+  return error.name === "QuotaExceededError" || error.name === "NS_ERROR_DOM_QUOTA_REACHED";
+}
+
+async function getNavigatorStorageEstimate(): Promise<{ usage?: number; quota?: number } | null> {
+  const estimate = globalThis.navigator?.storage?.estimate;
+
+  if (typeof estimate !== "function") {
+    return null;
+  }
+
+  try {
+    const value = await estimate.call(globalThis.navigator.storage);
+    return {
+      usage: typeof value.usage === "number" ? value.usage : undefined,
+      quota: typeof value.quota === "number" ? value.quota : undefined
+    };
+  } catch {
+    return null;
+  }
+}
+
+function collectBlobHashesFromChunks(chunks: StoredChunk[]): Set<string> {
+  const hashes = new Set<string>();
+
+  for (const chunk of chunks) {
+    try {
+      const events = decodeEventsNdjson(chunk.bytes);
+
+      for (const event of events) {
+        collectBlobHashesFromUnknown(event.data, hashes);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return hashes;
+}
+
+function collectBlobHashesFromUnknown(value: unknown, output: Set<string>): void {
+  const stack: unknown[] = [value];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+
+    if (typeof current === "string") {
+      if (SHA256_HEX_PATTERN.test(current)) {
+        output.add(current);
+      }
+
+      continue;
+    }
+
+    if (!current || typeof current !== "object") {
+      continue;
+    }
+
+    if (Array.isArray(current)) {
+      for (const item of current) {
+        stack.push(item);
+      }
+      continue;
+    }
+
+    for (const item of Object.values(current as Record<string, unknown>)) {
+      stack.push(item);
+    }
   }
 }
 
