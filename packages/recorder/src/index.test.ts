@@ -52,6 +52,57 @@ describe("recorder", () => {
     expect(redacted.token).not.toBe("abcdef");
   });
 
+  it("uses SHA-256 style hashes when hashSensitiveValues is enabled", () => {
+    const payload = {
+      headers: {
+        authorization: "Bearer abc"
+      },
+      token: "abcdef"
+    };
+
+    const redacted = redactPayload(payload, TEST_CONFIG.redaction) as {
+      headers: Record<string, string>;
+      token: string;
+    };
+
+    expect(redacted.headers.authorization).toMatch(/^[a-f0-9]{64}$/);
+    expect(redacted.token).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("redacts configured cookie names without masking every cookie", () => {
+    const profile: RecorderConfig["redaction"] = {
+      ...TEST_CONFIG.redaction,
+      redactHeaders: ["authorization"],
+      redactCookieNames: ["session", "token"],
+      hashSensitiveValues: false
+    };
+
+    const payload = {
+      headers: {
+        cookie: "session=abc123; theme=dark; token=xyz",
+        "set-cookie": "token=xyz; Path=/; HttpOnly",
+        authorization: "Bearer abc"
+      },
+      cookies: [
+        { name: "session", value: "abc123", path: "/" },
+        { name: "theme", value: "dark", path: "/" }
+      ]
+    };
+
+    const redacted = redactPayload(payload, profile) as {
+      headers: Record<string, string>;
+      cookies: Array<{ name: string; value: string }>;
+    };
+
+    expect(redacted.headers.cookie).toContain("session=[REDACTED]");
+    expect(redacted.headers.cookie).toContain("theme=dark");
+    expect(redacted.headers.cookie).toContain("token=[REDACTED]");
+    expect(redacted.headers["set-cookie"]).toContain("token=[REDACTED]");
+    expect(redacted.headers.authorization).toBe("[REDACTED]");
+    expect(redacted.cookies[0]?.value).toBe("[REDACTED]");
+    expect(redacted.cookies[1]?.value).toBe("dark");
+  });
+
   it("assigns action span id to dependent events", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const now = Date.now();
