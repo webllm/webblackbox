@@ -174,6 +174,15 @@ describe("WebBlackboxPlayer", () => {
     expect(comparison.eventDelta).toBeGreaterThan(0);
     expect(comparison.requestDelta).toBe(0);
     expect(comparison.typeDeltas.length).toBeGreaterThan(0);
+    expect(comparison.endpointRegressions.length).toBeGreaterThan(0);
+    expect(comparison.endpointRegressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endpoint: "https://example.com/api",
+          rightCount: 1
+        })
+      ])
+    );
 
     const storageComparison = left.compareStorageWith(right);
     expect(storageComparison.rightEvents).toBeGreaterThan(storageComparison.leftEvents);

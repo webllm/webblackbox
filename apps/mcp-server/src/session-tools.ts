@@ -939,6 +939,22 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
     failedDelta: number;
     slowDelta: number;
     p95DurationDeltaMs: number;
+    endpointRegressions: Array<{
+      endpoint: string;
+      method: string;
+      leftCount: number;
+      rightCount: number;
+      countDelta: number;
+      leftFailed: number;
+      rightFailed: number;
+      failedDelta: number;
+      leftFailureRate: number;
+      rightFailureRate: number;
+      failureRateDelta: number;
+      leftP95DurationMs: number;
+      rightP95DurationMs: number;
+      p95DurationDeltaMs: number;
+    }>;
     topFailedRequests: Array<{
       side: "left" | "right";
       reqId: string;
@@ -1027,6 +1043,7 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
       failedDelta: rightNet.failed - leftNet.failed,
       slowDelta: rightNet.slowOver1000ms - leftNet.slowOver1000ms,
       p95DurationDeltaMs: Number((rightNet.p95DurationMs - leftNet.p95DurationMs).toFixed(2)),
+      endpointRegressions: comparison.endpointRegressions.slice(0, topRequestDiffs),
       topFailedRequests: [...leftFailed, ...rightFailed]
         .sort((left, right) => right.durationMs - left.durationMs)
         .slice(0, topRequestDiffs),
