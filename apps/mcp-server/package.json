@@ -6,12 +6,14 @@
   "main": "./dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "prebuild": "pnpm --filter @webblackbox/player-sdk build",
     "build": "tsup src/index.ts --format esm --clean",
+    "prestart": "pnpm run build",
     "start": "node dist/index.js",
     "inspect": "pnpm run build && npx @modelcontextprotocol/inspector node dist/index.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.1",
