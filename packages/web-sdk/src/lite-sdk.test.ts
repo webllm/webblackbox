@@ -182,7 +182,7 @@ describe("WebBlackboxLiteSdk", () => {
     expect(parsed.events.length).toBeGreaterThanOrEqual(2);
     expect(clickEvent).toBeDefined();
     expect(clickEvent?.sid).toBe("S-sdk-export");
-    expect(clickEvent?.tab).toBe(-1);
+    expect(clickEvent?.tab).toBe(0);
 
     expect(screenshotEvent).toBeDefined();
     expect(screenshotEvent?.data).toMatchObject({
@@ -191,6 +191,35 @@ describe("WebBlackboxLiteSdk", () => {
       reason: "action:click"
     });
     expect(typeof (screenshotEvent?.data as { shotId?: unknown }).shotId).toBe("string");
+
+    await sdk.dispose();
+  });
+
+  it("normalizes invalid tab ids to non-negative values", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-tab-id",
+      tabId: -42,
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    expect(sdk.getSessionMetadata().tabId).toBe(0);
+
+    await sdk.start();
+    sdk.ingestRawEvent(
+      createRawEvent("click", {
+        x: 10,
+        y: 20,
+        target: {
+          selector: "button#tab"
+        }
+      })
+    );
+
+    const exported = await sdk.export();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+    const click = parsed.events.find((event) => event.type === "user.click");
+    expect(click?.tab).toBe(0);
 
     await sdk.dispose();
   });

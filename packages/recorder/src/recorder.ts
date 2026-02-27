@@ -61,7 +61,7 @@ export class WebBlackboxRecorder {
     const event: WebBlackboxEvent = {
       v: 1,
       sid: nextRawEvent.sid,
-      tab: nextRawEvent.tabId,
+      tab: normalizeTabId(nextRawEvent.tabId),
       nav: nextRawEvent.nav,
       frame: nextRawEvent.frame,
       tgt: nextRawEvent.targetId,
@@ -159,4 +159,12 @@ export class WebBlackboxRecorder {
 
     return nextEvent;
   }
+}
+
+function normalizeTabId(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.round(value));
 }

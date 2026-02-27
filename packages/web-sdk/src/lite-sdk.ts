@@ -29,7 +29,7 @@ import type {
   WebBlackboxLiteSdkOptions
 } from "./types.js";
 
-const DEFAULT_TAB_ID = -1;
+const DEFAULT_TAB_ID = 0;
 const LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
 const PIPELINE_BATCH_MAX_EVENTS = 160;
 const PIPELINE_BATCH_FLUSH_DELAY_MS = 120;
@@ -416,7 +416,7 @@ function normalizeTabId(value: number | undefined): number {
     return DEFAULT_TAB_ID;
   }
 
-  return Math.round(value);
+  return Math.max(0, Math.round(value));
 }
 
 function createSessionMetadata(

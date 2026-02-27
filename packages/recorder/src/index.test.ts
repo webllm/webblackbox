@@ -103,6 +103,23 @@ describe("recorder", () => {
     expect(redacted.cookies[1]?.value).toBe("dark");
   });
 
+  it("clamps negative tab ids to zero", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "click",
+      sid: "S-tab",
+      tabId: -99,
+      t: Date.now(),
+      mono: 12,
+      payload: {
+        selector: "button#submit"
+      }
+    });
+
+    expect(result.event?.tab).toBe(0);
+  });
+
   it("assigns action span id to dependent events", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const now = Date.now();
