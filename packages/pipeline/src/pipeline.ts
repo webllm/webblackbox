@@ -63,6 +63,7 @@ const EXPORT_OVERHEAD_RESERVE_BYTES = 2 * 1024 * 1024;
 
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
+  private readonly chunkCodec: (typeof CHUNK_CODECS)[number];
 
   private readonly indexer = new EventIndexer();
 
@@ -70,8 +71,9 @@ export class FlightRecorderPipeline {
   private readonly sessionBlobHashes = new Set<string>();
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
-    const codec = options.chunkCodec ?? "none";
+    const codec = resolveChunkCodec(options.chunkCodec);
     const maxChunkBytes = options.maxChunkBytes ?? 512 * 1024;
+    this.chunkCodec = codec;
     this.chunker = new EventChunker(maxChunkBytes, codec);
   }
 
@@ -493,7 +495,7 @@ export class FlightRecorderPipeline {
         monoEnd: last?.mono ?? 0,
         eventCount: events.length,
         byteLength: bytes.byteLength,
-        codec: this.options.chunkCodec ?? "none",
+        codec: this.chunkCodec,
         sha256: hash
       },
       bytes
@@ -516,7 +518,7 @@ export class FlightRecorderPipeline {
         origin: this.options.session.url,
         title: this.options.session.title
       },
-      chunkCodec: this.options.chunkCodec ?? "none",
+      chunkCodec: this.chunkCodec,
       redactionProfile: this.options.redactionProfile ?? {
         redactHeaders: [],
         redactCookieNames: [],
@@ -609,4 +611,17 @@ function normalizeBoundedPositiveInt(value: unknown): number | null {
   }
 
   return Math.max(1, Math.round(value));
+}
+
+function resolveChunkCodec(
+  codec: (typeof CHUNK_CODECS)[number] | undefined
+): (typeof CHUNK_CODECS)[number] {
+  if (!codec || codec === "none") {
+    return "none";
+  }
+
+  console.warn(
+    `[WebBlackbox] chunk codec '${codec}' is not implemented yet; falling back to 'none'.`
+  );
+  return "none";
 }

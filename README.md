@@ -58,7 +58,7 @@ WebBlackbox is a TypeScript monorepo organized into three tiers:
 1. **Injected Script** captures console logs, storage operations via `postMessage`
 2. **Content Script** receives injected events + captures user interactions and DOM events
 3. **Service Worker** receives all events, normalizes them through the recorder, routes to the pipeline
-4. **Offscreen Document** runs the pipeline: chunking, compression, indexing, and storage
+4. **Offscreen Document** runs the pipeline: chunking, indexing, and storage
 5. **Export** generates a `.webblackbox` ZIP archive with manifest, events (NDJSON), indexes, and blobs
 
 ### Playback Data Flow
@@ -79,7 +79,7 @@ webblackbox/
 ├── packages/
 │   ├── protocol/           # Event types, schemas, validation (Zod)
 │   ├── recorder/           # Event recording, normalization, ring buffer
-│   ├── pipeline/           # Chunking, compression, indexing, export
+│   ├── pipeline/           # Chunking, indexing, export
 │   ├── web-sdk/            # Browser lite capture SDK (published as `webblackbox`)
 │   ├── player-sdk/         # Playback, querying, analysis APIs
 │   ├── cdp-router/         # Chrome DevTools Protocol routing
@@ -179,7 +179,7 @@ Processes recorded events into portable, indexed archives.
 - **FlightRecorderPipeline** — Main pipeline orchestrator: ingestion, chunking, blob storage, index building, and archive export
 - **EventChunker** — Groups events into size-bounded chunks with configurable codecs
 - **EventIndexer** — Builds time-based, request-based, and inverted text search indexes
-- **Codec** — Encode/decode events as NDJSON with compression support (brotli, zstd, gzip)
+- **Codec** — Encode/decode events as NDJSON (`chunkCodec` currently resolves to `none`)
 - **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
 - **PipelineStorage** — Abstract storage interface with `MemoryPipelineStorage` implementation
 - **SHA-256** — Content-addressable blob deduplication
@@ -358,7 +358,7 @@ WebBlackbox exports sessions as `.webblackbox` files (ZIP archives) with the fol
 session.webblackbox (ZIP)
 ├── manifest.json           # Export metadata, stats, encryption info
 ├── events/
-│   ├── C-000001.ndjson     # Event chunk 1 (NDJSON, optionally compressed)
+│   ├── C-000001.ndjson     # Event chunk 1 (NDJSON)
 │   ├── C-000002.ndjson     # Event chunk 2
 │   └── ...
 ├── index/

@@ -72,6 +72,27 @@ describe("pipeline", () => {
     expect(indexes.request.some((entry) => entry.reqId === "R-1")).toBe(true);
   });
 
+  it("falls back to codec=none when compression codecs are requested", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 100,
+      chunkCodec: "gzip"
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-codec-1", "network.request", 1));
+    await pipeline.flush();
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(chunks[0]?.meta.codec).toBe("none");
+    expect(parsed.manifest.chunkCodec).toBe("none");
+  });
+
   it("ingests batches without losing index coverage", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
