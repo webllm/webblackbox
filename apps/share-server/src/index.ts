@@ -298,7 +298,7 @@ async function buildShareSummary(bytes: Uint8Array, passphrase?: string): Promis
 
     return {
       analyzed: true,
-      encrypted: manifest.encryption !== null,
+      encrypted: Boolean(manifest.encryption),
       manifest: {
         origin: redactText(manifest.site.origin),
         mode: manifest.mode,
