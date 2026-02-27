@@ -735,6 +735,28 @@ export async function summarizeActions(args: SummarizeActionsArgs): Promise<{
     eventCount: number;
     requestCount: number;
     errorCount: number;
+    requests: Array<{
+      reqId: string;
+      method: string;
+      url: string;
+      status: number | null;
+      failed: boolean;
+      durationMs: number;
+    }>;
+    errors: Array<{
+      eventId: string;
+      type: string;
+      mono: number;
+      message: string | null;
+    }>;
+    screenshot: {
+      eventId: string;
+      mono: number;
+      shotId: string | null;
+      reason: string | null;
+      format: string | null;
+      size: number | null;
+    } | null;
   }>;
 }> {
   const archivePath = resolveArchivePath(args.path);
@@ -742,18 +764,10 @@ export async function summarizeActions(args: SummarizeActionsArgs): Promise<{
   const range = buildRange(args.monoStart, args.monoEnd);
   const derived = player.buildDerived(range ?? undefined);
   const limit = clampInt(args.limit ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
-  const eventTypeById = new Map(player.events.map((event) => [event.id, event.type]));
-  const actions = derived.actionSpans.slice(0, limit).map((span) => ({
-    actId: span.actId,
-    triggerEventId: span.triggerEventId,
-    triggerType: eventTypeById.get(span.triggerEventId) ?? null,
-    startMono: span.startMono,
-    endMono: span.endMono,
-    durationMs: Number((span.endMono - span.startMono).toFixed(2)),
-    eventCount: span.eventIds.length,
-    requestCount: span.requestCount,
-    errorCount: span.errorCount
-  }));
+  const actions = player.getActionTimeline({
+    range: range ?? undefined,
+    limit
+  });
 
   return {
     archive: archivePath,

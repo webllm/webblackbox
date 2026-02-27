@@ -244,7 +244,7 @@ export function createServer(): McpServer {
 
   server.tool(
     "summarize_actions",
-    "Summarize action spans (trigger, duration, request/error counts) from an archive.",
+    "Summarize action spans with trigger/duration plus request, error, and screenshot context.",
     summarizeActionsInput,
     async ({ path, passphrase, monoStart, monoEnd, limit }) => {
       return toTextPayload(

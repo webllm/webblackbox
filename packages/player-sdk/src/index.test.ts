@@ -75,6 +75,40 @@ describe("WebBlackboxPlayer", () => {
     );
   });
 
+  it("builds action timeline with request, error, and screenshot context", async () => {
+    const bytes = await createRichFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+    const timeline = player.getActionTimeline();
+    const action = timeline.find((entry) => entry.actId === "A-2");
+
+    expect(action).toBeDefined();
+    expect(action?.triggerType).toBe("user.click");
+    expect(action?.requests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reqId: "R-1",
+          method: "POST",
+          url: "https://example.com/api"
+        })
+      ])
+    );
+    expect(action?.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventId: "E-16",
+          type: "error.exception"
+        })
+      ])
+    );
+    expect(action?.screenshot).toEqual(
+      expect.objectContaining({
+        eventId: "E-14S",
+        shotId: "SHOT-1",
+        format: "webp"
+      })
+    );
+  });
+
   it("builds network waterfall and export helpers", async () => {
     const bytes = await createRichFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
@@ -513,6 +547,24 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       tab: 9,
       t: 2005,
       mono: 18,
+      type: "screen.screenshot",
+      id: "E-14S",
+      ref: {
+        act: "A-2"
+      },
+      data: {
+        shotId: "SHOT-1",
+        format: "webp",
+        reason: "action",
+        size: 128
+      }
+    },
+    {
+      v: 1,
+      sid: "S-2",
+      tab: 9,
+      t: 2005,
+      mono: 18.05,
       type: "network.ws.open",
       id: "E-14A",
       data: {

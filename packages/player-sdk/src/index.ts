@@ -50,6 +50,40 @@ export type ActionSpan = {
   errorCount: number;
 };
 
+export type ActionTimelineEntry = {
+  actId: string;
+  triggerEventId: string;
+  triggerType: string | null;
+  startMono: number;
+  endMono: number;
+  durationMs: number;
+  eventCount: number;
+  requestCount: number;
+  errorCount: number;
+  requests: Array<{
+    reqId: string;
+    method: string;
+    url: string;
+    status: number | null;
+    failed: boolean;
+    durationMs: number;
+  }>;
+  errors: Array<{
+    eventId: string;
+    type: string;
+    mono: number;
+    message: string | null;
+  }>;
+  screenshot: {
+    eventId: string;
+    mono: number;
+    shotId: string | null;
+    reason: string | null;
+    format: string | null;
+    size: number | null;
+  } | null;
+};
+
 export type PlayerDerivedView = {
   actionSpans: ActionSpan[];
   totals: {
@@ -297,6 +331,9 @@ const STORAGE_EVENT_PREFIXES = [
 ] as const;
 
 const DEFAULT_ACTION_WINDOW_MS = 1500;
+const DEFAULT_TIMELINE_SCREENSHOT_LOOKAHEAD_MS = 2000;
+const DEFAULT_TIMELINE_REQUEST_LIMIT = 5;
+const DEFAULT_TIMELINE_ERROR_LIMIT = 5;
 
 export class WebBlackboxPlayer {
   public readonly status: PlayerStatus = "loaded";
@@ -568,6 +605,89 @@ export class WebBlackboxPlayer {
       actionSpans,
       totals
     };
+  }
+
+  public getActionTimeline(
+    options: {
+      range?: PlayerRange;
+      limit?: number;
+      screenshotLookaheadMs?: number;
+      requestLimit?: number;
+      errorLimit?: number;
+    } = {}
+  ): ActionTimelineEntry[] {
+    const { range } = options;
+    const limit = Math.max(1, options.limit ?? Number.POSITIVE_INFINITY);
+    const screenshotLookaheadMs = Math.max(
+      0,
+      options.screenshotLookaheadMs ?? DEFAULT_TIMELINE_SCREENSHOT_LOOKAHEAD_MS
+    );
+    const requestLimit = Math.max(1, options.requestLimit ?? DEFAULT_TIMELINE_REQUEST_LIMIT);
+    const errorLimit = Math.max(1, options.errorLimit ?? DEFAULT_TIMELINE_ERROR_LIMIT);
+    const derived = this.buildDerived(range);
+    const scopedEvents = this.query({ range });
+    const scopedById = new Map(scopedEvents.map((event) => [event.id, event]));
+    const requestById = new Map(
+      this.getNetworkWaterfall(range).map((entry) => [entry.reqId, entry])
+    );
+    const screenshots = this.query({
+      range,
+      types: ["screen.screenshot"]
+    });
+
+    return derived.actionSpans.slice(0, limit).map((span) => {
+      const spanEvents = span.eventIds
+        .map((eventId) => scopedById.get(eventId))
+        .filter((event): event is WebBlackboxEvent => Boolean(event));
+      const requestIds = [
+        ...new Set(spanEvents.map((event) => event.ref?.req).filter(isNonEmptyString))
+      ];
+      const requests = requestIds
+        .map((reqId) => requestById.get(reqId))
+        .filter((entry): entry is NetworkWaterfallEntry => Boolean(entry))
+        .sort((left, right) => left.startMono - right.startMono)
+        .slice(0, requestLimit)
+        .map((entry) => ({
+          reqId: entry.reqId,
+          method: entry.method,
+          url: entry.url,
+          status: typeof entry.status === "number" ? entry.status : null,
+          failed: entry.failed,
+          durationMs: roundTo(entry.durationMs, 2)
+        }));
+      const errors = scopedEvents
+        .filter(
+          (event) =>
+            (event.type.startsWith("error.") || event.lvl === "error") &&
+            event.mono >= span.startMono &&
+            event.mono <= span.endMono + screenshotLookaheadMs
+        )
+        .sort((left, right) => left.mono - right.mono)
+        .slice(0, errorLimit)
+        .map((event) => ({
+          eventId: event.id,
+          type: event.type,
+          mono: event.mono,
+          message: readEventMessage(event)
+        }));
+      const triggerEvent = scopedById.get(span.triggerEventId);
+      const screenshot = findActionScreenshot(span, screenshots, screenshotLookaheadMs);
+
+      return {
+        actId: span.actId,
+        triggerEventId: span.triggerEventId,
+        triggerType: triggerEvent?.type ?? null,
+        startMono: span.startMono,
+        endMono: span.endMono,
+        durationMs: roundTo(span.endMono - span.startMono, 2),
+        eventCount: span.eventIds.length,
+        requestCount: span.requestCount,
+        errorCount: span.errorCount,
+        requests,
+        errors,
+        screenshot
+      };
+    });
   }
 
   public getNetworkWaterfall(range?: PlayerRange): NetworkWaterfallEntry[] {
@@ -1424,6 +1544,56 @@ function computeDuration(events: WebBlackboxEvent[]): number {
   }
 
   return Math.max(0, last.mono - first.mono);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function readEventMessage(event: WebBlackboxEvent): string | null {
+  const payload = asRecord(event.data);
+  const message =
+    asString(payload?.message) ??
+    asString(payload?.text) ??
+    asString(payload?.errorText) ??
+    asString(payload?.reason);
+
+  return message ? compactText(message, 300) : null;
+}
+
+function compactText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}...`;
+}
+
+function findActionScreenshot(
+  span: ActionSpan,
+  screenshots: WebBlackboxEvent[],
+  lookaheadMs: number
+): ActionTimelineEntry["screenshot"] {
+  const inSpan = screenshots.filter(
+    (event) => event.mono >= span.startMono && event.mono <= span.endMono
+  );
+  const afterSpan = screenshots.find(
+    (event) => event.mono > span.endMono && event.mono <= span.endMono + lookaheadMs
+  );
+  const chosen = inSpan[inSpan.length - 1] ?? afterSpan;
+
+  if (!chosen) {
+    return null;
+  }
+
+  const payload = asRecord(chosen.data);
+  return {
+    eventId: chosen.id,
+    mono: chosen.mono,
+    shotId: asString(payload?.shotId) ?? null,
+    reason: asString(payload?.reason) ?? null,
+    format: asString(payload?.format) ?? null,
+    size: asNumber(payload?.size) ?? null
+  };
 }
 
 function buildEndpointRegressions(
