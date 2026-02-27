@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { compareSessions, generateBugReportBundle, listArchives } from "./session-tools.js";
+import {
+  compareSessions,
+  exportHarFromArchive,
+  generateBugReportBundle,
+  generatePlaywrightFromArchive,
+  listArchives
+} from "./session-tools.js";
 
 const tempDirs: string[] = [];
 
@@ -82,6 +88,26 @@ describe("session tools", () => {
       compareSessions({
         leftPath: missingLeft,
         rightPath: missingRight
+      })
+    ).rejects.toThrowError("Failed to open archive");
+  });
+
+  it("throws helpful errors when exporting HAR for missing archive", async () => {
+    const missing = join(tmpdir(), `wb-mcp-missing-har-${Date.now()}.webblackbox`);
+
+    await expect(
+      exportHarFromArchive({
+        path: missing
+      })
+    ).rejects.toThrowError("Failed to open archive");
+  });
+
+  it("throws helpful errors when generating Playwright script for missing archive", async () => {
+    const missing = join(tmpdir(), `wb-mcp-missing-playwright-${Date.now()}.webblackbox`);
+
+    await expect(
+      generatePlaywrightFromArchive({
+        path: missing
       })
     ).rejects.toThrowError("Failed to open archive");
   });

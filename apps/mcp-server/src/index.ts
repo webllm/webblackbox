@@ -12,8 +12,12 @@ import {
 import {
   compareSessions,
   compareSessionsInput,
+  exportHarFromArchive,
+  exportHarInput,
   generateBugReportBundle,
   generateBugReportInput,
+  generatePlaywrightFromArchive,
+  generatePlaywrightInput,
   listArchives,
   listArchivesInput,
   networkIssuesInput,
@@ -184,6 +188,51 @@ export function createServer(): McpServer {
           issueType,
           projectKey,
           priority
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "export_har",
+    "Export HAR JSON string from an archive, optionally within a mono range.",
+    exportHarInput,
+    async ({ path, passphrase, monoStart, monoEnd }) => {
+      return toTextPayload(
+        await exportHarFromArchive({
+          path,
+          passphrase,
+          monoStart,
+          monoEnd
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "generate_playwright",
+    "Generate a Playwright script from archive actions with optional range/start-url overrides.",
+    generatePlaywrightInput,
+    async ({
+      path,
+      passphrase,
+      name,
+      startUrl,
+      maxActions,
+      includeHarReplay,
+      monoStart,
+      monoEnd
+    }) => {
+      return toTextPayload(
+        await generatePlaywrightFromArchive({
+          path,
+          passphrase,
+          name,
+          startUrl,
+          maxActions,
+          includeHarReplay,
+          monoStart,
+          monoEnd
         })
       );
     }

@@ -169,6 +169,51 @@ export type GenerateBugReportArgs = {
   priority?: string;
 };
 
+export const exportHarInput = {
+  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
+  monoStart: z.number().finite().optional().describe("Optional mono range start."),
+  monoEnd: z.number().finite().optional().describe("Optional mono range end.")
+};
+
+export type ExportHarArgs = {
+  path: string;
+  passphrase?: string;
+  monoStart?: number;
+  monoEnd?: number;
+};
+
+export const generatePlaywrightInput = {
+  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
+  name: z.string().min(1).max(128).optional().describe("Playwright test name."),
+  startUrl: z.string().min(1).max(2048).optional().describe("Optional navigation URL override."),
+  maxActions: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_QUERY_LIMIT)
+    .optional()
+    .describe(`Maximum actions emitted into script (1-${MAX_QUERY_LIMIT}).`),
+  includeHarReplay: z
+    .boolean()
+    .optional()
+    .describe("Whether to include routeFromHAR wiring in generated script."),
+  monoStart: z.number().finite().optional().describe("Optional mono range start."),
+  monoEnd: z.number().finite().optional().describe("Optional mono range end.")
+};
+
+export type GeneratePlaywrightArgs = {
+  path: string;
+  passphrase?: string;
+  name?: string;
+  startUrl?: string;
+  maxActions?: number;
+  includeHarReplay?: boolean;
+  monoStart?: number;
+  monoEnd?: number;
+};
+
 export const compareSessionsInput = {
   leftPath: z.string().min(1).describe("Baseline archive path."),
   rightPath: z.string().min(1).describe("Compared archive path."),
@@ -558,6 +603,61 @@ export async function generateBugReportBundle(args: GenerateBugReportArgs): Prom
     markdown,
     github,
     jira
+  };
+}
+
+export async function exportHarFromArchive(args: ExportHarArgs): Promise<{
+  archive: string;
+  range: {
+    monoStart: number | null;
+    monoEnd: number | null;
+  };
+  har: string;
+}> {
+  const archivePath = resolveArchivePath(args.path);
+  const player = await openArchivePlayer(archivePath, args.passphrase);
+  const range = buildRange(args.monoStart, args.monoEnd);
+  const har = player.exportHar(range ?? undefined);
+
+  return {
+    archive: archivePath,
+    range: {
+      monoStart: range?.monoStart ?? null,
+      monoEnd: range?.monoEnd ?? null
+    },
+    har
+  };
+}
+
+export async function generatePlaywrightFromArchive(args: GeneratePlaywrightArgs): Promise<{
+  archive: string;
+  range: {
+    monoStart: number | null;
+    monoEnd: number | null;
+  };
+  script: string;
+}> {
+  const archivePath = resolveArchivePath(args.path);
+  const player = await openArchivePlayer(archivePath, args.passphrase);
+  const range = buildRange(args.monoStart, args.monoEnd);
+  const script = player.generatePlaywrightScript({
+    name: normalizeOptionalString(args.name),
+    range: range ?? undefined,
+    startUrl: normalizeOptionalString(args.startUrl),
+    maxActions:
+      typeof args.maxActions === "number"
+        ? clampInt(args.maxActions, 1, MAX_QUERY_LIMIT)
+        : undefined,
+    includeHarReplay: args.includeHarReplay === true
+  });
+
+  return {
+    archive: archivePath,
+    range: {
+      monoStart: range?.monoStart ?? null,
+      monoEnd: range?.monoEnd ?? null
+    },
+    script
   };
 }
 
