@@ -471,7 +471,8 @@ export async function queryEvents(args: QueryEventsArgs): Promise<{
   events: Array<Record<string, unknown>>;
 }> {
   const archivePath = resolveArchivePath(args.path);
-  const player = await openArchivePlayer(archivePath, args.passphrase);
+  const range = buildRange(args.monoStart, args.monoEnd);
+  const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
   const limit = clampInt(args.limit ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
   const offset = clampInt(args.offset ?? 0, 0, 1_000_000);
   const includeData = args.includeData === true;
@@ -489,10 +490,10 @@ export async function queryEvents(args: QueryEventsArgs): Promise<{
     offset
   };
 
-  if (typeof args.monoStart === "number" || typeof args.monoEnd === "number") {
+  if (range) {
     query.range = {
-      monoStart: typeof args.monoStart === "number" ? args.monoStart : undefined,
-      monoEnd: typeof args.monoEnd === "number" ? args.monoEnd : undefined
+      monoStart: range.monoStart,
+      monoEnd: range.monoEnd
     };
   }
 
@@ -615,9 +616,9 @@ export async function generateBugReportBundle(args: GenerateBugReportArgs): Prom
   jira: unknown;
 }> {
   const archivePath = resolveArchivePath(args.path);
-  const player = await openArchivePlayer(archivePath, args.passphrase);
-  const maxItems = clampInt(args.maxItems ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
   const range = buildRange(args.monoStart, args.monoEnd);
+  const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
+  const maxItems = clampInt(args.maxItems ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
   const labels = sanitizeStringArray(args.labels);
   const assignees = sanitizeStringArray(args.assignees);
   const title = normalizeOptionalString(args.title);
@@ -667,8 +668,8 @@ export async function exportHarFromArchive(args: ExportHarArgs): Promise<{
   har: string;
 }> {
   const archivePath = resolveArchivePath(args.path);
-  const player = await openArchivePlayer(archivePath, args.passphrase);
   const range = buildRange(args.monoStart, args.monoEnd);
+  const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
   const har = player.exportHar(range ?? undefined);
 
   return {
@@ -690,8 +691,8 @@ export async function generatePlaywrightFromArchive(args: GeneratePlaywrightArgs
   script: string;
 }> {
   const archivePath = resolveArchivePath(args.path);
-  const player = await openArchivePlayer(archivePath, args.passphrase);
   const range = buildRange(args.monoStart, args.monoEnd);
+  const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
   const script = player.generatePlaywrightScript({
     name: normalizeOptionalString(args.name),
     range: range ?? undefined,
@@ -760,8 +761,8 @@ export async function summarizeActions(args: SummarizeActionsArgs): Promise<{
   }>;
 }> {
   const archivePath = resolveArchivePath(args.path);
-  const player = await openArchivePlayer(archivePath, args.passphrase);
   const range = buildRange(args.monoStart, args.monoEnd);
+  const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
   const derived = player.buildDerived(range ?? undefined);
   const limit = clampInt(args.limit ?? DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
   const actions = player.getActionTimeline({
@@ -817,8 +818,8 @@ export async function findRootCauseCandidates(args: RootCauseCandidatesArgs): Pr
   }>;
 }> {
   const archivePath = resolveArchivePath(args.path);
-  const player = await openArchivePlayer(archivePath, args.passphrase);
   const range = buildRange(args.monoStart, args.monoEnd);
+  const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
   const limit = clampInt(args.limit ?? DEFAULT_TOP_N, 1, MAX_QUERY_LIMIT);
   const windowMs = Math.max(1, Math.min(120_000, Math.round(args.windowMs ?? 10_000)));
   const errors = player
@@ -1084,11 +1085,16 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
   };
 }
 
-async function openArchivePlayer(path: string, passphrase?: string): Promise<WebBlackboxPlayer> {
+async function openArchivePlayer(
+  path: string,
+  passphrase?: string,
+  range?: { monoStart?: number; monoEnd?: number }
+): Promise<WebBlackboxPlayer> {
   try {
     const bytes = await readFile(path);
     return await WebBlackboxPlayer.open(new Uint8Array(bytes), {
-      passphrase
+      passphrase,
+      range
     });
   } catch (error) {
     throw new Error(
