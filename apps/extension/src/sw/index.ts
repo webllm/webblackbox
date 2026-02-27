@@ -171,6 +171,7 @@ const pendingOffscreenRequests = new Map<
     timeout: ReturnType<typeof setTimeout>;
   }
 >();
+const offscreenSessionRecovery = new Map<string, Promise<void>>();
 let offscreenRequestSeq = 0;
 
 const OFFSCREEN_PATH = "offscreen.html";
@@ -264,6 +265,8 @@ const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
 const PERF_WARN_MS = 40;
 const OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
 const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
+const OFFSCREEN_PORT_READY_MAX_ATTEMPTS = 200;
+const OFFSCREEN_PORT_READY_WAIT_MS = 25;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -313,6 +316,12 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
     if (offscreenPort === port) {
       offscreenPort = null;
       rejectPendingOffscreenRequests("Offscreen pipeline disconnected.");
+
+      if (sessionsByTab.size > 0) {
+        void recoverAllActiveOffscreenPipelines().catch((error) => {
+          console.warn("[WebBlackbox] failed to recover active offscreen pipelines", error);
+        });
+      }
     }
 
     port.onMessage.removeListener(onMessage);
@@ -1200,14 +1209,19 @@ async function drainPipelineBufferBatches(
   let flushed = 0;
 
   while (runtime.pipelineEventBuffer.length > 0) {
-    const batch = runtime.pipelineEventBuffer.splice(0, PIPELINE_BATCH_DRAIN_CHUNK_EVENTS);
+    const batchSize = Math.min(
+      runtime.pipelineEventBuffer.length,
+      PIPELINE_BATCH_DRAIN_CHUNK_EVENTS
+    );
+    const batch = runtime.pipelineEventBuffer.slice(0, batchSize);
 
     if (batch.length === 0) {
       break;
     }
 
-    flushed += batch.length;
     await runtime.pipeline.ingestBatch(batch);
+    runtime.pipelineEventBuffer.splice(0, batch.length);
+    flushed += batch.length;
 
     if (runtime.pipelineEventBuffer.length > 0) {
       await wait(0);
@@ -1289,6 +1303,39 @@ async function requestOffscreenPipeline<TResult>(
   request: Omit<OffscreenPipelineRequest, "kind" | "requestId">
 ): Promise<TResult> {
   const startedAt = perfNow();
+  const result = await requestOffscreenPipelineWithRecovery<TResult>(request);
+
+  const durationMs = perfNow() - startedAt;
+
+  if (durationMs >= PERF_WARN_MS && shouldLogPerf()) {
+    console.info("[WebBlackbox][perf] offscreen request", {
+      op: request.op,
+      durationMs: Number(durationMs.toFixed(2)),
+      queuePending: pendingOffscreenRequests.size
+    });
+  }
+
+  return result as TResult;
+}
+
+async function requestOffscreenPipelineWithRecovery<TResult>(
+  request: Omit<OffscreenPipelineRequest, "kind" | "requestId">
+): Promise<TResult> {
+  try {
+    return await requestOffscreenPipelineOnce<TResult>(request);
+  } catch (error) {
+    if (!shouldRetryOffscreenRequest(request, error)) {
+      throw error;
+    }
+
+    await recoverOffscreenSession(request.sid);
+    return await requestOffscreenPipelineOnce<TResult>(request);
+  }
+}
+
+async function requestOffscreenPipelineOnce<TResult>(
+  request: Omit<OffscreenPipelineRequest, "kind" | "requestId">
+): Promise<TResult> {
   const port = await ensureOffscreenPortReady();
   const requestId = `off-${Date.now()}-${offscreenRequestSeq}`;
   const timeoutMs = resolveOffscreenRequestTimeoutMs(request.op);
@@ -1313,17 +1360,24 @@ async function requestOffscreenPipeline<TResult>(
     });
   });
 
-  const durationMs = perfNow() - startedAt;
+  return result as TResult;
+}
 
-  if (durationMs >= PERF_WARN_MS && shouldLogPerf()) {
-    console.info("[WebBlackbox][perf] offscreen request", {
-      op: request.op,
-      durationMs: Number(durationMs.toFixed(2)),
-      queuePending: pendingOffscreenRequests.size
-    });
+function shouldRetryOffscreenRequest(
+  request: Omit<OffscreenPipelineRequest, "kind" | "requestId">,
+  error: unknown
+): boolean {
+  if (request.op === "start") {
+    return false;
   }
 
-  return result as TResult;
+  const message = error instanceof Error ? error.message : String(error);
+
+  return (
+    message.includes("Pipeline session not found") ||
+    message.includes("Offscreen pipeline disconnected") ||
+    message.includes("Offscreen pipeline is unavailable")
+  );
 }
 
 function resolveOffscreenRequestTimeoutMs(requestOp: OffscreenPipelineRequest["op"]): number {
@@ -1341,12 +1395,12 @@ async function ensureOffscreenPortReady(): Promise<PortLike> {
 
   await ensureOffscreenDocument();
 
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < OFFSCREEN_PORT_READY_MAX_ATTEMPTS; attempt += 1) {
     if (offscreenPort) {
       return offscreenPort;
     }
 
-    await wait(25);
+    await wait(OFFSCREEN_PORT_READY_WAIT_MS);
   }
 
   throw new Error("Offscreen pipeline is unavailable.");
@@ -1398,6 +1452,54 @@ function rejectPendingOffscreenRequests(message: string): void {
   }
 
   pendingOffscreenRequests.clear();
+}
+
+async function recoverAllActiveOffscreenPipelines(): Promise<void> {
+  for (const runtime of sessionsByTab.values()) {
+    if (runtime.stopping || runtime.stoppedAt) {
+      continue;
+    }
+
+    await recoverOffscreenSession(runtime.sid);
+  }
+}
+
+async function recoverOffscreenSession(sid: string): Promise<void> {
+  const existing = offscreenSessionRecovery.get(sid);
+
+  if (existing) {
+    await existing;
+    return;
+  }
+
+  const task = (async () => {
+    const runtime = sessionsBySid.get(sid);
+
+    if (!runtime || runtime.stopping || runtime.stoppedAt) {
+      return;
+    }
+
+    await requestOffscreenPipelineOnce<void>({
+      op: "start",
+      sid,
+      session: toSessionMetadata(runtime),
+      redactionProfile: runtime.config.redaction
+    });
+    notifyOffscreenPipelineStatus();
+  })()
+    .catch((error) => {
+      console.warn("[WebBlackbox] failed to recover offscreen pipeline session", {
+        sid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    })
+    .finally(() => {
+      offscreenSessionRecovery.delete(sid);
+    });
+
+  offscreenSessionRecovery.set(sid, task);
+  await task;
 }
 
 async function attachCdp(runtime: SessionRuntime): Promise<void> {
@@ -2760,6 +2862,17 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     startedAt: runtime.startedAt,
     active,
     stoppedAt: runtime.stoppedAt
+  };
+}
+
+function toSessionMetadata(runtime: SessionRuntime): SessionMetadata {
+  return {
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    startedAt: runtime.startedAt,
+    mode: runtime.mode,
+    url: `tab:${runtime.tabId}`,
+    tags: []
   };
 }
 
