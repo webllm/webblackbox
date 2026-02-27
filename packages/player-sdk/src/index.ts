@@ -454,7 +454,9 @@ export class WebBlackboxPlayer {
       return [];
     }
 
-    const sourceEvents = candidateIds ? toSortedEvents(candidateIds, this.eventsById) : this.events;
+    const sourceEvents = candidateIds
+      ? toSortedEvents(candidateIds, this.eventsById)
+      : sliceEventsByRange(this.events, query.range);
 
     const matched: WebBlackboxEvent[] = [];
 
@@ -2301,6 +2303,59 @@ function withinRange(event: WebBlackboxEvent, range?: PlayerRange): boolean {
   }
 
   return true;
+}
+
+function sliceEventsByRange(events: WebBlackboxEvent[], range?: PlayerRange): WebBlackboxEvent[] {
+  if (!range) {
+    return events;
+  }
+
+  const start = range.monoStart ?? Number.NEGATIVE_INFINITY;
+  const end = range.monoEnd ?? Number.POSITIVE_INFINITY;
+
+  if (start > end) {
+    return [];
+  }
+
+  const from = lowerBoundByMono(events, start);
+  const to = upperBoundByMono(events, end);
+  return events.slice(from, to);
+}
+
+function lowerBoundByMono(events: WebBlackboxEvent[], target: number): number {
+  let low = 0;
+  let high = events.length;
+
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    const mono = events[mid]?.mono ?? Number.POSITIVE_INFINITY;
+
+    if (mono < target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
+function upperBoundByMono(events: WebBlackboxEvent[], target: number): number {
+  let low = 0;
+  let high = events.length;
+
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    const mono = events[mid]?.mono ?? Number.NEGATIVE_INFINITY;
+
+    if (mono <= target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
 }
 
 function matchesText(event: WebBlackboxEvent, term: string): boolean {

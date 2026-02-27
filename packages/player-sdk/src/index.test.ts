@@ -23,6 +23,27 @@ describe("WebBlackboxPlayer", () => {
     const textEvents = player.query({ text: "boom" });
     expect(textEvents.map((event) => event.id)).toContain("E-5");
     expect(player.query({ text: "example.com/api" }).map((event) => event.id)).toContain("E-3");
+    expect(
+      player.query({
+        range: {
+          monoStart: 3,
+          monoEnd: 4
+        }
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "E-3" }),
+        expect.objectContaining({ id: "E-4" })
+      ])
+    );
+    expect(
+      player.query({
+        range: {
+          monoStart: 6,
+          monoEnd: 5
+        }
+      })
+    ).toHaveLength(0);
 
     const searchResults = player.search("api");
     expect(searchResults[0]?.eventId).toBe("E-3");
