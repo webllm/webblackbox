@@ -205,6 +205,36 @@ export type SummarizeActionsArgs = {
   limit?: number;
 };
 
+export const rootCauseCandidatesInput = {
+  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
+  monoStart: z.number().finite().optional().describe("Optional mono range start."),
+  monoEnd: z.number().finite().optional().describe("Optional mono range end."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_QUERY_LIMIT)
+    .optional()
+    .describe(`Maximum error candidates to return (1-${MAX_QUERY_LIMIT}).`),
+  windowMs: z
+    .number()
+    .finite()
+    .min(1)
+    .max(120_000)
+    .optional()
+    .describe("Lookback window before each error (ms). Defaults to 10000.")
+};
+
+export type RootCauseCandidatesArgs = {
+  path: string;
+  passphrase?: string;
+  monoStart?: number;
+  monoEnd?: number;
+  limit?: number;
+  windowMs?: number;
+};
+
 export const generatePlaywrightInput = {
   path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
@@ -738,6 +768,123 @@ export async function summarizeActions(args: SummarizeActionsArgs): Promise<{
       requests: derived.totals.requests
     },
     actions
+  };
+}
+
+export async function findRootCauseCandidates(args: RootCauseCandidatesArgs): Promise<{
+  archive: string;
+  range: {
+    monoStart: number | null;
+    monoEnd: number | null;
+  };
+  windowMs: number;
+  candidates: Array<{
+    eventId: string;
+    type: string;
+    mono: number;
+    message: string | null;
+    aiRootCause: unknown;
+    nearbyNetwork: Array<{
+      reqId: string;
+      method: string;
+      url: string;
+      status: number | null;
+      failed: boolean;
+      durationMs: number;
+      deltaMs: number;
+    }>;
+    nearbyConsole: Array<{
+      eventId: string;
+      mono: number;
+      level: string | null;
+      text: string | null;
+      deltaMs: number;
+    }>;
+  }>;
+}> {
+  const archivePath = resolveArchivePath(args.path);
+  const player = await openArchivePlayer(archivePath, args.passphrase);
+  const range = buildRange(args.monoStart, args.monoEnd);
+  const limit = clampInt(args.limit ?? DEFAULT_TOP_N, 1, MAX_QUERY_LIMIT);
+  const windowMs = Math.max(1, Math.min(120_000, Math.round(args.windowMs ?? 10_000)));
+  const errors = player
+    .query({
+      range: range ?? undefined
+    })
+    .filter((event) => event.type.startsWith("error."))
+    .slice(0, limit);
+  const waterfall = player.getNetworkWaterfall(range ?? undefined);
+
+  const candidates = errors.map((event) => {
+    const payload = asRecord(event.data);
+    const nearbyNetwork = waterfall
+      .filter(
+        (entry) =>
+          (entry.failed || (typeof entry.status === "number" && entry.status >= 500)) &&
+          entry.endMono <= event.mono &&
+          entry.endMono >= event.mono - windowMs
+      )
+      .sort((left, right) => right.endMono - left.endMono)
+      .slice(0, 5)
+      .map((entry) => ({
+        reqId: entry.reqId,
+        method: entry.method,
+        url: entry.url,
+        status: typeof entry.status === "number" ? entry.status : null,
+        failed: entry.failed,
+        durationMs: Number(entry.durationMs.toFixed(2)),
+        deltaMs: Number((event.mono - entry.endMono).toFixed(2))
+      }));
+    const nearbyConsole = player
+      .query({
+        range: {
+          monoStart: event.mono - windowMs,
+          monoEnd: event.mono
+        },
+        types: ["console.entry"],
+        limit: MAX_QUERY_LIMIT
+      })
+      .map((consoleEvent) => {
+        const consolePayload = asRecord(consoleEvent.data);
+        const level =
+          typeof consolePayload?.level === "string" ? consolePayload.level.toLowerCase() : null;
+
+        return {
+          eventId: consoleEvent.id,
+          mono: consoleEvent.mono,
+          level,
+          text:
+            typeof consolePayload?.text === "string" ? compactText(consolePayload.text, 300) : null,
+          deltaMs: Number((event.mono - consoleEvent.mono).toFixed(2))
+        };
+      })
+      .filter((entry) => entry.level === "error" || entry.level === "warn")
+      .slice(0, 5);
+
+    return {
+      eventId: event.id,
+      type: event.type,
+      mono: event.mono,
+      message:
+        typeof payload?.message === "string"
+          ? compactText(payload.message, 300)
+          : typeof payload?.text === "string"
+            ? compactText(payload.text, 300)
+            : null,
+      aiRootCause: payload?.aiRootCause ?? null,
+      nearbyNetwork,
+      nearbyConsole
+    };
+  });
+
+  return {
+    archive: archivePath,
+    range: {
+      monoStart: range?.monoStart ?? null,
+      monoEnd: range?.monoEnd ?? null
+    },
+    windowMs,
+    candidates
   };
 }
 

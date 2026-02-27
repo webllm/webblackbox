@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   compareSessions,
   exportHarFromArchive,
+  findRootCauseCandidates,
   generateBugReportBundle,
   generatePlaywrightFromArchive,
   listArchives,
@@ -118,6 +119,16 @@ describe("session tools", () => {
 
     await expect(
       summarizeActions({
+        path: missing
+      })
+    ).rejects.toThrowError("Failed to open archive");
+  });
+
+  it("throws helpful errors when finding root-cause candidates for missing archive", async () => {
+    const missing = join(tmpdir(), `wb-mcp-missing-root-cause-${Date.now()}.webblackbox`);
+
+    await expect(
+      findRootCauseCandidates({
         path: missing
       })
     ).rejects.toThrowError("Failed to open archive");

@@ -14,6 +14,7 @@ import {
   compareSessionsInput,
   exportHarFromArchive,
   exportHarInput,
+  findRootCauseCandidates,
   generateBugReportBundle,
   generateBugReportInput,
   generatePlaywrightFromArchive,
@@ -23,6 +24,7 @@ import {
   networkIssuesInput,
   queryEvents,
   queryEventsInput,
+  rootCauseCandidatesInput,
   sessionSummaryInput,
   summarizeActions,
   summarizeActionsInput,
@@ -252,6 +254,24 @@ export function createServer(): McpServer {
           monoStart,
           monoEnd,
           limit
+        })
+      );
+    }
+  );
+
+  server.tool(
+    "find_root_cause_candidates",
+    "Find likely root-cause signals around errors (nearby failed requests, warn/error console, AI root cause hints).",
+    rootCauseCandidatesInput,
+    async ({ path, passphrase, monoStart, monoEnd, limit, windowMs }) => {
+      return toTextPayload(
+        await findRootCauseCandidates({
+          path,
+          passphrase,
+          monoStart,
+          monoEnd,
+          limit,
+          windowMs
         })
       );
     }
