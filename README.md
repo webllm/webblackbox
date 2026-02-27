@@ -23,34 +23,34 @@ Think of it as a "black box" for your web app: always recording in the backgroun
 WebBlackbox is a TypeScript monorepo organized into three tiers:
 
 ```
-                    ┌──────────────────────────────────────────────────┐
-                    │              Chrome Extension                    │
-                    │                                                  │
-                    │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-                    │  │ Injected │→ │ Content  │→ │   Service    │  │
-                    │  │  Script  │  │  Script  │  │   Worker     │  │
-                    │  └──────────┘  └──────────┘  └──────┬───────┘  │
-                    │       console, storage    user, DOM   │  CDP     │
-                    │                                      ↓          │
+                    ┌─────────────────────────────────────────────────┐
+                    │              Chrome Extension                   │
+                    │                                                 │
+                    │  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
+                    │  │ Injected │→ │ Content  │→ │   Service    │   │
+                    │  │  Script  │  │  Script  │  │   Worker     │   │
+                    │  └──────────┘  └──────────┘  └──────┬───────┘   │
+                    │       console, storage    user, DOM │  CDP      │
+                    │                                     ↓           │
                     │                              ┌──────────────┐   │
                     │                              │  Offscreen   │   │
                     │                              │  (Pipeline)  │   │
                     │                              └──────┬───────┘   │
                     └─────────────────────────────────────┼───────────┘
-                                                         │
-                                                         ↓
-                                                  .webblackbox
-                                                   ZIP archive
-                                                         │
-                                                         ↓
+                                                          │
+                                                          ↓
+                                                   .webblackbox
+                                                    ZIP archive
+                                                          │
+                                                          ↓
                     ┌──────────────────────────────────────────────────┐
                     │              Player (React UI)                   │
                     │                                                  │
-                    │  ┌──────────────┐  ┌────────────────────────┐   │
-                    │  │  Player SDK  │  │  Timeline │ Network    │   │
-                    │  │  (analysis)  │→ │  Console  │ Storage    │   │
-                    │  └──────────────┘  │  DOM Diff │ Perf       │   │
-                    │                    └────────────────────────┘   │
+                    │  ┌──────────────┐  ┌────────────────────────┐    │
+                    │  │  Player SDK  │  │  Timeline │ Network    │    │
+                    │  │  (analysis)  │→ │  Console  │ Storage    │    │
+                    │  └──────────────┘  │  DOM Diff │ Perf       │    │
+                    │                    └────────────────────────┘    │
                     └──────────────────────────────────────────────────┘
 ```
 
