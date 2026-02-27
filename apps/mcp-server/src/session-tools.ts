@@ -825,9 +825,26 @@ export async function findRootCauseCandidates(args: RootCauseCandidatesArgs): Pr
     .query({
       range: range ?? undefined
     })
-    .filter((event) => event.type.startsWith("error."))
+    .filter((event) => event.type.startsWith("error.") || event.lvl === "error")
     .slice(0, limit);
   const waterfall = player.getNetworkWaterfall(range ?? undefined);
+  const consoleEvents = player
+    .query({
+      range: range ?? undefined,
+      types: ["console.entry"]
+    })
+    .map((event) => {
+      const payload = asRecord(event.data);
+      const level = typeof payload?.level === "string" ? payload.level.toLowerCase() : null;
+
+      return {
+        eventId: event.id,
+        mono: event.mono,
+        level,
+        text: typeof payload?.text === "string" ? compactText(payload.text, 300) : null
+      };
+    })
+    .filter((entry) => entry.level === "error" || entry.level === "warn");
 
   const candidates = errors.map((event) => {
     const payload = asRecord(event.data);
@@ -849,31 +866,19 @@ export async function findRootCauseCandidates(args: RootCauseCandidatesArgs): Pr
         durationMs: Number(entry.durationMs.toFixed(2)),
         deltaMs: Number((event.mono - entry.endMono).toFixed(2))
       }));
-    const nearbyConsole = player
-      .query({
-        range: {
-          monoStart: event.mono - windowMs,
-          monoEnd: event.mono
-        },
-        types: ["console.entry"],
-        limit: MAX_QUERY_LIMIT
+    const nearbyConsole = consoleEvents
+      .filter((consoleEvent) => {
+        return consoleEvent.mono <= event.mono && consoleEvent.mono >= event.mono - windowMs;
       })
-      .map((consoleEvent) => {
-        const consolePayload = asRecord(consoleEvent.data);
-        const level =
-          typeof consolePayload?.level === "string" ? consolePayload.level.toLowerCase() : null;
-
-        return {
-          eventId: consoleEvent.id,
-          mono: consoleEvent.mono,
-          level,
-          text:
-            typeof consolePayload?.text === "string" ? compactText(consolePayload.text, 300) : null,
-          deltaMs: Number((event.mono - consoleEvent.mono).toFixed(2))
-        };
-      })
-      .filter((entry) => entry.level === "error" || entry.level === "warn")
-      .slice(0, 5);
+      .sort((left, right) => right.mono - left.mono)
+      .slice(0, 5)
+      .map((consoleEvent) => ({
+        eventId: consoleEvent.eventId,
+        mono: consoleEvent.mono,
+        level: consoleEvent.level,
+        text: consoleEvent.text,
+        deltaMs: Number((event.mono - consoleEvent.mono).toFixed(2))
+      }));
 
     return {
       eventId: event.id,
