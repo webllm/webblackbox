@@ -7,6 +7,7 @@ React-based session playback application for analyzing `.webblackbox` archives.
 The Player provides an interactive UI for exploring recorded web sessions with multiple analysis panels:
 
 - **Timeline** — Chronological event visualization with filtering
+- **Action Timeline** — Action cards with trigger/request/error/screenshot context
 - **Network Waterfall** — HTTP request/response timing and details
 - **Console** — Console log viewer with level filtering
 - **Storage** — Cookie, localStorage, sessionStorage, IndexedDB, and cache operations
@@ -52,6 +53,12 @@ pnpm build
 - Filter by event type, level, and time range
 - Full-text search across events
 - Click events to view full details
+
+### Action Timeline
+
+- Card-based action spans from `getActionTimeline()`
+- Trigger, duration, request/error counts, and screenshot context in one row
+- Click-to-focus behavior links action cards to event details and request panel selection
 
 ### Network Panel
 

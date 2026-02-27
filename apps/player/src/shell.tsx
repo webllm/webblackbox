@@ -255,6 +255,15 @@ export function PlayerShell(): React.JSX.Element {
           </Button>
           <Button
             className="panel-tab"
+            data-log-panel="actions"
+            data-count="0"
+            type="button"
+            variant="ghost"
+          >
+            Actions
+          </Button>
+          <Button
+            className="panel-tab"
             data-log-panel="network"
             data-count="0"
             type="button"
@@ -329,6 +338,11 @@ export function PlayerShell(): React.JSX.Element {
           <Card className="details-card" data-log-panel-target="details">
             <h2>Event Details</h2>
             <pre id="event-details" className="code"></pre>
+          </Card>
+
+          <Card data-log-panel-target="actions">
+            <h2>Action Timeline</h2>
+            <ul id="actions-list" className="action-card-list"></ul>
           </Card>
 
           <Card className="network-card" data-log-panel-target="network">

@@ -1,5 +1,6 @@
 import type { WebBlackboxEvent } from "@webblackbox/protocol";
 import {
+  type ActionTimelineEntry,
   type NetworkWaterfallEntry,
   type PerformanceArtifactEntry,
   type PlayerComparison,
@@ -44,6 +45,7 @@ type NetworkSortDirection = "asc" | "desc";
 type LogPanelKey =
   | "timeline"
   | "details"
+  | "actions"
   | "network"
   | "compare"
   | "console"
@@ -54,6 +56,7 @@ type LogPanelKey =
 const PANEL_LABELS: Record<LogPanelKey, string> = {
   timeline: "Timeline",
   details: "Event",
+  actions: "Actions",
   network: "Network",
   compare: "Compare",
   console: "Console",
@@ -64,12 +67,13 @@ const PANEL_LABELS: Record<LogPanelKey, string> = {
 
 const PANEL_SHORTCUT_BY_CODE: Record<string, LogPanelKey> = {
   Digit1: "details",
-  Digit2: "network",
-  Digit3: "compare",
-  Digit4: "console",
-  Digit5: "realtime",
-  Digit6: "storage",
-  Digit7: "perf"
+  Digit2: "actions",
+  Digit3: "network",
+  Digit4: "compare",
+  Digit5: "console",
+  Digit6: "realtime",
+  Digit7: "storage",
+  Digit8: "perf"
 };
 
 type ScreenshotMarker = {
@@ -147,6 +151,8 @@ type ScreenshotRecord = {
 
 type ArchiveModel = {
   events: WebBlackboxEvent[];
+  actionTimeline: ActionTimelineEntry[];
+  actionSearchText: string[];
   consoleSignals: WebBlackboxEvent[];
   consoleSignalSearchText: string[];
   eventById: Map<string, WebBlackboxEvent>;
@@ -179,6 +185,7 @@ type PlayerState = {
   compareSummary: PlayerComparison | null;
   model: ArchiveModel | null;
   selectedEventId: string | null;
+  selectedActionId: string | null;
   selectedRequestId: string | null;
   textFilter: string;
   typeFilter: TimelineFilter;
@@ -226,6 +233,7 @@ type SetPlayheadOptions = {
 };
 
 const MAX_TIMELINE_ROWS = 20_000;
+const MAX_ACTION_ROWS = 2_000;
 const MAX_WATERFALL_ROWS = 360;
 const MAX_SIGNAL_ROWS = 120;
 const MAX_SHOT_BUTTONS = 180;
@@ -261,6 +269,7 @@ const state: PlayerState = {
   compareSummary: null,
   model: null,
   selectedEventId: null,
+  selectedActionId: null,
   selectedRequestId: null,
   textFilter: "",
   typeFilter: "all",
@@ -365,6 +374,7 @@ const refs = {
   filmstripMeta: getElement<HTMLElement>("filmstrip-meta"),
   filmstripList: getElement<HTMLUListElement>("filmstrip-list"),
   timelineList: getElement<HTMLUListElement>("timeline-list"),
+  actionsList: getElement<HTMLUListElement>("actions-list"),
   eventDetails: getElement<HTMLElement>("event-details"),
   waterfallBody: getElement<HTMLTableSectionElement>("waterfall-body"),
   requestDetails: getElement<HTMLElement>("request-details"),
@@ -661,6 +671,7 @@ function bindGlobalActions(): void {
     }
 
     pausePlayback();
+    state.selectedActionId = null;
     state.selectedEventId = eventId;
 
     if (state.activePanel !== "details") {
@@ -670,6 +681,47 @@ function bindGlobalActions(): void {
 
     renderEventDetails();
     renderTimeline();
+  });
+
+  refs.actionsList.addEventListener("click", (event) => {
+    const model = state.model;
+
+    if (!model) {
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    const button = target.closest<HTMLButtonElement>("button[data-action-id]");
+
+    if (!button) {
+      return;
+    }
+
+    const actionId = button.dataset.actionId;
+
+    if (!actionId) {
+      return;
+    }
+
+    const action = model.actionTimeline.find((entry) => entry.actId === actionId);
+
+    if (!action) {
+      return;
+    }
+
+    const firstRequestId = action.requests[0]?.reqId ?? null;
+    const targetMono = action.screenshot?.mono ?? action.endMono ?? action.startMono;
+
+    pausePlayback();
+    state.selectedActionId = action.actId;
+    state.selectedEventId = action.triggerEventId;
+    state.selectedRequestId = firstRequestId;
+
+    if (state.activePanel !== "actions") {
+      state.activePanel = "actions";
+    }
+
+    setPlayhead(targetMono, { forcePanels: true });
   });
 
   refs.timelineList.addEventListener("scroll", () => {
@@ -1174,6 +1226,7 @@ async function loadPrimaryArchiveFile(file: File): Promise<void> {
     state.player = player;
     state.model = model;
     state.selectedEventId = model.events[model.events.length - 1]?.id ?? null;
+    state.selectedActionId = model.actionTimeline[model.actionTimeline.length - 1]?.actId ?? null;
     state.selectedRequestId = model.waterfall[model.waterfall.length - 1]?.reqId ?? null;
     state.playheadMono = model.maxMono;
 
@@ -1433,6 +1486,11 @@ function renderPanelTabCounts(): void {
     state.playheadMono,
     (entry) => entry.startMono
   );
+  const visibleActionCount = upperBoundByMono(
+    model.actionTimeline,
+    state.playheadMono,
+    (entry) => entry.startMono
+  );
   const visibleConsoleCount = upperBoundByMono(
     model.consoleSignals,
     state.playheadMono,
@@ -1458,6 +1516,7 @@ function renderPanelTabCounts(): void {
   const counts: Record<LogPanelKey, number> = {
     timeline: visibleEventCount,
     details: visibleDetailsCount,
+    actions: visibleActionCount,
     network: visibleNetworkCount,
     compare: visibleCompareCount,
     console: visibleConsoleCount,
@@ -1498,6 +1557,7 @@ function renderPlaybackReadout(): void {
   const panelKey = state.activePanel === "timeline" ? "details" : state.activePanel;
   const panelLabel = PANEL_LABELS[panelKey];
   const selection = [
+    state.selectedActionId ? `action ${truncateId(state.selectedActionId)}` : null,
     state.selectedEventId ? `event ${truncateId(state.selectedEventId)}` : null,
     state.selectedRequestId ? `request ${truncateId(state.selectedRequestId)}` : null
   ]
@@ -1814,7 +1874,7 @@ function buildProgressHoverTags(
     tags.push({
       label: latestEvent.type,
       tone: "action",
-      panel: "details",
+      panel: "actions",
       mono: latestEvent.mono,
       eventId: latestEvent.id
     });
@@ -2032,6 +2092,11 @@ function renderSummary(): void {
     state.playheadMono,
     (entry) => entry.startMono
   );
+  const visibleActionCount = upperBoundByMono(
+    model.actionTimeline,
+    state.playheadMono,
+    (entry) => entry.startMono
+  );
   const visibleShotCount = upperBoundByMono(
     model.screenshots,
     state.playheadMono,
@@ -2049,6 +2114,7 @@ function renderSummary(): void {
     <div class="pill">visible events ${visibleEventCount}</div>
     <div class="pill">visible errors ${visibleErrorCount}</div>
     <div class="pill">visible requests ${visibleRequestCount}</div>
+    <div class="pill">visible actions ${visibleActionCount}</div>
     <div class="pill">visible screenshots ${visibleShotCount}</div>
     <div class="pill">all actions ${model.totals.actionSpans}</div>
     ${compareDelta}
@@ -2074,8 +2140,11 @@ function renderPanels(): void {
 
   if (!state.model) {
     state.timelineRows = [];
+    state.selectedActionId = null;
     refs.timelineList.innerHTML = "";
-    refs.eventDetails.textContent = "Select a timeline event to inspect payload details.";
+    refs.actionsList.innerHTML = "";
+    refs.eventDetails.textContent =
+      "Select a timeline event or action card to inspect payload details.";
     refs.waterfallBody.innerHTML = "";
     refs.networkSummary.textContent = "0 / 0 requests";
     refs.requestDetails.textContent = "Select a request row to inspect network details.";
@@ -2091,6 +2160,7 @@ function renderPanels(): void {
   }
 
   renderTimeline();
+  renderActionTimeline();
   renderEventDetails();
   renderWaterfall();
   renderConsoleSignals();
@@ -2126,6 +2196,38 @@ function renderTimeline(): void {
   state.timelineRows =
     filtered.length > MAX_TIMELINE_ROWS ? filtered.slice(-MAX_TIMELINE_ROWS) : filtered;
   renderTimelineWindow();
+}
+
+function renderActionTimeline(): void {
+  const model = state.model;
+
+  if (!model) {
+    refs.actionsList.innerHTML = "";
+    return;
+  }
+
+  const visibleCount = upperBoundByMono(
+    model.actionTimeline,
+    state.playheadMono,
+    (entry) => entry.startMono
+  );
+  const filtered = applyActionFilters(model, visibleCount);
+
+  if (filtered.length === 0) {
+    state.selectedActionId = null;
+    refs.actionsList.innerHTML = `<li class="empty">No action spans at current filters.</li>`;
+    return;
+  }
+
+  if (
+    !state.selectedActionId ||
+    !filtered.some((entry) => entry.actId === state.selectedActionId)
+  ) {
+    state.selectedActionId = filtered[filtered.length - 1]?.actId ?? null;
+  }
+
+  const rows = filtered.length > MAX_ACTION_ROWS ? filtered.slice(-MAX_ACTION_ROWS) : filtered;
+  refs.actionsList.innerHTML = rows.map((entry) => renderActionCard(entry, model)).join("");
 }
 
 function renderTimelineWindow(): void {
@@ -2180,18 +2282,75 @@ function renderTimelineRow(event: WebBlackboxEvent): string {
       </button></li>`;
 }
 
+function renderActionCard(action: ActionTimelineEntry, model: ArchiveModel): string {
+  const selectedClass = state.selectedActionId === action.actId ? "selected" : "";
+  const triggerType = action.triggerType ?? "unknown";
+  const relativeStart = Math.max(0, action.startMono - model.minMono);
+  const relativeEnd = Math.max(relativeStart, action.endMono - model.minMono);
+  const screenshotMeta = action.screenshot
+    ? `shot ${formatMono(Math.max(0, action.screenshot.mono - model.minMono))}`
+    : "no-shot";
+  const requestPreview = action.requests
+    .slice(0, 2)
+    .map((entry) => {
+      const status = entry.failed
+        ? "(failed)"
+        : entry.status === null
+          ? "(pending)"
+          : String(entry.status);
+      return `${entry.method.toUpperCase()} ${shortUrl(entry.url)} ${status}`;
+    })
+    .join(" | ");
+  const errorPreview = action.errors
+    .slice(0, 2)
+    .map((entry) => `${entry.type}${entry.message ? `: ${entry.message}` : ""}`)
+    .join(" | ");
+  const cardClass = selectedClass ? `action-card ${selectedClass}` : "action-card";
+
+  return `<li class="action-card-row"><button class="${cardClass}" data-action-id="${escapeHtml(action.actId)}">
+      <div class="action-card-head">
+        <span class="action-card-trigger">${escapeHtml(triggerType)}</span>
+        <span class="action-card-time mono">${formatMono(relativeStart)} - ${formatMono(relativeEnd)}</span>
+      </div>
+      <div class="action-card-metrics mono">
+        <span>duration ${Number(action.durationMs.toFixed(1))}ms</span>
+        <span>events ${action.eventCount}</span>
+        <span>req ${action.requestCount}</span>
+        <span>err ${action.errorCount}</span>
+        <span>${escapeHtml(screenshotMeta)}</span>
+      </div>
+      ${
+        requestPreview
+          ? `<div class="action-card-section"><span class="action-card-label">network</span><span>${escapeHtml(requestPreview)}</span></div>`
+          : ""
+      }
+      ${
+        errorPreview
+          ? `<div class="action-card-section"><span class="action-card-label">errors</span><span>${escapeHtml(errorPreview)}</span></div>`
+          : ""
+      }
+    </button></li>`;
+}
+
 function renderEventDetails(): void {
   const model = state.model;
 
   if (!model) {
-    refs.eventDetails.textContent = "Select a timeline event to inspect payload details.";
+    refs.eventDetails.textContent =
+      "Select a timeline event or action card to inspect payload details.";
+    return;
+  }
+
+  if (state.activePanel === "actions") {
+    renderActionRootCauseDetails(model);
     return;
   }
 
   const eventId = state.selectedEventId;
 
   if (!eventId) {
-    refs.eventDetails.textContent = "Select a timeline event to inspect payload details.";
+    refs.eventDetails.textContent =
+      "Select a timeline event or action card to inspect payload details.";
     return;
   }
 
@@ -2203,6 +2362,66 @@ function renderEventDetails(): void {
   }
 
   refs.eventDetails.textContent = JSON.stringify(selected, null, 2);
+}
+
+function renderActionRootCauseDetails(model: ArchiveModel): void {
+  const actionId = state.selectedActionId;
+
+  if (!actionId) {
+    refs.eventDetails.textContent =
+      "Select an action card to inspect trigger and root-cause context.";
+    return;
+  }
+
+  const action = model.actionTimeline.find((entry) => entry.actId === actionId);
+
+  if (!action || action.startMono > state.playheadMono) {
+    refs.eventDetails.textContent = "Selected action is outside the current playhead range.";
+    return;
+  }
+
+  const triggerEvent = model.eventById.get(action.triggerEventId) ?? null;
+  const errorEvents = action.errors
+    .map((entry) => model.eventById.get(entry.eventId))
+    .filter((event): event is WebBlackboxEvent => Boolean(event))
+    .map((event) => ({
+      id: event.id,
+      type: event.type,
+      mono: Number(event.mono.toFixed(2)),
+      level: event.lvl ?? null,
+      data: event.data
+    }));
+  const requestContext = action.requests.map((entry) => ({
+    reqId: entry.reqId,
+    method: entry.method,
+    url: entry.url,
+    status: entry.status,
+    failed: entry.failed,
+    durationMs: Number(entry.durationMs.toFixed(2)),
+    linked: model.waterfallByReqId.get(entry.reqId) ?? null
+  }));
+
+  refs.eventDetails.textContent = JSON.stringify(
+    {
+      action: {
+        actId: action.actId,
+        triggerEventId: action.triggerEventId,
+        triggerType: action.triggerType,
+        startMono: Number(action.startMono.toFixed(2)),
+        endMono: Number(action.endMono.toFixed(2)),
+        durationMs: Number(action.durationMs.toFixed(2)),
+        eventCount: action.eventCount,
+        requestCount: action.requestCount,
+        errorCount: action.errorCount
+      },
+      triggerEvent,
+      screenshot: action.screenshot,
+      nearbyNetwork: requestContext,
+      nearbyErrors: errorEvents
+    },
+    null,
+    2
+  );
 }
 
 function renderNetworkSortButtons(): void {
@@ -3046,6 +3265,37 @@ function applyTimelineFilters(model: ArchiveModel, visibleCount: number): WebBla
   return filtered;
 }
 
+function applyActionFilters(model: ArchiveModel, visibleCount: number): ActionTimelineEntry[] {
+  const text = state.textFilter.trim().toLowerCase();
+  const filterType = state.typeFilter;
+
+  if (!text && filterType === "all") {
+    return model.actionTimeline.slice(0, visibleCount);
+  }
+
+  const filtered: ActionTimelineEntry[] = [];
+
+  for (let index = 0; index < visibleCount; index += 1) {
+    const action = model.actionTimeline[index];
+
+    if (!action) {
+      continue;
+    }
+
+    if (!matchesActionTypeFilter(action, filterType)) {
+      continue;
+    }
+
+    if (text && !model.actionSearchText[index]?.includes(text)) {
+      continue;
+    }
+
+    filtered.push(action);
+  }
+
+  return filtered;
+}
+
 function matchesTypeFilter(event: WebBlackboxEvent, filterType: TimelineFilter): boolean {
   if (filterType === "all") {
     return true;
@@ -3070,10 +3320,38 @@ function matchesTypeFilter(event: WebBlackboxEvent, filterType: TimelineFilter):
   return true;
 }
 
+function matchesActionTypeFilter(action: ActionTimelineEntry, filterType: TimelineFilter): boolean {
+  if (filterType === "all") {
+    return true;
+  }
+
+  if (filterType === "errors") {
+    return action.errorCount > 0;
+  }
+
+  if (filterType === "network") {
+    return action.requestCount > 0;
+  }
+
+  if (filterType === "storage") {
+    return action.triggerType?.startsWith("storage.") ?? false;
+  }
+
+  if (filterType === "console") {
+    return action.errorCount > 0 || (action.triggerType?.startsWith("console.") ?? false);
+  }
+
+  return true;
+}
+
 function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   const events = [...player.events].sort(
     (left, right) => left.mono - right.mono || left.t - right.t
   );
+  const actionTimeline = player
+    .getActionTimeline()
+    .sort((left, right) => left.startMono - right.startMono);
+  const actionSearchText = actionTimeline.map((entry) => buildActionSearchText(entry));
   const consoleSignals: WebBlackboxEvent[] = [];
   const consoleSignalSearchText: string[] = [];
   const eventById = new Map<string, WebBlackboxEvent>();
@@ -3168,6 +3446,8 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
 
   return {
     events,
+    actionTimeline,
+    actionSearchText,
     consoleSignals,
     consoleSignalSearchText,
     eventById,
@@ -3228,6 +3508,22 @@ function buildEventSearchText(event: WebBlackboxEvent): string {
   const refText = event.ref ? JSON.stringify(event.ref) : "";
   const dataText = event.data ? JSON.stringify(event.data) : "";
   return `${event.id} ${event.type} ${refText} ${dataText}`.toLowerCase();
+}
+
+function buildActionSearchText(entry: ActionTimelineEntry): string {
+  const requestText = entry.requests
+    .map(
+      (request) =>
+        `${request.reqId} ${request.method} ${request.url} ${request.status ?? ""} ${
+          request.failed ? "failed" : ""
+        }`
+    )
+    .join(" ");
+  const errorText = entry.errors
+    .map((error) => `${error.eventId} ${error.type} ${error.message ?? ""}`)
+    .join(" ");
+
+  return `${entry.actId} ${entry.triggerEventId} ${entry.triggerType ?? ""} ${requestText} ${errorText}`.toLowerCase();
 }
 
 function buildProgressMarkers(
@@ -3738,7 +4034,7 @@ function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | 
   }
 
   if (kind === "action") {
-    return "details";
+    return "actions";
   }
 
   return null;
