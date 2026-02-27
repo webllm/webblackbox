@@ -1,7 +1,7 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 
-import type { ExportManifest, WebBlackboxEvent } from "@webblackbox/protocol";
+import type { ChunkTimeIndexEntry, ExportManifest, WebBlackboxEvent } from "@webblackbox/protocol";
 
 import { WebBlackboxPlayer } from "./index.js";
 
@@ -51,6 +51,19 @@ describe("WebBlackboxPlayer", () => {
     const blob = await player.getBlob("blob1");
     expect(blob?.mime).toBe("image/webp");
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
+  });
+
+  it("supports range-preloaded open via time index chunks", async () => {
+    const bytes = await createTwoChunkFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes, {
+      range: {
+        monoStart: 50,
+        monoEnd: 60
+      }
+    });
+
+    expect(player.events.map((event) => event.id)).toEqual(["E-2"]);
+    expect(player.query().map((event) => event.id)).toEqual(["E-2"]);
   });
 
   it("opens encrypted archives when passphrase is provided", async () => {
@@ -397,6 +410,105 @@ async function createDeprecatedLayoutArchive(): Promise<Uint8Array> {
       id: "E-1",
       data: {}
     })
+  );
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function createTwoChunkFixtureArchive(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const eventsChunk1: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: "S-3",
+      tab: 1,
+      t: 3000,
+      mono: 10,
+      type: "user.click",
+      id: "E-1",
+      data: {
+        target: "button.first"
+      }
+    }
+  ];
+  const eventsChunk2: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: "S-3",
+      tab: 1,
+      t: 3050,
+      mono: 55,
+      type: "error.exception",
+      id: "E-2",
+      lvl: "error",
+      data: {
+        message: "second chunk"
+      }
+    }
+  ];
+  const timeIndex: ChunkTimeIndexEntry[] = [
+    {
+      chunkId: "chunk-000001",
+      seq: 1,
+      tStart: 3000,
+      tEnd: 3000,
+      monoStart: 10,
+      monoEnd: 10,
+      eventCount: 1,
+      byteLength: 128,
+      codec: "none",
+      sha256: "sha-1"
+    },
+    {
+      chunkId: "chunk-000002",
+      seq: 2,
+      tStart: 3050,
+      tEnd: 3050,
+      monoStart: 55,
+      monoEnd: 55,
+      eventCount: 1,
+      byteLength: 128,
+      codec: "none",
+      sha256: "sha-2"
+    }
+  ];
+
+  const manifest: ExportManifest = {
+    protocolVersion: 1,
+    createdAt: new Date(0).toISOString(),
+    mode: "full",
+    site: {
+      origin: "https://example.com",
+      title: "Two Chunk"
+    },
+    chunkCodec: "none",
+    redactionProfile: {
+      redactHeaders: [],
+      redactCookieNames: [],
+      redactBodyPatterns: [],
+      blockedSelectors: [],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: 2,
+      chunkCount: 2,
+      blobCount: 0,
+      durationMs: 45
+    }
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("index/time.json", JSON.stringify(timeIndex));
+  zip.file("index/req.json", JSON.stringify([]));
+  zip.file("index/inv.json", JSON.stringify([]));
+  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
+  zip.file(
+    "events/chunk-000001.ndjson",
+    eventsChunk1.map((event) => JSON.stringify(event)).join("\n")
+  );
+  zip.file(
+    "events/chunk-000002.ndjson",
+    eventsChunk2.map((event) => JSON.stringify(event)).join("\n")
   );
 
   return zip.generateAsync({ type: "uint8array" });

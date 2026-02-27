@@ -17,6 +17,7 @@ export type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 
 export type PlayerOpenOptions = {
   passphrase?: string;
+  range?: PlayerRange;
 };
 
 export type PlayerRange = {
@@ -421,7 +422,10 @@ export class WebBlackboxPlayer {
     const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
     const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
     const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
-    const events = await readEvents(zip, archiveKey, encryptedFiles);
+    const events = await readEvents(zip, archiveKey, encryptedFiles, {
+      range: options.range,
+      timeIndex
+    });
 
     return new WebBlackboxPlayer(
       zip,
@@ -2242,11 +2246,25 @@ async function resolveArchiveReadKey(
 async function readEvents(
   zip: JSZip,
   archiveKey: CryptoKey | null,
-  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
+  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>,
+  options: {
+    range?: PlayerRange;
+    timeIndex?: ChunkTimeIndexEntry[];
+  } = {}
 ): Promise<WebBlackboxEvent[]> {
-  const eventPaths = Object.keys(zip.files)
+  let eventPaths = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
     .sort();
+  const { range, timeIndex } = options;
+
+  if (range && Array.isArray(timeIndex) && timeIndex.length > 0) {
+    const chunkPaths = timeIndex
+      .filter((entry) => chunkIntersectsRange(entry, range))
+      .sort((left, right) => left.seq - right.seq)
+      .map((entry) => `events/${entry.chunkId}.ndjson`);
+
+    eventPaths = chunkPaths;
+  }
 
   const events: WebBlackboxEvent[] = [];
 
@@ -2263,11 +2281,29 @@ async function readEvents(
     const lines = content.split(/\r?\n/).filter(Boolean);
 
     for (const line of lines) {
-      events.push(JSON.parse(line) as WebBlackboxEvent);
+      const event = JSON.parse(line) as WebBlackboxEvent;
+
+      if (range && !withinRange(event, range)) {
+        continue;
+      }
+
+      events.push(event);
     }
   }
 
   return events;
+}
+
+function chunkIntersectsRange(entry: ChunkTimeIndexEntry, range: PlayerRange): boolean {
+  if (range.monoStart !== undefined && entry.monoEnd < range.monoStart) {
+    return false;
+  }
+
+  if (range.monoEnd !== undefined && entry.monoStart > range.monoEnd) {
+    return false;
+  }
+
+  return true;
 }
 
 async function decryptArchiveBytes(
