@@ -745,9 +745,12 @@ export class WebBlackboxPlayer {
       })
       .sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta));
 
+    const leftSessionId = this.events[0]?.sid ?? this.archive.manifest.site.origin;
+    const rightSessionId = other.events[0]?.sid ?? other.archive.manifest.site.origin;
+
     return {
-      leftSid: this.archive.manifest.site.origin,
-      rightSid: other.archive.manifest.site.origin,
+      leftSid: leftSessionId,
+      rightSid: rightSessionId,
       eventDelta: other.events.length - this.events.length,
       errorDelta:
         other.events.filter((event) => event.type.startsWith("error.")).length -
