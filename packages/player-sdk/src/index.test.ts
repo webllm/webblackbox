@@ -1,6 +1,6 @@
 import * as zlib from "node:zlib";
 import JSZip from "jszip";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ChunkTimeIndexEntry, ExportManifest, WebBlackboxEvent } from "@webblackbox/protocol";
 
@@ -88,6 +88,39 @@ describe("WebBlackboxPlayer", () => {
         }
       })
     ).toThrow(/chunk-000002/i);
+  });
+
+  it("memoizes full-range queries and derived analyzers", async () => {
+    const bytes = await createFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+    const parseSpy = vi.spyOn(JSON, "parse");
+
+    try {
+      const firstEvents = player.events;
+      const parseCountAfterFirstRead = parseSpy.mock.calls.length;
+
+      expect(firstEvents.length).toBeGreaterThan(0);
+      expect(parseCountAfterFirstRead).toBe(firstEvents.length);
+
+      const secondEvents = player.events;
+      const firstDerived = player.buildDerived();
+      const secondDerived = player.buildDerived();
+      const firstWaterfall = player.getNetworkWaterfall();
+      const secondWaterfall = player.getNetworkWaterfall();
+      const firstStorage = player.getStorageTimeline();
+      const secondStorage = player.getStorageTimeline();
+      const firstPerf = player.getPerformanceArtifacts();
+      const secondPerf = player.getPerformanceArtifacts();
+
+      expect(secondEvents).toBe(firstEvents);
+      expect(secondDerived).toBe(firstDerived);
+      expect(secondWaterfall).toBe(firstWaterfall);
+      expect(secondStorage).toBe(firstStorage);
+      expect(secondPerf).toBe(firstPerf);
+      expect(parseSpy.mock.calls).toHaveLength(parseCountAfterFirstRead);
+    } finally {
+      parseSpy.mockRestore();
+    }
   });
 
   it("opens archives with compressed chunk codecs", async () => {

@@ -378,6 +378,16 @@ export class WebBlackboxPlayer {
 
   private readonly decodedChunkCache = new Map<string, WebBlackboxEvent[]>();
 
+  private allEventsCache: WebBlackboxEvent[] | null = null;
+
+  private allDerivedCache: PlayerDerivedView | null = null;
+
+  private allNetworkWaterfallCache: NetworkWaterfallEntry[] | null = null;
+
+  private allStorageTimelineCache: StorageTimelineEntry[] | null = null;
+
+  private allPerformanceArtifactsCache: PerformanceArtifactEntry[] | null = null;
+
   private readonly requestToEventIds = new Map<string, string[]>();
 
   private readonly inverted = new Map<string, string[]>();
@@ -486,6 +496,19 @@ export class WebBlackboxPlayer {
     const requestedIds = query.requestId && indexedRequestIds ? new Set(indexedRequestIds) : null;
     const textCandidateIds = text ? collectInvertedCandidateIds(this.inverted, text) : null;
     const candidateIds = intersectCandidateIds(requestedIds, textCandidateIds);
+    const sourceEvents = isRangeUnbounded(query.range) ? this.getAllEvents() : null;
+    const isUnfilteredFullQuery =
+      sourceEvents !== null &&
+      offset === 0 &&
+      !Number.isFinite(limit) &&
+      !query.requestId &&
+      !types &&
+      !levels &&
+      !text;
+
+    if (isUnfilteredFullQuery) {
+      return sourceEvents;
+    }
 
     if (candidateIds && candidateIds.size === 0) {
       return [];
@@ -494,42 +517,55 @@ export class WebBlackboxPlayer {
     const matched: WebBlackboxEvent[] = [];
     let skipped = 0;
 
-    for (const chunk of this.getChunksForRange(query.range)) {
-      const sourceEvents = this.getChunkEvents(chunk);
+    const collectMatch = (event: WebBlackboxEvent): boolean => {
+      if (candidateIds && !candidateIds.has(event.id)) {
+        return false;
+      }
 
+      if (query.requestId && extractReqId(event) !== query.requestId) {
+        return false;
+      }
+
+      if (!withinRange(event, query.range)) {
+        return false;
+      }
+
+      if (types && !types.has(event.type)) {
+        return false;
+      }
+
+      if (levels && (!event.lvl || !levels.has(event.lvl))) {
+        return false;
+      }
+
+      if (text && !matchesText(event, text)) {
+        return false;
+      }
+
+      if (skipped < offset) {
+        skipped += 1;
+        return false;
+      }
+
+      matched.push(event);
+      return matched.length >= limit;
+    };
+
+    if (sourceEvents) {
       for (const event of sourceEvents) {
-        if (candidateIds && !candidateIds.has(event.id)) {
-          continue;
+        if (collectMatch(event)) {
+          return matched;
         }
+      }
 
-        if (query.requestId && extractReqId(event) !== query.requestId) {
-          continue;
-        }
+      return matched;
+    }
 
-        if (!withinRange(event, query.range)) {
-          continue;
-        }
+    for (const chunk of this.getChunksForRange(query.range)) {
+      const chunkEvents = this.getChunkEvents(chunk);
 
-        if (types && !types.has(event.type)) {
-          continue;
-        }
-
-        if (levels && (!event.lvl || !levels.has(event.lvl))) {
-          continue;
-        }
-
-        if (text && !matchesText(event, text)) {
-          continue;
-        }
-
-        if (skipped < offset) {
-          skipped += 1;
-          continue;
-        }
-
-        matched.push(event);
-
-        if (matched.length >= limit) {
+      for (const event of chunkEvents) {
+        if (collectMatch(event)) {
           return matched;
         }
       }
@@ -556,24 +592,20 @@ export class WebBlackboxPlayer {
       }
     }
 
-    for (const chunk of this.eventChunks) {
-      const sourceEvents = this.getChunkEvents(chunk);
-
-      for (const event of sourceEvents) {
-        if (candidateIds && !candidateIds.has(event.id)) {
-          continue;
-        }
-
-        const score = computeTextScore(event, normalizedTerm);
-
-        if (score <= 0 && !ranked.has(event.id)) {
-          continue;
-        }
-
-        const previous = ranked.get(event.id) ?? 0;
-        ranked.set(event.id, Math.max(previous, score));
-        eventsById.set(event.id, event);
+    for (const event of this.getAllEvents()) {
+      if (candidateIds && !candidateIds.has(event.id)) {
+        continue;
       }
+
+      const score = computeTextScore(event, normalizedTerm);
+
+      if (score <= 0 && !ranked.has(event.id)) {
+        continue;
+      }
+
+      const previous = ranked.get(event.id) ?? 0;
+      ranked.set(event.id, Math.max(previous, score));
+      eventsById.set(event.id, event);
     }
 
     return [...ranked.entries()]
@@ -591,6 +623,21 @@ export class WebBlackboxPlayer {
     }
 
     return this.eventChunks.filter((chunk) => chunkSourceIntersectsRange(chunk, range));
+  }
+
+  private getAllEvents(): WebBlackboxEvent[] {
+    if (this.allEventsCache) {
+      return this.allEventsCache;
+    }
+
+    const events: WebBlackboxEvent[] = [];
+
+    for (const chunk of this.eventChunks) {
+      events.push(...this.getChunkEvents(chunk));
+    }
+
+    this.allEventsCache = events;
+    return events;
   }
 
   private getChunkEvents(chunk: EventChunkSource): WebBlackboxEvent[] {
@@ -621,6 +668,10 @@ export class WebBlackboxPlayer {
   private findEventById(eventId: string): WebBlackboxEvent | null {
     if (!eventId.trim()) {
       return null;
+    }
+
+    if (this.allEventsCache) {
+      return this.allEventsCache.find((entry) => entry.id === eventId) ?? null;
     }
 
     for (const chunk of this.eventChunks) {
@@ -657,6 +708,10 @@ export class WebBlackboxPlayer {
   }
 
   public buildDerived(range?: PlayerRange): PlayerDerivedView {
+    if (isRangeUnbounded(range) && this.allDerivedCache) {
+      return this.allDerivedCache;
+    }
+
     const scoped = this.query({ range });
     const explicitSpans = new Map<string, ActionSpan>();
     const derivedSpans: ActionSpan[] = [];
@@ -713,10 +768,16 @@ export class WebBlackboxPlayer {
       requests: scoped.filter((event) => event.type === "network.request").length
     };
 
-    return {
+    const derived = {
       actionSpans,
       totals
     };
+
+    if (isRangeUnbounded(range)) {
+      this.allDerivedCache = derived;
+    }
+
+    return derived;
   }
 
   public getActionTimeline(
@@ -804,14 +865,24 @@ export class WebBlackboxPlayer {
   }
 
   public getNetworkWaterfall(range?: PlayerRange): NetworkWaterfallEntry[] {
+    if (isRangeUnbounded(range) && this.allNetworkWaterfallCache) {
+      return this.allNetworkWaterfallCache;
+    }
+
     const scoped = this.query({ range }).filter((event) => NETWORK_EVENT_TYPES.has(event.type));
     const buckets = collectNetworkBuckets(scoped);
 
-    return buckets
+    const waterfall = buckets
       .map((bucket) => toNetworkEntry(bucket))
       .sort(
         (left, right) => left.startMono - right.startMono || left.reqId.localeCompare(right.reqId)
       );
+
+    if (isRangeUnbounded(range)) {
+      this.allNetworkWaterfallCache = waterfall;
+    }
+
+    return waterfall;
   }
 
   public getRequestEvents(reqId: string): WebBlackboxEvent[] {
@@ -854,7 +925,11 @@ export class WebBlackboxPlayer {
   }
 
   public getStorageTimeline(range?: PlayerRange): StorageTimelineEntry[] {
-    return this.query({ range })
+    if (isRangeUnbounded(range) && this.allStorageTimelineCache) {
+      return this.allStorageTimelineCache;
+    }
+
+    const timeline = this.query({ range })
       .filter((event) => STORAGE_EVENT_PREFIXES.some((prefix) => event.type.startsWith(prefix)))
       .map((event) => {
         const payload = asRecord(event.data);
@@ -874,10 +949,20 @@ export class WebBlackboxPlayer {
         };
       })
       .sort((left, right) => left.mono - right.mono);
+
+    if (isRangeUnbounded(range)) {
+      this.allStorageTimelineCache = timeline;
+    }
+
+    return timeline;
   }
 
   public getPerformanceArtifacts(range?: PlayerRange): PerformanceArtifactEntry[] {
-    return this.query({ range })
+    if (isRangeUnbounded(range) && this.allPerformanceArtifactsCache) {
+      return this.allPerformanceArtifactsCache;
+    }
+
+    const artifacts = this.query({ range })
       .filter((event) => event.type.startsWith("perf."))
       .map((event) => {
         const payload = asRecord(event.data);
@@ -899,6 +984,12 @@ export class WebBlackboxPlayer {
         };
       })
       .sort((left, right) => left.mono - right.mono);
+
+    if (isRangeUnbounded(range)) {
+      this.allPerformanceArtifactsCache = artifacts;
+    }
+
+    return artifacts;
   }
 
   public getDomSnapshots(range?: PlayerRange): DomSnapshotRef[] {
@@ -2687,6 +2778,10 @@ function withinRange(event: WebBlackboxEvent, range?: PlayerRange): boolean {
   }
 
   return true;
+}
+
+function isRangeUnbounded(range?: PlayerRange): boolean {
+  return !range || (range.monoStart === undefined && range.monoEnd === undefined);
 }
 
 function matchesText(event: WebBlackboxEvent, term: string): boolean {

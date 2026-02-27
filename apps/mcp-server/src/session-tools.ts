@@ -1089,6 +1089,8 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
   const topActionDiffs = clampInt(args.topActionDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
   const topPerfDiffs = clampInt(args.topPerfDiffs ?? DEFAULT_TOP_N, 1, MAX_COMPARE_TOP);
   const includeStorageHashes = args.includeStorageHashes === true;
+  const leftEvents = leftPlayer.events;
+  const rightEvents = rightPlayer.events;
   const comparison = leftPlayer.compareWith(rightPlayer);
   const storageComparison = leftPlayer.compareStorageWith(rightPlayer);
   const leftDerived = leftPlayer.buildDerived();
@@ -1101,16 +1103,16 @@ export async function compareSessions(args: CompareSessionsArgs): Promise<{
   const rightFailed = collectFailedRequests(rightWaterfall, "right", topRequestDiffs);
   const leftSlow = collectSlowRequests(leftWaterfall, "left", topRequestDiffs);
   const rightSlow = collectSlowRequests(rightWaterfall, "right", topRequestDiffs);
-  const leftDuration = computeDurationMs(leftPlayer.events);
-  const rightDuration = computeDurationMs(rightPlayer.events);
+  const leftDuration = computeDurationMs(leftEvents);
+  const rightDuration = computeDurationMs(rightEvents);
   const endpointRegressions = Array.isArray(
     (comparison as { endpointRegressions?: unknown }).endpointRegressions
   )
     ? comparison.endpointRegressions
     : [];
   const fingerprintRegressions = buildErrorFingerprintRegressions(
-    leftPlayer.events,
-    rightPlayer.events,
+    leftEvents,
+    rightEvents,
     topErrorDiffs
   );
   const leftActions = leftPlayer.getActionTimeline();
