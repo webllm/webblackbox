@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { RecorderConfig } from "@webblackbox/protocol";
 
@@ -730,5 +730,67 @@ describe("recorder", () => {
     expect(errorPayload?.aiRootCause?.suspects?.some((suspect) => suspect.type === "network")).toBe(
       true
     );
+  });
+
+  it("isolates plugin hook exceptions without dropping ingest flow", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG, {}, undefined, [
+      {
+        name: "throws-raw",
+        onRawEvent() {
+          throw new Error("raw hook failed");
+        }
+      },
+      {
+        name: "mutate-raw",
+        onRawEvent(raw) {
+          return {
+            ...raw,
+            payload: {
+              ...(raw.payload as Record<string, unknown>),
+              pluginRaw: "ok"
+            }
+          };
+        }
+      },
+      {
+        name: "throws-event",
+        onEvent() {
+          throw new Error("event hook failed");
+        }
+      },
+      {
+        name: "mutate-event",
+        onEvent(event) {
+          return {
+            ...event,
+            data: {
+              ...(event.data as Record<string, unknown>),
+              pluginEvent: "ok"
+            }
+          };
+        }
+      }
+    ]);
+
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "click",
+      sid: "S-plugin-guard",
+      tabId: 1,
+      t: Date.now(),
+      mono: 1,
+      payload: {
+        selector: "button.guard"
+      }
+    });
+    const payload = result.event?.data as Record<string, unknown> | undefined;
+
+    expect(result.event).toBeDefined();
+    expect(payload?.pluginRaw).toBe("ok");
+    expect(payload?.pluginEvent).toBe("ok");
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+
+    warnSpy.mockRestore();
   });
 });
