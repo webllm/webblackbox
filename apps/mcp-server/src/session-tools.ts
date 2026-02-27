@@ -827,6 +827,7 @@ export async function findRootCauseCandidates(args: RootCauseCandidatesArgs): Pr
       range: range ?? undefined
     })
     .filter((event) => event.type.startsWith("error.") || event.lvl === "error")
+    .sort((left, right) => right.mono - left.mono)
     .slice(0, limit);
   const waterfall = player.getNetworkWaterfall(range ?? undefined);
   const consoleEvents = player
