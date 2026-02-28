@@ -237,3 +237,151 @@ main {
   font-size: 12px;
   color: rgba(20, 33, 61, 0.66);
 }
+
+.mono {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.wb-sessions-card {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.wb-sessions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wb-sessions-title {
+  margin: 0;
+  font-size: 22px;
+}
+
+.wb-sessions-count {
+  font-size: 12px;
+  color: var(--wb-muted-ink);
+  border: 1px solid var(--wb-border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.wb-sessions-subtitle {
+  margin: 8px 0 14px;
+  font-size: 13px;
+  color: var(--wb-muted-ink);
+}
+
+.wb-sessions-list {
+  display: grid;
+  gap: 12px;
+}
+
+.wb-sessions-empty {
+  margin: 0;
+  padding: 18px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--wb-border-strong);
+  color: var(--wb-muted-ink);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.wb-session-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 11px;
+  border: 1px solid var(--wb-border);
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.wb-session-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wb-session-card__title-wrap {
+  min-width: 0;
+}
+
+.wb-session-card__title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.3;
+  color: var(--wb-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-session-card__url {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--wb-muted-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-session-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 70px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  letter-spacing: 0.02em;
+}
+
+.wb-session-status--live {
+  color: #185530;
+  background: rgba(12, 169, 127, 0.14);
+  border-color: rgba(12, 169, 127, 0.28);
+}
+
+.wb-session-status--stopped {
+  color: #495169;
+  background: rgba(20, 33, 61, 0.08);
+  border-color: rgba(20, 33, 61, 0.16);
+}
+
+.wb-session-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wb-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--wb-border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--wb-muted-ink);
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.wb-session-card__sid {
+  margin: 0;
+  font-size: 12px;
+  color: var(--wb-muted-ink);
+}
+
+.wb-session-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wb-session-card__actions .wb-btn {
+  min-width: 86px;
+}
