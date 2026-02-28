@@ -15,6 +15,7 @@ import { createRoot } from "react-dom/client";
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { toArrayBuffer } from "./lib/binary.js";
 import { openDialog } from "./lib/dialog.js";
+import { clamp, readPointerRatio } from "./lib/math.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import {
   normalizeShareServerBaseUrl,
@@ -4493,21 +4494,6 @@ function compactText(value: string, maxLength: number): string {
   }
 
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function readPointerRatio(event: PointerEvent, container: HTMLElement): number {
-  const rect = container.getBoundingClientRect();
-
-  if (rect.width <= 0) {
-    return 0;
-  }
-
-  const offset = event.clientX - rect.left;
-  return Math.max(0, Math.min(1, offset / rect.width));
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function purgeStoredShareServerApiKeys(): void {
