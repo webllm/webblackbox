@@ -14,6 +14,7 @@ import { createRoot } from "react-dom/client";
 
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { toArrayBuffer } from "./lib/binary.js";
+import { formatCompareSummary } from "./lib/compare-summary.js";
 import { escapeHtml, getElement } from "./lib/dom.js";
 import { copyText, downloadTextFile } from "./lib/export.js";
 import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
@@ -2402,17 +2403,7 @@ function renderSummary(): void {
   `;
 
   refs.compareDetails.textContent = state.compareSummary
-    ? JSON.stringify(
-        {
-          eventDelta: state.compareSummary.eventDelta,
-          errorDelta: state.compareSummary.errorDelta,
-          requestDelta: state.compareSummary.requestDelta,
-          durationDeltaMs: Number(state.compareSummary.durationDeltaMs.toFixed(2)),
-          topTypeDeltas: state.compareSummary.typeDeltas.slice(0, 10)
-        },
-        null,
-        2
-      )
+    ? formatCompareSummary(state.compareSummary)
     : "Load a comparison archive to inspect event deltas.";
 }
 
