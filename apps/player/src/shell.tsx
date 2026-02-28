@@ -508,6 +508,16 @@ export function PlayerShell(): React.JSX.Element {
               autoComplete="off"
             />
           </label>
+          <label className="share-dialog-field">
+            <span>Optional API key</span>
+            <Input
+              id="share-upload-api-key"
+              className="share-dialog-input"
+              type="password"
+              placeholder="Required when server auth is enabled"
+              autoComplete="off"
+            />
+          </label>
           <label className="share-dialog-toggle">
             <Checkbox id="share-upload-show-passphrase" />
             Show passphrase
@@ -536,6 +546,16 @@ export function PlayerShell(): React.JSX.Element {
               className="share-dialog-input"
               type="text"
               placeholder="https://host/share/abc123 or abc123"
+              autoComplete="off"
+            />
+          </label>
+          <label className="share-dialog-field">
+            <span>Optional API key</span>
+            <Input
+              id="share-load-api-key"
+              className="share-dialog-input"
+              type="password"
+              placeholder="Required when server auth is enabled"
               autoComplete="off"
             />
           </label>

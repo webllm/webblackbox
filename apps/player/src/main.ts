@@ -189,6 +189,7 @@ type PlayerState = {
   loadedArchiveBytes: Uint8Array | null;
   loadedArchiveName: string | null;
   shareServerBaseUrl: string;
+  shareServerApiKey: string;
   selectedEventId: string | null;
   selectedActionId: string | null;
   selectedRequestId: string | null;
@@ -257,6 +258,7 @@ const LOG_GRID_SPLIT_MAX = 74;
 const LOG_GRID_SPLIT_KEY_STEP = 2;
 const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
 const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
+const SHARE_SERVER_API_KEY_STORAGE_KEY = "webblackbox.player.shareServerApiKey";
 const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
@@ -277,6 +279,7 @@ const state: PlayerState = {
   loadedArchiveBytes: null,
   loadedArchiveName: null,
   shareServerBaseUrl: readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? "http://localhost:8787",
+  shareServerApiKey: readStoredText(SHARE_SERVER_API_KEY_STORAGE_KEY) ?? "",
   selectedEventId: null,
   selectedActionId: null,
   selectedRequestId: null,
@@ -404,9 +407,11 @@ const refs = {
   shareUploadDialog: getElement<HTMLDialogElement>("share-upload-dialog"),
   shareUploadBaseUrl: getElement<HTMLInputElement>("share-upload-base-url"),
   shareUploadPassphrase: getElement<HTMLInputElement>("share-upload-passphrase"),
+  shareUploadApiKey: getElement<HTMLInputElement>("share-upload-api-key"),
   shareUploadShowPassphrase: getElement<HTMLInputElement>("share-upload-show-passphrase"),
   shareLoadDialog: getElement<HTMLDialogElement>("share-load-dialog"),
-  shareLoadReference: getElement<HTMLInputElement>("share-load-reference")
+  shareLoadReference: getElement<HTMLInputElement>("share-load-reference"),
+  shareLoadApiKey: getElement<HTMLInputElement>("share-load-api-key")
 };
 
 const panelTabButtons = Array.from(
@@ -1339,6 +1344,8 @@ async function shareLoadedArchive(): Promise<void> {
 
   state.shareServerBaseUrl = normalizedBaseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
+  state.shareServerApiKey = shareConfig.apiKey;
+  writeStoredText(SHARE_SERVER_API_KEY_STORAGE_KEY, shareConfig.apiKey);
 
   const headers: Record<string, string> = {
     "content-type": "application/octet-stream",
@@ -1348,6 +1355,9 @@ async function shareLoadedArchive(): Promise<void> {
 
   if (passphrase.length > 0) {
     headers["x-webblackbox-passphrase"] = passphrase;
+  }
+  if (shareConfig.apiKey.length > 0) {
+    headers["x-webblackbox-api-key"] = shareConfig.apiKey;
   }
 
   try {
@@ -1387,13 +1397,13 @@ async function shareLoadedArchive(): Promise<void> {
 }
 
 async function loadArchiveFromSharePrompt(): Promise<void> {
-  const input = await promptShareReferenceInput();
+  const shareInput = await promptShareReferenceInput();
 
-  if (!input) {
+  if (!shareInput) {
     return;
   }
 
-  const resolved = resolveShareArchiveRequest(input, state.shareServerBaseUrl);
+  const resolved = resolveShareArchiveRequest(shareInput.reference, state.shareServerBaseUrl);
 
   if (!resolved) {
     setFeedback("Invalid share reference.");
@@ -1402,9 +1412,18 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
 
   state.shareServerBaseUrl = resolved.baseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
+  state.shareServerApiKey = shareInput.apiKey;
+  writeStoredText(SHARE_SERVER_API_KEY_STORAGE_KEY, shareInput.apiKey);
 
   try {
-    const response = await fetch(resolved.archiveUrl);
+    const headers: Record<string, string> = {};
+    if (shareInput.apiKey.length > 0) {
+      headers["x-webblackbox-api-key"] = shareInput.apiKey;
+    }
+
+    const response = await fetch(resolved.archiveUrl, {
+      headers
+    });
 
     if (!response.ok) {
       const message = await response.text();
@@ -1419,9 +1438,14 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
   }
 }
 
-async function promptShareUploadConfig(): Promise<{ baseUrl: string; passphrase: string } | null> {
+async function promptShareUploadConfig(): Promise<{
+  baseUrl: string;
+  passphrase: string;
+  apiKey: string;
+} | null> {
   refs.shareUploadBaseUrl.value = state.shareServerBaseUrl;
   refs.shareUploadPassphrase.value = "";
+  refs.shareUploadApiKey.value = state.shareServerApiKey;
   refs.shareUploadShowPassphrase.checked = false;
   refs.shareUploadPassphrase.type = "password";
 
@@ -1433,20 +1457,29 @@ async function promptShareUploadConfig(): Promise<{ baseUrl: string; passphrase:
 
   return {
     baseUrl: refs.shareUploadBaseUrl.value.trim(),
-    passphrase: refs.shareUploadPassphrase.value
+    passphrase: refs.shareUploadPassphrase.value,
+    apiKey: refs.shareUploadApiKey.value.trim()
   };
 }
 
-async function promptShareReferenceInput(): Promise<string | null> {
+async function promptShareReferenceInput(): Promise<{ reference: string; apiKey: string } | null> {
   refs.shareLoadReference.value = `${state.shareServerBaseUrl}/share/`;
+  refs.shareLoadApiKey.value = state.shareServerApiKey;
   const result = await openDialog(refs.shareLoadDialog, refs.shareLoadReference);
 
   if (result !== "confirm") {
     return null;
   }
 
-  const value = refs.shareLoadReference.value.trim();
-  return value.length > 0 ? value : null;
+  const reference = refs.shareLoadReference.value.trim();
+  if (reference.length === 0) {
+    return null;
+  }
+
+  return {
+    reference,
+    apiKey: refs.shareLoadApiKey.value.trim()
+  };
 }
 
 function togglePlayback(): void {
