@@ -398,7 +398,13 @@ const refs = {
   exportGitHubIssue: getElement<HTMLButtonElement>("export-github-issue"),
   exportJiraIssue: getElement<HTMLButtonElement>("export-jira-issue"),
   shareUpload: getElement<HTMLButtonElement>("share-upload"),
-  loadShareUrl: getElement<HTMLButtonElement>("load-share-url")
+  loadShareUrl: getElement<HTMLButtonElement>("load-share-url"),
+  shareUploadDialog: getElement<HTMLDialogElement>("share-upload-dialog"),
+  shareUploadBaseUrl: getElement<HTMLInputElement>("share-upload-base-url"),
+  shareUploadPassphrase: getElement<HTMLInputElement>("share-upload-passphrase"),
+  shareUploadShowPassphrase: getElement<HTMLInputElement>("share-upload-show-passphrase"),
+  shareLoadDialog: getElement<HTMLDialogElement>("share-load-dialog"),
+  shareLoadReference: getElement<HTMLInputElement>("share-load-reference")
 };
 
 const panelTabButtons = Array.from(
@@ -951,6 +957,10 @@ function bindGlobalActions(): void {
   refs.loadShareUrl.addEventListener("click", () => {
     void loadArchiveFromSharePrompt();
   });
+
+  refs.shareUploadShowPassphrase.addEventListener("change", () => {
+    refs.shareUploadPassphrase.type = refs.shareUploadShowPassphrase.checked ? "text" : "password";
+  });
 }
 
 function bindArchiveDropTarget(): void {
@@ -1312,25 +1322,16 @@ async function shareLoadedArchive(): Promise<void> {
     return;
   }
 
-  const promptedBaseUrl = prompt("Share server URL", state.shareServerBaseUrl);
+  const shareConfig = await promptShareUploadConfig();
 
-  if (promptedBaseUrl === null) {
+  if (!shareConfig) {
     return;
   }
 
-  const normalizedBaseUrl = normalizeShareServerBaseUrl(promptedBaseUrl);
+  const normalizedBaseUrl = normalizeShareServerBaseUrl(shareConfig.baseUrl);
 
   if (!normalizedBaseUrl) {
     setFeedback("Invalid share server URL.");
-    return;
-  }
-
-  const passphraseInput = prompt(
-    "Optional passphrase for server-side archive analysis (leave empty for unencrypted or private metadata).",
-    ""
-  );
-
-  if (passphraseInput === null) {
     return;
   }
 
@@ -1341,7 +1342,7 @@ async function shareLoadedArchive(): Promise<void> {
     "content-type": "application/octet-stream",
     "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox"
   };
-  const passphrase = passphraseInput.trim();
+  const passphrase = shareConfig.passphrase.trim();
 
   if (passphrase.length > 0) {
     headers["x-webblackbox-passphrase"] = passphrase;
@@ -1384,12 +1385,9 @@ async function shareLoadedArchive(): Promise<void> {
 }
 
 async function loadArchiveFromSharePrompt(): Promise<void> {
-  const input = prompt(
-    "Paste a share URL (/share/:id), an archive API URL, or a share id.",
-    `${state.shareServerBaseUrl}/share/`
-  );
+  const input = await promptShareReferenceInput();
 
-  if (input === null) {
+  if (!input) {
     return;
   }
 
@@ -1417,6 +1415,59 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
   } catch (error) {
     setFeedback(`Failed to load shared archive: ${String(error)}`);
   }
+}
+
+async function promptShareUploadConfig(): Promise<{ baseUrl: string; passphrase: string } | null> {
+  refs.shareUploadBaseUrl.value = state.shareServerBaseUrl;
+  refs.shareUploadPassphrase.value = "";
+  refs.shareUploadShowPassphrase.checked = false;
+  refs.shareUploadPassphrase.type = "password";
+
+  const result = await openDialog(refs.shareUploadDialog, refs.shareUploadBaseUrl);
+
+  if (result !== "confirm") {
+    return null;
+  }
+
+  return {
+    baseUrl: refs.shareUploadBaseUrl.value.trim(),
+    passphrase: refs.shareUploadPassphrase.value
+  };
+}
+
+async function promptShareReferenceInput(): Promise<string | null> {
+  refs.shareLoadReference.value = `${state.shareServerBaseUrl}/share/`;
+  const result = await openDialog(refs.shareLoadDialog, refs.shareLoadReference);
+
+  if (result !== "confirm") {
+    return null;
+  }
+
+  const value = refs.shareLoadReference.value.trim();
+  return value.length > 0 ? value : null;
+}
+
+function openDialog(dialog: HTMLDialogElement, autofocus: HTMLElement): Promise<string> {
+  return new Promise((resolve) => {
+    const onClose = (): void => {
+      dialog.removeEventListener("close", onClose);
+      resolve(dialog.returnValue || "cancel");
+    };
+
+    dialog.addEventListener("close", onClose);
+
+    if (dialog.open) {
+      dialog.close("cancel");
+    }
+
+    dialog.showModal();
+    requestAnimationFrame(() => {
+      autofocus.focus();
+      if (autofocus instanceof HTMLInputElement) {
+        autofocus.select();
+      }
+    });
+  });
 }
 
 type ShareArchiveRequest = {

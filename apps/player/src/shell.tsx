@@ -482,6 +482,74 @@ export function PlayerShell(): React.JSX.Element {
         </section>
       </section>
 
+      <dialog id="share-upload-dialog" className="share-dialog">
+        <form id="share-upload-form" className="share-dialog-card" method="dialog">
+          <header className="share-dialog-head">
+            <h2>Share Archive</h2>
+            <p>Upload the loaded archive to a share server and copy the generated link.</p>
+          </header>
+          <label className="share-dialog-field">
+            <span>Share server URL</span>
+            <Input
+              id="share-upload-base-url"
+              className="share-dialog-input"
+              type="url"
+              placeholder="https://share.example.com"
+              autoComplete="url"
+            />
+          </label>
+          <label className="share-dialog-field">
+            <span>Optional passphrase</span>
+            <Input
+              id="share-upload-passphrase"
+              className="share-dialog-input"
+              type="password"
+              placeholder="Leave empty for public metadata only"
+              autoComplete="off"
+            />
+          </label>
+          <label className="share-dialog-toggle">
+            <Checkbox id="share-upload-show-passphrase" />
+            Show passphrase
+          </label>
+          <div className="share-dialog-actions">
+            <Button id="share-upload-cancel" type="submit" value="cancel" variant="ghost">
+              Cancel
+            </Button>
+            <Button id="share-upload-confirm" type="submit" value="confirm" variant="secondary">
+              Share
+            </Button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="share-load-dialog" className="share-dialog">
+        <form id="share-load-form" className="share-dialog-card" method="dialog">
+          <header className="share-dialog-head">
+            <h2>Load Shared Archive</h2>
+            <p>Paste a share URL, archive API URL, or share ID.</p>
+          </header>
+          <label className="share-dialog-field">
+            <span>Share reference</span>
+            <Input
+              id="share-load-reference"
+              className="share-dialog-input"
+              type="text"
+              placeholder="https://host/share/abc123 or abc123"
+              autoComplete="off"
+            />
+          </label>
+          <div className="share-dialog-actions">
+            <Button id="share-load-cancel" type="submit" value="cancel" variant="ghost">
+              Cancel
+            </Button>
+            <Button id="share-load-confirm" type="submit" value="confirm" variant="secondary">
+              Load
+            </Button>
+          </div>
+        </form>
+      </dialog>
+
       <div id="archive-drop-overlay" className="archive-drop-overlay" hidden>
         <div className="archive-drop-overlay-card">
           <strong>Drop Archive to Load</strong>

@@ -1733,6 +1733,68 @@ input[type="file"],
   stroke-width: 1.1;
 }
 
+.share-dialog {
+  border: none;
+  border-radius: 14px;
+  padding: 0;
+  width: min(560px, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  background: transparent;
+}
+
+.share-dialog::backdrop {
+  background: rgba(6, 12, 26, 0.56);
+  backdrop-filter: blur(2px);
+}
+
+.share-dialog-card {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.15);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 248, 255, 0.98));
+  box-shadow: 0 20px 46px rgba(2, 8, 20, 0.28);
+}
+
+.share-dialog-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.share-dialog-head p {
+  margin: 6px 0 0;
+  color: var(--sys-color-subtle);
+  font-size: 13px;
+}
+
+.share-dialog-field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sys-color-subtle);
+}
+
+.share-dialog-input {
+  width: 100%;
+}
+
+.share-dialog-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--sys-color-text);
+}
+
+.share-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
