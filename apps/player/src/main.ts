@@ -21,6 +21,7 @@ import { clamp, readPointerRatio } from "./lib/math.js";
 import { formatByteSize, formatNetworkSize, resolveNetworkSizeBytes } from "./lib/network-size.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
+import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
   bindShareApiKeyInputToTargetOrigin,
@@ -150,13 +151,6 @@ type ProgressHoverSummary = {
 type RequestHoverContext = {
   entry: NetworkWaterfallEntry;
   tag: ProgressHoverTag;
-};
-
-type ResponsePreview = {
-  mime: string;
-  sizeBytes: number;
-  text: string;
-  isJson: boolean;
 };
 
 type PointerSample = {
@@ -2305,75 +2299,9 @@ async function getResponsePreviewByHash(hash: string): Promise<ResponsePreview |
     return null;
   }
 
-  const preview = decodeResponsePreview(blob.mime, blob.bytes);
+  const preview = decodeResponsePreview(blob.mime, blob.bytes, RESPONSE_PREVIEW_EXPANDED_CHARS);
   state.responsePreviewByHash.set(hash, preview);
   return preview;
-}
-
-function decodeResponsePreview(mime: string, bytes: Uint8Array): ResponsePreview | null {
-  const normalizedMime = mime.toLowerCase();
-
-  if (bytes.byteLength === 0) {
-    return {
-      mime: normalizedMime || "unknown",
-      sizeBytes: 0,
-      text: "(empty body)",
-      isJson: false
-    };
-  }
-
-  const isTextual =
-    normalizedMime.startsWith("text/") ||
-    normalizedMime.includes("json") ||
-    normalizedMime.includes("xml") ||
-    normalizedMime.includes("javascript") ||
-    normalizedMime.includes("form-urlencoded");
-
-  if (!isTextual) {
-    return {
-      mime: normalizedMime || "unknown",
-      sizeBytes: bytes.byteLength,
-      text: `[binary ${normalizedMime || "unknown"} ${bytes.byteLength}B]`,
-      isJson: false
-    };
-  }
-
-  const slice = bytes.subarray(0, Math.min(bytes.byteLength, 12_000));
-  const decoded = new TextDecoder().decode(slice).trim();
-
-  if (!decoded) {
-    return {
-      mime: normalizedMime || "text/plain",
-      sizeBytes: bytes.byteLength,
-      text: "(empty body)",
-      isJson: false
-    };
-  }
-
-  const maybeJson =
-    normalizedMime.includes("json") || decoded.startsWith("{") || decoded.startsWith("[");
-
-  if (maybeJson) {
-    try {
-      const parsed = JSON.parse(decoded) as unknown;
-      const pretty = JSON.stringify(parsed, null, 2);
-      return {
-        mime: normalizedMime || "application/json",
-        sizeBytes: bytes.byteLength,
-        text: pretty,
-        isJson: true
-      };
-    } catch {
-      // Fallback to plain text.
-    }
-  }
-
-  return {
-    mime: normalizedMime || "text/plain",
-    sizeBytes: bytes.byteLength,
-    text: compactText(decoded, RESPONSE_PREVIEW_EXPANDED_CHARS),
-    isJson: false
-  };
 }
 
 function jumpToFirstError(): void {
