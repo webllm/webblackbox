@@ -177,6 +177,7 @@ const pendingOffscreenRequests = new Map<
 >();
 const offscreenSessionRecovery = new Map<string, Promise<void>>();
 let offscreenRequestSeq = 0;
+let freezeBadgeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
@@ -190,6 +191,7 @@ const FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS = 15_000;
 const FULL_MODE_MIN_SCREENSHOT_INTERVAL_MS = 12_000;
 const FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS = 30_000;
 const FREEZE_NOTICE_COOLDOWN_MS = 20_000;
+const FREEZE_BADGE_HIGHLIGHT_MS = 15_000;
 const BEST_EFFORT_QUEUE_MAX_PENDING = 80;
 const PIPELINE_BATCH_MAX_EVENTS = 160;
 const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
@@ -1921,6 +1923,7 @@ function handleFreezeNotice(runtime: SessionRuntime, reason: FreezeReason): void
 
   runtime.lastFreezeNotices.set(reason, now);
   broadcast({ kind: "sw.freeze", sid: runtime.sid, reason });
+  void setFreezeBadge();
 }
 
 async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
@@ -3201,6 +3204,26 @@ async function setIdleBadge(): Promise<void> {
 async function setRecordingBadge(): Promise<void> {
   await chromeApi?.action?.setBadgeText({ text: "REC" }).catch(() => undefined);
   await chromeApi?.action?.setBadgeBackgroundColor({ color: "#c92a2a" }).catch(() => undefined);
+}
+
+async function setFreezeBadge(): Promise<void> {
+  await chromeApi?.action?.setBadgeText({ text: "ERR" }).catch(() => undefined);
+  await chromeApi?.action?.setBadgeBackgroundColor({ color: "#9b2226" }).catch(() => undefined);
+
+  if (freezeBadgeTimer !== null) {
+    clearTimeout(freezeBadgeTimer);
+  }
+
+  freezeBadgeTimer = setTimeout(() => {
+    freezeBadgeTimer = null;
+
+    if (sessionsByTab.size > 0) {
+      void setRecordingBadge();
+      return;
+    }
+
+    void setIdleBadge();
+  }, FREEZE_BADGE_HIGHLIGHT_MS);
 }
 
 function monotonicTime(): number {
