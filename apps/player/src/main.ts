@@ -49,6 +49,7 @@ import {
   readScreenshotShotId
 } from "./lib/screenshot-data.js";
 import { describeScreenshotMeta } from "./lib/screenshot-description.js";
+import { buildActionSearchText, buildEventSearchText } from "./lib/search-text.js";
 import { uploadArchiveWithProgress } from "./lib/share-upload.js";
 import {
   buildConsoleSignalSearchText,
@@ -3441,28 +3442,6 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
       actionSpans: derived.actionSpans.length
     }
   };
-}
-
-function buildEventSearchText(event: WebBlackboxEvent): string {
-  const refText = event.ref ? JSON.stringify(event.ref) : "";
-  const dataText = event.data ? JSON.stringify(event.data) : "";
-  return `${event.id} ${event.type} ${refText} ${dataText}`.toLowerCase();
-}
-
-function buildActionSearchText(entry: ActionTimelineEntry): string {
-  const requestText = entry.requests
-    .map(
-      (request) =>
-        `${request.reqId} ${request.method} ${request.url} ${request.status ?? ""} ${
-          request.failed ? "failed" : ""
-        }`
-    )
-    .join(" ");
-  const errorText = entry.errors
-    .map((error) => `${error.eventId} ${error.type} ${error.message ?? ""}`)
-    .join(" ");
-
-  return `${entry.actId} ${entry.triggerEventId} ${entry.triggerType ?? ""} ${requestText} ${errorText}`.toLowerCase();
 }
 
 function buildProgressMarkers(
