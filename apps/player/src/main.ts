@@ -18,6 +18,7 @@ import { escapeHtml, getElement } from "./lib/dom.js";
 import { copyText, downloadTextFile } from "./lib/export.js";
 import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
 import { openDialog } from "./lib/dialog.js";
+import { describeRequestName, resolveNetworkInitiator } from "./lib/network-labels.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import {
   formatByteSize,
@@ -3082,28 +3083,6 @@ function resolveNetworkStatusClass(entry: NetworkWaterfallEntry): string {
   return "wf-status-neutral";
 }
 
-function describeRequestName(url: string): {
-  name: string;
-  host: string;
-} {
-  try {
-    const parsed = new URL(url);
-    const path = parsed.pathname || "/";
-    const basename = path === "/" ? "/" : (path.split("/").filter(Boolean).pop() ?? path);
-    const query = parsed.search ? parsed.search : "";
-    const displayName = compactText(`${basename}${query}`, 120);
-    return {
-      name: displayName || parsed.hostname,
-      host: parsed.hostname
-    };
-  } catch {
-    return {
-      name: compactText(url, 120),
-      host: ""
-    };
-  }
-}
-
 function resolveNetworkTypeLabel(mimeType: string | undefined): string {
   return resolveNetworkTypeBucket(mimeType);
 }
@@ -3144,20 +3123,6 @@ function resolveNetworkTypeBucket(mimeType: string | undefined): NetworkTypeFilt
   }
 
   return "other";
-}
-
-function resolveNetworkInitiator(entry: NetworkWaterfallEntry): string {
-  if (entry.actionId && entry.actionId.length > 0) {
-    const maybeActionNumber = /(\d+)$/.exec(entry.actionId)?.[1];
-
-    if (maybeActionNumber) {
-      return `action #${maybeActionNumber}`;
-    }
-
-    return compactText(entry.actionId, 24);
-  }
-
-  return "(direct)";
 }
 
 function renderConsoleSignals(): void {
