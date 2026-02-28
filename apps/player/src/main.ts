@@ -259,6 +259,7 @@ const LOG_GRID_SPLIT_KEY_STEP = 2;
 const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
 const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
 const SHARE_SERVER_API_KEYS_STORAGE_KEY = "webblackbox.player.shareServerApiKeysByOrigin";
+const LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY = "webblackbox.player.shareServerApiKey";
 const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
@@ -279,7 +280,7 @@ const state: PlayerState = {
   loadedArchiveBytes: null,
   loadedArchiveName: null,
   shareServerBaseUrl: readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? "http://localhost:8787",
-  shareServerApiKeysByOrigin: readStoredShareServerApiKeys(),
+  shareServerApiKeysByOrigin: {},
   selectedEventId: null,
   selectedActionId: null,
   selectedRequestId: null,
@@ -422,6 +423,7 @@ const networkSortButtons = Array.from(
 );
 const panelCards = Array.from(document.querySelectorAll<HTMLElement>("[data-log-panel-target]"));
 
+purgeStoredShareServerApiKeys();
 bindGlobalActions();
 void renderAll({ forcePanels: true, forceScreenshot: true });
 
@@ -1466,11 +1468,6 @@ function setShareServerApiKeyForBaseUrl(baseUrl: string, apiKey: string): void {
   } else {
     delete state.shareServerApiKeysByOrigin[origin];
   }
-
-  writeStoredText(
-    SHARE_SERVER_API_KEYS_STORAGE_KEY,
-    JSON.stringify(state.shareServerApiKeysByOrigin)
-  );
 }
 
 function bindShareApiKeyInputToTargetOrigin(
@@ -4416,43 +4413,6 @@ function readStoredText(key: string): string | null {
   }
 }
 
-function readStoredShareServerApiKeys(): Record<string, string> {
-  const raw = readStoredText(SHARE_SERVER_API_KEYS_STORAGE_KEY);
-
-  if (!raw) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-
-    const entries = Object.entries(parsed);
-    const sanitized: Record<string, string> = {};
-
-    for (const [origin, value] of entries) {
-      if (typeof value !== "string") {
-        continue;
-      }
-
-      const trimmed = value.trim();
-
-      if (trimmed.length === 0) {
-        continue;
-      }
-
-      sanitized[origin] = trimmed;
-    }
-
-    return sanitized;
-  } catch {
-    return {};
-  }
-}
-
 function getShareServerOrigin(baseUrl: string | null): string | null {
   if (!baseUrl) {
     return null;
@@ -4468,6 +4428,15 @@ function getShareServerOrigin(baseUrl: string | null): string | null {
     return new URL(normalized).origin;
   } catch {
     return null;
+  }
+}
+
+function purgeStoredShareServerApiKeys(): void {
+  try {
+    window.localStorage.removeItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures in restricted contexts (private mode, policy blocks).
   }
 }
 
