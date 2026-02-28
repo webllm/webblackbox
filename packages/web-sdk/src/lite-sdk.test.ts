@@ -195,6 +195,38 @@ describe("WebBlackboxLiteSdk", () => {
     await sdk.dispose();
   });
 
+  it("normalizes rrweb raw events into dom.rrweb.event entries", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-rrweb",
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    await sdk.start();
+
+    sdk.ingestRawEvent(
+      createRawEvent("rrweb", {
+        schema: "rrweb-lite/v1",
+        event: {
+          type: "incremental-snapshot",
+          source: "mutation-summary",
+          data: {
+            count: 3
+          }
+        }
+      })
+    );
+
+    const exported = await sdk.export();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+    const rrwebEvent = parsed.events.find((event) => event.type === "dom.rrweb.event");
+
+    expect(rrwebEvent).toBeDefined();
+    expect((rrwebEvent?.data as { schema?: unknown }).schema).toBe("rrweb-lite/v1");
+
+    await sdk.dispose();
+  });
+
   it("normalizes invalid tab ids to non-negative values", async () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-tab-id",

@@ -29,6 +29,7 @@ const LOW_PRIORITY_RAW_TYPES = new Set([
   "mousemove",
   "scroll",
   "mutation",
+  "rrweb",
   "vitals",
   "longtask",
   "snapshot",
@@ -656,6 +657,30 @@ export class LiteCaptureAgent {
     this.queueEvent("mutation", {
       count: summary.count,
       summary
+    });
+    this.emitRrwebMutationSummary(summary);
+  }
+
+  private emitRrwebMutationSummary(summary: MutationBatchSummary): void {
+    this.queueEvent("rrweb", {
+      schema: "rrweb-lite/v1",
+      event: {
+        type: "incremental-snapshot",
+        source: "mutation-summary",
+        timestamp: Date.now(),
+        data: {
+          count: summary.count,
+          childListCount: summary.childListCount,
+          attributeCount: summary.attributeCount,
+          characterDataCount: summary.characterDataCount,
+          addedNodes: summary.addedNodes,
+          removedNodes: summary.removedNodes,
+          sampleTargets: [...summary.sampleTargets],
+          attributeNames: [...summary.attributeNames]
+        }
+      },
+      href: location.href,
+      title: document.title
     });
   }
 

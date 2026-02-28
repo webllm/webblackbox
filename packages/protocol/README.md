@@ -80,7 +80,7 @@ WebBlackbox currently defines 57 event types, organized by category:
 - `dom.mutation.batch` — Batched DOM mutations
 - `dom.snapshot` — Full DOM snapshot (content-addressable blob)
 - `dom.diff` — DOM diff between snapshots
-- `dom.rrweb.event` — rrweb recording events (reserved event type; not emitted by current recorder/extension builds)
+- `dom.rrweb.event` — rrweb-compatible events (currently emitted as lite mutation summaries)
 
 ### Screen Events
 

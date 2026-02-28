@@ -305,6 +305,31 @@ describe("recorder", () => {
     expect(result.freezeReason).toBeUndefined();
   });
 
+  it("normalizes rrweb mutation summaries from content capture", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "rrweb",
+      sid: "S-rrweb",
+      tabId: 6,
+      t: Date.now(),
+      mono: 18,
+      payload: {
+        schema: "rrweb-lite/v1",
+        event: {
+          type: "incremental-snapshot",
+          source: "mutation-summary",
+          data: {
+            count: 4
+          }
+        }
+      }
+    });
+
+    expect(result.event?.type).toBe("dom.rrweb.event");
+    expect((result.event?.data as { schema?: unknown })?.schema).toBe("rrweb-lite/v1");
+  });
+
   it("normalizes console payloads from cdp and injected hooks", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const base = Date.now();

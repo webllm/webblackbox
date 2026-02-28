@@ -32,6 +32,7 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   visibilitychange: "user.visibility",
   resize: "user.resize",
   mutation: "dom.mutation.batch",
+  rrweb: "dom.rrweb.event",
   snapshot: "dom.snapshot",
   screenshot: "screen.screenshot",
   console: "console.entry",

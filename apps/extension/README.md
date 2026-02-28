@@ -82,7 +82,7 @@ The extension consists of multiple main components:
 
 ## rrweb Status
 
-`dom.rrweb.event` is currently protocol-reserved only. The extension recorder pipeline does not emit rrweb events yet.
+`dom.rrweb.event` is emitted from lite-mode mutation summaries (`schema: rrweb-lite/v1`) and ingested through the standard content-event pipeline.
 
 ## Permissions
 
