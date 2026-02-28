@@ -430,6 +430,7 @@ const panelCards = Array.from(document.querySelectorAll<HTMLElement>("[data-log-
 purgeStoredShareServerApiKeys();
 bindGlobalActions();
 void renderAll({ forcePanels: true, forceScreenshot: true });
+void maybeAutoLoadSharedArchiveFromLocation();
 
 function bindGlobalActions(): void {
   bindStageSplitter();
@@ -1434,7 +1435,14 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
     return;
   }
 
-  const resolved = resolveShareArchiveRequest(shareInput.reference, state.shareServerBaseUrl);
+  await loadArchiveFromShareReference(shareInput.reference, shareInput.apiKey);
+}
+
+async function loadArchiveFromShareReference(reference: string, apiKey: string): Promise<void> {
+  const trimmedReference = reference.trim();
+  const trimmedApiKey = apiKey.trim();
+
+  const resolved = resolveShareArchiveRequest(trimmedReference, state.shareServerBaseUrl);
 
   if (!resolved) {
     setFeedback("Invalid share reference.");
@@ -1443,12 +1451,12 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
 
   state.shareServerBaseUrl = resolved.baseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
-  setShareServerApiKeyForBaseUrl(resolved.baseUrl, shareInput.apiKey);
+  setShareServerApiKeyForBaseUrl(resolved.baseUrl, trimmedApiKey);
 
   try {
     const headers: Record<string, string> = {};
-    if (shareInput.apiKey.length > 0) {
-      headers["x-webblackbox-api-key"] = shareInput.apiKey;
+    if (trimmedApiKey.length > 0) {
+      headers["x-webblackbox-api-key"] = trimmedApiKey;
     }
 
     const response = await fetch(resolved.archiveUrl, {
@@ -1466,6 +1474,23 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
   } catch (error) {
     setFeedback(`Failed to load shared archive: ${String(error)}`);
   }
+}
+
+async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
+  let shareRef: string | null = null;
+
+  try {
+    shareRef = new URL(window.location.href).searchParams.get("share");
+  } catch {
+    return;
+  }
+
+  if (!shareRef || shareRef.trim().length === 0) {
+    return;
+  }
+
+  setFeedback("Loading shared archive from URL...");
+  await loadArchiveFromShareReference(shareRef, "");
 }
 
 function getShareServerApiKeyForBaseUrl(baseUrl: string | null): string {
