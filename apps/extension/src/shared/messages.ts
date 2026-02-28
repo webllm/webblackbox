@@ -90,6 +90,7 @@ export type SessionListItem = {
   title?: string;
   eventCount?: number;
   errorCount?: number;
+  sizeBytes?: number;
 };
 
 export type SessionListMessage = {

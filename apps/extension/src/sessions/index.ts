@@ -62,6 +62,7 @@ function renderSessionCard(session: SessionListItem, now: number): string {
   const elapsed = formatDuration(session.startedAt, session.stoppedAt ?? now);
   const eventCount = session.eventCount ?? 0;
   const errorCount = session.errorCount ?? 0;
+  const sizeBytes = session.sizeBytes ?? 0;
   const sidShort = shortenSessionId(session.sid);
   const statusLabel = session.active ? "LIVE" : "Stopped";
   const statusClass = session.active ? "wb-session-status--live" : "wb-session-status--stopped";
@@ -82,6 +83,7 @@ function renderSessionCard(session: SessionListItem, now: number): string {
         <span class="wb-chip" title="${escapeHtml(startedAt)}">started ${escapeHtml(startedRelative)}</span>
         <span class="wb-chip">events ${eventCount}</span>
         <span class="wb-chip">errors ${errorCount}</span>
+        <span class="wb-chip">size ${escapeHtml(formatByteSize(sizeBytes))}</span>
         <span class="wb-chip">duration ${escapeHtml(elapsed)}</span>
         ${endedAt ? `<span class="wb-chip" title="${escapeHtml(endedAt)}">ended</span>` : ""}
       </div>
@@ -171,6 +173,24 @@ function formatDuration(startedAt: number, endedAt: number): string {
   const hours = Math.floor(minutes / 60);
   const remMinutes = minutes % 60;
   return `${hours}h ${remMinutes}m`;
+}
+
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+
+  const kb = bytes / 1024;
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`;
+  }
+
+  const mb = kb / 1024;
+  return `${mb.toFixed(2)} MB`;
 }
 
 function escapeHtml(value: string): string {

@@ -72,6 +72,7 @@ type SessionRuntime = {
   responseBodyCaptureTimestamps: number[];
   capturedEventCount: number;
   capturedErrorCount: number;
+  capturedSizeBytes: number;
   lastFreezeNotices: Map<string, number>;
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
@@ -583,6 +584,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     responseBodyCaptureTimestamps: [],
     capturedEventCount: 0,
     capturedErrorCount: 0,
+    capturedSizeBytes: 0,
     lastFreezeNotices: new Map<string, number>(),
     queue: Promise.resolve(),
     removeCdpListeners: [],
@@ -1160,6 +1162,7 @@ function shouldCaptureActionScreenshot(
 
 function trackSessionCounters(runtime: SessionRuntime, event: WebBlackboxEvent): void {
   runtime.capturedEventCount += 1;
+  runtime.capturedSizeBytes += estimateSessionEventBytes(event);
 
   if (event.type === "error.exception" || event.type === "error.unhandledrejection") {
     runtime.capturedErrorCount += 1;
@@ -1471,6 +1474,14 @@ function handleOffscreenRuntimeMessage(rawMessage: unknown, port: PortLike): boo
   }
 
   return true;
+}
+
+function estimateSessionEventBytes(event: WebBlackboxEvent): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(event)).byteLength;
+  } catch {
+    return 0;
+  }
 }
 
 function rejectPendingOffscreenRequests(message: string): void {
@@ -2894,7 +2905,8 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     url: runtime.url,
     title: runtime.title,
     eventCount: runtime.capturedEventCount,
-    errorCount: runtime.capturedErrorCount
+    errorCount: runtime.capturedErrorCount,
+    sizeBytes: runtime.capturedSizeBytes
   };
 }
 
@@ -3143,7 +3155,8 @@ function notifyOffscreenPipelineStatus(): void {
       startedAt: runtime.startedAt,
       active: true,
       eventCount: runtime.capturedEventCount,
-      errorCount: runtime.capturedErrorCount
+      errorCount: runtime.capturedErrorCount,
+      sizeBytes: runtime.capturedSizeBytes
     })),
     updatedAt: Date.now()
   });

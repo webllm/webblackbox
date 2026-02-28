@@ -82,7 +82,7 @@ function render(container: HTMLElement): void {
       : "Idle";
   const summarySession = activeSession ?? exportSession;
   const captureSummary = summarySession
-    ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors`
+    ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors • ${formatByteSize(summarySession.sizeBytes ?? 0)}`
     : "No captured events";
   const recentFreeze =
     state.lastFreeze && now - state.lastFreeze.at <= 10 * 60 * 1000 ? state.lastFreeze : null;
@@ -365,6 +365,24 @@ function formatRelativeTime(timestamp: number, now: number): string {
 
   const hours = Math.floor(minutes / 60);
   return `${hours}h ago`;
+}
+
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+
+  const kb = bytes / 1024;
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`;
+  }
+
+  const mb = kb / 1024;
+  return `${mb.toFixed(2)} MB`;
 }
 
 function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
