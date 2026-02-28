@@ -523,7 +523,7 @@ export function PlayerShell(): React.JSX.Element {
             Show passphrase
           </label>
           <div className="share-dialog-actions">
-            <Button id="share-upload-cancel" type="submit" value="cancel" variant="ghost">
+            <Button id="share-upload-cancel" type="button" variant="ghost" data-dialog-cancel>
               Cancel
             </Button>
             <Button id="share-upload-confirm" type="submit" value="confirm" variant="secondary">
@@ -560,7 +560,7 @@ export function PlayerShell(): React.JSX.Element {
             />
           </label>
           <div className="share-dialog-actions">
-            <Button id="share-load-cancel" type="submit" value="cancel" variant="ghost">
+            <Button id="share-load-cancel" type="button" variant="ghost" data-dialog-cancel>
               Cancel
             </Button>
             <Button id="share-load-confirm" type="submit" value="confirm" variant="secondary">

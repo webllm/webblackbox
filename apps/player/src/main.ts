@@ -968,6 +968,12 @@ function bindGlobalActions(): void {
   refs.shareUploadShowPassphrase.addEventListener("change", () => {
     refs.shareUploadPassphrase.type = refs.shareUploadShowPassphrase.checked ? "text" : "password";
   });
+
+  document.querySelectorAll<HTMLButtonElement>("button[data-dialog-cancel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      button.closest("dialog")?.close("cancel");
+    });
+  });
 }
 
 function bindArchiveDropTarget(): void {
