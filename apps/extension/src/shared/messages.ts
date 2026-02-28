@@ -86,6 +86,8 @@ export type SessionListItem = {
   startedAt: number;
   active: boolean;
   stoppedAt?: number;
+  url?: string;
+  title?: string;
 };
 
 export type SessionListMessage = {

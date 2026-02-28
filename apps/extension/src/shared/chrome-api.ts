@@ -116,6 +116,13 @@ export type ChromeApi = {
     };
   };
   tabs?: {
+    get(tabId: number): Promise<{
+      id?: number;
+      active?: boolean;
+      url?: string;
+      title?: string;
+      lastAccessed?: number;
+    }>;
     query(queryInfo: {
       active?: boolean;
       currentWindow?: boolean;
@@ -125,6 +132,7 @@ export type ChromeApi = {
         id?: number;
         active?: boolean;
         url?: string;
+        title?: string;
         lastAccessed?: number;
       }>
     >;

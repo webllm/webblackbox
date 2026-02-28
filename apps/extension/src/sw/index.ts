@@ -43,6 +43,8 @@ type SessionRuntime = {
   sid: string;
   tabId: number;
   mode: CaptureMode;
+  url: string;
+  title?: string;
   config: typeof DEFAULT_RECORDER_CONFIG;
   startedAt: number;
   stoppedAt?: number;
@@ -523,13 +525,15 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   const sid = createSessionId();
   const startedAt = Date.now();
+  const tabMetadata = await resolveTabSessionMetadata(tabId);
   const recorderConfig = await loadRecorderConfig(mode);
   const metadata: SessionMetadata = {
     sid,
     tabId,
     startedAt,
     mode,
-    url: `tab:${tabId}`,
+    url: tabMetadata.url,
+    title: tabMetadata.title,
     tags: []
   };
 
@@ -541,6 +545,8 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     sid,
     tabId,
     mode,
+    url: metadata.url,
+    title: metadata.title,
     config: recorderConfig,
     startedAt,
     stoppedAt: undefined,
@@ -585,6 +591,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     },
     {
       onEvent: (event) => {
+        updateSessionMetadataFromEvent(runtime, event);
         enqueuePipelineEvent(runtime, event);
       },
       onFreeze: (reason) => {
@@ -2861,7 +2868,9 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     mode: runtime.mode,
     startedAt: runtime.startedAt,
     active,
-    stoppedAt: runtime.stoppedAt
+    stoppedAt: runtime.stoppedAt,
+    url: runtime.url,
+    title: runtime.title
   };
 }
 
@@ -2871,9 +2880,69 @@ function toSessionMetadata(runtime: SessionRuntime): SessionMetadata {
     tabId: runtime.tabId,
     startedAt: runtime.startedAt,
     mode: runtime.mode,
-    url: `tab:${runtime.tabId}`,
+    url: runtime.url,
+    title: runtime.title,
     tags: []
   };
+}
+
+async function resolveTabSessionMetadata(
+  tabId: number
+): Promise<Pick<SessionMetadata, "url" | "title">> {
+  const fallbackUrl = `tab:${tabId}`;
+
+  if (!chromeApi?.tabs?.get) {
+    return {
+      url: fallbackUrl
+    };
+  }
+
+  try {
+    const tab = await chromeApi.tabs.get(tabId);
+    const url = typeof tab?.url === "string" && tab.url.length > 0 ? tab.url : fallbackUrl;
+    const title =
+      typeof tab?.title === "string" && tab.title.trim().length > 0 ? tab.title.trim() : undefined;
+
+    return {
+      url,
+      title
+    };
+  } catch {
+    return {
+      url: fallbackUrl
+    };
+  }
+}
+
+function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
+  if (
+    event.type !== "nav.commit" &&
+    event.type !== "nav.history.push" &&
+    event.type !== "nav.history.replace" &&
+    event.type !== "nav.hash"
+  ) {
+    return;
+  }
+
+  const payload = asRecord(event.data);
+  const frame = asRecord(payload?.frame);
+  const nextUrl = asString(payload?.url) ?? asString(frame?.url);
+  const nextTitle = asString(payload?.title) ?? asString(payload?.documentTitle);
+  let changed = false;
+
+  if (nextUrl && nextUrl !== runtime.url) {
+    runtime.url = nextUrl;
+    changed = true;
+  }
+
+  if (nextTitle && nextTitle.trim().length > 0 && nextTitle !== runtime.title) {
+    runtime.title = nextTitle.trim();
+    changed = true;
+  }
+
+  if (changed) {
+    pushSessionList();
+  }
 }
 
 function pushSessionList(): void {
