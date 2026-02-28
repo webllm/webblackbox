@@ -48,6 +48,7 @@ import {
   readScreenshotMarker,
   readScreenshotShotId
 } from "./lib/screenshot-data.js";
+import { describeScreenshotMeta } from "./lib/screenshot-description.js";
 import { uploadArchiveWithProgress } from "./lib/share-upload.js";
 import {
   buildConsoleSignalSearchText,
@@ -3614,24 +3615,6 @@ function resolveShotForMono(
   }
 
   return screenshots[end] ?? null;
-}
-
-function describeScreenshotMeta(
-  marker: ScreenshotMarker | null,
-  trail: ScreenshotTrailPoint[]
-): string {
-  const markerText = describeScreenshotMarker(marker);
-  const trailText = trail.length > 0 ? `Trail points: ${trail.length}` : "No trail points.";
-  return `${markerText} | ${trailText}`;
-}
-
-function describeScreenshotMarker(marker: ScreenshotMarker | null): string {
-  if (!marker) {
-    return "No pointer marker on this screenshot.";
-  }
-
-  const base = `Pointer marker: (${Math.round(marker.x)}, ${Math.round(marker.y)})`;
-  return marker.reason ? `${base} [${marker.reason}]` : base;
 }
 
 function renderSignalEvents(container: HTMLElement, events: WebBlackboxEvent[]): void {
