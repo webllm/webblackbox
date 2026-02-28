@@ -20,12 +20,18 @@ import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.
 import { openDialog } from "./lib/dialog.js";
 import { describeRequestName, resolveNetworkInitiator } from "./lib/network-labels.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
+import { formatByteSize, formatNetworkSize, sumNetworkTransferBytes } from "./lib/network-size.js";
 import {
-  formatByteSize,
-  formatNetworkSize,
-  resolveNetworkSizeBytes,
-  sumNetworkTransferBytes
-} from "./lib/network-size.js";
+  applyNetworkViewFilters,
+  describeNetworkStatus,
+  resolveNetworkStatusClass,
+  resolveNetworkTypeLabel,
+  sortNetworkEntries,
+  type NetworkSortDirection,
+  type NetworkSortKey,
+  type NetworkStatusFilter,
+  type NetworkTypeFilter
+} from "./lib/network-view.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { markerKindToPanel } from "./lib/progress.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
@@ -50,33 +56,6 @@ import { computeTriageStats, findFirstErrorEvent, findSlowestRequest } from "./l
 import { PlayerShell } from "./shell.js";
 
 type TimelineFilter = "all" | "errors" | "network" | "storage" | "console";
-type NetworkStatusFilter =
-  | "all"
-  | "success"
-  | "redirect"
-  | "client-error"
-  | "server-error"
-  | "failed";
-type NetworkTypeFilter =
-  | "all"
-  | "document"
-  | "fetch"
-  | "script"
-  | "stylesheet"
-  | "image"
-  | "font"
-  | "text"
-  | "other";
-type NetworkSortKey =
-  | "start"
-  | "name"
-  | "method"
-  | "status"
-  | "type"
-  | "initiator"
-  | "size"
-  | "time";
-type NetworkSortDirection = "asc" | "desc";
 type LogPanelKey =
   | "timeline"
   | "details"
@@ -2763,7 +2742,7 @@ function renderWaterfall(): void {
     (entry) => entry.startMono
   );
   const visibleEntries = model.waterfall.slice(0, visibleCount);
-  const filteredEntries = applyNetworkViewFilters(visibleEntries);
+  const filteredEntries = applyNetworkViewFilters(visibleEntries, state.networkView);
   const sortedEntries = sortNetworkEntries(
     filteredEntries,
     state.networkView.sortKey,
@@ -2885,244 +2864,6 @@ function renderNetworkSummary(
       : "";
 
   refs.networkSummary.textContent = `${filteredEntries.length} / ${visibleEntries.length} requests | ${formatByteSize(filteredBytes)} / ${formatByteSize(totalBytes)} transferred${truncatedSuffix}`;
-}
-
-function applyNetworkViewFilters(entries: NetworkWaterfallEntry[]): NetworkWaterfallEntry[] {
-  const methodFilter = state.networkView.method.toUpperCase();
-  const query = state.networkView.query.trim().toLowerCase();
-  const statusFilter = state.networkView.status;
-  const typeFilter = state.networkView.type;
-
-  return entries.filter((entry) => {
-    if (methodFilter !== "ALL" && entry.method.toUpperCase() !== methodFilter) {
-      return false;
-    }
-
-    if (!matchesNetworkStatus(entry, statusFilter)) {
-      return false;
-    }
-
-    if (!matchesNetworkType(entry, typeFilter)) {
-      return false;
-    }
-
-    if (query.length === 0) {
-      return true;
-    }
-
-    const requestName = describeRequestName(entry.url);
-    const status = describeNetworkStatus(entry);
-    const type = resolveNetworkTypeLabel(entry.mimeType);
-    const initiator = resolveNetworkInitiator(entry);
-    const haystack =
-      `${entry.reqId} ${entry.method} ${entry.url} ${requestName.name} ${requestName.host} ${status} ${type} ${initiator}`
-        .trim()
-        .toLowerCase();
-    return haystack.includes(query);
-  });
-}
-
-function sortNetworkEntries(
-  entries: NetworkWaterfallEntry[],
-  sortKey: NetworkSortKey,
-  sortDirection: NetworkSortDirection
-): NetworkWaterfallEntry[] {
-  const direction = sortDirection === "asc" ? 1 : -1;
-
-  return entries
-    .map((entry, index) => ({
-      entry,
-      index
-    }))
-    .sort((left, right) => {
-      const order = compareNetworkEntries(left.entry, right.entry, sortKey) * direction;
-
-      if (order !== 0) {
-        return order;
-      }
-
-      return left.index - right.index;
-    })
-    .map((item) => item.entry);
-}
-
-function compareNetworkEntries(
-  left: NetworkWaterfallEntry,
-  right: NetworkWaterfallEntry,
-  sortKey: NetworkSortKey
-): number {
-  if (sortKey === "start") {
-    return left.startMono - right.startMono;
-  }
-
-  if (sortKey === "method") {
-    return left.method.localeCompare(right.method);
-  }
-
-  if (sortKey === "status") {
-    return networkStatusCode(left) - networkStatusCode(right);
-  }
-
-  if (sortKey === "type") {
-    return resolveNetworkTypeLabel(left.mimeType).localeCompare(
-      resolveNetworkTypeLabel(right.mimeType)
-    );
-  }
-
-  if (sortKey === "initiator") {
-    return resolveNetworkInitiator(left).localeCompare(resolveNetworkInitiator(right));
-  }
-
-  if (sortKey === "size") {
-    return resolveNetworkSizeBytes(left) - resolveNetworkSizeBytes(right);
-  }
-
-  if (sortKey === "time") {
-    return left.durationMs - right.durationMs;
-  }
-
-  const leftName = describeRequestName(left.url);
-  const rightName = describeRequestName(right.url);
-  const byName = leftName.name.localeCompare(rightName.name);
-  return byName !== 0 ? byName : leftName.host.localeCompare(rightName.host);
-}
-
-function matchesNetworkStatus(entry: NetworkWaterfallEntry, filter: NetworkStatusFilter): boolean {
-  if (filter === "all") {
-    return true;
-  }
-
-  if (filter === "failed") {
-    return entry.failed;
-  }
-
-  const status = entry.status;
-
-  if (typeof status !== "number") {
-    return false;
-  }
-
-  if (filter === "success") {
-    return status >= 200 && status < 300;
-  }
-
-  if (filter === "redirect") {
-    return status >= 300 && status < 400;
-  }
-
-  if (filter === "client-error") {
-    return status >= 400 && status < 500;
-  }
-
-  if (filter === "server-error") {
-    return status >= 500;
-  }
-
-  return true;
-}
-
-function matchesNetworkType(entry: NetworkWaterfallEntry, filter: NetworkTypeFilter): boolean {
-  if (filter === "all") {
-    return true;
-  }
-
-  return resolveNetworkTypeBucket(entry.mimeType) === filter;
-}
-
-function networkStatusCode(entry: NetworkWaterfallEntry): number {
-  if (entry.failed) {
-    return -1;
-  }
-
-  return typeof entry.status === "number" ? entry.status : 0;
-}
-
-function describeNetworkStatus(entry: NetworkWaterfallEntry): string {
-  if (entry.failed) {
-    return "(failed)";
-  }
-
-  if (typeof entry.status === "number") {
-    if (entry.statusText && entry.statusText.length > 0) {
-      return `${entry.status} ${entry.statusText}`;
-    }
-
-    return String(entry.status);
-  }
-
-  return "(pending)";
-}
-
-function resolveNetworkStatusClass(entry: NetworkWaterfallEntry): string {
-  if (entry.failed) {
-    return "wf-status-failed";
-  }
-
-  const status = entry.status;
-
-  if (typeof status !== "number") {
-    return "wf-status-neutral";
-  }
-
-  if (status >= 500) {
-    return "wf-status-error";
-  }
-
-  if (status >= 400) {
-    return "wf-status-warn";
-  }
-
-  if (status >= 300) {
-    return "wf-status-redirect";
-  }
-
-  if (status >= 200) {
-    return "wf-status-ok";
-  }
-
-  return "wf-status-neutral";
-}
-
-function resolveNetworkTypeLabel(mimeType: string | undefined): string {
-  return resolveNetworkTypeBucket(mimeType);
-}
-
-function resolveNetworkTypeBucket(mimeType: string | undefined): NetworkTypeFilter {
-  if (!mimeType) {
-    return "other";
-  }
-
-  const mime = mimeType.toLowerCase();
-
-  if (mime.includes("json") || mime.includes("xml") || mime.includes("protobuf")) {
-    return "fetch";
-  }
-
-  if (mime.includes("javascript") || mime.includes("ecmascript")) {
-    return "script";
-  }
-
-  if (mime.includes("css")) {
-    return "stylesheet";
-  }
-
-  if (mime.startsWith("image/")) {
-    return "image";
-  }
-
-  if (mime.startsWith("font/") || mime.includes("woff") || mime.includes("truetype")) {
-    return "font";
-  }
-
-  if (mime.includes("html")) {
-    return "document";
-  }
-
-  if (mime.startsWith("text/")) {
-    return "text";
-  }
-
-  return "other";
 }
 
 function renderConsoleSignals(): void {
