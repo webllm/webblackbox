@@ -1,6 +1,8 @@
 import type { RedactionProfile } from "@webblackbox/protocol";
 
 const REDACTED = "[REDACTED]";
+// Redaction runs on the synchronous ingest hot path (service worker + content/injected contexts).
+// We intentionally keep hashing sync to avoid async pipeline stalls from crypto.subtle.digest.
 const SHA_256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
