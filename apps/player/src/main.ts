@@ -45,6 +45,11 @@ import {
 import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
 import { uploadArchiveWithProgress } from "./lib/share-upload.js";
 import {
+  buildConsoleSignalSearchText,
+  readEventSummaryText,
+  stringifySignalPayload
+} from "./lib/signal-text.js";
+import {
   readStoredNumber,
   readStoredText,
   removeStoredItem,
@@ -2256,18 +2261,6 @@ function buildErrorHoverTag(model: ArchiveModel, mono: number): ProgressHoverTag
   return null;
 }
 
-function readEventSummaryText(event: WebBlackboxEvent): string {
-  const data = asRecord(event.data);
-  const first = asString(data?.message) ?? asString(data?.text) ?? asString(data?.error);
-
-  if (first) {
-    return first;
-  }
-
-  const payload = JSON.stringify(event.data);
-  return payload.length > 120 ? payload.slice(0, 120) : payload;
-}
-
 async function getResponsePreviewByHash(hash: string): Promise<ResponsePreview | null> {
   if (state.responsePreviewByHash.has(hash)) {
     return state.responsePreviewByHash.get(hash) ?? null;
@@ -3731,28 +3724,6 @@ function renderSignalEvents(container: HTMLElement, events: WebBlackboxEvent[]):
       return `<li class="signal"><span class="signal-type">${escapeHtml(event.type)}</span><span class="signal-text">${escapeHtml(text)}</span></li>`;
     })
     .join("");
-}
-
-function buildConsoleSignalSearchText(event: WebBlackboxEvent): string {
-  return `${event.type} ${stringifySignalPayload(event.data)}`.toLowerCase();
-}
-
-function stringifySignalPayload(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    const serialized = JSON.stringify(value);
-
-    if (typeof serialized === "string") {
-      return serialized;
-    }
-  } catch {
-    return "[unserializable payload]";
-  }
-
-  return String(value);
 }
 
 async function getScreenshotUrlByShotId(shotId: string): Promise<string | null> {
