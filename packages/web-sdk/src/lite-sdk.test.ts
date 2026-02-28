@@ -275,7 +275,7 @@ describe("WebBlackboxLiteSdk", () => {
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
       screenshotIdleMs: 12_000,
-      bodyCaptureMaxBytes: 128 * 1024
+      bodyCaptureMaxBytes: 256 * 1024
     });
 
     await sdk.start();

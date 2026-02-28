@@ -241,8 +241,8 @@ import { DEFAULT_EXPORT_POLICY, DEFAULT_RECORDER_CONFIG } from "@webblackbox/pro
 // - recentWindowMs: 20 * 60 * 1000
 ```
 
-`DEFAULT_RECORDER_CONFIG` is a shared baseline. Runtime products may apply stricter safety overrides
-(for example, extension/web-sdk lite paths commonly clamp body capture to `128 KiB`).
+`DEFAULT_RECORDER_CONFIG` is a shared baseline. Runtime products may apply product-specific
+overrides for sampling or freeze policies, but should document those overrides explicitly.
 
 ## Message Types
 
