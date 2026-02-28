@@ -23,10 +23,11 @@ import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
-  normalizeShareServerBaseUrl,
-  resolveShareArchiveRequest,
-  resolveShareServerOrigin
-} from "./lib/share.js";
+  bindShareApiKeyInputToTargetOrigin,
+  getShareServerApiKeyForBaseUrl,
+  setShareServerApiKeyForBaseUrl
+} from "./lib/share-api-key.js";
+import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
 import { uploadArchiveWithProgress } from "./lib/share-upload.js";
 import {
   readStoredNumber,
@@ -1400,7 +1401,11 @@ async function shareLoadedArchive(): Promise<void> {
 
   state.shareServerBaseUrl = normalizedBaseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
-  setShareServerApiKeyForBaseUrl(normalizedBaseUrl, shareConfig.apiKey);
+  setShareServerApiKeyForBaseUrl(
+    state.shareServerApiKeysByOrigin,
+    normalizedBaseUrl,
+    shareConfig.apiKey
+  );
 
   const headers: Record<string, string> = {
     "content-type": "application/octet-stream",
@@ -1484,7 +1489,7 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
 
   state.shareServerBaseUrl = resolved.baseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
-  setShareServerApiKeyForBaseUrl(resolved.baseUrl, trimmedApiKey);
+  setShareServerApiKeyForBaseUrl(state.shareServerApiKeysByOrigin, resolved.baseUrl, trimmedApiKey);
 
   try {
     const headers: Record<string, string> = {};
@@ -1526,70 +1531,6 @@ async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
   await loadArchiveFromShareReference(shareRef, "");
 }
 
-function getShareServerApiKeyForBaseUrl(baseUrl: string | null): string {
-  const origin = resolveShareServerOrigin(baseUrl);
-
-  if (!origin) {
-    return "";
-  }
-
-  return state.shareServerApiKeysByOrigin[origin] ?? "";
-}
-
-function setShareServerApiKeyForBaseUrl(baseUrl: string, apiKey: string): void {
-  const origin = resolveShareServerOrigin(baseUrl);
-
-  if (!origin) {
-    return;
-  }
-
-  const trimmed = apiKey.trim();
-
-  if (trimmed.length > 0) {
-    state.shareServerApiKeysByOrigin[origin] = trimmed;
-  } else {
-    delete state.shareServerApiKeysByOrigin[origin];
-  }
-}
-
-function bindShareApiKeyInputToTargetOrigin(
-  sourceInput: HTMLInputElement,
-  apiKeyInput: HTMLInputElement,
-  resolveBaseUrl: (value: string) => string | null
-): () => void {
-  let apiKeyEdited = false;
-  let resolvedBaseUrl = resolveBaseUrl(sourceInput.value);
-  let targetOrigin = resolveShareServerOrigin(resolvedBaseUrl);
-  apiKeyInput.value = getShareServerApiKeyForBaseUrl(resolvedBaseUrl);
-
-  const onApiKeyInput = (): void => {
-    apiKeyEdited = true;
-  };
-  const onSourceInput = (): void => {
-    const nextBaseUrl = resolveBaseUrl(sourceInput.value);
-    const nextOrigin = resolveShareServerOrigin(nextBaseUrl);
-
-    if (nextOrigin === targetOrigin) {
-      return;
-    }
-
-    resolvedBaseUrl = nextBaseUrl;
-    targetOrigin = nextOrigin;
-
-    if (!apiKeyEdited) {
-      apiKeyInput.value = getShareServerApiKeyForBaseUrl(resolvedBaseUrl);
-    }
-  };
-
-  apiKeyInput.addEventListener("input", onApiKeyInput);
-  sourceInput.addEventListener("input", onSourceInput);
-
-  return () => {
-    apiKeyInput.removeEventListener("input", onApiKeyInput);
-    sourceInput.removeEventListener("input", onSourceInput);
-  };
-}
-
 async function promptShareUploadConfig(): Promise<{
   baseUrl: string;
   passphrase: string;
@@ -1603,7 +1544,8 @@ async function promptShareUploadConfig(): Promise<{
   const detachBinding = bindShareApiKeyInputToTargetOrigin(
     refs.shareUploadBaseUrl,
     refs.shareUploadApiKey,
-    (value) => normalizeShareServerBaseUrl(value.trim())
+    (value) => normalizeShareServerBaseUrl(value.trim()),
+    (baseUrl) => getShareServerApiKeyForBaseUrl(state.shareServerApiKeysByOrigin, baseUrl)
   );
 
   let result: string;
@@ -1630,7 +1572,8 @@ async function promptShareReferenceInput(): Promise<{ reference: string; apiKey:
   const detachBinding = bindShareApiKeyInputToTargetOrigin(
     refs.shareLoadReference,
     refs.shareLoadApiKey,
-    (value) => resolveShareArchiveRequest(value.trim(), state.shareServerBaseUrl)?.baseUrl ?? null
+    (value) => resolveShareArchiveRequest(value.trim(), state.shareServerBaseUrl)?.baseUrl ?? null,
+    (baseUrl) => getShareServerApiKeyForBaseUrl(state.shareServerApiKeysByOrigin, baseUrl)
   );
 
   let result: string;
