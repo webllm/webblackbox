@@ -36,6 +36,7 @@ import {
 import { asFiniteNumber, asRecord } from "./lib/parsing.js";
 import { markerKindToPanel } from "./lib/progress.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
+import { createReplayHeaders as buildReplayHeaders, shouldAttachReplayBody } from "./lib/replay.js";
 import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
@@ -283,15 +284,6 @@ const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
 const STAGE_HEIGHT_STORAGE_KEY = "webblackbox.player.stageHeightPx";
-const REPLAY_HEADER_BLOCKLIST = new Set([
-  "accept-encoding",
-  "connection",
-  "content-length",
-  "cookie",
-  "host",
-  "origin",
-  "referer"
-]);
 const ACTION_MARKER_TYPES = new Set([
   "user.click",
   "user.dblclick",
@@ -3693,14 +3685,14 @@ async function replaySelectedRequest(): Promise<void> {
     return;
   }
 
-  const headers = createReplayHeaders(request.requestHeaders);
+  const headers = buildReplayHeaders(request.requestHeaders);
   const method = request.method.toUpperCase();
   const init: RequestInit = {
     method,
     headers
   };
 
-  if (method !== "GET" && method !== "HEAD" && typeof request.requestBodyText === "string") {
+  if (shouldAttachReplayBody(method, request.requestBodyText)) {
     init.body = request.requestBodyText;
   }
 
@@ -3786,31 +3778,6 @@ async function copyProgressHoverResponse(): Promise<void> {
 
     refs.progressHoverResponseCopy.textContent = "Copy";
   }, 1200);
-}
-
-function createReplayHeaders(headers: Record<string, string>): Headers {
-  const replayHeaders = new Headers();
-
-  for (const [name, value] of Object.entries(headers)) {
-    const normalizedName = name.toLowerCase();
-    const normalizedValue = String(value ?? "").trim();
-
-    if (
-      normalizedValue.length === 0 ||
-      REPLAY_HEADER_BLOCKLIST.has(normalizedName) ||
-      normalizedName.startsWith("sec-")
-    ) {
-      continue;
-    }
-
-    if (normalizedValue === "[REDACTED]") {
-      continue;
-    }
-
-    replayHeaders.set(name, normalizedValue);
-  }
-
-  return replayHeaders;
 }
 
 async function openArchiveWithPassphraseFallback(
