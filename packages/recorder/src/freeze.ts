@@ -18,6 +18,8 @@ export class FreezePolicy {
       this.recordFailure(event.t);
 
       if (this.networkFailures.length >= NETWORK_FAILURE_THRESHOLD) {
+        // Network failure spikes intentionally reuse the "error" freeze bucket.
+        // FreezeReason is a coarse triage signal ("error" | "marker" | "perf" | "manual").
         return "error";
       }
     }

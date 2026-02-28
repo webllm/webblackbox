@@ -164,7 +164,7 @@ const reason = policy.evaluate(event);
 Freeze conditions:
 
 - **Error** — Uncaught exceptions or unhandled rejections (`error.resource` is recorded but does not auto-freeze)
-- **Network failure** — Network request failures exceeding threshold
+- **Network failure** — Network request failures exceeding threshold (emits freeze reason `"error"`)
 - **Performance** — Long tasks exceeding 200ms
 - **Marker** — User-triggered markers
 
