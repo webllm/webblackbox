@@ -18,6 +18,7 @@ import { escapeHtml, getElement } from "./lib/dom.js";
 import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
 import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
+import { formatByteSize, formatNetworkSize, resolveNetworkSizeBytes } from "./lib/network-size.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
@@ -3279,21 +3280,6 @@ function resolveNetworkInitiator(entry: NetworkWaterfallEntry): string {
   return "(direct)";
 }
 
-function formatNetworkSize(entry: NetworkWaterfallEntry): string {
-  const size = resolveNetworkSizeBytes(entry);
-
-  if (!Number.isFinite(size) || size < 0) {
-    return entry.failed ? "(failed)" : "-";
-  }
-
-  return formatByteSize(size);
-}
-
-function resolveNetworkSizeBytes(entry: NetworkWaterfallEntry): number {
-  const size = entry.encodedDataLength ?? entry.responseBodySize;
-  return typeof size === "number" && Number.isFinite(size) && size >= 0 ? size : -1;
-}
-
 function sumNetworkTransferBytes(entries: NetworkWaterfallEntry[]): number {
   let total = 0;
 
@@ -3306,18 +3292,6 @@ function sumNetworkTransferBytes(entries: NetworkWaterfallEntry[]): number {
   }
 
   return total;
-}
-
-function formatByteSize(bytes: number): string {
-  if (bytes < 1024) {
-    return `${Math.round(bytes)} B`;
-  }
-
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function renderConsoleSignals(): void {
