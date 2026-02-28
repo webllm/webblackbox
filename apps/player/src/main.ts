@@ -14,7 +14,11 @@ import { createRoot } from "react-dom/client";
 
 import { openDialog } from "./lib/dialog.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
-import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
+import {
+  normalizeShareServerBaseUrl,
+  resolveShareArchiveRequest,
+  resolveShareServerOrigin
+} from "./lib/share.js";
 import { uploadArchiveWithProgress } from "./lib/share-upload.js";
 import {
   readStoredNumber,
@@ -1514,7 +1518,7 @@ async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
 }
 
 function getShareServerApiKeyForBaseUrl(baseUrl: string | null): string {
-  const origin = getShareServerOrigin(baseUrl);
+  const origin = resolveShareServerOrigin(baseUrl);
 
   if (!origin) {
     return "";
@@ -1524,7 +1528,7 @@ function getShareServerApiKeyForBaseUrl(baseUrl: string | null): string {
 }
 
 function setShareServerApiKeyForBaseUrl(baseUrl: string, apiKey: string): void {
-  const origin = getShareServerOrigin(baseUrl);
+  const origin = resolveShareServerOrigin(baseUrl);
 
   if (!origin) {
     return;
@@ -1546,7 +1550,7 @@ function bindShareApiKeyInputToTargetOrigin(
 ): () => void {
   let apiKeyEdited = false;
   let resolvedBaseUrl = resolveBaseUrl(sourceInput.value);
-  let targetOrigin = getShareServerOrigin(resolvedBaseUrl);
+  let targetOrigin = resolveShareServerOrigin(resolvedBaseUrl);
   apiKeyInput.value = getShareServerApiKeyForBaseUrl(resolvedBaseUrl);
 
   const onApiKeyInput = (): void => {
@@ -1554,7 +1558,7 @@ function bindShareApiKeyInputToTargetOrigin(
   };
   const onSourceInput = (): void => {
     const nextBaseUrl = resolveBaseUrl(sourceInput.value);
-    const nextOrigin = getShareServerOrigin(nextBaseUrl);
+    const nextOrigin = resolveShareServerOrigin(nextBaseUrl);
 
     if (nextOrigin === targetOrigin) {
       return;
@@ -4525,24 +4529,6 @@ function pickArchiveFile(files: FileList | null): File | null {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function getShareServerOrigin(baseUrl: string | null): string | null {
-  if (!baseUrl) {
-    return null;
-  }
-
-  const normalized = normalizeShareServerBaseUrl(baseUrl);
-
-  if (!normalized) {
-    return null;
-  }
-
-  try {
-    return new URL(normalized).origin;
-  } catch {
-    return null;
-  }
 }
 
 function purgeStoredShareServerApiKeys(): void {

@@ -84,6 +84,24 @@ export function normalizeShareServerBaseUrl(value: string): string | null {
   }
 }
 
+export function resolveShareServerOrigin(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = normalizeShareServerBaseUrl(value);
+
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    return new URL(normalized).origin;
+  } catch {
+    return null;
+  }
+}
+
 function buildAuthQuerySuffix(url: URL): string {
   const key = url.searchParams.get("key");
   if (!key) {
