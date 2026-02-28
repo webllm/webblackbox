@@ -20,6 +20,7 @@ import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import { formatByteSize, formatNetworkSize, resolveNetworkSizeBytes } from "./lib/network-size.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
+import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
   normalizeShareServerBaseUrl,
@@ -4333,61 +4334,6 @@ function downloadTextFile(filename: string, content: string, mime: string): void
 function setFeedback(text: string): void {
   state.feedback = text;
   refs.feedback.textContent = text;
-}
-
-function prefixValue(prefix: number[], index: number): number {
-  if (index < 0) {
-    return 0;
-  }
-
-  const value = prefix[index];
-  return typeof value === "number" ? value : 0;
-}
-
-function upperBoundByMono<T>(items: T[], mono: number, pickMono: (item: T) => number): number {
-  let low = 0;
-  let high = items.length;
-
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    const item = items[mid];
-
-    if (!item) {
-      high = mid;
-      continue;
-    }
-
-    if (pickMono(item) <= mono) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-
-  return low;
-}
-
-function lowerBoundByMono<T>(items: T[], mono: number, pickMono: (item: T) => number): number {
-  let low = 0;
-  let high = items.length;
-
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    const item = items[mid];
-
-    if (!item) {
-      high = mid;
-      continue;
-    }
-
-    if (pickMono(item) < mono) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-
-  return low;
 }
 
 function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | null {
