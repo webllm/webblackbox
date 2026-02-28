@@ -977,6 +977,25 @@ input[type="file"],
   gap: 4px;
 }
 
+.summary-triage {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border: 1px solid var(--sys-color-divider);
+  border-radius: 8px;
+  background: var(--sys-color-surface1);
+}
+
+.summary-triage__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--sys-color-on-surface-subtle);
+}
+
 .pill {
   border: 1px solid var(--sys-color-outline);
   border-radius: 8px;
@@ -984,6 +1003,25 @@ input[type="file"],
   padding: 1px 6px;
   font-size: 10px;
   color: var(--sys-color-on-surface);
+}
+
+.summary-jump-btn {
+  border: 1px solid var(--sys-color-outline);
+  border-radius: 8px;
+  background: var(--sys-color-surface);
+  color: var(--sys-color-on-surface);
+  padding: 1px 6px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.summary-jump-btn:hover:not(:disabled) {
+  background: var(--sys-color-state-hover-on-subtle);
+}
+
+.summary-jump-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .ops-grid {

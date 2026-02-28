@@ -251,6 +251,7 @@ const MAX_PROGRESS_MARKERS_PER_KIND = 120;
 const TRAIL_WINDOW_MS = 3_500;
 const PANEL_RENDER_BUCKET_MS = 120;
 const PLAYBACK_STEP_MS = 1_000;
+const TRIAGE_SLOW_REQUEST_MS = 1_000;
 const RESPONSE_PREVIEW_COLLAPSED_CHARS = 900;
 const RESPONSE_PREVIEW_EXPANDED_CHARS = 10_000;
 const LOG_GRID_SPLIT_MIN = 26;
@@ -972,6 +973,26 @@ function bindGlobalActions(): void {
 
   refs.shareUploadShowPassphrase.addEventListener("change", () => {
     refs.shareUploadPassphrase.type = refs.shareUploadShowPassphrase.checked ? "text" : "password";
+  });
+
+  refs.summary.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const button = target.closest<HTMLButtonElement>("button[data-summary-jump]");
+
+    if (!button || !state.model) {
+      return;
+    }
+
+    const jump = button.dataset.summaryJump;
+
+    if (jump === "first-error") {
+      jumpToFirstError();
+      return;
+    }
+
+    if (jump === "slowest-request") {
+      jumpToSlowestRequest();
+    }
   });
 
   document.querySelectorAll<HTMLButtonElement>("button[data-dialog-cancel]").forEach((button) => {
@@ -2369,6 +2390,49 @@ function redactPreviewText(value: string): string {
     .replaceAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]");
 }
 
+function jumpToFirstError(): void {
+  const model = state.model;
+
+  if (!model) {
+    return;
+  }
+
+  const firstError =
+    model.events.find((event) => event.lvl === "error" || event.type.startsWith("error.")) ?? null;
+
+  if (!firstError) {
+    setFeedback("No error events in this archive.");
+    return;
+  }
+
+  pausePlayback();
+  state.selectedActionId = null;
+  state.selectedEventId = firstError.id;
+  state.activePanel = "details";
+  setPlayhead(firstError.mono, { forcePanels: true });
+  setFeedback(`Jumped to first error at ${formatMono(firstError.mono - model.minMono)}.`);
+}
+
+function jumpToSlowestRequest(): void {
+  const model = state.model;
+
+  if (!model || model.waterfall.length === 0) {
+    setFeedback("No network requests in this archive.");
+    return;
+  }
+
+  const slowest = model.waterfall.reduce((current, entry) =>
+    entry.durationMs > current.durationMs ? entry : current
+  );
+
+  pausePlayback();
+  state.selectedRequestId = slowest.reqId;
+  state.selectedEventId = slowest.eventIds[0] ?? state.selectedEventId;
+  state.activePanel = "network";
+  setPlayhead(slowest.startMono, { forcePanels: true });
+  setFeedback(`Jumped to slowest request (${slowest.durationMs.toFixed(0)}ms).`);
+}
+
 function renderSummary(): void {
   const model = state.model;
 
@@ -2399,12 +2463,40 @@ function renderSummary(): void {
     state.playheadMono,
     (entry) => entry.mono
   );
+  const firstError =
+    model.events.find((event) => event.lvl === "error" || event.type.startsWith("error.")) ?? null;
+  const failedRequests = model.waterfall.filter((entry) => entry.failed).length;
+  const slowRequests = model.waterfall.filter(
+    (entry) => entry.durationMs >= TRIAGE_SLOW_REQUEST_MS
+  ).length;
+  const slowestRequest =
+    model.waterfall.length > 0
+      ? model.waterfall.reduce((current, entry) =>
+          entry.durationMs > current.durationMs ? entry : current
+        )
+      : null;
 
   const compareDelta = state.compareSummary
     ? `<div class="pill">compare event delta ${formatDelta(state.compareSummary.eventDelta)}</div>`
     : "";
 
   refs.summary.innerHTML = `
+    <div class="summary-triage">
+      <span class="summary-triage__label">triage</span>
+      <div class="pill">errors ${model.totals.errors}</div>
+      <div class="pill">failed requests ${failedRequests}</div>
+      <div class="pill">slow requests ${slowRequests} (>=${TRIAGE_SLOW_REQUEST_MS}ms)</div>
+      <button class="summary-jump-btn" type="button" data-summary-jump="first-error" ${
+        firstError ? "" : "disabled"
+      }>
+        Jump to first error
+      </button>
+      <button class="summary-jump-btn" type="button" data-summary-jump="slowest-request" ${
+        slowestRequest ? "" : "disabled"
+      }>
+        Jump to slowest request
+      </button>
+    </div>
     <div class="pill"><strong>${state.player.archive.manifest.mode.toUpperCase()}</strong> mode</div>
     <div class="pill">origin ${escapeHtml(state.player.archive.manifest.site.origin)}</div>
     <div class="pill">playhead ${formatMono(state.playheadMono - model.minMono)}</div>
