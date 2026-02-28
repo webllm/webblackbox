@@ -412,7 +412,10 @@ const refs = {
   shareUploadShowPassphrase: getElement<HTMLInputElement>("share-upload-show-passphrase"),
   shareLoadDialog: getElement<HTMLDialogElement>("share-load-dialog"),
   shareLoadReference: getElement<HTMLInputElement>("share-load-reference"),
-  shareLoadApiKey: getElement<HTMLInputElement>("share-load-api-key")
+  shareLoadApiKey: getElement<HTMLInputElement>("share-load-api-key"),
+  archivePassphraseDialog: getElement<HTMLDialogElement>("archive-passphrase-dialog"),
+  archivePassphraseContext: getElement<HTMLElement>("archive-passphrase-context"),
+  archivePassphraseInput: getElement<HTMLInputElement>("archive-passphrase-input")
 };
 
 const panelTabButtons = Array.from(
@@ -4185,7 +4188,7 @@ async function openArchiveWithPassphraseFallback(
       throw error;
     }
 
-    const passphrase = prompt(`Archive '${fileName}' is encrypted. Enter passphrase:`);
+    const passphrase = await promptArchivePassphrase(fileName);
 
     if (!passphrase || passphrase.trim().length === 0) {
       throw new Error("Passphrase is required for encrypted archive.");
@@ -4195,6 +4198,19 @@ async function openArchiveWithPassphraseFallback(
       passphrase: passphrase.trim()
     });
   }
+}
+
+async function promptArchivePassphrase(fileName: string): Promise<string | null> {
+  refs.archivePassphraseContext.textContent = `Archive '${fileName}' is encrypted. Enter passphrase to continue loading.`;
+  refs.archivePassphraseInput.value = "";
+  const result = await openDialog(refs.archivePassphraseDialog, refs.archivePassphraseInput);
+
+  if (result !== "confirm") {
+    return null;
+  }
+
+  const trimmed = refs.archivePassphraseInput.value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 async function copyText(value: string): Promise<void> {

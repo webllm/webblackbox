@@ -570,6 +570,40 @@ export function PlayerShell(): React.JSX.Element {
         </form>
       </dialog>
 
+      <dialog id="archive-passphrase-dialog" className="share-dialog">
+        <form id="archive-passphrase-form" className="share-dialog-card" method="dialog">
+          <header className="share-dialog-head">
+            <h2>Encrypted Archive</h2>
+            <p id="archive-passphrase-context">
+              This archive is encrypted. Enter the passphrase to continue loading.
+            </p>
+          </header>
+          <label className="share-dialog-field">
+            <span>Passphrase</span>
+            <Input
+              id="archive-passphrase-input"
+              className="share-dialog-input"
+              type="password"
+              placeholder="Required for encrypted archives"
+              autoComplete="off"
+            />
+          </label>
+          <div className="share-dialog-actions">
+            <Button id="archive-passphrase-cancel" type="button" variant="ghost" data-dialog-cancel>
+              Cancel
+            </Button>
+            <Button
+              id="archive-passphrase-confirm"
+              type="submit"
+              value="confirm"
+              variant="secondary"
+            >
+              Load
+            </Button>
+          </div>
+        </form>
+      </dialog>
+
       <div id="archive-drop-overlay" className="archive-drop-overlay" hidden>
         <div className="archive-drop-overlay-card">
           <strong>Drop Archive to Load</strong>
