@@ -26,3 +26,17 @@ export function formatNetworkSize(entry: NetworkWaterfallEntry): string {
 
   return formatByteSize(size);
 }
+
+export function sumNetworkTransferBytes(entries: NetworkWaterfallEntry[]): number {
+  let total = 0;
+
+  for (const entry of entries) {
+    const bytes = resolveNetworkSizeBytes(entry);
+
+    if (bytes > 0) {
+      total += bytes;
+    }
+  }
+
+  return total;
+}

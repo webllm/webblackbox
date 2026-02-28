@@ -19,7 +19,12 @@ import { copyText, downloadTextFile } from "./lib/export.js";
 import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
 import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
-import { formatByteSize, formatNetworkSize, resolveNetworkSizeBytes } from "./lib/network-size.js";
+import {
+  formatByteSize,
+  formatNetworkSize,
+  resolveNetworkSizeBytes,
+  sumNetworkTransferBytes
+} from "./lib/network-size.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { markerKindToPanel } from "./lib/progress.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
@@ -3153,20 +3158,6 @@ function resolveNetworkInitiator(entry: NetworkWaterfallEntry): string {
   }
 
   return "(direct)";
-}
-
-function sumNetworkTransferBytes(entries: NetworkWaterfallEntry[]): number {
-  let total = 0;
-
-  for (const entry of entries) {
-    const bytes = resolveNetworkSizeBytes(entry);
-
-    if (bytes > 0) {
-      total += bytes;
-    }
-  }
-
-  return total;
 }
 
 function renderConsoleSignals(): void {
