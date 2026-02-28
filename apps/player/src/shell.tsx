@@ -444,6 +444,9 @@ export function PlayerShell(): React.JSX.Element {
               <Button id="copy-fetch" type="button" variant="secondary">
                 Copy fetch
               </Button>
+              <Button id="replay-request" type="button" variant="secondary">
+                Replay request
+              </Button>
             </div>
             <pre id="request-details" className="code"></pre>
           </Card>

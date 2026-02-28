@@ -283,6 +283,15 @@ const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
 const STAGE_HEIGHT_STORAGE_KEY = "webblackbox.player.stageHeightPx";
+const REPLAY_HEADER_BLOCKLIST = new Set([
+  "accept-encoding",
+  "connection",
+  "content-length",
+  "cookie",
+  "host",
+  "origin",
+  "referer"
+]);
 const ACTION_MARKER_TYPES = new Set([
   "user.click",
   "user.dblclick",
@@ -412,6 +421,7 @@ const refs = {
   requestDetails: getElement<HTMLElement>("request-details"),
   copyCurl: getElement<HTMLButtonElement>("copy-curl"),
   copyFetch: getElement<HTMLButtonElement>("copy-fetch"),
+  replayRequest: getElement<HTMLButtonElement>("replay-request"),
   consoleList: getElement<HTMLUListElement>("console-list"),
   realtimeList: getElement<HTMLUListElement>("realtime-list"),
   storageList: getElement<HTMLUListElement>("storage-list"),
@@ -907,6 +917,10 @@ function bindGlobalActions(): void {
 
   refs.copyFetch.addEventListener("click", () => {
     void copySelectedRequestAsFetch();
+  });
+
+  refs.replayRequest.addEventListener("click", () => {
+    void replaySelectedRequest();
   });
 
   refs.exportReport.addEventListener("click", () => {
@@ -2428,6 +2442,7 @@ function renderPanels(): void {
     refs.filmstripList.innerHTML = "";
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
+    refs.replayRequest.disabled = true;
     return;
   }
 
@@ -2724,6 +2739,7 @@ function renderWaterfall(): void {
     refs.requestDetails.textContent = "Select a request row to inspect network details.";
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
+    refs.replayRequest.disabled = true;
     return;
   }
 
@@ -2751,6 +2767,7 @@ function renderWaterfall(): void {
       : "No requests at current playhead or current filters.";
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
+    refs.replayRequest.disabled = true;
     return;
   }
 
@@ -2810,6 +2827,7 @@ function renderWaterfall(): void {
     refs.requestDetails.textContent = "No request selected.";
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
+    refs.replayRequest.disabled = true;
     return;
   }
 
@@ -2834,6 +2852,7 @@ function renderWaterfall(): void {
 
   refs.copyCurl.disabled = false;
   refs.copyFetch.disabled = false;
+  refs.replayRequest.disabled = false;
 }
 
 function renderNetworkSummary(
@@ -3660,6 +3679,88 @@ async function copySelectedRequestAsFetch(): Promise<void> {
   setFeedback(`Copied fetch snippet for ${reqId}`);
 }
 
+async function replaySelectedRequest(): Promise<void> {
+  const model = state.model;
+  const reqId = state.selectedRequestId;
+
+  if (!model || !reqId) {
+    return;
+  }
+
+  const request = model.waterfallByReqId.get(reqId);
+
+  if (!request) {
+    return;
+  }
+
+  const headers = createReplayHeaders(request.requestHeaders);
+  const method = request.method.toUpperCase();
+  const init: RequestInit = {
+    method,
+    headers
+  };
+
+  if (method !== "GET" && method !== "HEAD" && typeof request.requestBodyText === "string") {
+    init.body = request.requestBodyText;
+  }
+
+  const startedAt = performance.now();
+
+  try {
+    const response = await fetch(request.url, init);
+    const elapsedMs = performance.now() - startedAt;
+    const replayStatus = response.status;
+    const capturedStatus = typeof request.status === "number" ? request.status : null;
+    const statusDelta = capturedStatus === null ? null : replayStatus - capturedStatus;
+    const replayBody = await response.text();
+
+    refs.requestDetails.textContent = JSON.stringify(
+      {
+        replay: {
+          reqId,
+          method,
+          url: request.url,
+          status: replayStatus,
+          statusText: response.statusText || null,
+          durationMs: Number(elapsedMs.toFixed(2))
+        },
+        captured: {
+          status: capturedStatus,
+          failed: request.failed,
+          durationMs: Number(request.durationMs.toFixed(2))
+        },
+        delta: {
+          status: statusDelta,
+          durationMs: Number((elapsedMs - request.durationMs).toFixed(2))
+        },
+        responsePreview: compactText(replayBody, 4_000)
+      },
+      null,
+      2
+    );
+
+    const statusLabel =
+      capturedStatus === null
+        ? String(replayStatus)
+        : `${replayStatus} (captured ${capturedStatus}, delta ${formatDelta(statusDelta ?? 0)})`;
+    setFeedback(`Replayed ${reqId}: ${statusLabel}`);
+  } catch (error) {
+    refs.requestDetails.textContent = JSON.stringify(
+      {
+        replay: {
+          reqId,
+          method,
+          url: request.url,
+          error: String(error)
+        }
+      },
+      null,
+      2
+    );
+    setFeedback(`Replay failed for ${reqId}.`);
+  }
+}
+
 async function copyProgressHoverResponse(): Promise<void> {
   const payload = state.responseCopyText;
 
@@ -3685,6 +3786,31 @@ async function copyProgressHoverResponse(): Promise<void> {
 
     refs.progressHoverResponseCopy.textContent = "Copy";
   }, 1200);
+}
+
+function createReplayHeaders(headers: Record<string, string>): Headers {
+  const replayHeaders = new Headers();
+
+  for (const [name, value] of Object.entries(headers)) {
+    const normalizedName = name.toLowerCase();
+    const normalizedValue = String(value ?? "").trim();
+
+    if (
+      normalizedValue.length === 0 ||
+      REPLAY_HEADER_BLOCKLIST.has(normalizedName) ||
+      normalizedName.startsWith("sec-")
+    ) {
+      continue;
+    }
+
+    if (normalizedValue === "[REDACTED]") {
+      continue;
+    }
+
+    replayHeaders.set(name, normalizedValue);
+  }
+
+  return replayHeaders;
 }
 
 async function openArchiveWithPassphraseFallback(
