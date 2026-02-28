@@ -51,13 +51,14 @@ type ShareSummary = {
 };
 
 const DEFAULT_PORT = 8787;
+const DEFAULT_HOST = "127.0.0.1";
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
-const DEFAULT_BASE_URL = `http://localhost:${DEFAULT_PORT}`;
+const DEFAULT_BASE_URL = `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
 const DATA_ROOT = resolve(process.env.WEBBLACKBOX_SHARE_DATA_DIR ?? ".webblackbox-share-data");
 const ARCHIVES_DIR = join(DATA_ROOT, "archives");
 const RECORDS_DIR = join(DATA_ROOT, "records");
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
-const SHARE_ALLOWED_ORIGIN = (process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN ?? "*").trim() || "*";
+const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
 const UPLOAD_RATE_LIMIT_MAX = parseRateLimitCount(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX,
@@ -81,6 +82,7 @@ async function startShareServer(): Promise<void> {
   await ensureStorageLayout();
 
   const port = parsePort(process.env.PORT);
+  const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
   const server = createServer((request, response) => {
     void routeRequest(request, response).catch((error) => {
       console.warn("[share-server] request failed", error);
@@ -90,14 +92,15 @@ async function startShareServer(): Promise<void> {
     });
   });
 
-  server.listen(port, () => {
-    console.info(`[share-server] listening on http://localhost:${port}`);
+  server.listen(port, host, () => {
+    console.info(`[share-server] listening on http://${host}:${port}`);
     console.info(`[share-server] data root: ${DATA_ROOT}`);
   });
 }
 
 async function routeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  applyCorsHeaders(response, request);
+  const requestUrl = new URL(request.url ?? "/", requestBaseUrl(request));
+  applyCorsHeaders(response, request, requestUrl);
 
   if (request.method === "OPTIONS") {
     response.writeHead(204);
@@ -105,7 +108,6 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
     return;
   }
 
-  const requestUrl = new URL(request.url ?? "/", requestBaseUrl(request));
   const method = request.method ?? "GET";
   const pathname = requestUrl.pathname;
 
@@ -597,6 +599,25 @@ function parsePort(rawValue: string | undefined): number {
   return Math.floor(parsed);
 }
 
+function parseBindHost(rawValue: string | undefined): string {
+  if (typeof rawValue !== "string") {
+    return DEFAULT_HOST;
+  }
+
+  const trimmed = rawValue.trim();
+  return trimmed.length > 0 ? trimmed : DEFAULT_HOST;
+}
+
+function normalizeAllowedOrigin(rawValue: string | undefined): string {
+  const resolved = (rawValue ?? "same-origin").trim();
+
+  if (resolved.length === 0) {
+    return "same-origin";
+  }
+
+  return resolved.toLowerCase() === "same-origin" ? "same-origin" : resolved;
+}
+
 async function readRequestBody(request: IncomingMessage, maxBytes: number): Promise<Uint8Array> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -639,9 +660,16 @@ function normalizeFileName(rawName: string): string {
   return safe.endsWith(".webblackbox") || safe.endsWith(".zip") ? safe : `${safe}.webblackbox`;
 }
 
-function applyCorsHeaders(response: ServerResponse, request: IncomingMessage): void {
+function applyCorsHeaders(
+  response: ServerResponse,
+  request: IncomingMessage,
+  requestUrl: URL
+): void {
   const requestOrigin = request.headers.origin;
-  const allowOrigin = resolveAllowedOrigin(requestOrigin);
+  const allowOrigin = resolveAllowedOrigin(
+    requestOrigin,
+    requestOriginFromUrl(request, requestUrl)
+  );
 
   if (allowOrigin) {
     response.setHeader("access-control-allow-origin", allowOrigin);
@@ -700,13 +728,20 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#039;");
 }
 
-function resolveAllowedOrigin(originHeader: string | string[] | undefined): string | null {
+function resolveAllowedOrigin(
+  originHeader: string | string[] | undefined,
+  expectedOrigin: string
+): string | null {
   if (SHARE_ALLOWED_ORIGIN === "*") {
     return "*";
   }
 
   if (typeof originHeader !== "string" || originHeader.trim().length === 0) {
     return null;
+  }
+
+  if (SHARE_ALLOWED_ORIGIN === "same-origin") {
+    return originHeader === expectedOrigin ? expectedOrigin : null;
   }
 
   return originHeader === SHARE_ALLOWED_ORIGIN ? SHARE_ALLOWED_ORIGIN : null;
@@ -727,7 +762,7 @@ function isProtectedShareRoute(pathname: string): boolean {
 
 function isAuthorizedRequest(request: IncomingMessage, requestUrl: URL): boolean {
   if (!SHARE_API_KEY) {
-    return true;
+    return isLoopbackRequest(request);
   }
 
   const headerToken = readAuthTokenFromRequest(request);
@@ -741,6 +776,39 @@ function isAuthorizedRequest(request: IncomingMessage, requestUrl: URL): boolean
   }
 
   return false;
+}
+
+function requestOriginFromUrl(request: IncomingMessage, requestUrl: URL): string {
+  return requestOrigin(request, requestUrl);
+}
+
+function isLoopbackRequest(request: IncomingMessage): boolean {
+  const address = resolveClientAddress(request);
+  return Boolean(address && isLoopbackAddress(address));
+}
+
+function resolveClientAddress(request: IncomingMessage): string | null {
+  if (TRUST_X_FORWARDED_FOR) {
+    const forwardedFor = request.headers["x-forwarded-for"];
+    if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
+      const first = forwardedFor.split(",")[0]?.trim();
+      if (first) {
+        return first;
+      }
+    }
+  }
+
+  const socketAddress = request.socket.remoteAddress;
+  return typeof socketAddress === "string" && socketAddress.length > 0 ? socketAddress : null;
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return (
+    address === "127.0.0.1" ||
+    address === "::1" ||
+    address === "::ffff:127.0.0.1" ||
+    address.startsWith("127.")
+  );
 }
 
 function readAuthTokenFromRequest(request: IncomingMessage): string | null {
@@ -798,22 +866,8 @@ function parseRateLimitWindowMs(value: string | undefined, fallback: number): nu
 }
 
 function resolveClientKey(request: IncomingMessage): string {
-  if (TRUST_X_FORWARDED_FOR) {
-    const forwardedFor = request.headers["x-forwarded-for"];
-    if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-      const first = forwardedFor.split(",")[0]?.trim();
-      if (first) {
-        return `ip:${first}`;
-      }
-    }
-  }
-
-  const socketAddress = request.socket.remoteAddress;
-  if (typeof socketAddress === "string" && socketAddress.length > 0) {
-    return `ip:${socketAddress}`;
-  }
-
-  return "ip:unknown";
+  const address = resolveClientAddress(request);
+  return address ? `ip:${address}` : "ip:unknown";
 }
 
 function consumeUploadRateLimitToken(

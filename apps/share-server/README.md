@@ -16,17 +16,18 @@ cd apps/share-server
 pnpm dev
 ```
 
-By default the server listens on `http://localhost:8787`.
+By default the server listens on `http://127.0.0.1:8787`.
 
 ## Security knobs
 
 Set these environment variables for production-like deployments:
 
-- `WEBBLACKBOX_SHARE_API_KEY`: optional API key. When set, all `/api/share/*` and `/share/*` routes require either:
+- `WEBBLACKBOX_SHARE_API_KEY`: API key for `/api/share/*` and `/share/*` routes. If unset, protected routes are limited to loopback clients (`127.0.0.1` / `::1`). When set, clients can authenticate with either:
   - `x-webblackbox-api-key: <key>`, or
   - `authorization: Bearer <key>`, or
   - `?key=<key>` query param
-- `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `*`.
+- `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
+- `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Use `*` only for trusted environments.
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX`: max uploads per client in each window (default `10`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS`: upload rate limit window in ms (default `60000`).
 - `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: set `true` only behind a trusted proxy; otherwise upload rate limiting uses socket IP.
