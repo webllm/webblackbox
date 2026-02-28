@@ -385,3 +385,44 @@ main {
 .wb-session-card__actions .wb-btn {
   min-width: 86px;
 }
+
+.wb-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(20, 33, 61, 0.38);
+  backdrop-filter: blur(2px);
+}
+
+.wb-confirm-card {
+  width: min(420px, 100%);
+  border-radius: 12px;
+  border: 1px solid var(--wb-border);
+  background: #fff;
+  box-shadow: 0 16px 42px rgba(20, 33, 61, 0.24);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.wb-confirm-title {
+  margin: 0;
+  font-size: 16px;
+  color: var(--wb-ink);
+}
+
+.wb-confirm-body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--wb-muted-ink);
+}
+
+.wb-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

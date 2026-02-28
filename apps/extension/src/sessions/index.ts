@@ -219,14 +219,16 @@ function bindActions(container: HTMLElement): void {
   });
 
   container.querySelectorAll<HTMLButtonElement>("button[data-delete]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const sid = button.getAttribute("data-delete");
 
       if (!sid) {
         return;
       }
 
-      const confirmed = confirm(`Delete session ${sid}? This removes local archive data.`);
+      const confirmed = await openConfirmDialog(
+        `Delete session ${sid}? This removes local archive data.`
+      );
 
       if (!confirmed) {
         return;
@@ -237,5 +239,50 @@ function bindActions(container: HTMLElement): void {
         sid
       });
     });
+  });
+}
+
+function openConfirmDialog(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "wb-confirm-overlay";
+    overlay.innerHTML = `
+      <section class="wb-confirm-card" role="dialog" aria-modal="true" aria-labelledby="wb-confirm-title">
+        <h2 id="wb-confirm-title" class="wb-confirm-title">Confirm Delete</h2>
+        <p class="wb-confirm-body">${escapeHtml(message)}</p>
+        <div class="wb-confirm-actions">
+          <button type="button" class="wb-btn wb-btn--muted" data-confirm-cancel>Cancel</button>
+          <button type="button" class="wb-btn wb-btn--brand" data-confirm-accept>Delete</button>
+        </div>
+      </section>
+    `;
+
+    const cancelButton = overlay.querySelector<HTMLButtonElement>("button[data-confirm-cancel]");
+    const acceptButton = overlay.querySelector<HTMLButtonElement>("button[data-confirm-accept]");
+
+    const finish = (accepted: boolean): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+      resolve(accepted);
+    };
+
+    const onKeydown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+
+    cancelButton?.addEventListener("click", () => finish(false));
+    acceptButton?.addEventListener("click", () => finish(true));
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(false);
+      }
+    });
+
+    document.addEventListener("keydown", onKeydown);
+    document.body.append(overlay);
+    cancelButton?.focus();
   });
 }
