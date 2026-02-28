@@ -20,6 +20,7 @@ import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import { formatByteSize, formatNetworkSize, resolveNetworkSizeBytes } from "./lib/network-size.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
+import { markerKindToPanel } from "./lib/progress.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
 import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
@@ -4205,30 +4206,6 @@ function downloadTextFile(filename: string, content: string, mime: string): void
 function setFeedback(text: string): void {
   state.feedback = text;
   refs.feedback.textContent = text;
-}
-
-function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | null {
-  if (!kind) {
-    return null;
-  }
-
-  if (kind === "error") {
-    return "console";
-  }
-
-  if (kind === "network") {
-    return "network";
-  }
-
-  if (kind === "screenshot") {
-    return "details";
-  }
-
-  if (kind === "action") {
-    return "actions";
-  }
-
-  return null;
 }
 
 function purgeStoredShareServerApiKeys(): void {
