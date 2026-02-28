@@ -381,6 +381,27 @@ main {
   color: var(--wb-muted-ink);
 }
 
+.wb-session-card__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--wb-ink);
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wb-session-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wb-chip--tag {
+  color: #0f4c81;
+  border-color: rgba(15, 76, 129, 0.24);
+  background: rgba(15, 76, 129, 0.08);
+}
+
 .wb-session-card__actions {
   display: flex;
   align-items: center;
@@ -390,6 +411,31 @@ main {
 
 .wb-session-card__actions .wb-btn {
   min-width: 86px;
+}
+
+.wb-session-annotation {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-session-note-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 54px;
+  border-radius: 8px;
+  border: 1px solid var(--wb-border);
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--wb-ink);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+}
+
+.wb-session-note-input:focus-visible {
+  outline: none;
+  border-color: var(--wb-border-strong);
+  box-shadow: 0 0 0 3px rgba(27, 134, 217, 0.2);
 }
 
 .wb-confirm-overlay {

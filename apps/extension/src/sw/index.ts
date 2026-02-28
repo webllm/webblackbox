@@ -45,6 +45,8 @@ type SessionRuntime = {
   mode: CaptureMode;
   url: string;
   title?: string;
+  tags: string[];
+  note?: string;
   config: typeof DEFAULT_RECORDER_CONFIG;
   startedAt: number;
   stoppedAt?: number;
@@ -107,6 +109,11 @@ type PipelineExportDownloadResult = {
   integrity: HashesManifest;
 };
 
+type SessionAnnotation = {
+  tags: string[];
+  note?: string;
+};
+
 type SessionPipelineClient = {
   start: (session: SessionMetadata, redactionProfile: RedactionProfile) => Promise<void>;
   ingest: (event: WebBlackboxEvent) => Promise<void>;
@@ -166,6 +173,7 @@ const chromeApi = getChromeApi();
 
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
+const sessionAnnotations = new Map<string, SessionAnnotation>();
 const connectedPorts = new Set<PortLike>();
 let offscreenPort: PortLike | null = null;
 const pendingOffscreenRequests = new Map<
@@ -266,6 +274,7 @@ const CPU_PROFILE_SAMPLE_MS = 350;
 const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
 const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
+const SESSION_ANNOTATIONS_STORAGE_KEY = "webblackbox.runtime.sessionAnnotations";
 const STOPPED_SESSION_TTL_MS = 10 * 60_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
@@ -436,6 +445,11 @@ async function handleInboundMessage(
     return;
   }
 
+  if (message.kind === "ui.annotate") {
+    await updateSessionAnnotation(message.sid, message.tags, message.note);
+    return;
+  }
+
   if (message.kind === "content.marker") {
     const tabId = senderTabId ?? port?.sender?.tab?.id;
 
@@ -509,6 +523,9 @@ async function deleteSessionBySid(sid: string): Promise<void> {
   const runtime = sessionsBySid.get(sid);
 
   if (!runtime) {
+    if (sessionAnnotations.delete(sid)) {
+      await persistSessionAnnotations().catch(() => undefined);
+    }
     return;
   }
 
@@ -517,6 +534,11 @@ async function deleteSessionBySid(sid: string): Promise<void> {
   }
 
   await disposeStoppedSession(runtime);
+
+  if (sessionAnnotations.delete(sid)) {
+    await persistSessionAnnotations().catch(() => undefined);
+    pushSessionList();
+  }
 }
 
 async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
@@ -532,6 +554,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   const startedAt = Date.now();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
   const recorderConfig = await loadRecorderConfig(mode);
+  const annotation = getSessionAnnotation(sid);
   const metadata: SessionMetadata = {
     sid,
     tabId,
@@ -539,7 +562,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     mode,
     url: tabMetadata.url,
     title: tabMetadata.title,
-    tags: []
+    tags: [...annotation.tags]
   };
 
   const recorderPlugins = createDefaultRecorderPlugins();
@@ -552,6 +575,8 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     mode,
     url: metadata.url,
     title: metadata.title,
+    tags: [...annotation.tags],
+    note: annotation.note,
     config: recorderConfig,
     startedAt,
     stoppedAt: undefined,
@@ -2906,7 +2931,9 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     title: runtime.title,
     eventCount: runtime.capturedEventCount,
     errorCount: runtime.capturedErrorCount,
-    sizeBytes: runtime.capturedSizeBytes
+    sizeBytes: runtime.capturedSizeBytes,
+    tags: [...runtime.tags],
+    note: runtime.note
   };
 }
 
@@ -2918,7 +2945,7 @@ function toSessionMetadata(runtime: SessionRuntime): SessionMetadata {
     mode: runtime.mode,
     url: runtime.url,
     title: runtime.title,
-    tags: []
+    tags: [...runtime.tags]
   };
 }
 
@@ -3093,6 +3120,135 @@ function applyModeRuntimeConfig(
   return config;
 }
 
+async function updateSessionAnnotation(
+  sid: string,
+  tagsInput: unknown,
+  noteInput: unknown
+): Promise<void> {
+  const tags = normalizeSessionTags(tagsInput);
+  const note = normalizeSessionNote(noteInput);
+  const runtime = sessionsBySid.get(sid);
+
+  if (runtime) {
+    runtime.tags = [...tags];
+    runtime.note = note;
+  }
+
+  sessionAnnotations.set(sid, {
+    tags: [...tags],
+    note
+  });
+
+  await persistSessionAnnotations().catch(() => undefined);
+  pushSessionList();
+}
+
+function getSessionAnnotation(sid: string): SessionAnnotation {
+  const annotation = sessionAnnotations.get(sid);
+
+  if (!annotation) {
+    return {
+      tags: []
+    };
+  }
+
+  return {
+    tags: [...annotation.tags],
+    note: annotation.note
+  };
+}
+
+async function loadSessionAnnotations(): Promise<void> {
+  sessionAnnotations.clear();
+
+  if (!chromeApi?.storage?.local?.get) {
+    return;
+  }
+
+  const values = await chromeApi.storage.local
+    .get(SESSION_ANNOTATIONS_STORAGE_KEY)
+    .catch(() => undefined);
+  const raw = asRecord(values?.[SESSION_ANNOTATIONS_STORAGE_KEY]);
+
+  if (!raw) {
+    return;
+  }
+
+  for (const [sid, payload] of Object.entries(raw)) {
+    const row = asRecord(payload);
+    const tags = normalizeSessionTags(row?.tags);
+    const note = normalizeSessionNote(row?.note);
+
+    sessionAnnotations.set(sid, {
+      tags,
+      note
+    });
+  }
+}
+
+async function persistSessionAnnotations(): Promise<void> {
+  if (!chromeApi?.storage?.local?.set) {
+    return;
+  }
+
+  const serialized: Record<string, SessionAnnotation> = {};
+
+  for (const [sid, annotation] of sessionAnnotations.entries()) {
+    serialized[sid] = {
+      tags: [...annotation.tags],
+      note: annotation.note
+    };
+  }
+
+  await chromeApi.storage.local.set({
+    [SESSION_ANNOTATIONS_STORAGE_KEY]: serialized
+  });
+}
+
+function normalizeSessionTags(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const tags: string[] = [];
+
+  for (const raw of input) {
+    if (typeof raw !== "string") {
+      continue;
+    }
+
+    const normalized = raw.trim().slice(0, 40);
+
+    if (normalized.length === 0 || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    tags.push(normalized);
+
+    if (tags.length >= 12) {
+      break;
+    }
+  }
+
+  return tags;
+}
+
+function normalizeSessionNote(input: unknown): string | undefined {
+  if (typeof input !== "string") {
+    return undefined;
+  }
+
+  const normalized = input.trim();
+
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  return normalized.slice(0, 500);
+}
+
 async function persistRuntimeState(): Promise<void> {
   if (!chromeApi?.storage?.local?.set) {
     return;
@@ -3111,6 +3267,8 @@ async function persistRuntimeState(): Promise<void> {
 }
 
 async function restoreRuntimeState(): Promise<void> {
+  await loadSessionAnnotations();
+
   if (!chromeApi?.storage?.local?.get) {
     return;
   }
@@ -3156,7 +3314,9 @@ function notifyOffscreenPipelineStatus(): void {
       active: true,
       eventCount: runtime.capturedEventCount,
       errorCount: runtime.capturedErrorCount,
-      sizeBytes: runtime.capturedSizeBytes
+      sizeBytes: runtime.capturedSizeBytes,
+      tags: [...runtime.tags],
+      note: runtime.note
     })),
     updatedAt: Date.now()
   });

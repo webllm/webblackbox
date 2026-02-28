@@ -39,6 +39,13 @@ export type UiDeleteSessionMessage = {
   sid: string;
 };
 
+export type UiAnnotateSessionMessage = {
+  kind: "ui.annotate";
+  sid: string;
+  tags?: string[];
+  note?: string;
+};
+
 export type ContentEventBatchMessage = {
   kind: "content.events";
   events: RawRecorderEvent[];
@@ -58,6 +65,7 @@ export type ExtensionInboundMessage =
   | UiStopSessionMessage
   | UiExportSessionMessage
   | UiDeleteSessionMessage
+  | UiAnnotateSessionMessage
   | ContentEventBatchMessage
   | ContentMarkerMessage
   | ContentReadyMessage;
@@ -91,6 +99,8 @@ export type SessionListItem = {
   eventCount?: number;
   errorCount?: number;
   sizeBytes?: number;
+  tags?: string[];
+  note?: string;
 };
 
 export type SessionListMessage = {

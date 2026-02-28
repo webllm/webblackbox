@@ -63,6 +63,12 @@ function renderSessionCard(session: SessionListItem, now: number): string {
   const eventCount = session.eventCount ?? 0;
   const errorCount = session.errorCount ?? 0;
   const sizeBytes = session.sizeBytes ?? 0;
+  const tags = session.tags ?? [];
+  const note = typeof session.note === "string" ? session.note : "";
+  const tagsValue = formatTagInputValue(tags);
+  const tagChips = tags
+    .map((tag) => `<span class="wb-chip wb-chip--tag">#${escapeHtml(tag)}</span>`)
+    .join("");
   const sidShort = shortenSessionId(session.sid);
   const statusLabel = session.active ? "LIVE" : "Stopped";
   const statusClass = session.active ? "wb-session-status--live" : "wb-session-status--stopped";
@@ -88,11 +94,28 @@ function renderSessionCard(session: SessionListItem, now: number): string {
         ${endedAt ? `<span class="wb-chip" title="${escapeHtml(endedAt)}">ended</span>` : ""}
       </div>
       <p class="wb-session-card__sid mono" title="${escapeHtml(session.sid)}">sid ${escapeHtml(sidShort)}</p>
+      ${
+        note
+          ? `<p class="wb-session-card__note" title="${escapeHtml(note)}">${escapeHtml(note)}</p>`
+          : ""
+      }
+      ${tagChips ? `<div class="wb-session-card__tags">${tagChips}</div>` : ""}
       <div class="wb-session-card__actions">
         <button class="wb-btn wb-btn--brand" data-export="${escapeHtml(session.sid)}">Export</button>
         <button class="wb-btn wb-btn--muted" data-stop="${session.tabId}" ${stopDisabledAttr}>Stop</button>
         <button class="wb-btn wb-btn--muted" data-delete="${escapeHtml(session.sid)}">Delete</button>
       </div>
+      <form class="wb-session-annotation" data-annotate="${escapeHtml(session.sid)}">
+        <label class="wb-field-label">
+          Tags (comma-separated)
+          <input class="wb-input" data-annotate-tags value="${escapeHtml(tagsValue)}" />
+        </label>
+        <label class="wb-field-label">
+          Notes
+          <textarea class="wb-session-note-input" data-annotate-note rows="2">${escapeHtml(note)}</textarea>
+        </label>
+        <button class="wb-btn wb-btn--muted" type="submit">Save Context</button>
+      </form>
     </article>
   `;
 }
@@ -193,6 +216,42 @@ function formatByteSize(bytes: number): string {
   return `${mb.toFixed(2)} MB`;
 }
 
+function parseTagInput(value: string): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+
+  for (const fragment of value.split(",")) {
+    const tag = fragment.trim();
+
+    if (tag.length === 0 || seen.has(tag)) {
+      continue;
+    }
+
+    seen.add(tag);
+    tags.push(tag);
+
+    if (tags.length >= 12) {
+      break;
+    }
+  }
+
+  return tags;
+}
+
+function normalizeNoteInput(value: string): string | undefined {
+  const normalized = value.trim();
+
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  return normalized.slice(0, 500);
+}
+
+function formatTagInputValue(tags: string[]): string {
+  return tags.join(", ");
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -259,6 +318,27 @@ function bindActions(container: HTMLElement): void {
       port?.postMessage({
         kind: "ui.delete",
         sid
+      });
+    });
+  });
+
+  container.querySelectorAll<HTMLFormElement>("form[data-annotate]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const sid = form.getAttribute("data-annotate");
+
+      if (!sid) {
+        return;
+      }
+
+      const tagsInput = form.querySelector<HTMLInputElement>("[data-annotate-tags]");
+      const noteInput = form.querySelector<HTMLTextAreaElement>("[data-annotate-note]");
+
+      port?.postMessage({
+        kind: "ui.annotate",
+        sid,
+        tags: parseTagInput(tagsInput?.value ?? ""),
+        note: normalizeNoteInput(noteInput?.value ?? "")
       });
     });
   });
