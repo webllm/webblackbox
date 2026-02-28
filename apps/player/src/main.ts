@@ -364,6 +364,7 @@ const refs = {
   compareInput: getElement<HTMLInputElement>("compare-input"),
   summary: getElement<HTMLElement>("summary"),
   compareDetails: getElement<HTMLElement>("compare-details"),
+  compareRegressions: getElement<HTMLElement>("compare-regressions"),
   feedback: getElement<HTMLElement>("feedback"),
   logGrid: getElement<HTMLElement>("log-grid"),
   logGridDivider: getElement<HTMLElement>("log-grid-divider"),
@@ -2349,6 +2350,7 @@ function renderSummary(): void {
   if (!model || !state.player) {
     refs.summary.innerHTML = `<p class="empty">Load an archive to inspect playback.</p>`;
     refs.compareDetails.textContent = "Load a comparison archive to inspect deltas.";
+    refs.compareRegressions.innerHTML = "";
     return;
   }
 
@@ -2411,6 +2413,46 @@ function renderSummary(): void {
   refs.compareDetails.textContent = state.compareSummary
     ? formatCompareSummary(state.compareSummary)
     : "Load a comparison archive to inspect event deltas.";
+  refs.compareRegressions.innerHTML = renderCompareRegressions(state.compareSummary);
+}
+
+function renderCompareRegressions(summary: PlayerComparison | null): string {
+  if (!summary || summary.endpointRegressions.length === 0) {
+    return `<p class="empty compare-empty">No endpoint regression deltas.</p>`;
+  }
+
+  const rows = summary.endpointRegressions.slice(0, 8);
+
+  return `
+    <table class="compare-regressions-table">
+      <thead>
+        <tr>
+          <th>Endpoint</th>
+          <th>Count Δ</th>
+          <th>Fail-rate Δ</th>
+          <th>P95 Δ</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map((entry) => {
+            const endpointLabel = `${entry.method} ${entry.endpoint}`;
+            const failRateDelta = `${formatDelta(
+              Number((entry.failureRateDelta * 100).toFixed(2))
+            )}%`;
+            const p95Delta = `${formatDelta(Number(entry.p95DurationDeltaMs.toFixed(1)))}ms`;
+
+            return `<tr>
+              <td title="${escapeHtml(endpointLabel)}">${escapeHtml(endpointLabel)}</td>
+              <td class="mono">${formatDelta(entry.countDelta)}</td>
+              <td class="mono">${escapeHtml(failRateDelta)}</td>
+              <td class="mono">${escapeHtml(p95Delta)}</td>
+            </tr>`;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 function renderPanels(): void {

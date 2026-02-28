@@ -453,6 +453,7 @@ export function PlayerShell(): React.JSX.Element {
 
           <Card className="compare-card" data-log-panel-target="compare">
             <h2>Compare</h2>
+            <div id="compare-regressions" className="compare-regressions"></div>
             <pre id="compare-details" className="code"></pre>
           </Card>
 

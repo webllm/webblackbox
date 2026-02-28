@@ -1698,6 +1698,47 @@ input[type="file"],
   background: var(--sys-color-surface);
 }
 
+.compare-regressions {
+  border-bottom: 1px solid var(--sys-color-divider);
+  background: #f8f9fa;
+}
+
+.compare-regressions-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 10px;
+}
+
+.compare-regressions-table th,
+.compare-regressions-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--sys-color-divider);
+}
+
+.compare-regressions-table th {
+  color: #495169;
+  font-weight: 600;
+  text-align: left;
+  background: #eef1f5;
+}
+
+.compare-regressions-table td {
+  color: #1f2937;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compare-regressions-table tr:last-child td {
+  border-bottom: none;
+}
+
+.compare-empty {
+  padding: 8px;
+  text-align: left;
+}
+
 .empty {
   margin: 0;
   padding: 14px;
