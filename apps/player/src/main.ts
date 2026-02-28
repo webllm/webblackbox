@@ -189,7 +189,7 @@ type PlayerState = {
   loadedArchiveBytes: Uint8Array | null;
   loadedArchiveName: string | null;
   shareServerBaseUrl: string;
-  shareServerApiKey: string;
+  shareServerApiKeysByOrigin: Record<string, string>;
   selectedEventId: string | null;
   selectedActionId: string | null;
   selectedRequestId: string | null;
@@ -258,7 +258,7 @@ const LOG_GRID_SPLIT_MAX = 74;
 const LOG_GRID_SPLIT_KEY_STEP = 2;
 const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
 const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
-const SHARE_SERVER_API_KEY_STORAGE_KEY = "webblackbox.player.shareServerApiKey";
+const SHARE_SERVER_API_KEYS_STORAGE_KEY = "webblackbox.player.shareServerApiKeysByOrigin";
 const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
@@ -279,7 +279,7 @@ const state: PlayerState = {
   loadedArchiveBytes: null,
   loadedArchiveName: null,
   shareServerBaseUrl: readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? "http://localhost:8787",
-  shareServerApiKey: readStoredText(SHARE_SERVER_API_KEY_STORAGE_KEY) ?? "",
+  shareServerApiKeysByOrigin: readStoredShareServerApiKeys(),
   selectedEventId: null,
   selectedActionId: null,
   selectedRequestId: null,
@@ -1350,8 +1350,7 @@ async function shareLoadedArchive(): Promise<void> {
 
   state.shareServerBaseUrl = normalizedBaseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
-  state.shareServerApiKey = shareConfig.apiKey;
-  writeStoredText(SHARE_SERVER_API_KEY_STORAGE_KEY, shareConfig.apiKey);
+  setShareServerApiKeyForBaseUrl(normalizedBaseUrl, shareConfig.apiKey);
 
   const headers: Record<string, string> = {
     "content-type": "application/octet-stream",
@@ -1418,8 +1417,7 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
 
   state.shareServerBaseUrl = resolved.baseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
-  state.shareServerApiKey = shareInput.apiKey;
-  writeStoredText(SHARE_SERVER_API_KEY_STORAGE_KEY, shareInput.apiKey);
+  setShareServerApiKeyForBaseUrl(resolved.baseUrl, shareInput.apiKey);
 
   try {
     const headers: Record<string, string> = {};
@@ -1444,6 +1442,75 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
   }
 }
 
+function getShareServerApiKeyForBaseUrl(baseUrl: string | null): string {
+  const origin = getShareServerOrigin(baseUrl);
+
+  if (!origin) {
+    return "";
+  }
+
+  return state.shareServerApiKeysByOrigin[origin] ?? "";
+}
+
+function setShareServerApiKeyForBaseUrl(baseUrl: string, apiKey: string): void {
+  const origin = getShareServerOrigin(baseUrl);
+
+  if (!origin) {
+    return;
+  }
+
+  const trimmed = apiKey.trim();
+
+  if (trimmed.length > 0) {
+    state.shareServerApiKeysByOrigin[origin] = trimmed;
+  } else {
+    delete state.shareServerApiKeysByOrigin[origin];
+  }
+
+  writeStoredText(
+    SHARE_SERVER_API_KEYS_STORAGE_KEY,
+    JSON.stringify(state.shareServerApiKeysByOrigin)
+  );
+}
+
+function bindShareApiKeyInputToTargetOrigin(
+  sourceInput: HTMLInputElement,
+  apiKeyInput: HTMLInputElement,
+  resolveBaseUrl: (value: string) => string | null
+): () => void {
+  let apiKeyEdited = false;
+  let resolvedBaseUrl = resolveBaseUrl(sourceInput.value);
+  let targetOrigin = getShareServerOrigin(resolvedBaseUrl);
+  apiKeyInput.value = getShareServerApiKeyForBaseUrl(resolvedBaseUrl);
+
+  const onApiKeyInput = (): void => {
+    apiKeyEdited = true;
+  };
+  const onSourceInput = (): void => {
+    const nextBaseUrl = resolveBaseUrl(sourceInput.value);
+    const nextOrigin = getShareServerOrigin(nextBaseUrl);
+
+    if (nextOrigin === targetOrigin) {
+      return;
+    }
+
+    resolvedBaseUrl = nextBaseUrl;
+    targetOrigin = nextOrigin;
+
+    if (!apiKeyEdited) {
+      apiKeyInput.value = getShareServerApiKeyForBaseUrl(resolvedBaseUrl);
+    }
+  };
+
+  apiKeyInput.addEventListener("input", onApiKeyInput);
+  sourceInput.addEventListener("input", onSourceInput);
+
+  return () => {
+    apiKeyInput.removeEventListener("input", onApiKeyInput);
+    sourceInput.removeEventListener("input", onSourceInput);
+  };
+}
+
 async function promptShareUploadConfig(): Promise<{
   baseUrl: string;
   passphrase: string;
@@ -1451,11 +1518,22 @@ async function promptShareUploadConfig(): Promise<{
 } | null> {
   refs.shareUploadBaseUrl.value = state.shareServerBaseUrl;
   refs.shareUploadPassphrase.value = "";
-  refs.shareUploadApiKey.value = state.shareServerApiKey;
   refs.shareUploadShowPassphrase.checked = false;
   refs.shareUploadPassphrase.type = "password";
 
-  const result = await openDialog(refs.shareUploadDialog, refs.shareUploadBaseUrl);
+  const detachBinding = bindShareApiKeyInputToTargetOrigin(
+    refs.shareUploadBaseUrl,
+    refs.shareUploadApiKey,
+    (value) => normalizeShareServerBaseUrl(value.trim())
+  );
+
+  let result: string;
+
+  try {
+    result = await openDialog(refs.shareUploadDialog, refs.shareUploadBaseUrl);
+  } finally {
+    detachBinding();
+  }
 
   if (result !== "confirm") {
     return null;
@@ -1470,8 +1548,19 @@ async function promptShareUploadConfig(): Promise<{
 
 async function promptShareReferenceInput(): Promise<{ reference: string; apiKey: string } | null> {
   refs.shareLoadReference.value = `${state.shareServerBaseUrl}/share/`;
-  refs.shareLoadApiKey.value = state.shareServerApiKey;
-  const result = await openDialog(refs.shareLoadDialog, refs.shareLoadReference);
+  const detachBinding = bindShareApiKeyInputToTargetOrigin(
+    refs.shareLoadReference,
+    refs.shareLoadApiKey,
+    (value) => resolveShareArchiveRequest(value.trim(), state.shareServerBaseUrl)?.baseUrl ?? null
+  );
+
+  let result: string;
+
+  try {
+    result = await openDialog(refs.shareLoadDialog, refs.shareLoadReference);
+  } finally {
+    detachBinding();
+  }
 
   if (result !== "confirm") {
     return null;
@@ -4322,6 +4411,61 @@ function readStoredText(key: string): string | null {
 
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredShareServerApiKeys(): Record<string, string> {
+  const raw = readStoredText(SHARE_SERVER_API_KEYS_STORAGE_KEY);
+
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const entries = Object.entries(parsed);
+    const sanitized: Record<string, string> = {};
+
+    for (const [origin, value] of entries) {
+      if (typeof value !== "string") {
+        continue;
+      }
+
+      const trimmed = value.trim();
+
+      if (trimmed.length === 0) {
+        continue;
+      }
+
+      sanitized[origin] = trimmed;
+    }
+
+    return sanitized;
+  } catch {
+    return {};
+  }
+}
+
+function getShareServerOrigin(baseUrl: string | null): string | null {
+  if (!baseUrl) {
+    return null;
+  }
+
+  const normalized = normalizeShareServerBaseUrl(baseUrl);
+
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    return new URL(normalized).origin;
   } catch {
     return null;
   }
