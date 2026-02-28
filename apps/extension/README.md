@@ -172,6 +172,12 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
   - `injected` fetch/xhr/console patching is not enabled (CDP is the primary source in full mode)
   - screenshot/trace artifacts are still captured from the SW/CDP pipeline path
 
+Body capture sizing note:
+
+- Protocol baseline (`DEFAULT_RECORDER_CONFIG`) sets `bodyCaptureMaxBytes=256 KiB`.
+- Extension runtime defaults clamp both lite/full modes to `128 KiB` for safer long-session behavior.
+- Options can still override this cap per profile.
+
 The SW ↔ offscreen pipeline path also uses ingest batching with chunked drain to reduce message round-trips and avoid giant postMessage payloads under high event volume.
 
 Users can still tune other settings through the Options page.

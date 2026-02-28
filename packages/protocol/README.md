@@ -231,6 +231,7 @@ import { DEFAULT_EXPORT_POLICY, DEFAULT_RECORDER_CONFIG } from "@webblackbox/pro
 // - freezeOnError: true
 // - mousemoveHz: 20, scrollHz: 15
 // - screenshotIdleMs: 8000
+// - bodyCaptureMaxBytes: 262144 (256 KiB base profile)
 // - Redacts: authorization, cookie, set-cookie headers
 // - Blocks: .secret, [data-sensitive], input[type='password']
 //
@@ -239,6 +240,9 @@ import { DEFAULT_EXPORT_POLICY, DEFAULT_RECORDER_CONFIG } from "@webblackbox/pro
 // - maxArchiveBytes: 100 * 1024 * 1024
 // - recentWindowMs: 20 * 60 * 1000
 ```
+
+`DEFAULT_RECORDER_CONFIG` is a shared baseline. Runtime products may apply stricter safety overrides
+(for example, extension/web-sdk lite paths commonly clamp body capture to `128 KiB`).
 
 ## Message Types
 
