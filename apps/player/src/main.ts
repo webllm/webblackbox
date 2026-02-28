@@ -19,6 +19,7 @@ import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.
 import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
+import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
   normalizeShareServerBaseUrl,
   resolveShareArchiveRequest,
@@ -2427,21 +2428,6 @@ function decodeResponsePreview(mime: string, bytes: Uint8Array): ResponsePreview
     text: compactText(decoded, RESPONSE_PREVIEW_EXPANDED_CHARS),
     isJson: false
   };
-}
-
-function highlightJsonPreview(value: string): string {
-  const escaped = escapeHtml(value);
-  return escaped.replaceAll(/(&quot;[^&]*&quot;)(\s*:)/g, '<span class="json-key">$1</span>$2');
-}
-
-function redactPreviewText(value: string): string {
-  return value
-    .replaceAll(
-      /("?(?:password|passwd|token|secret|api[_-]?key|authorization|cookie)"?\s*[:=]\s*"?)[^",\s}]+("?)/gi,
-      "$1***$2"
-    )
-    .replaceAll(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer ***")
-    .replaceAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]");
 }
 
 function jumpToFirstError(): void {
