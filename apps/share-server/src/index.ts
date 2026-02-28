@@ -143,7 +143,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(pathname);
 
   if (method === "GET" && sharePageMatch?.[1]) {
-    await handleSharePage(response, sharePageMatch[1]);
+    await handleSharePage(response, sharePageMatch[1], requestUrl);
     return;
   }
 
@@ -267,7 +267,11 @@ async function handleDownloadArchive(response: ServerResponse, id: string): Prom
   }
 }
 
-async function handleSharePage(response: ServerResponse, id: string): Promise<void> {
+async function handleSharePage(
+  response: ServerResponse,
+  id: string,
+  requestUrl: URL
+): Promise<void> {
   const record = await readRecord(id);
 
   if (!record) {
@@ -279,6 +283,7 @@ async function handleSharePage(response: ServerResponse, id: string): Promise<vo
     return;
   }
 
+  const authQuerySuffix = buildAuthQuerySuffix(requestUrl);
   const metadataPretty = escapeHtml(JSON.stringify(record.summary, null, 2));
   const page = `<!doctype html>
 <html lang="en">
@@ -304,8 +309,8 @@ async function handleSharePage(response: ServerResponse, id: string): Promise<vo
         record.fileName
       )}</code> · Size: ${formatSize(record.sizeBytes)}</p>
       <div class="actions">
-        <a class="btn" href="/api/share/${encodeURIComponent(record.id)}/archive">Download Archive</a>
-        <a class="btn secondary" href="/api/share/${encodeURIComponent(record.id)}/meta">View Metadata JSON</a>
+        <a class="btn" href="/api/share/${encodeURIComponent(record.id)}/archive${authQuerySuffix}">Download Archive</a>
+        <a class="btn secondary" href="/api/share/${encodeURIComponent(record.id)}/meta${authQuerySuffix}">View Metadata JSON</a>
       </div>
       <pre>${metadataPretty}</pre>
     </main>
@@ -701,6 +706,15 @@ function resolveAllowedOrigin(originHeader: string | string[] | undefined): stri
   }
 
   return originHeader === SHARE_ALLOWED_ORIGIN ? SHARE_ALLOWED_ORIGIN : null;
+}
+
+function buildAuthQuerySuffix(requestUrl: URL): string {
+  const key = requestUrl.searchParams.get("key");
+  if (!key) {
+    return "";
+  }
+
+  return `?key=${encodeURIComponent(key)}`;
 }
 
 function isProtectedShareRoute(pathname: string): boolean {

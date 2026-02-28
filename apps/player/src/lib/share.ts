@@ -36,10 +36,11 @@ export function resolveShareArchiveRequest(
   if (sharePageMatch?.[1]) {
     const shareId = sharePageMatch[1];
     const baseUrl = parsed.origin;
+    const keySuffix = buildAuthQuerySuffix(parsed);
     return {
       shareId,
       baseUrl,
-      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive`
+      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive${keySuffix}`
     };
   }
 
@@ -57,10 +58,11 @@ export function resolveShareArchiveRequest(
 
   if (metadataMatch?.[1]) {
     const shareId = metadataMatch[1];
+    const keySuffix = buildAuthQuerySuffix(parsed);
     return {
       shareId,
       baseUrl: parsed.origin,
-      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive`
+      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive${keySuffix}`
     };
   }
 
@@ -80,4 +82,13 @@ export function normalizeShareServerBaseUrl(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function buildAuthQuerySuffix(url: URL): string {
+  const key = url.searchParams.get("key");
+  if (!key) {
+    return "";
+  }
+
+  return `?key=${encodeURIComponent(key)}`;
 }
