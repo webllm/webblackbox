@@ -58,6 +58,7 @@ const ARCHIVES_DIR = join(DATA_ROOT, "archives");
 const RECORDS_DIR = join(DATA_ROOT, "records");
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
 const SHARE_ALLOWED_ORIGIN = (process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN ?? "*").trim() || "*";
+const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
 const UPLOAD_RATE_LIMIT_MAX = parseRateLimitCount(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX,
   10
@@ -66,7 +67,10 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS,
   60_000
 );
-const uploadRateWindows = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_CLEANUP_INTERVAL = 64;
+const MAX_TRACKED_RATE_BUCKETS = 4096;
+const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
+let rateLimitCleanupCounter = 0;
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -794,11 +798,13 @@ function parseRateLimitWindowMs(value: string | undefined, fallback: number): nu
 }
 
 function resolveClientKey(request: IncomingMessage): string {
-  const forwardedFor = request.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    const first = forwardedFor.split(",")[0]?.trim();
-    if (first) {
-      return `ip:${first}`;
+  if (TRUST_X_FORWARDED_FOR) {
+    const forwardedFor = request.headers["x-forwarded-for"];
+    if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
+      const first = forwardedFor.split(",")[0]?.trim();
+      if (first) {
+        return `ip:${first}`;
+      }
     }
   }
 
@@ -814,12 +820,14 @@ function consumeUploadRateLimitToken(
   clientKey: string
 ): { ok: true } | { ok: false; retryAfterSec: number } {
   const now = Date.now();
+  maybeCleanupUploadRateWindows(now);
   const bucket = uploadRateWindows.get(clientKey);
 
   if (!bucket || bucket.resetAt <= now) {
     uploadRateWindows.set(clientKey, {
       count: 1,
-      resetAt: now + UPLOAD_RATE_LIMIT_WINDOW_MS
+      resetAt: now + UPLOAD_RATE_LIMIT_WINDOW_MS,
+      lastSeenAt: now
     });
     return {
       ok: true
@@ -827,6 +835,7 @@ function consumeUploadRateLimitToken(
   }
 
   if (bucket.count >= UPLOAD_RATE_LIMIT_MAX) {
+    bucket.lastSeenAt = now;
     return {
       ok: false,
       retryAfterSec: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
@@ -834,7 +843,46 @@ function consumeUploadRateLimitToken(
   }
 
   bucket.count += 1;
+  bucket.lastSeenAt = now;
   return {
     ok: true
   };
+}
+
+function maybeCleanupUploadRateWindows(now: number): void {
+  rateLimitCleanupCounter += 1;
+  if (
+    rateLimitCleanupCounter % RATE_LIMIT_CLEANUP_INTERVAL !== 0 &&
+    uploadRateWindows.size < MAX_TRACKED_RATE_BUCKETS
+  ) {
+    return;
+  }
+
+  for (const [clientKey, bucket] of uploadRateWindows) {
+    if (bucket.resetAt <= now) {
+      uploadRateWindows.delete(clientKey);
+    }
+  }
+
+  if (uploadRateWindows.size <= MAX_TRACKED_RATE_BUCKETS) {
+    return;
+  }
+
+  const overflow = uploadRateWindows.size - MAX_TRACKED_RATE_BUCKETS;
+  const oldestBuckets = [...uploadRateWindows.entries()]
+    .sort((left, right) => left[1].lastSeenAt - right[1].lastSeenAt)
+    .slice(0, overflow);
+
+  for (const [clientKey] of oldestBuckets) {
+    uploadRateWindows.delete(clientKey);
+  }
+}
+
+function parseBooleanFlag(value: string | undefined): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
