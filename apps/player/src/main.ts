@@ -12,6 +12,8 @@ import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
+import { openDialog } from "./lib/dialog.js";
+import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
 import { PlayerShell } from "./shell.js";
 
 type TimelineFilter = "all" | "errors" | "network" | "storage" | "console";
@@ -1391,7 +1393,7 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
     return;
   }
 
-  const resolved = resolveShareArchiveRequest(input);
+  const resolved = resolveShareArchiveRequest(input, state.shareServerBaseUrl);
 
   if (!resolved) {
     setFeedback("Invalid share reference.");
@@ -1445,110 +1447,6 @@ async function promptShareReferenceInput(): Promise<string | null> {
 
   const value = refs.shareLoadReference.value.trim();
   return value.length > 0 ? value : null;
-}
-
-function openDialog(dialog: HTMLDialogElement, autofocus: HTMLElement): Promise<string> {
-  return new Promise((resolve) => {
-    const onClose = (): void => {
-      dialog.removeEventListener("close", onClose);
-      resolve(dialog.returnValue || "cancel");
-    };
-
-    dialog.addEventListener("close", onClose);
-
-    if (dialog.open) {
-      dialog.close("cancel");
-    }
-
-    dialog.showModal();
-    requestAnimationFrame(() => {
-      autofocus.focus();
-      if (autofocus instanceof HTMLInputElement) {
-        autofocus.select();
-      }
-    });
-  });
-}
-
-type ShareArchiveRequest = {
-  shareId: string;
-  baseUrl: string;
-  archiveUrl: string;
-};
-
-function resolveShareArchiveRequest(input: string): ShareArchiveRequest | null {
-  const trimmed = input.trim();
-
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  if (/^[a-zA-Z0-9_-]{8,}$/.test(trimmed)) {
-    const baseUrl = state.shareServerBaseUrl;
-    return {
-      shareId: trimmed,
-      baseUrl,
-      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(trimmed)}/archive`
-    };
-  }
-
-  let parsed: URL;
-
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return null;
-  }
-
-  const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(parsed.pathname);
-
-  if (sharePageMatch?.[1]) {
-    const shareId = sharePageMatch[1];
-    const baseUrl = parsed.origin;
-    return {
-      shareId,
-      baseUrl,
-      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive`
-    };
-  }
-
-  const archiveMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/archive$/.exec(parsed.pathname);
-
-  if (archiveMatch?.[1]) {
-    return {
-      shareId: archiveMatch[1],
-      baseUrl: parsed.origin,
-      archiveUrl: parsed.toString()
-    };
-  }
-
-  const metadataMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/meta$/.exec(parsed.pathname);
-
-  if (metadataMatch?.[1]) {
-    const shareId = metadataMatch[1];
-    return {
-      shareId,
-      baseUrl: parsed.origin,
-      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive`
-    };
-  }
-
-  return null;
-}
-
-function normalizeShareServerBaseUrl(value: string): string | null {
-  const trimmed = value.trim();
-
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  try {
-    const url = new URL(trimmed);
-    return url.origin;
-  } catch {
-    return null;
-  }
 }
 
 function togglePlayback(): void {
