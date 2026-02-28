@@ -14,6 +14,7 @@ import { createRoot } from "react-dom/client";
 
 import { openDialog } from "./lib/dialog.js";
 import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
+import { computeTriageStats, findFirstErrorEvent, findSlowestRequest } from "./lib/triage.js";
 import { PlayerShell } from "./shell.js";
 
 type TimelineFilter = "all" | "errors" | "network" | "storage" | "console";
@@ -2490,8 +2491,7 @@ function jumpToFirstError(): void {
     return;
   }
 
-  const firstError =
-    model.events.find((event) => event.lvl === "error" || event.type.startsWith("error.")) ?? null;
+  const firstError = findFirstErrorEvent(model.events);
 
   if (!firstError) {
     setFeedback("No error events in this archive.");
@@ -2509,14 +2509,17 @@ function jumpToFirstError(): void {
 function jumpToSlowestRequest(): void {
   const model = state.model;
 
-  if (!model || model.waterfall.length === 0) {
+  if (!model) {
     setFeedback("No network requests in this archive.");
     return;
   }
 
-  const slowest = model.waterfall.reduce((current, entry) =>
-    entry.durationMs > current.durationMs ? entry : current
-  );
+  const slowest = findSlowestRequest(model.waterfall);
+
+  if (!slowest) {
+    setFeedback("No network requests in this archive.");
+    return;
+  }
 
   pausePlayback();
   state.selectedRequestId = slowest.reqId;
@@ -2556,18 +2559,7 @@ function renderSummary(): void {
     state.playheadMono,
     (entry) => entry.mono
   );
-  const firstError =
-    model.events.find((event) => event.lvl === "error" || event.type.startsWith("error.")) ?? null;
-  const failedRequests = model.waterfall.filter((entry) => entry.failed).length;
-  const slowRequests = model.waterfall.filter(
-    (entry) => entry.durationMs >= TRIAGE_SLOW_REQUEST_MS
-  ).length;
-  const slowestRequest =
-    model.waterfall.length > 0
-      ? model.waterfall.reduce((current, entry) =>
-          entry.durationMs > current.durationMs ? entry : current
-        )
-      : null;
+  const triage = computeTriageStats(model.events, model.waterfall, TRIAGE_SLOW_REQUEST_MS);
 
   const compareDelta = state.compareSummary
     ? `<div class="pill">compare event delta ${formatDelta(state.compareSummary.eventDelta)}</div>`
@@ -2577,15 +2569,15 @@ function renderSummary(): void {
     <div class="summary-triage">
       <span class="summary-triage__label">triage</span>
       <div class="pill">errors ${model.totals.errors}</div>
-      <div class="pill">failed requests ${failedRequests}</div>
-      <div class="pill">slow requests ${slowRequests} (>=${TRIAGE_SLOW_REQUEST_MS}ms)</div>
+      <div class="pill">failed requests ${triage.failedRequests}</div>
+      <div class="pill">slow requests ${triage.slowRequests} (>=${TRIAGE_SLOW_REQUEST_MS}ms)</div>
       <button class="summary-jump-btn" type="button" data-summary-jump="first-error" ${
-        firstError ? "" : "disabled"
+        triage.firstError ? "" : "disabled"
       }>
         Jump to first error
       </button>
       <button class="summary-jump-btn" type="button" data-summary-jump="slowest-request" ${
-        slowestRequest ? "" : "disabled"
+        triage.slowestRequest ? "" : "disabled"
       }>
         Jump to slowest request
       </button>
