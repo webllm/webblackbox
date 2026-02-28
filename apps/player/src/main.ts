@@ -13,6 +13,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
+import { toArrayBuffer } from "./lib/binary.js";
 import { openDialog } from "./lib/dialog.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import {
@@ -4512,12 +4513,6 @@ function clamp(value: number, min: number, max: number): number {
 function purgeStoredShareServerApiKeys(): void {
   removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
   removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
-}
-
-function toArrayBuffer(input: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(input.byteLength);
-  copy.set(input);
-  return copy.buffer;
 }
 
 function getElement<TElement extends HTMLElement>(id: string): TElement {
