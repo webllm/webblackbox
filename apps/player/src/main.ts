@@ -34,6 +34,7 @@ import {
   writeStoredNumber,
   writeStoredText
 } from "./lib/storage.js";
+import { compactText, shortUrl, truncateId } from "./lib/text.js";
 import { computeTriageStats, findFirstErrorEvent, findSlowestRequest } from "./lib/triage.js";
 import { PlayerShell } from "./shell.js";
 
@@ -4334,19 +4335,6 @@ function setFeedback(text: string): void {
   refs.feedback.textContent = text;
 }
 
-function shortUrl(raw: string): string {
-  try {
-    const url = new URL(raw);
-    return `${url.pathname}${url.search}` || raw;
-  } catch {
-    return raw;
-  }
-}
-
-function truncateId(value: string): string {
-  return value.length > 22 ? `${value.slice(0, 9)}...${value.slice(-8)}` : value;
-}
-
 function prefixValue(prefix: number[], index: number): number {
   if (index < 0) {
     return 0;
@@ -4424,14 +4412,6 @@ function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | 
   }
 
   return null;
-}
-
-function compactText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-
-  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 function purgeStoredShareServerApiKeys(): void {
