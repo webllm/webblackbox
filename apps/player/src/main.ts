@@ -15,6 +15,7 @@ import { createRoot } from "react-dom/client";
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { toArrayBuffer } from "./lib/binary.js";
 import { escapeHtml, getElement } from "./lib/dom.js";
+import { copyText, downloadTextFile } from "./lib/export.js";
 import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
 import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
@@ -4182,25 +4183,6 @@ async function promptArchivePassphrase(fileName: string): Promise<string | null>
 
   const trimmed = refs.archivePassphraseInput.value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-
-  downloadTextFile("webblackbox-copy.txt", value, "text/plain");
-}
-
-function downloadTextFile(filename: string, content: string, mime: string): void {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
 }
 
 function setFeedback(text: string): void {
