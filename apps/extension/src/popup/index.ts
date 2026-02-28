@@ -1,4 +1,4 @@
-import { DEFAULT_EXPORT_POLICY, type ExportPolicy } from "@webblackbox/protocol";
+import { DEFAULT_EXPORT_POLICY, type ExportPolicy, type FreezeReason } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import {
@@ -25,12 +25,14 @@ const state: {
   recording: { active: boolean; sid?: string; mode?: string };
   exportPolicyForm: PopupExportPolicyForm;
   exportStatus?: string;
+  lastFreeze?: { sid: string; reason: FreezeReason; at: number };
 } = {
   tabId: null,
   sessions: [],
   recording: { active: false },
   exportPolicyForm: toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY),
-  exportStatus: undefined
+  exportStatus: undefined,
+  lastFreeze: undefined
 };
 
 if (root) {
@@ -52,6 +54,7 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 }
 
 function render(container: HTMLElement): void {
+  const now = Date.now();
   const sortedSessions = [...state.sessions].sort((left, right) => {
     const activeDiff = Number(right.active) - Number(left.active);
 
@@ -81,6 +84,13 @@ function render(container: HTMLElement): void {
   const captureSummary = summarySession
     ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors`
     : "No captured events";
+  const recentFreeze =
+    state.lastFreeze && now - state.lastFreeze.at <= 10 * 60 * 1000 ? state.lastFreeze : null;
+  const incidentText = recentFreeze
+    ? `${recentFreeze.reason} (${formatRelativeTime(recentFreeze.at, now)})`
+    : "none";
+  const badgeText = recentFreeze ? "ALERT" : activeSession ? "REC" : "IDLE";
+  const badgeClass = recentFreeze ? "wb-popup__badge wb-popup__badge--alert" : "wb-popup__badge";
   const exportStatusClass = state.exportStatus?.startsWith("Export failed")
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
@@ -89,12 +99,13 @@ function render(container: HTMLElement): void {
     <section class="card wb-popup">
       <header class="wb-popup__header">
         <h1 class="wb-popup__title">WebBlackbox</h1>
-        <span class="wb-popup__badge">${activeSession ? "REC" : "IDLE"}</span>
+        <span class="${badgeClass}">${badgeText}</span>
       </header>
       <div class="wb-popup__meta">
         <p class="wb-popup__meta-line"><span>Tab</span><strong>${state.tabId ?? "n/a"}</strong></p>
         <p class="wb-popup__meta-line"><span>Status</span><strong>${status}</strong></p>
         <p class="wb-popup__meta-line"><span>Capture</span><strong>${captureSummary}</strong></p>
+        <p class="wb-popup__meta-line"><span>Incident</span><strong>${incidentText}</strong></p>
       </div>
       <div class="wb-popup__actions">
         <button class="wb-btn wb-btn--brand" data-action="start-lite">Start Lite</button>
@@ -269,6 +280,15 @@ function applyMessage(message: ExtensionOutboundMessage): void {
     state.exportStatus = message.ok
       ? `Exported: ${message.fileName ?? message.sid}`
       : `Export failed: ${message.error ?? "Unknown error"}`;
+    return;
+  }
+
+  if (message.kind === "sw.freeze") {
+    state.lastFreeze = {
+      sid: message.sid,
+      reason: message.reason,
+      at: Date.now()
+    };
   }
 }
 
@@ -327,6 +347,24 @@ function isRecordableTabUrl(url: string | undefined): boolean {
   }
 
   return true;
+}
+
+function formatRelativeTime(timestamp: number, now: number): string {
+  const deltaMs = Math.max(0, now - timestamp);
+  const seconds = Math.floor(deltaMs / 1000);
+
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
 }
 
 function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
