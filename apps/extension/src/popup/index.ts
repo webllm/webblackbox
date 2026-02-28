@@ -77,6 +77,10 @@ function render(container: HTMLElement): void {
         ? `Idle (Last ${exportSession.mode})`
         : `Idle (Last ${exportSession.mode} on Tab ${exportSession.tabId})`
       : "Idle";
+  const summarySession = activeSession ?? exportSession;
+  const captureSummary = summarySession
+    ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors`
+    : "No captured events";
   const exportStatusClass = state.exportStatus?.startsWith("Export failed")
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
@@ -90,6 +94,7 @@ function render(container: HTMLElement): void {
       <div class="wb-popup__meta">
         <p class="wb-popup__meta-line"><span>Tab</span><strong>${state.tabId ?? "n/a"}</strong></p>
         <p class="wb-popup__meta-line"><span>Status</span><strong>${status}</strong></p>
+        <p class="wb-popup__meta-line"><span>Capture</span><strong>${captureSummary}</strong></p>
       </div>
       <div class="wb-popup__actions">
         <button class="wb-btn wb-btn--brand" data-action="start-lite">Start Lite</button>

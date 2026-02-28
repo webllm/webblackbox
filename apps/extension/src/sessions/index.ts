@@ -60,6 +60,8 @@ function renderSessionCard(session: SessionListItem, now: number): string {
   const endedAt =
     typeof session.stoppedAt === "number" ? formatAbsoluteTime(session.stoppedAt) : null;
   const elapsed = formatDuration(session.startedAt, session.stoppedAt ?? now);
+  const eventCount = session.eventCount ?? 0;
+  const errorCount = session.errorCount ?? 0;
   const sidShort = shortenSessionId(session.sid);
   const statusLabel = session.active ? "LIVE" : "Stopped";
   const statusClass = session.active ? "wb-session-status--live" : "wb-session-status--stopped";
@@ -78,6 +80,8 @@ function renderSessionCard(session: SessionListItem, now: number): string {
         <span class="wb-chip">mode ${escapeHtml(session.mode.toUpperCase())}</span>
         <span class="wb-chip">tab ${session.tabId}</span>
         <span class="wb-chip" title="${escapeHtml(startedAt)}">started ${escapeHtml(startedRelative)}</span>
+        <span class="wb-chip">events ${eventCount}</span>
+        <span class="wb-chip">errors ${errorCount}</span>
         <span class="wb-chip">duration ${escapeHtml(elapsed)}</span>
         ${endedAt ? `<span class="wb-chip" title="${escapeHtml(endedAt)}">ended</span>` : ""}
       </div>

@@ -88,6 +88,8 @@ export type SessionListItem = {
   stoppedAt?: number;
   url?: string;
   title?: string;
+  eventCount?: number;
+  errorCount?: number;
 };
 
 export type SessionListMessage = {

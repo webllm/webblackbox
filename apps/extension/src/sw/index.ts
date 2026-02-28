@@ -70,6 +70,8 @@ type SessionRuntime = {
   stopping: boolean;
   responseBodyCaptures: number;
   responseBodyCaptureTimestamps: number[];
+  capturedEventCount: number;
+  capturedErrorCount: number;
   lastFreezeNotices: Map<string, number>;
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
@@ -577,6 +579,8 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     stopping: false,
     responseBodyCaptures: 0,
     responseBodyCaptureTimestamps: [],
+    capturedEventCount: 0,
+    capturedErrorCount: 0,
     lastFreezeNotices: new Map<string, number>(),
     queue: Promise.resolve(),
     removeCdpListeners: [],
@@ -592,6 +596,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     {
       onEvent: (event) => {
         updateSessionMetadataFromEvent(runtime, event);
+        trackSessionCounters(runtime, event);
         enqueuePipelineEvent(runtime, event);
       },
       onFreeze: (reason) => {
@@ -1149,6 +1154,20 @@ function shouldCaptureActionScreenshot(
   }
 
   return true;
+}
+
+function trackSessionCounters(runtime: SessionRuntime, event: WebBlackboxEvent): void {
+  runtime.capturedEventCount += 1;
+
+  if (event.type === "error.exception" || event.type === "error.unhandledrejection") {
+    runtime.capturedErrorCount += 1;
+    pushSessionList();
+    return;
+  }
+
+  if (runtime.capturedEventCount % 50 === 0) {
+    pushSessionList();
+  }
 }
 
 function enqueuePipelineEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
@@ -2870,7 +2889,9 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     active,
     stoppedAt: runtime.stoppedAt,
     url: runtime.url,
-    title: runtime.title
+    title: runtime.title,
+    eventCount: runtime.capturedEventCount,
+    errorCount: runtime.capturedErrorCount
   };
 }
 
@@ -3117,7 +3138,9 @@ function notifyOffscreenPipelineStatus(): void {
       tabId: runtime.tabId,
       mode: runtime.mode,
       startedAt: runtime.startedAt,
-      active: true
+      active: true,
+      eventCount: runtime.capturedEventCount,
+      errorCount: runtime.capturedErrorCount
     })),
     updatedAt: Date.now()
   });
