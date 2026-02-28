@@ -14,6 +14,7 @@ import { createRoot } from "react-dom/client";
 
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { toArrayBuffer } from "./lib/binary.js";
+import { escapeHtml, getElement } from "./lib/dom.js";
 import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
@@ -4499,23 +4500,4 @@ function compactText(value: string, maxLength: number): string {
 function purgeStoredShareServerApiKeys(): void {
   removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
   removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
-}
-
-function getElement<TElement extends HTMLElement>(id: string): TElement {
-  const element = document.getElementById(id);
-
-  if (!element) {
-    throw new Error(`Missing element: #${id}`);
-  }
-
-  return element as TElement;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
