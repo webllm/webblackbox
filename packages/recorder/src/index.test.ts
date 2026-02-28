@@ -249,7 +249,7 @@ describe("recorder", () => {
     expect(result.freezeReason).toBe("error");
   });
 
-  it("treats repeated network failures as error freeze", () => {
+  it("treats repeated network failures as network freeze", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const base = Date.now();
 
@@ -283,7 +283,7 @@ describe("recorder", () => {
     });
 
     expect(result.event?.type).toBe("network.failed");
-    expect(result.freezeReason).toBe("error");
+    expect(result.freezeReason).toBe("network");
   });
 
   it("does not freeze on resource load errors", () => {

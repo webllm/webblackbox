@@ -78,6 +78,6 @@ export const MESSAGE_TYPES = [
   "PIPE.EXPORT_DONE"
 ] as const;
 
-export const FREEZE_REASONS = ["error", "marker", "perf", "manual"] as const;
+export const FREEZE_REASONS = ["error", "network", "marker", "perf", "manual"] as const;
 
 export const STORAGE_SNAPSHOT_MODES = ["schema-only", "sample", "full"] as const;
