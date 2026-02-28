@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
@@ -56,6 +56,17 @@ const DEFAULT_BASE_URL = `http://localhost:${DEFAULT_PORT}`;
 const DATA_ROOT = resolve(process.env.WEBBLACKBOX_SHARE_DATA_DIR ?? ".webblackbox-share-data");
 const ARCHIVES_DIR = join(DATA_ROOT, "archives");
 const RECORDS_DIR = join(DATA_ROOT, "records");
+const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
+const SHARE_ALLOWED_ORIGIN = (process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN ?? "*").trim() || "*";
+const UPLOAD_RATE_LIMIT_MAX = parseRateLimitCount(
+  process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX,
+  10
+);
+const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
+  process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS,
+  60_000
+);
+const uploadRateWindows = new Map<string, { count: number; resetAt: number }>();
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -82,7 +93,7 @@ async function startShareServer(): Promise<void> {
 }
 
 async function routeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  applyCorsHeaders(response);
+  applyCorsHeaders(response, request);
 
   if (request.method === "OPTIONS") {
     response.writeHead(204);
@@ -93,6 +104,17 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const requestUrl = new URL(request.url ?? "/", requestBaseUrl(request));
   const method = request.method ?? "GET";
   const pathname = requestUrl.pathname;
+
+  if (isProtectedShareRoute(pathname) && !isAuthorizedRequest(request, requestUrl)) {
+    if (pathname.startsWith("/share/")) {
+      respondHtml(response, 401, "<h1>Unauthorized</h1><p>Provide a valid share API key.</p>");
+      return;
+    }
+    respondJson(response, 401, {
+      error: "Unauthorized."
+    });
+    return;
+  }
 
   if (method === "POST" && pathname === "/api/share/upload") {
     await handleUpload(request, response, requestUrl);
@@ -135,6 +157,15 @@ async function handleUpload(
   response: ServerResponse,
   requestUrl: URL
 ): Promise<void> {
+  const rateLimited = consumeUploadRateLimitToken(resolveClientKey(request));
+
+  if (!rateLimited.ok) {
+    respondJson(response, 429, {
+      error: `Upload rate limit exceeded. Retry in ${rateLimited.retryAfterSec}s.`
+    });
+    return;
+  }
+
   const bytes = await readRequestBody(request, MAX_UPLOAD_BYTES);
 
   if (bytes.byteLength === 0) {
@@ -599,11 +630,18 @@ function normalizeFileName(rawName: string): string {
   return safe.endsWith(".webblackbox") || safe.endsWith(".zip") ? safe : `${safe}.webblackbox`;
 }
 
-function applyCorsHeaders(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
+function applyCorsHeaders(response: ServerResponse, request: IncomingMessage): void {
+  const requestOrigin = request.headers.origin;
+  const allowOrigin = resolveAllowedOrigin(requestOrigin);
+
+  if (allowOrigin) {
+    response.setHeader("access-control-allow-origin", allowOrigin);
+    response.setHeader("vary", "origin");
+  }
+
   response.setHeader(
     "access-control-allow-headers",
-    "content-type,x-webblackbox-filename,x-webblackbox-passphrase"
+    "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,x-webblackbox-passphrase"
   );
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
 }
@@ -651,4 +689,138 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function resolveAllowedOrigin(originHeader: string | string[] | undefined): string | null {
+  if (SHARE_ALLOWED_ORIGIN === "*") {
+    return "*";
+  }
+
+  if (typeof originHeader !== "string" || originHeader.trim().length === 0) {
+    return null;
+  }
+
+  return originHeader === SHARE_ALLOWED_ORIGIN ? SHARE_ALLOWED_ORIGIN : null;
+}
+
+function isProtectedShareRoute(pathname: string): boolean {
+  return pathname.startsWith("/api/share/") || pathname.startsWith("/share/");
+}
+
+function isAuthorizedRequest(request: IncomingMessage, requestUrl: URL): boolean {
+  if (!SHARE_API_KEY) {
+    return true;
+  }
+
+  const headerToken = readAuthTokenFromRequest(request);
+  if (headerToken && equalsSecret(headerToken, SHARE_API_KEY)) {
+    return true;
+  }
+
+  const queryToken = requestUrl.searchParams.get("key");
+  if (queryToken && equalsSecret(queryToken, SHARE_API_KEY)) {
+    return true;
+  }
+
+  return false;
+}
+
+function readAuthTokenFromRequest(request: IncomingMessage): string | null {
+  const apiKeyHeader = request.headers["x-webblackbox-api-key"];
+
+  if (typeof apiKeyHeader === "string" && apiKeyHeader.trim().length > 0) {
+    return apiKeyHeader.trim();
+  }
+
+  const authHeader = request.headers.authorization;
+  if (typeof authHeader === "string") {
+    const match = /^Bearer\s+(.+)$/.exec(authHeader.trim());
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return null;
+}
+
+function equalsSecret(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+
+  if (leftBuffer.byteLength !== rightBuffer.byteLength) {
+    return false;
+  }
+
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function readOptionalSecret(value: string | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseRateLimitCount(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.max(1, Math.floor(parsed));
+}
+
+function parseRateLimitWindowMs(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.max(1_000, Math.floor(parsed));
+}
+
+function resolveClientKey(request: IncomingMessage): string {
+  const forwardedFor = request.headers["x-forwarded-for"];
+  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
+    const first = forwardedFor.split(",")[0]?.trim();
+    if (first) {
+      return `ip:${first}`;
+    }
+  }
+
+  const socketAddress = request.socket.remoteAddress;
+  if (typeof socketAddress === "string" && socketAddress.length > 0) {
+    return `ip:${socketAddress}`;
+  }
+
+  return "ip:unknown";
+}
+
+function consumeUploadRateLimitToken(
+  clientKey: string
+): { ok: true } | { ok: false; retryAfterSec: number } {
+  const now = Date.now();
+  const bucket = uploadRateWindows.get(clientKey);
+
+  if (!bucket || bucket.resetAt <= now) {
+    uploadRateWindows.set(clientKey, {
+      count: 1,
+      resetAt: now + UPLOAD_RATE_LIMIT_WINDOW_MS
+    });
+    return {
+      ok: true
+    };
+  }
+
+  if (bucket.count >= UPLOAD_RATE_LIMIT_MAX) {
+    return {
+      ok: false,
+      retryAfterSec: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
+    };
+  }
+
+  bucket.count += 1;
+  return {
+    ok: true
+  };
 }
