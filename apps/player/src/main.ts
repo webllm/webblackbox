@@ -1393,18 +1393,28 @@ async function shareLoadedArchive(): Promise<void> {
   }
 
   try {
-    const response = await fetch(`${normalizedBaseUrl}/api/share/upload`, {
-      method: "POST",
+    const totalBytes = bytes.byteLength;
+    let lastProgressUpdate = 0;
+    const payload = (await uploadArchiveWithProgress(
+      `${normalizedBaseUrl}/api/share/upload`,
       headers,
-      body: toArrayBuffer(bytes)
-    });
+      toArrayBuffer(bytes),
+      (loadedBytes, uploadTotalBytes) => {
+        const targetTotal =
+          uploadTotalBytes && uploadTotalBytes > 0 ? uploadTotalBytes : totalBytes;
+        const now = Date.now();
 
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(message || `HTTP ${response.status}`);
-    }
+        if (now - lastProgressUpdate < 150 && loadedBytes < targetTotal) {
+          return;
+        }
 
-    const payload = (await response.json()) as {
+        lastProgressUpdate = now;
+        const percent = targetTotal > 0 ? Math.min(100, (loadedBytes / targetTotal) * 100) : 0;
+        setFeedback(
+          `Uploading share archive... ${percent.toFixed(1)}% (${formatByteSize(loadedBytes)} / ${formatByteSize(targetTotal)})`
+        );
+      }
+    )) as {
       shareId?: unknown;
       shareUrl?: unknown;
     };
@@ -1426,6 +1436,64 @@ async function shareLoadedArchive(): Promise<void> {
   } catch (error) {
     setFeedback(`Share failed: ${String(error)}`);
   }
+}
+
+function uploadArchiveWithProgress(
+  url: string,
+  headers: Record<string, string>,
+  body: ArrayBuffer,
+  onProgress: (loadedBytes: number, totalBytes: number | null) => void
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+
+    for (const [name, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(name, value);
+    }
+
+    xhr.upload.addEventListener("progress", (event) => {
+      const totalBytes = event.lengthComputable ? event.total : body.byteLength;
+      onProgress(event.loaded, totalBytes);
+    });
+
+    xhr.addEventListener("error", () => {
+      reject(new Error("Network error while uploading archive."));
+    });
+
+    xhr.addEventListener("abort", () => {
+      reject(new Error("Upload aborted."));
+    });
+
+    xhr.addEventListener("load", () => {
+      const responseText = xhr.responseText ?? "";
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(responseText || `HTTP ${xhr.status}`));
+        return;
+      }
+
+      if (responseText.trim().length === 0) {
+        resolve({});
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(responseText) as unknown;
+
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          resolve(parsed as Record<string, unknown>);
+          return;
+        }
+
+        reject(new Error("Share server response is not a JSON object."));
+      } catch {
+        reject(new Error("Share server returned invalid JSON."));
+      }
+    });
+
+    xhr.send(body);
+  });
 }
 
 async function loadArchiveFromSharePrompt(): Promise<void> {
