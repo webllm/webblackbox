@@ -80,6 +80,10 @@ The extension consists of multiple main components:
 - View session metadata and statistics
 - Export and delete sessions
 
+## rrweb Status
+
+`dom.rrweb.event` is currently protocol-reserved only. The extension recorder pipeline does not emit rrweb events yet.
+
 ## Permissions
 
 | Permission   | Purpose                                          |

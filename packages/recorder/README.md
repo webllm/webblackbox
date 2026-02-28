@@ -127,6 +127,8 @@ The `DefaultEventNormalizer` handles mapping from raw source events to `WebBlack
 | `cookieSnapshot`                                     | `storage.cookie.snapshot`                                         |
 | `longtask` / `vitals`                                | `perf.longtask` / `perf.vitals`                                   |
 
+`dom.rrweb.event` remains a protocol-reserved event type and is not emitted by the current recorder implementation.
+
 ## Action Span Tracking
 
 The `ActionSpanTracker` groups related events into action spans:
