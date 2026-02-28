@@ -172,14 +172,12 @@ function bindActions(
     });
   });
 
-  container.querySelector("[data-action='export']")?.addEventListener("click", () => {
+  container.querySelector("[data-action='export']")?.addEventListener("click", async () => {
     if (!exportSession) {
       return;
     }
 
-    const passphrase = prompt(
-      "Optional export passphrase (AES-GCM). Leave empty for unencrypted export."
-    );
+    const passphrase = await openPassphraseDialog();
 
     if (passphrase === null) {
       return;
@@ -193,6 +191,57 @@ function bindActions(
       passphrase: passphrase.trim() || undefined,
       policy
     });
+  });
+}
+
+function openPassphraseDialog(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "wb-confirm-overlay";
+    overlay.innerHTML = `
+      <form class="wb-confirm-card wb-prompt-card" aria-labelledby="wb-passphrase-title">
+        <h2 id="wb-passphrase-title" class="wb-confirm-title">Export Passphrase</h2>
+        <p class="wb-confirm-body">Optional AES-GCM passphrase. Leave blank for unencrypted export.</p>
+        <label class="wb-field-label" for="wb-passphrase-input">Passphrase</label>
+        <input id="wb-passphrase-input" type="password" class="wb-input wb-prompt-field" autocomplete="off" />
+        <div class="wb-confirm-actions">
+          <button type="button" class="wb-btn wb-btn--muted" data-passphrase-cancel>Cancel</button>
+          <button type="submit" class="wb-btn wb-btn--accent">Export</button>
+        </div>
+      </form>
+    `;
+
+    const form = overlay.querySelector<HTMLFormElement>("form");
+    const input = overlay.querySelector<HTMLInputElement>("#wb-passphrase-input");
+    const cancelButton = overlay.querySelector<HTMLButtonElement>("button[data-passphrase-cancel]");
+
+    const finish = (value: string | null): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+      resolve(value);
+    };
+
+    const onKeydown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(null);
+      }
+    };
+
+    cancelButton?.addEventListener("click", () => finish(null));
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      finish(input?.value ?? "");
+    });
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(null);
+      }
+    });
+
+    document.addEventListener("keydown", onKeydown);
+    document.body.append(overlay);
+    input?.focus();
   });
 }
 

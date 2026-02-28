@@ -426,3 +426,11 @@ main {
   justify-content: flex-end;
   gap: 8px;
 }
+
+.wb-prompt-card {
+  width: min(440px, 100%);
+}
+
+.wb-prompt-field {
+  margin-top: -2px;
+}
