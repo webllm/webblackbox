@@ -15,6 +15,7 @@ import { createRoot } from "react-dom/client";
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { toArrayBuffer } from "./lib/binary.js";
 import { escapeHtml, getElement } from "./lib/dom.js";
+import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
 import { openDialog } from "./lib/dialog.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
@@ -4439,30 +4440,6 @@ function lowerBoundByMono<T>(items: T[], mono: number, pickMono: (item: T) => nu
   }
 
   return low;
-}
-
-function formatMono(ms: number): string {
-  return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function formatDelta(delta: number): string {
-  if (delta > 0) {
-    return `+${delta}`;
-  }
-
-  return String(delta);
-}
-
-function formatTimelineEventLabel(eventId: string): string {
-  const exactMatch = /^E-(\d+)$/.exec(eventId);
-  const anyNumber = /(\d+)(?!.*\d)/.exec(eventId);
-  const digits = exactMatch?.[1] ?? anyNumber?.[1];
-
-  if (!digits) {
-    return eventId;
-  }
-
-  return `#${digits.slice(-5).padStart(5, "0")}`;
 }
 
 function markerKindToPanel(kind: ProgressMarkerKind | undefined): LogPanelKey | null {
