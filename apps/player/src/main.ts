@@ -13,6 +13,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { openDialog } from "./lib/dialog.js";
+import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
 import { uploadArchiveWithProgress } from "./lib/share-upload.js";
 import {
@@ -4547,20 +4548,6 @@ function getShareServerOrigin(baseUrl: string | null): string | null {
 function purgeStoredShareServerApiKeys(): void {
   removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
   removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asFiniteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
 }
 
 function toArrayBuffer(input: Uint8Array): ArrayBuffer {
