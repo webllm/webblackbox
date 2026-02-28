@@ -21,6 +21,7 @@ import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.
 import { openDialog } from "./lib/dialog.js";
 import { describeRequestName, resolveNetworkInitiator } from "./lib/network-labels.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
+import { sha256HexFromText } from "./lib/hash.js";
 import { formatByteSize, formatNetworkSize, sumNetworkTransferBytes } from "./lib/network-size.js";
 import {
   applyNetworkViewFilters,
@@ -3747,6 +3748,15 @@ async function replaySelectedRequest(): Promise<void> {
     const capturedStatus = typeof request.status === "number" ? request.status : null;
     const statusDelta = capturedStatus === null ? null : replayStatus - capturedStatus;
     const replayBody = await response.text();
+    const replayBodyHash = await sha256HexFromText(replayBody);
+    const capturedBodyHash = request.responseBodyHash ?? null;
+    const bodyHashMatch =
+      typeof replayBodyHash === "string" &&
+      typeof capturedBodyHash === "string" &&
+      replayBodyHash === capturedBodyHash;
+    const capturedBodySize =
+      typeof request.responseBodySize === "number" ? request.responseBodySize : null;
+    const replayBodySize = replayBody.length;
 
     refs.requestDetails.textContent = JSON.stringify(
       {
@@ -3756,16 +3766,25 @@ async function replaySelectedRequest(): Promise<void> {
           url: request.url,
           status: replayStatus,
           statusText: response.statusText || null,
-          durationMs: Number(elapsedMs.toFixed(2))
+          durationMs: Number(elapsedMs.toFixed(2)),
+          responseBodyHash: replayBodyHash,
+          responseBodySize: replayBodySize
         },
         captured: {
           status: capturedStatus,
           failed: request.failed,
-          durationMs: Number(request.durationMs.toFixed(2))
+          durationMs: Number(request.durationMs.toFixed(2)),
+          responseBodyHash: capturedBodyHash,
+          responseBodySize: capturedBodySize
         },
         delta: {
           status: statusDelta,
-          durationMs: Number((elapsedMs - request.durationMs).toFixed(2))
+          durationMs: Number((elapsedMs - request.durationMs).toFixed(2)),
+          responseBodySize:
+            capturedBodySize === null
+              ? null
+              : Number((replayBodySize - capturedBodySize).toFixed(0)),
+          responseBodyHashMatch: bodyHashMatch
         },
         responsePreview: compactText(replayBody, 4_000)
       },
