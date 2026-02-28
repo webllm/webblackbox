@@ -2847,8 +2847,11 @@ function renderNetworkSummary(
 
   const filteredBytes = sumNetworkTransferBytes(filteredEntries);
   const totalBytes = sumNetworkTransferBytes(visibleEntries);
+  const hiddenCount = Math.max(0, filteredEntries.length - renderedEntries.length);
   const truncatedSuffix =
-    renderedEntries.length < filteredEntries.length ? ` | showing ${renderedEntries.length}` : "";
+    hiddenCount > 0
+      ? ` | showing ${renderedEntries.length}/${filteredEntries.length} (${hiddenCount} hidden; narrow filters to inspect more)`
+      : "";
 
   refs.networkSummary.textContent = `${filteredEntries.length} / ${visibleEntries.length} requests | ${formatByteSize(filteredBytes)} / ${formatByteSize(totalBytes)} transferred${truncatedSuffix}`;
 }
