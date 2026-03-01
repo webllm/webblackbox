@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { constants, createWriteStream } from "node:fs";
 import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -115,13 +116,23 @@ async function main() {
   const demoTarget = await openTarget(baseUrl, demoUrl);
   state.openedTargetIds.push(demoTarget.id);
 
-  let swTarget = await waitForExtensionServiceWorker(baseUrl, 8_000).catch(() => null);
+  const preferredExtensionId = await resolvePreferredExtensionId(extensionDir);
+  if (preferredExtensionId) {
+    console.log(`Preferred extension ID: ${preferredExtensionId}`);
+  }
+
+  let swTarget = await waitForExtensionServiceWorker(baseUrl, 8_000, preferredExtensionId).catch(
+    () => null
+  );
   if (!swTarget) {
-    swTarget = await waitForExtensionServiceWorker(baseUrl, 20_000).catch(() => null);
+    swTarget = await waitForExtensionServiceWorker(baseUrl, 20_000, preferredExtensionId).catch(
+      () => null
+    );
   }
   const extensionId = swTarget
     ? extractExtensionId(swTarget.url)
-    : await waitForExtensionIdFromProfile(baseUrl, profileDir, extensionDir, 30_000);
+    : (preferredExtensionId ??
+      (await waitForExtensionIdFromProfile(baseUrl, profileDir, extensionDir, 30_000)));
   console.log(`Extension ID: ${extensionId}`);
 
   let popupTarget = null;
@@ -855,6 +866,58 @@ async function waitForExtensionServiceWorker(urlBase, timeoutMs, extensionId) {
       }`
     );
   }
+}
+
+async function resolvePreferredExtensionId(extensionDir) {
+  const fromEnv = process.env.WB_E2E_EXTENSION_ID?.trim();
+
+  if (isLikelyExtensionId(fromEnv)) {
+    return fromEnv;
+  }
+
+  const manifestPath = resolve(extensionDir, "manifest.json");
+  let manifestRaw;
+
+  try {
+    manifestRaw = await readFile(manifestPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  let manifest;
+
+  try {
+    manifest = JSON.parse(manifestRaw);
+  } catch {
+    return null;
+  }
+
+  const key = typeof manifest?.key === "string" ? manifest.key.trim() : "";
+
+  if (key.length === 0) {
+    return null;
+  }
+
+  try {
+    const id = computeExtensionIdFromManifestKey(key);
+    return isLikelyExtensionId(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function computeExtensionIdFromManifestKey(keyBase64) {
+  const digest = createHash("sha256").update(Buffer.from(keyBase64, "base64")).digest();
+  const alphabet = "abcdefghijklmnop";
+  let id = "";
+
+  for (let i = 0; i < 16; i += 1) {
+    const value = digest[i];
+    id += alphabet[(value >> 4) & 0x0f];
+    id += alphabet[value & 0x0f];
+  }
+
+  return id;
 }
 
 async function waitForExtensionIdFromProfile(urlBase, profileDir, extensionDir, timeoutMs) {
