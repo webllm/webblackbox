@@ -445,8 +445,7 @@ export class LiteCaptureAgent {
     const vitalTypes: Array<{ type: string; rawType: string }> = [
       { type: "largest-contentful-paint", rawType: "vitals" },
       { type: "layout-shift", rawType: "vitals" },
-      { type: "first-input", rawType: "vitals" },
-      { type: "event", rawType: "vitals" }
+      { type: "first-input", rawType: "vitals" }
     ];
 
     for (const item of vitalTypes) {

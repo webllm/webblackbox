@@ -1,9 +1,9 @@
 type CapturePayload = Record<string, unknown>;
 
 const DEFAULT_FLAG = "__WEBBLACKBOX_INJECTED__";
-const NETWORK_BODY_CAPTURE_MAX_BYTES = 512 * 1024;
+const NETWORK_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
 const NETWORK_BODY_CAPTURE_MAX_PER_MINUTE = 45;
-const NETWORK_BODY_CAPTURE_MAX_BYTES_PER_MINUTE = 8 * 1024 * 1024;
+const NETWORK_BODY_CAPTURE_MAX_BYTES_PER_MINUTE = 4 * 1024 * 1024;
 const NOISY_CONSOLE_MAX_PER_SEC = 40;
 const NOISY_CONSOLE_METHODS = new Set(["log", "info", "debug", "dir", "dirxml", "table"]);
 const SAFE_SERIALIZE_MAX_DEPTH = 3;
@@ -606,22 +606,22 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       return;
     }
 
-    let bodyText: string | null = null;
+    const encodedDataLength = parseHeaderInt(response.headers.get("content-length"));
 
-    try {
-      bodyText = await response.clone().text();
-    } catch {
+    if (
+      typeof encodedDataLength === "number" &&
+      encodedDataLength > NETWORK_BODY_CAPTURE_MAX_BYTES
+    ) {
       return;
     }
 
-    if (!bodyText || bodyText.length === 0) {
+    const sampled = await readFetchBodySample(response, NETWORK_BODY_CAPTURE_MAX_BYTES);
+
+    if (!sampled || sampled.body.length === 0) {
       return;
     }
 
-    const clipped = clipUtf8Text(bodyText, NETWORK_BODY_CAPTURE_MAX_BYTES);
-    const sampledSize = new TextEncoder().encode(clipped.value).byteLength;
-
-    if (!allowBodyCapture(sampledSize)) {
+    if (!allowBodyCapture(sampled.sampledBytes)) {
       return;
     }
 
@@ -634,10 +634,17 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       status: response.status,
       mimeType: contentType,
       encoding: "utf8",
-      body: clipped.value,
-      size: clipped.fullBytes,
-      sampledSize,
-      truncated: clipped.truncated
+      body: sampled.body,
+      size:
+        typeof encodedDataLength === "number"
+          ? encodedDataLength
+          : sampled.truncated
+            ? Math.max(sampled.sampledBytes + 1, sampled.sampledBytes)
+            : sampled.sampledBytes,
+      sampledSize: sampled.sampledBytes,
+      truncated:
+        sampled.truncated ||
+        (typeof encodedDataLength === "number" && encodedDataLength > sampled.sampledBytes)
     });
   }
 
@@ -650,6 +657,15 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     contentType: string | undefined
   ): Promise<void> {
     if (!isBodyCaptureMimeAllowed(contentType)) {
+      return;
+    }
+
+    const encodedDataLength = parseHeaderInt(xhr.getResponseHeader("content-length"));
+
+    if (
+      typeof encodedDataLength === "number" &&
+      encodedDataLength > NETWORK_BODY_CAPTURE_MAX_BYTES
+    ) {
       return;
     }
 
@@ -677,10 +693,117 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       mimeType: contentType,
       encoding: "utf8",
       body: clipped.value,
-      size: clipped.fullBytes,
+      size: typeof encodedDataLength === "number" ? encodedDataLength : clipped.fullBytes,
       sampledSize,
-      truncated: clipped.truncated
+      truncated:
+        clipped.truncated ||
+        (typeof encodedDataLength === "number" && encodedDataLength > sampledSize)
     });
+  }
+
+  async function readFetchBodySample(
+    response: Response,
+    maxBytes: number
+  ): Promise<{ body: string; sampledBytes: number; truncated: boolean } | null> {
+    const cloned = response.clone();
+
+    if (!cloned.body || typeof cloned.body.getReader !== "function") {
+      try {
+        const bodyText = await cloned.text();
+        const clipped = clipUtf8Text(bodyText, maxBytes);
+        const sampledBytes = new TextEncoder().encode(clipped.value).byteLength;
+        return {
+          body: clipped.value,
+          sampledBytes,
+          truncated: clipped.truncated
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    const reader = cloned.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let sampledBytes = 0;
+    let truncated = false;
+
+    try {
+      while (sampledBytes < maxBytes) {
+        const result = await reader.read();
+
+        if (result.done) {
+          break;
+        }
+
+        const value = toUint8Array(result.value);
+
+        if (!value || value.byteLength === 0) {
+          continue;
+        }
+
+        const remaining = maxBytes - sampledBytes;
+
+        if (value.byteLength <= remaining) {
+          chunks.push(value);
+          sampledBytes += value.byteLength;
+          continue;
+        }
+
+        chunks.push(value.slice(0, remaining));
+        sampledBytes += remaining;
+        truncated = true;
+        break;
+      }
+    } catch {
+      return null;
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        void 0;
+      }
+    }
+
+    if (chunks.length === 0) {
+      return null;
+    }
+
+    const decoder = new TextDecoder();
+    let body = "";
+
+    for (const chunk of chunks) {
+      body += decoder.decode(chunk, {
+        stream: true
+      });
+    }
+
+    body += decoder.decode();
+
+    return {
+      body,
+      sampledBytes,
+      truncated
+    };
+  }
+
+  function toUint8Array(value: unknown): Uint8Array | null {
+    if (value instanceof Uint8Array) {
+      return value;
+    }
+
+    if (value instanceof ArrayBuffer) {
+      return new Uint8Array(value);
+    }
+
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+
+    if (typeof value === "string") {
+      return new TextEncoder().encode(value);
+    }
+
+    return null;
   }
 
   async function readXhrBodyText(xhr: XMLHttpRequest): Promise<string | null> {
