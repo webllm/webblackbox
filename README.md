@@ -115,6 +115,7 @@ share-server ──→ player-sdk ──→ protocol
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Performance Benchmarks](docs/PERFORMANCE.md)
+- [Player SDK API Docs](docs/api/player-sdk/index.html)
 - [Contributing](docs/CONTRIBUTING.md)
 
 ## Packages

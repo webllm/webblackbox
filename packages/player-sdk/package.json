@@ -19,7 +19,8 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "docs:api": "typedoc --options typedoc.json"
   },
   "dependencies": {
     "@webblackbox/protocol": "workspace:*",

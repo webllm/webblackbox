@@ -19,6 +19,7 @@
     "bench:ci": "node scripts/bench-regression-check.mjs",
     "bench:recorder": "pnpm --filter @webblackbox/recorder bench",
     "bench:pipeline": "pnpm --filter @webblackbox/pipeline bench",
+    "docs:api": "pnpm --filter @webblackbox/player-sdk docs:api",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "changeset": "changeset",
@@ -47,6 +48,7 @@
     "tsup": "^8.5.1",
     "tsx": "^4.20.6",
     "turbo": "^2.6.1",
+    "typedoc": "^0.28.17",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
     "vitest": "^4.0.8"

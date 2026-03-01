@@ -12,20 +12,25 @@ import type {
   WebBlackboxEventType
 } from "@webblackbox/protocol";
 
+/** Player lifecycle status. */
 export type PlayerStatus = "idle" | "loaded";
 
+/** Supported input payloads when opening an archive. */
 export type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 
+/** Optional archive open settings. */
 export type PlayerOpenOptions = {
   passphrase?: string;
   range?: PlayerRange;
 };
 
+/** Monotonic-time query range in milliseconds. */
 export type PlayerRange = {
   monoStart?: number;
   monoEnd?: number;
 };
 
+/** Event query filter model. */
 export type PlayerQuery = {
   range?: PlayerRange;
   types?: WebBlackboxEventType[];
@@ -36,12 +41,14 @@ export type PlayerQuery = {
   offset?: number;
 };
 
+/** Ranked full-text search hit for an event. */
 export type PlayerSearchResult = {
   eventId: string;
   score: number;
   event: WebBlackboxEvent;
 };
 
+/** Aggregated user action span. */
 export type ActionSpan = {
   actId: string;
   startMono: number;
@@ -52,6 +59,7 @@ export type ActionSpan = {
   errorCount: number;
 };
 
+/** Action timeline row with network/error/screenshot context. */
 export type ActionTimelineEntry = {
   actId: string;
   triggerEventId: string;
@@ -86,6 +94,7 @@ export type ActionTimelineEntry = {
   } | null;
 };
 
+/** Cached derived analysis view. */
 export type PlayerDerivedView = {
   actionSpans: ActionSpan[];
   totals: {
@@ -95,6 +104,7 @@ export type PlayerDerivedView = {
   };
 };
 
+/** Parsed archive metadata and indexes. */
 export type PlayerArchive = {
   manifest: ExportManifest;
   timeIndex: ChunkTimeIndexEntry[];
@@ -103,6 +113,7 @@ export type PlayerArchive = {
   integrity: HashesManifest;
 };
 
+/** Normalized request waterfall entry. */
 export type NetworkWaterfallEntry = {
   reqId: string;
   url: string;
@@ -127,6 +138,7 @@ export type NetworkWaterfallEntry = {
   eventIds: string[];
 };
 
+/** Realtime network stream entry (WebSocket/SSE). */
 export type RealtimeNetworkEntry = {
   eventId: string;
   eventType: WebBlackboxEventType;
@@ -143,6 +155,7 @@ export type RealtimeNetworkEntry = {
   snapshot?: unknown;
 };
 
+/** Storage event timeline entry. */
 export type StorageTimelineEntry = {
   eventId: string;
   eventType: WebBlackboxEventType;
@@ -157,6 +170,7 @@ export type StorageTimelineEntry = {
   snapshot?: unknown;
 };
 
+/** Performance artifact timeline entry. */
 export type PerformanceArtifactEntry = {
   eventId: string;
   eventType: WebBlackboxEventType;
@@ -169,6 +183,7 @@ export type PerformanceArtifactEntry = {
   snapshot?: unknown;
 };
 
+/** Session-vs-session comparison summary. */
 export type PlayerComparison = {
   leftSessionId: string;
   rightSessionId: string;
@@ -204,6 +219,7 @@ export type PlayerComparison = {
   }>;
 };
 
+/** Storage-only comparison summary. */
 export type StorageComparison = {
   leftEvents: number;
   rightEvents: number;
@@ -217,12 +233,14 @@ export type StorageComparison = {
   hashOnlyRight: string[];
 };
 
+/** Bug report generation options. */
 export type BugReportOptions = {
   title?: string;
   range?: PlayerRange;
   maxItems?: number;
 };
 
+/** Playwright script generation options. */
 export type PlaywrightScriptOptions = {
   name?: string;
   range?: PlayerRange;
@@ -231,10 +249,12 @@ export type PlaywrightScriptOptions = {
   includeHarReplay?: boolean;
 };
 
+/** Playwright mock script generation options. */
 export type PlaywrightMockScriptOptions = PlaywrightScriptOptions & {
   maxMocks?: number;
 };
 
+/** Shared options for team issue template generation. */
 export type TeamIssueTemplateOptions = {
   title?: string;
   range?: PlayerRange;
@@ -246,6 +266,7 @@ export type TeamIssueTemplateOptions = {
   priority?: string;
 };
 
+/** GitHub issue payload generated from a session. */
 export type GitHubIssueTemplate = {
   title: string;
   body: string;
@@ -253,6 +274,7 @@ export type GitHubIssueTemplate = {
   assignees: string[];
 };
 
+/** Jira issue payload generated from a session. */
 export type JiraIssueTemplate = {
   fields: {
     summary: string;
@@ -270,6 +292,7 @@ export type JiraIssueTemplate = {
   };
 };
 
+/** DOM snapshot reference entry from the timeline. */
 export type DomSnapshotRef = {
   eventId: string;
   mono: number;
@@ -281,11 +304,13 @@ export type DomSnapshotRef = {
   reason?: string;
 };
 
+/** DOM diff timeline query options. */
 export type DomDiffTimelineOptions = {
   range?: PlayerRange;
   limit?: number;
 };
 
+/** Result of diffing two DOM snapshots. */
 export type DomDiffResult = {
   previous: DomSnapshotRef;
   current: DomSnapshotRef;
@@ -367,9 +392,14 @@ type EventChunkDescriptor = {
   codec: ChunkCodec;
 };
 
+/**
+ * Main SDK entry for loading, querying, and exporting insights from `.webblackbox` archives.
+ */
 export class WebBlackboxPlayer {
+  /** Current player status (always `loaded` for opened instances). */
   public readonly status: PlayerStatus = "loaded";
 
+  /** Parsed archive metadata and indexes. */
   public readonly archive: PlayerArchive;
 
   private readonly zip: JSZip;
@@ -439,10 +469,12 @@ export class WebBlackboxPlayer {
     }
   }
 
+  /** Returns all events in the current loaded range. */
   public get events(): WebBlackboxEvent[] {
     return this.query();
   }
 
+  /** Opens a WebBlackbox archive from bytes, buffer, or Blob input. */
   public static async open(
     input: PlayerOpenInput,
     options: PlayerOpenOptions = {}
@@ -478,6 +510,7 @@ export class WebBlackboxPlayer {
     );
   }
 
+  /** Queries events using range/type/level/text/request filters. */
   public query(query: PlayerQuery = {}): WebBlackboxEvent[] {
     if (
       query.range?.monoStart !== undefined &&
@@ -574,6 +607,7 @@ export class WebBlackboxPlayer {
     return matched;
   }
 
+  /** Full-text search over indexed terms and event payloads. */
   public search(term: string, limit = 100): PlayerSearchResult[] {
     const normalizedTerm = term.trim().toLowerCase();
 
@@ -685,6 +719,7 @@ export class WebBlackboxPlayer {
     return null;
   }
 
+  /** Resolves a stored blob by hash or blob path alias. */
   public async getBlob(hash: string): Promise<{ mime: string; bytes: Uint8Array } | null> {
     const blob = resolveBlobByKey(this.blobsByHash, hash);
 
@@ -707,6 +742,7 @@ export class WebBlackboxPlayer {
     };
   }
 
+  /** Builds action-span aggregates and total counters for the selected range. */
   public buildDerived(range?: PlayerRange): PlayerDerivedView {
     if (isRangeUnbounded(range) && this.allDerivedCache) {
       return this.allDerivedCache;
@@ -780,6 +816,7 @@ export class WebBlackboxPlayer {
     return derived;
   }
 
+  /** Builds per-action timeline rows with related requests/errors/screenshots. */
   public getActionTimeline(
     options: {
       range?: PlayerRange;
@@ -864,6 +901,7 @@ export class WebBlackboxPlayer {
     });
   }
 
+  /** Returns normalized network waterfall entries sorted by start time. */
   public getNetworkWaterfall(range?: PlayerRange): NetworkWaterfallEntry[] {
     if (isRangeUnbounded(range) && this.allNetworkWaterfallCache) {
       return this.allNetworkWaterfallCache;
@@ -885,10 +923,12 @@ export class WebBlackboxPlayer {
     return waterfall;
   }
 
+  /** Returns all events that reference a specific request id. */
   public getRequestEvents(reqId: string): WebBlackboxEvent[] {
     return this.query({ requestId: reqId }).sort((left, right) => left.mono - right.mono);
   }
 
+  /** Returns realtime network stream entries (WebSocket/SSE). */
   public getRealtimeNetworkTimeline(range?: PlayerRange): RealtimeNetworkEntry[] {
     return this.query({ range })
       .filter(
@@ -924,6 +964,7 @@ export class WebBlackboxPlayer {
       .sort((left, right) => left.mono - right.mono);
   }
 
+  /** Returns storage timeline entries (cookie/local/session/idb/cache/sw). */
   public getStorageTimeline(range?: PlayerRange): StorageTimelineEntry[] {
     if (isRangeUnbounded(range) && this.allStorageTimelineCache) {
       return this.allStorageTimelineCache;
@@ -957,6 +998,7 @@ export class WebBlackboxPlayer {
     return timeline;
   }
 
+  /** Returns collected performance artifacts (trace/cpu/heap/vitals/longtask). */
   public getPerformanceArtifacts(range?: PlayerRange): PerformanceArtifactEntry[] {
     if (isRangeUnbounded(range) && this.allPerformanceArtifactsCache) {
       return this.allPerformanceArtifactsCache;
@@ -992,6 +1034,7 @@ export class WebBlackboxPlayer {
     return artifacts;
   }
 
+  /** Returns DOM snapshot references ordered by monotonic time. */
   public getDomSnapshots(range?: PlayerRange): DomSnapshotRef[] {
     return this.query({ range })
       .filter((event) => event.type === "dom.snapshot")
@@ -1012,6 +1055,7 @@ export class WebBlackboxPlayer {
       .sort((left, right) => left.mono - right.mono);
   }
 
+  /** Computes sequential diffs across the DOM snapshot timeline. */
   public async getDomDiffTimeline(options: DomDiffTimelineOptions = {}): Promise<DomDiffResult[]> {
     const snapshots = this.getDomSnapshots(options.range);
 
@@ -1040,6 +1084,7 @@ export class WebBlackboxPlayer {
     return diffs;
   }
 
+  /** Compares two snapshots from this player by event id. */
   public async compareDomSnapshots(
     previousEventId: string,
     currentEventId: string
@@ -1057,6 +1102,7 @@ export class WebBlackboxPlayer {
     return buildDomDiff(previous, current, previousPaths, currentPaths);
   }
 
+  /** Compares latest DOM snapshots across two players. */
   public async compareLatestDomSnapshotWith(
     other: WebBlackboxPlayer
   ): Promise<DomDiffResult | null> {
@@ -1075,6 +1121,7 @@ export class WebBlackboxPlayer {
     return buildDomDiff(previous, current, previousPaths, currentPaths);
   }
 
+  /** Compares two sessions by event/request/error deltas and endpoint regressions. */
   public compareWith(other: WebBlackboxPlayer): PlayerComparison {
     const leftEvents = this.events;
     const rightEvents = other.events;
@@ -1121,6 +1168,7 @@ export class WebBlackboxPlayer {
     };
   }
 
+  /** Compares storage timelines across two sessions. */
   public compareStorageWith(other: WebBlackboxPlayer): StorageComparison {
     const left = this.getStorageTimeline();
     const right = other.getStorageTimeline();
@@ -1166,6 +1214,7 @@ export class WebBlackboxPlayer {
     };
   }
 
+  /** Generates a curl replay command for a recorded network request. */
   public generateCurl(reqId: string): string | null {
     const entry = this.getNetworkWaterfall().find((item) => item.reqId === reqId);
 
@@ -1188,6 +1237,7 @@ export class WebBlackboxPlayer {
     return lines.join("\n");
   }
 
+  /** Generates a fetch replay snippet for a recorded network request. */
   public generateFetch(reqId: string): string | null {
     const entry = this.getNetworkWaterfall().find((item) => item.reqId === reqId);
 
@@ -1207,6 +1257,7 @@ export class WebBlackboxPlayer {
     return `await fetch(${JSON.stringify(entry.url)}, ${JSON.stringify(options, null, 2)});`;
   }
 
+  /** Exports a HAR 1.2 document from network events. */
   public exportHar(range?: PlayerRange): string {
     const entries = this.getNetworkWaterfall(range).map((entry) => toHarEntry(entry));
     const started = new Date(this.events[0]?.t ?? Date.now()).toISOString();
@@ -1236,6 +1287,7 @@ export class WebBlackboxPlayer {
     return JSON.stringify(har, null, 2);
   }
 
+  /** Generates a Markdown bug report for the selected range. */
   public generateBugReport(options: BugReportOptions = {}): string {
     const maxItems = Math.max(5, options.maxItems ?? 20);
     const scoped = this.query({ range: options.range });
@@ -1298,6 +1350,7 @@ export class WebBlackboxPlayer {
     ].join("\n");
   }
 
+  /** Generates a GitHub issue template payload from session evidence. */
   public generateGitHubIssueTemplate(options: TeamIssueTemplateOptions = {}): GitHubIssueTemplate {
     const title = options.title ?? `Bug: ${this.archive.manifest.site.origin} regression`;
     const body = this.generateBugReport({
@@ -1314,6 +1367,7 @@ export class WebBlackboxPlayer {
     };
   }
 
+  /** Generates a Jira issue payload from session evidence. */
   public generateJiraIssueTemplate(options: TeamIssueTemplateOptions = {}): JiraIssueTemplate {
     const summary = options.title ?? `WebBlackbox: ${this.archive.manifest.site.origin} issue`;
     const description = this.generateBugReport({
@@ -1344,6 +1398,7 @@ export class WebBlackboxPlayer {
     };
   }
 
+  /** Generates a Playwright script from captured navigation and user actions. */
   public generatePlaywrightScript(options: PlaywrightScriptOptions = {}): string {
     const name = options.name ?? "replay-from-webblackbox";
     const maxActions = Math.max(1, options.maxActions ?? 40);
@@ -1376,6 +1431,7 @@ export class WebBlackboxPlayer {
     return lines.join("\n");
   }
 
+  /** Generates a Playwright script with mocked network responses. */
   public async generatePlaywrightMockScript(
     options: PlaywrightMockScriptOptions = {}
   ): Promise<string> {
@@ -1504,6 +1560,7 @@ export class WebBlackboxPlayer {
   }
 }
 
+/** Returns the default pre-open player status. */
 export function getDefaultPlayerStatus(): PlayerStatus {
   return "idle";
 }

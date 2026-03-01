@@ -119,6 +119,16 @@ pnpm --filter @webblackbox/recorder test -- --watch
 
 Tests use **Vitest** and are co-located with source files (`*.test.ts`).
 
+### API Docs
+
+Generate the Player SDK API site:
+
+```bash
+pnpm docs:api
+```
+
+The generated files are written to `docs/api/player-sdk/`.
+
 ## Versioning
 
 WebBlackbox uses [Changesets](https://github.com/changesets/changesets) for version management:

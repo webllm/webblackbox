@@ -10,6 +10,7 @@ export default tseslint.config(
       "**/coverage/**",
       "**/.turbo/**",
       "**/node_modules/**",
+      "docs/api/**",
       ".changeset/*.md"
     ]
   },
