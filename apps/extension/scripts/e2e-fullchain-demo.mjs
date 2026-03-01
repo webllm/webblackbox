@@ -111,9 +111,21 @@ async function main() {
       .catch(() => undefined);
   }
 
-  const swTarget = await waitForExtensionServiceWorker(baseUrl, 25_000);
-  const extensionId = extractExtensionId(swTarget.url);
+  let swTarget = await waitForExtensionServiceWorker(baseUrl, 8_000).catch(() => null);
+  const extensionId = swTarget
+    ? extractExtensionId(swTarget.url)
+    : await waitForExtensionIdFromProfile(profileDir, extensionDir, 25_000);
   console.log(`Extension ID: ${extensionId}`);
+
+  let popupTarget = null;
+  let warmupPopupTargetId = null;
+
+  if (!swTarget) {
+    popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+    state.openedTargetIds.push(popupTarget.id);
+    warmupPopupTargetId = popupTarget.id;
+    swTarget = await waitForExtensionServiceWorker(baseUrl, 25_000, extensionId);
+  }
 
   const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
   await swClient.connect();
@@ -129,8 +141,17 @@ async function main() {
   });
 
   const demoTarget = await openTarget(baseUrl, demoUrl);
-  const popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
-  state.openedTargetIds.push(demoTarget.id, popupTarget.id);
+  state.openedTargetIds.push(demoTarget.id);
+
+  if (!popupTarget) {
+    popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+    state.openedTargetIds.push(popupTarget.id);
+  } else if (warmupPopupTargetId) {
+    await closeTarget(baseUrl, warmupPopupTargetId);
+    state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
+    popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+    state.openedTargetIds.push(popupTarget.id);
+  }
 
   const demoClient = new CdpClient(demoTarget.webSocketDebuggerUrl);
   const popupClient = new CdpClient(popupTarget.webSocketDebuggerUrl);
@@ -139,8 +160,11 @@ async function main() {
   await demoClient.send("Runtime.enable");
   await popupClient.send("Runtime.enable");
   await demoClient.send("DOM.enable");
+  await popupClient.send("DOM.enable");
   state.demoClient = demoClient;
   state.popupClient = popupClient;
+
+  await waitForPopupUiReady(popupClient, 20_000);
 
   const demoExceptions = [];
   demoClient.on("Runtime.exceptionThrown", (params) => {
@@ -789,29 +813,135 @@ async function waitForChromeReady(urlBase, timeoutMs) {
   );
 }
 
-async function waitForExtensionServiceWorker(urlBase, timeoutMs) {
+async function waitForExtensionServiceWorker(urlBase, timeoutMs, extensionId) {
+  const extensionPrefix = extensionId
+    ? `chrome-extension://${extensionId}/`
+    : "chrome-extension://";
+  let lastTargetSummary = "none";
+
+  try {
+    return await waitFor(
+      async () => {
+        const targets = await fetchJson(`${urlBase}/json/list`, 4_000);
+
+        if (!Array.isArray(targets)) {
+          return null;
+        }
+
+        lastTargetSummary = summarizeTargetsForDebug(targets);
+
+        return (
+          targets.find(
+            (target) =>
+              target?.type === "service_worker" &&
+              typeof target?.url === "string" &&
+              target.url.startsWith(extensionPrefix) &&
+              target.url.endsWith("/sw.js")
+          ) ?? null
+        );
+      },
+      timeoutMs,
+      250,
+      "Extension service worker target not found"
+    );
+  } catch (error) {
+    throw new Error(
+      `Extension service worker target not found for prefix '${extensionPrefix}'. Targets: ${lastTargetSummary}. ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
+async function waitForExtensionIdFromProfile(profileDir, extensionDir, timeoutMs) {
+  const normalizedExtensionDir = normalizeFsPath(extensionDir);
+
   return waitFor(
     async () => {
-      const targets = await fetchJson(`${urlBase}/json/list`, 4_000);
-
-      if (!Array.isArray(targets)) {
-        return null;
-      }
-
-      return (
-        targets.find(
-          (target) =>
-            target?.type === "service_worker" &&
-            typeof target?.url === "string" &&
-            target.url.startsWith("chrome-extension://") &&
-            target.url.endsWith("/sw.js")
-        ) ?? null
-      );
+      return readExtensionIdFromProfile(profileDir, normalizedExtensionDir);
     },
     timeoutMs,
     250,
-    "Extension service worker target not found"
+    `Extension id not found in profile for path '${normalizedExtensionDir}'`
   );
+}
+
+async function readExtensionIdFromProfile(profileDir, normalizedExtensionDir) {
+  for (const fileName of ["Secure Preferences", "Preferences"]) {
+    const path = resolve(profileDir, "Default", fileName);
+    let content;
+
+    try {
+      content = await readFile(path, "utf8");
+    } catch {
+      continue;
+    }
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      continue;
+    }
+
+    const settings = parsed?.extensions?.settings;
+
+    if (!settings || typeof settings !== "object") {
+      continue;
+    }
+
+    for (const [candidateId, candidateValue] of Object.entries(settings)) {
+      if (!isLikelyExtensionId(candidateId)) {
+        continue;
+      }
+
+      if (!candidateValue || typeof candidateValue !== "object") {
+        continue;
+      }
+
+      const pathValue =
+        typeof candidateValue.path === "string" ? normalizeFsPath(candidateValue.path) : null;
+
+      if (!pathValue) {
+        continue;
+      }
+
+      if (pathsLikelyEqual(pathValue, normalizedExtensionDir)) {
+        return candidateId;
+      }
+    }
+  }
+
+  return null;
+}
+
+function isLikelyExtensionId(value) {
+  return typeof value === "string" && /^[a-p]{32}$/.test(value);
+}
+
+function normalizeFsPath(value) {
+  return resolve(String(value)).replaceAll("\\", "/").replace(/\/+$/g, "");
+}
+
+function pathsLikelyEqual(left, right) {
+  return left === right || left.toLowerCase() === right.toLowerCase();
+}
+
+function summarizeTargetsForDebug(targets) {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    return "[]";
+  }
+
+  return targets
+    .slice(0, 12)
+    .map((target) => {
+      const type = typeof target?.type === "string" ? target.type : "unknown";
+      const url = typeof target?.url === "string" ? target.url : "";
+      const normalizedUrl = url.length > 120 ? `${url.slice(0, 117)}...` : url;
+      return `${type}:${normalizedUrl}`;
+    })
+    .join(", ");
 }
 
 function extractExtensionId(url) {
@@ -1198,6 +1328,41 @@ async function waitForIndicatorText(pageClient, fragment, timeoutMs) {
     timeoutMs,
     250,
     `Indicator not found: ${fragment}`
+  );
+}
+
+async function waitForPopupUiReady(popupClient, timeoutMs) {
+  return waitFor(
+    async () => {
+      const snapshot = await popupClient.evaluate(`
+        (() => {
+          const startLite = document.querySelector("[data-action='start-lite']");
+          const startFull = document.querySelector("[data-action='start-full']");
+          const hasChromeRuntime =
+            typeof chrome === "object" &&
+            chrome !== null &&
+            typeof chrome.runtime === "object" &&
+            chrome.runtime !== null &&
+            typeof chrome.runtime.id === "string";
+
+          return {
+            ready: Boolean(startLite && startFull && hasChromeRuntime),
+            hasStartLite: Boolean(startLite),
+            hasStartFull: Boolean(startFull),
+            hasChromeRuntime
+          };
+        })()
+      `);
+
+      if (snapshot?.ready) {
+        return snapshot;
+      }
+
+      return null;
+    },
+    timeoutMs,
+    200,
+    "Popup UI not ready"
   );
 }
 
