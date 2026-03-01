@@ -142,21 +142,25 @@ async function main() {
     popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
     state.openedTargetIds.push(popupTarget.id);
     warmupPopupTargetId = popupTarget.id;
-    swTarget = await waitForExtensionServiceWorker(baseUrl, 25_000, extensionId);
+    swTarget = await waitForExtensionServiceWorker(baseUrl, 25_000, extensionId).catch(() => null);
   }
 
-  const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
-  await swClient.connect();
-  await swClient.send("Runtime.enable");
-  state.swClient = swClient;
-
   const swExceptions = [];
-  swClient.on("Runtime.exceptionThrown", (params) => {
-    swExceptions.push({
-      text: params?.exceptionDetails?.text ?? "unknown",
-      line: params?.exceptionDetails?.lineNumber ?? null
+  if (swTarget?.webSocketDebuggerUrl) {
+    const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
+    await swClient.connect();
+    await swClient.send("Runtime.enable");
+    state.swClient = swClient;
+
+    swClient.on("Runtime.exceptionThrown", (params) => {
+      swExceptions.push({
+        text: params?.exceptionDetails?.text ?? "unknown",
+        line: params?.exceptionDetails?.lineNumber ?? null
+      });
     });
-  });
+  } else {
+    console.warn("Service worker target is unavailable; continuing without SW runtime hook.");
+  }
 
   if (!popupTarget) {
     popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
