@@ -25,6 +25,7 @@ const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "4500
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
 const usePopupUiActions = (process.env.WB_E2E_USE_POPUP_UI ?? "1") !== "0";
+const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "";
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 
 const chromeCandidates = [
@@ -217,7 +218,8 @@ async function main() {
 
   const exportStatusBefore = await readExportStatusLine(popupClient);
   const exportStartedAtMs = Date.now();
-  await exportSessionFromPopup(popupClient, sid);
+  const exportTriggered = await exportSessionFromPopup(popupClient, sid);
+  assert(exportTriggered?.ok === true, "Failed to trigger export from popup", exportTriggered);
   const exportStatus = await waitForExportStatus(popupClient, exportStatusBefore, 35_000);
   assert(exportStatus.ok, "Export status indicates failure", exportStatus);
 
@@ -968,11 +970,32 @@ async function exportSessionFromPopup(popupClient, sid) {
         try {
           globalThis.prompt = () => "";
           button.click();
+
+          const passphraseInput = document.querySelector('#wb-passphrase-input');
+
+          if (passphraseInput instanceof HTMLInputElement) {
+            passphraseInput.value = ${JSON.stringify(exportPassphrase)};
+            passphraseInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+            const form = passphraseInput.closest('form');
+
+            if (form instanceof HTMLFormElement) {
+              form.requestSubmit();
+              return {
+                ok: true,
+                sid: ${JSON.stringify(sid)},
+                via: 'popup-ui',
+                passphraseMode: ${JSON.stringify(exportPassphrase.length > 0 ? "provided" : "empty")}
+              };
+            }
+
+            return { ok: false, reason: 'passphrase-form-not-found' };
+          }
         } finally {
           globalThis.prompt = previousPrompt;
         }
 
-        return { ok: true, sid: ${JSON.stringify(sid)}, via: 'popup-ui' };
+        return { ok: true, sid: ${JSON.stringify(sid)}, via: 'popup-ui', flow: 'prompt-fallback' };
       })()
     `;
 
