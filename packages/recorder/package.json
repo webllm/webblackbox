@@ -19,6 +19,7 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --coverage",
     "bench": "tsx scripts/benchmark.ts"
   },
   "dependencies": {

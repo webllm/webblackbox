@@ -67,6 +67,46 @@ describe("WebBlackboxPlayer", () => {
     expect(player.query().map((event) => event.id)).toEqual(["E-2"]);
   });
 
+  it("accepts ArrayBuffer and Blob archive inputs", async () => {
+    const bytes = await createFixtureArchive();
+    const arrayBuffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+    const fromArrayBuffer = await WebBlackboxPlayer.open(arrayBuffer);
+    expect(fromArrayBuffer.events.length).toBeGreaterThan(0);
+
+    const fromBlob = await WebBlackboxPlayer.open(new Blob([bytes]));
+    expect(fromBlob.events.length).toBeGreaterThan(0);
+  });
+
+  it("throws for unsupported archive input type", async () => {
+    await expect(WebBlackboxPlayer.open("invalid-input" as unknown as Uint8Array)).rejects.toThrow(
+      /unsupported archive input type/i
+    );
+  });
+
+  it("infers blob mime types by extension and rejects empty blob hashes", async () => {
+    const fixture = await createFixtureArchive();
+    const zip = await JSZip.loadAsync(fixture);
+    zip.file("blobs/sha256-blobpng.png", Uint8Array.from([9]));
+    zip.file("blobs/sha256-blobbin.bin", Uint8Array.from([8]));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const player = await WebBlackboxPlayer.open(bytes);
+
+    await expect(player.getBlob("   ")).resolves.toBeNull();
+    await expect(player.getBlob("blobpng")).resolves.toEqual(
+      expect.objectContaining({
+        mime: "image/png"
+      })
+    );
+    await expect(player.getBlob("blobbin")).resolves.toEqual(
+      expect.objectContaining({
+        mime: "application/octet-stream"
+      })
+    );
+  });
+
   it("parses chunks lazily when queried", async () => {
     const bytes = await createLazyParseFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
@@ -150,6 +190,55 @@ describe("WebBlackboxPlayer", () => {
 
     const blob = await player.getBlob("blob1");
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
+  });
+
+  it("opens encrypted archives when atob is unavailable (Buffer fallback)", async () => {
+    const originalAtob = (globalThis as unknown as { atob?: typeof atob }).atob;
+    const bytes = await createEncryptedArchive(await createFixtureArchive(), "test-passphrase");
+
+    Object.defineProperty(globalThis, "atob", {
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+
+    try {
+      const player = await WebBlackboxPlayer.open(bytes, {
+        passphrase: "test-passphrase"
+      });
+      expect(player.events.length).toBeGreaterThan(0);
+    } finally {
+      Object.defineProperty(globalThis, "atob", {
+        configurable: true,
+        writable: true,
+        value: originalAtob
+      });
+    }
+  });
+
+  it("fails encrypted archive open when Web Crypto API is unavailable", async () => {
+    const bytes = await createEncryptedArchive(await createFixtureArchive(), "test-passphrase");
+    const originalCrypto = (globalThis as unknown as { crypto?: Crypto }).crypto;
+
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+
+    try {
+      await expect(
+        WebBlackboxPlayer.open(bytes, {
+          passphrase: "test-passphrase"
+        })
+      ).rejects.toThrow(/Web Crypto API is required/i);
+    } finally {
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        writable: true,
+        value: originalCrypto
+      });
+    }
   });
 
   it("rejects archives that use deprecated index/integrity layout paths", async () => {
