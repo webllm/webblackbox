@@ -251,6 +251,7 @@ type PlayerState = {
   responsePreviewByHash: Map<string, ResponsePreview | null>;
   responseJsonExpanded: boolean;
   responseCopyText: string;
+  preflightDismissTimer: number | null;
 };
 
 type SetPlayheadOptions = {
@@ -338,7 +339,8 @@ const state: PlayerState = {
   maskResponsePreview: true,
   responsePreviewByHash: new Map<string, ResponsePreview | null>(),
   responseJsonExpanded: false,
-  responseCopyText: ""
+  responseCopyText: "",
+  preflightDismissTimer: null
 };
 
 function mountPlayerShell(): void {
@@ -367,6 +369,18 @@ const refs = {
   compareDetails: getElement<HTMLElement>("compare-details"),
   compareRegressions: getElement<HTMLElement>("compare-regressions"),
   feedback: getElement<HTMLElement>("feedback"),
+  preflightPanel: getElement<HTMLElement>("preflight-panel"),
+  preflightMeta: getElement<HTMLElement>("preflight-meta"),
+  preflightErrors: getElement<HTMLElement>("preflight-errors"),
+  preflightFailedRequests: getElement<HTMLElement>("preflight-failed-requests"),
+  preflightSlowRequests: getElement<HTMLElement>("preflight-slow-requests"),
+  preflightShots: getElement<HTMLElement>("preflight-shots"),
+  preflightActions: getElement<HTMLElement>("preflight-actions"),
+  preflightDismiss: getElement<HTMLButtonElement>("preflight-dismiss"),
+  preflightOpenPlayer: getElement<HTMLButtonElement>("preflight-open-player"),
+  preflightCopyReport: getElement<HTMLButtonElement>("preflight-copy-report"),
+  preflightJumpError: getElement<HTMLButtonElement>("preflight-jump-error"),
+  preflightJumpSlowest: getElement<HTMLButtonElement>("preflight-jump-slowest"),
   logGrid: getElement<HTMLElement>("log-grid"),
   logGridDivider: getElement<HTMLElement>("log-grid-divider"),
   textFilter: getElement<HTMLInputElement>("text-filter"),
@@ -1022,6 +1036,29 @@ function bindGlobalActions(): void {
     }
   });
 
+  refs.preflightDismiss.addEventListener("click", () => {
+    hideQuickTriagePanel();
+  });
+
+  refs.preflightOpenPlayer.addEventListener("click", () => {
+    hideQuickTriagePanel();
+    setFeedback("Quick triage dismissed.");
+  });
+
+  refs.preflightCopyReport.addEventListener("click", () => {
+    void copyBugReportFromQuickTriage();
+  });
+
+  refs.preflightJumpError.addEventListener("click", () => {
+    hideQuickTriagePanel();
+    jumpToFirstError();
+  });
+
+  refs.preflightJumpSlowest.addEventListener("click", () => {
+    hideQuickTriagePanel();
+    jumpToSlowestRequest();
+  });
+
   document.querySelectorAll<HTMLButtonElement>("button[data-dialog-cancel]").forEach((button) => {
     button.addEventListener("click", () => {
       button.closest("dialog")?.close("cancel");
@@ -1311,6 +1348,7 @@ async function loadPrimaryArchiveFile(file: File): Promise<void> {
 async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): Promise<void> {
   pausePlayback();
   hideProgressHover();
+  hideQuickTriagePanel();
   state.lastPanelBucket = Number.NEGATIVE_INFINITY;
 
   try {
@@ -1332,8 +1370,10 @@ async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): P
     refreshCompareSummary();
 
     await renderAll({ forcePanels: true, forceScreenshot: true });
+    showQuickTriagePanel(model, sourceName);
     setFeedback(`Loaded ${sourceName}`);
   } catch (error) {
+    hideQuickTriagePanel();
     setFeedback(`Failed to load ${sourceName}: ${String(error)}`);
   }
 }
@@ -1366,6 +1406,56 @@ function refreshCompareSummary(): void {
   }
 
   state.compareSummary = null;
+}
+
+function showQuickTriagePanel(model: ArchiveModel, archiveName: string): void {
+  const player = state.player;
+
+  if (!player) {
+    return;
+  }
+
+  const triage = computeTriageStats(model.events, model.waterfall, TRIAGE_SLOW_REQUEST_MS);
+  const origin = player.archive.manifest.site.origin;
+  refs.preflightMeta.textContent = `${archiveName} • ${formatMono(model.durationMono)} • ${origin}`;
+  refs.preflightErrors.textContent = String(model.totals.errors);
+  refs.preflightFailedRequests.textContent = String(triage.failedRequests);
+  refs.preflightSlowRequests.textContent = String(triage.slowRequests);
+  refs.preflightShots.textContent = String(model.screenshots.length);
+  refs.preflightActions.textContent = String(model.totals.actionSpans);
+  refs.preflightJumpError.disabled = !triage.firstError;
+  refs.preflightJumpSlowest.disabled = !triage.slowestRequest;
+  refs.preflightPanel.hidden = false;
+
+  if (state.preflightDismissTimer !== null) {
+    window.clearTimeout(state.preflightDismissTimer);
+    state.preflightDismissTimer = null;
+  }
+
+  state.preflightDismissTimer = window.setTimeout(() => {
+    state.preflightDismissTimer = null;
+    refs.preflightPanel.hidden = true;
+  }, 5_000);
+}
+
+function hideQuickTriagePanel(): void {
+  if (state.preflightDismissTimer !== null) {
+    window.clearTimeout(state.preflightDismissTimer);
+    state.preflightDismissTimer = null;
+  }
+
+  refs.preflightPanel.hidden = true;
+}
+
+async function copyBugReportFromQuickTriage(): Promise<void> {
+  const player = state.player;
+
+  if (!player) {
+    return;
+  }
+
+  await copyText(player.generateBugReport());
+  setFeedback("Bug report copied.");
 }
 
 async function exportPlaywrightMocks(): Promise<void> {

@@ -427,6 +427,75 @@ input[type="file"],
   text-overflow: ellipsis;
 }
 
+.preflight-panel {
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  padding: 8px;
+  background:
+    linear-gradient(180deg, rgba(245, 249, 255, 0.98), rgba(255, 255, 255, 0.96)),
+    radial-gradient(circle at top right, rgba(17, 95, 190, 0.08), transparent 45%);
+  display: grid;
+  gap: 7px;
+}
+
+.preflight-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.preflight-head h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.preflight-meta {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--sys-color-on-surface-subtle);
+}
+
+.preflight-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preflight-pill {
+  min-width: 90px;
+  border: 1px solid var(--sys-color-outline);
+  border-radius: 8px;
+  background: var(--sys-color-surface);
+  padding: 4px 7px;
+  display: grid;
+  gap: 1px;
+}
+
+.preflight-pill span {
+  font-size: 10px;
+  color: var(--sys-color-on-surface-subtle);
+}
+
+.preflight-pill strong {
+  font-size: 12px;
+  color: var(--sys-color-on-surface);
+  font-variant-numeric: tabular-nums;
+}
+
+.preflight-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preflight-actions .ui-button {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
+}
+
 .stage-card {
   border-left: none;
   border-right: none;

@@ -51,6 +51,54 @@ export function PlayerShell(): React.JSX.Element {
         </div>
       </section>
 
+      <section id="preflight-panel" className="preflight-panel card" hidden>
+        <header className="preflight-head">
+          <div>
+            <h2 id="preflight-title">Quick Triage</h2>
+            <p id="preflight-meta" className="preflight-meta"></p>
+          </div>
+          <Button id="preflight-dismiss" type="button" variant="ghost">
+            Dismiss
+          </Button>
+        </header>
+        <div className="preflight-metrics">
+          <div className="preflight-pill">
+            <span>Errors</span>
+            <strong id="preflight-errors">0</strong>
+          </div>
+          <div className="preflight-pill">
+            <span>Failed reqs</span>
+            <strong id="preflight-failed-requests">0</strong>
+          </div>
+          <div className="preflight-pill">
+            <span>Slow reqs</span>
+            <strong id="preflight-slow-requests">0</strong>
+          </div>
+          <div className="preflight-pill">
+            <span>Screenshots</span>
+            <strong id="preflight-shots">0</strong>
+          </div>
+          <div className="preflight-pill">
+            <span>Actions</span>
+            <strong id="preflight-actions">0</strong>
+          </div>
+        </div>
+        <div className="preflight-actions">
+          <Button id="preflight-open-player" type="button" variant="secondary">
+            Open Full Player
+          </Button>
+          <Button id="preflight-copy-report" type="button" variant="secondary">
+            Copy Bug Report
+          </Button>
+          <Button id="preflight-jump-error" type="button" variant="secondary">
+            Jump to first error
+          </Button>
+          <Button id="preflight-jump-slowest" type="button" variant="secondary">
+            Jump to slowest request
+          </Button>
+        </div>
+      </section>
+
       <Card id="stage-card" className="stage-card">
         <div className="stage-toolbar">
           <div className="playback-buttons">
