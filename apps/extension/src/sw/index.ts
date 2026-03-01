@@ -437,12 +437,24 @@ async function handleInboundMessage(
   senderTabId?: number
 ): Promise<void> {
   if (message.kind === "ui.start") {
-    await startSession(message.tabId, message.mode);
+    const tabId = await resolveUiActionTabId(message.tabId);
+
+    if (typeof tabId !== "number") {
+      return;
+    }
+
+    await startSession(tabId, message.mode);
     return;
   }
 
   if (message.kind === "ui.stop") {
-    await stopSession(message.tabId);
+    const tabId = await resolveUiActionTabId(message.tabId);
+
+    if (typeof tabId !== "number") {
+      return;
+    }
+
+    await stopSession(tabId);
     return;
   }
 
@@ -3502,6 +3514,21 @@ async function relayMarkerCommand(): Promise<void> {
   }
 
   await chromeApi?.tabs?.sendMessage(tabId, { kind: "sw.marker-command" }).catch(() => undefined);
+}
+
+async function resolveUiActionTabId(tabId?: number): Promise<number | undefined> {
+  if (typeof tabId === "number") {
+    return tabId;
+  }
+
+  const activeTabs = (await chromeApi?.tabs?.query?.({ active: true, currentWindow: true })) ?? [];
+  const activeTabId = activeTabs[0]?.id;
+
+  if (typeof activeTabId === "number") {
+    return activeTabId;
+  }
+
+  return sessionsByTab.keys().next().value;
 }
 
 function parseInboundMessage(message: unknown): ExtensionInboundMessage | null {

@@ -17,13 +17,13 @@ export const PORT_NAMES = {
 
 export type UiStartSessionMessage = {
   kind: "ui.start";
-  tabId: number;
+  tabId?: number;
   mode: CaptureMode;
 };
 
 export type UiStopSessionMessage = {
   kind: "ui.stop";
-  tabId: number;
+  tabId?: number;
 };
 
 export type UiExportSessionMessage = {

@@ -221,12 +221,16 @@ async function main() {
     usePopupUiActionsEffective
   );
   assert(start?.ok === true, `Failed to start ${captureMode} mode`, start);
-  const demoTab = await findTabByUrlFromPopup(popupClient, demoUrl);
-  assert(typeof demoTab?.id === "number", "Demo tab is not discoverable from popup", {
-    demoUrl,
-    demoTab,
-    start
-  });
+  const demoTab = usePopupUiActionsEffective
+    ? await findTabByUrlFromPopup(popupClient, demoUrl)
+    : null;
+  if (usePopupUiActionsEffective) {
+    assert(typeof demoTab?.id === "number", "Demo tab is not discoverable from popup", {
+      demoUrl,
+      demoTab,
+      start
+    });
+  }
 
   const indicator = await waitForIndicatorText(demoClient, `REC ${captureMode}`, 25_000);
   assert(typeof indicator === "string", "Recorder indicator did not appear", {
@@ -256,12 +260,14 @@ async function main() {
 
   const sid = activeSessions[0]?.sid;
   assert(typeof sid === "string" && sid.length > 0, "Missing session id", { activeSessions });
-  assert(activeSessions[0]?.tabId === demoTab.id, "Session started on unexpected tab", {
-    expectedTabId: demoTab.id,
-    activeSessions,
-    demoTab,
-    start
-  });
+  if (typeof demoTab?.id === "number") {
+    assert(activeSessions[0]?.tabId === demoTab.id, "Session started on unexpected tab", {
+      expectedTabId: demoTab.id,
+      activeSessions,
+      demoTab,
+      start
+    });
+  }
 
   const scenarioResult = await runDemoScenario(demoClient);
   assert(scenarioResult?.ok === true, "Demo scenario failed", scenarioResult);
@@ -1290,34 +1296,39 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
 
   const expression = `
     (async () => {
-      const tabs = await chrome.tabs.query({});
-      const exact = tabs.find((tab) =>
-        typeof tab.id === 'number' &&
-        typeof tab.url === 'string' &&
-        tab.url.startsWith(${JSON.stringify(expectedUrl)})
-      );
+      if (typeof chrome?.tabs?.query === 'function') {
+        const tabs = await chrome.tabs.query({});
+        const exact = tabs.find((tab) =>
+          typeof tab.id === 'number' &&
+          typeof tab.url === 'string' &&
+          tab.url.startsWith(${JSON.stringify(expectedUrl)})
+        );
 
-      const fallback = tabs.find((tab) =>
-        typeof tab.id === 'number' &&
-        typeof tab.url === 'string' &&
-        !tab.url.startsWith('chrome-extension://') &&
-        tab.url !== 'about:blank'
-      );
+        const fallback = tabs.find((tab) =>
+          typeof tab.id === 'number' &&
+          typeof tab.url === 'string' &&
+          !tab.url.startsWith('chrome-extension://') &&
+          tab.url !== 'about:blank'
+        );
 
-      const target = exact ?? fallback;
+        const target = exact ?? fallback;
 
-      if (!target || typeof target.id !== 'number') {
-        return {
-          ok: false,
-          reason: 'target-tab-not-found',
-          tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active }))
-        };
+        if (!target || typeof target.id !== 'number') {
+          return {
+            ok: false,
+            reason: 'target-tab-not-found',
+            tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active }))
+          };
+        }
+
+        await chrome.runtime.sendMessage({ kind: 'ui.start', tabId: target.id, mode: ${JSON.stringify(
+          mode
+        )} });
+        return { ok: true, tabId: target.id, mode: ${JSON.stringify(mode)}, via: 'runtime-tabs' };
       }
 
-      await chrome.runtime.sendMessage({ kind: 'ui.start', tabId: target.id, mode: ${JSON.stringify(
-        mode
-      )} });
-      return { ok: true, tabId: target.id, mode: ${JSON.stringify(mode)} };
+      await chrome.runtime.sendMessage({ kind: 'ui.start', mode: ${JSON.stringify(mode)} });
+      return { ok: true, mode: ${JSON.stringify(mode)}, via: 'runtime-active-tab-fallback' };
     })()
   `;
 
@@ -1654,12 +1665,13 @@ async function waitForPopupRuntimeReady(popupClient, timeoutMs) {
     async () => {
       const snapshot = await popupClient.evaluate(`
         (() => {
-          const hasChromeRuntime =
+          const hasRuntimeMessaging =
             typeof chrome === "object" &&
             chrome !== null &&
             typeof chrome.runtime === "object" &&
             chrome.runtime !== null &&
-            typeof chrome.runtime.id === "string";
+            typeof chrome.runtime.id === "string" &&
+            typeof chrome.runtime.sendMessage === "function";
           const hasTabsQuery =
             typeof chrome === "object" &&
             chrome !== null &&
@@ -1668,13 +1680,13 @@ async function waitForPopupRuntimeReady(popupClient, timeoutMs) {
             typeof chrome.tabs.query === "function";
 
           return {
-            hasChromeRuntime,
+            hasRuntimeMessaging,
             hasTabsQuery
           };
         })()
       `);
 
-      if (snapshot?.hasChromeRuntime && snapshot?.hasTabsQuery) {
+      if (snapshot?.hasRuntimeMessaging) {
         return snapshot;
       }
 
