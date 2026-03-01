@@ -96,6 +96,7 @@ export type SessionListItem = {
   stoppedAt?: number;
   url?: string;
   title?: string;
+  ringBufferMinutes?: number;
   eventCount?: number;
   errorCount?: number;
   sizeBytes?: number;

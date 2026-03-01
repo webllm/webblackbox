@@ -81,6 +81,7 @@ function render(container: HTMLElement): void {
         : `Idle (Last ${exportSession.mode} on Tab ${exportSession.tabId})`
       : "Idle";
   const summarySession = activeSession ?? exportSession;
+  const ringUsage = summarySession ? describeRingBufferUsage(summarySession, now) : null;
   const captureSummary = summarySession
     ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors • ${formatByteSize(summarySession.sizeBytes ?? 0)}`
     : "No captured events";
@@ -107,6 +108,23 @@ function render(container: HTMLElement): void {
         <p class="wb-popup__meta-line"><span>Capture</span><strong>${captureSummary}</strong></p>
         <p class="wb-popup__meta-line"><span>Incident</span><strong>${incidentText}</strong></p>
       </div>
+      ${
+        ringUsage
+          ? `
+      <section class="wb-popup__buffer">
+        <p class="wb-popup__buffer-label">
+          <span>Ring buffer</span>
+          <strong>${ringUsage.windowLabel}</strong>
+        </p>
+        <div class="wb-popup__buffer-track" role="progressbar" aria-valuemin="0" aria-valuemax="${Math.round(
+          ringUsage.capacityMinutes * 100
+        )}" aria-valuenow="${Math.round(ringUsage.usedMinutes * 100)}" aria-valuetext="${ringUsage.windowLabel}">
+          <span class="wb-popup__buffer-fill" style="width:${ringUsage.ratioPercent.toFixed(1)}%"></span>
+        </div>
+      </section>
+      `
+          : ""
+      }
       <div class="wb-popup__actions">
         <button class="wb-btn wb-btn--brand" data-action="start-lite">Start Lite</button>
         <button class="wb-btn wb-btn--brand-alt" data-action="start-full">Start Full</button>
@@ -479,4 +497,31 @@ function normalizeBoundedInt(value: unknown, fallback: number, min: number, max:
   }
 
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function describeRingBufferUsage(
+  session: SessionListItem,
+  now: number
+): {
+  usedMinutes: number;
+  capacityMinutes: number;
+  ratioPercent: number;
+  windowLabel: string;
+} {
+  const capacityMinutes = Math.max(
+    1,
+    Number.isFinite(session.ringBufferMinutes) ? Number(session.ringBufferMinutes) : 10
+  );
+  const endedAt = typeof session.stoppedAt === "number" ? session.stoppedAt : now;
+  const elapsedMinutes = Math.max(0, (endedAt - session.startedAt) / 60_000);
+  const usedMinutes = Math.min(capacityMinutes, elapsedMinutes);
+  const ratioPercent = Math.max(0, Math.min(100, (usedMinutes / capacityMinutes) * 100));
+  const windowLabel = `${usedMinutes.toFixed(1)}m / ${capacityMinutes.toFixed(1)}m`;
+
+  return {
+    usedMinutes,
+    capacityMinutes,
+    ratioPercent,
+    windowLabel
+  };
 }
