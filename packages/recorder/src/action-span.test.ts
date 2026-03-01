@@ -54,7 +54,7 @@ describe("ActionSpanTracker", () => {
     );
     const domMutation = tracker.assign(
       createEvent(
-        "dom.mutation",
+        "dom.snapshot",
         120,
         {},
         {

@@ -40,7 +40,7 @@ function chunkMeta(chunkId: string, seq: number): ChunkTimeIndexEntry {
     monoEnd: seq * 1000 + 100,
     eventCount: 1,
     byteLength: 16,
-    codec: "ndjson",
+    codec: "none",
     sha256: "a".repeat(64)
   };
 }
@@ -314,12 +314,15 @@ describe("storage", () => {
   });
 
   it("evicts oldest session during quota recovery helper and logs when none is evictable", async () => {
-    const storage = new IndexedDbPipelineStorage(createDbName()) as IndexedDbPipelineStorage & {
-      recoverQuotaPressure: (protectedSid?: string) => Promise<boolean>;
-    };
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const quotaRecovery = (
+      storage as unknown as {
+        recoverQuotaPressure: (protectedSid?: string) => Promise<boolean>;
+      }
+    ).recoverQuotaPressure.bind(storage);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    await expect(storage.recoverQuotaPressure("S-protected")).resolves.toBe(false);
+    await expect(quotaRecovery("S-protected")).resolves.toBe(false);
 
     await storage.putSession({
       ...SESSION_A,
@@ -332,7 +335,7 @@ describe("storage", () => {
       startedAt: 2
     });
 
-    await expect(storage.recoverQuotaPressure("S-newest")).resolves.toBe(true);
+    await expect(quotaRecovery("S-newest")).resolves.toBe(true);
     expect(await storage.getSession("S-oldest")).toBeUndefined();
     expect(await storage.getSession("S-newest")).toEqual(
       expect.objectContaining({ sid: "S-newest" })

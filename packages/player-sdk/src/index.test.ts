@@ -76,7 +76,7 @@ describe("WebBlackboxPlayer", () => {
     const fromArrayBuffer = await WebBlackboxPlayer.open(arrayBuffer);
     expect(fromArrayBuffer.events.length).toBeGreaterThan(0);
 
-    const fromBlob = await WebBlackboxPlayer.open(new Blob([bytes]));
+    const fromBlob = await WebBlackboxPlayer.open(new Blob([arrayBuffer]));
     expect(fromBlob.events.length).toBeGreaterThan(0);
   });
 
