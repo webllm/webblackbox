@@ -200,6 +200,8 @@ async function main() {
         throw new Error("Popup UI/runtime is not ready");
       }
     }
+  } else {
+    await waitForPopupRuntimeReady(popupClient, 20_000);
   }
 
   const demoExceptions = [];
