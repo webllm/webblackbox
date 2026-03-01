@@ -569,6 +569,7 @@ All WebBlackbox data uses protocol version `1`. The version is embedded in every
 | `pnpm build`            | Build all packages (dependency-ordered) |
 | `pnpm test`             | Run all tests                           |
 | `pnpm bench`            | Run recorder + pipeline benchmarks      |
+| `pnpm bundle:size`      | Check bundle size budgets               |
 | `pnpm bench:recorder`   | Run recorder benchmarks                 |
 | `pnpm bench:pipeline`   | Run pipeline benchmarks                 |
 | `pnpm typecheck`        | TypeScript type checking                |
