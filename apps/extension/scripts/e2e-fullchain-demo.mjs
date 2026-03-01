@@ -121,7 +121,7 @@ async function main() {
   }
   const extensionId = swTarget
     ? extractExtensionId(swTarget.url)
-    : await waitForExtensionIdFromProfile(profileDir, extensionDir, 25_000);
+    : await waitForExtensionIdFromProfile(baseUrl, profileDir, extensionDir, 30_000);
   console.log(`Extension ID: ${extensionId}`);
 
   let popupTarget = null;
@@ -857,8 +857,10 @@ async function waitForExtensionServiceWorker(urlBase, timeoutMs, extensionId) {
   }
 }
 
-async function waitForExtensionIdFromProfile(profileDir, extensionDir, timeoutMs) {
+async function waitForExtensionIdFromProfile(urlBase, profileDir, extensionDir, timeoutMs) {
   const normalizedExtensionDir = normalizeFsPath(extensionDir);
+  const retryProbeAfterMs = 3_000;
+  const nextProbeAtById = new Map();
 
   return waitFor(
     async () => {
@@ -868,7 +870,34 @@ async function waitForExtensionIdFromProfile(profileDir, extensionDir, timeoutMs
         return idFromSettings;
       }
 
-      return readSingleExtensionIdFromLocalSettings(profileDir);
+      const candidateIds = new Set([
+        ...(await readExtensionIdsFromProfile(profileDir)),
+        ...(await readExtensionIdsFromLocalSettings(profileDir)),
+        ...(await readExtensionIdsFromTargets(urlBase))
+      ]);
+
+      if (candidateIds.size === 0) {
+        return null;
+      }
+
+      const now = Date.now();
+
+      for (const candidateId of candidateIds) {
+        const nextProbeAt = nextProbeAtById.get(candidateId) ?? 0;
+
+        if (nextProbeAt > now) {
+          continue;
+        }
+
+        const matched = await probeExtensionPopup(urlBase, candidateId, 2_500);
+        nextProbeAtById.set(candidateId, now + retryProbeAfterMs);
+
+        if (matched) {
+          return candidateId;
+        }
+      }
+
+      return null;
     },
     timeoutMs,
     250,
@@ -926,21 +955,148 @@ async function readExtensionIdFromProfile(profileDir, normalizedExtensionDir) {
   return null;
 }
 
-async function readSingleExtensionIdFromLocalSettings(profileDir) {
+async function readExtensionIdsFromProfile(profileDir) {
+  const ids = new Set();
+
+  for (const fileName of ["Secure Preferences", "Preferences"]) {
+    const path = resolve(profileDir, "Default", fileName);
+    let content;
+
+    try {
+      content = await readFile(path, "utf8");
+    } catch {
+      continue;
+    }
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      continue;
+    }
+
+    const settings = parsed?.extensions?.settings;
+
+    if (!settings || typeof settings !== "object") {
+      continue;
+    }
+
+    for (const candidateId of Object.keys(settings)) {
+      if (isLikelyExtensionId(candidateId)) {
+        ids.add(candidateId);
+      }
+    }
+  }
+
+  return [...ids];
+}
+
+async function readExtensionIdsFromLocalSettings(profileDir) {
   const settingsDir = resolve(profileDir, "Default", "Local Extension Settings");
   let entries;
 
   try {
     entries = await readdir(settingsDir, { withFileTypes: true });
   } catch {
-    return null;
+    return [];
   }
 
-  const candidates = entries
+  return entries
     .filter((entry) => entry.isDirectory() && isLikelyExtensionId(entry.name))
     .map((entry) => entry.name);
+}
 
-  return candidates.length === 1 ? candidates[0] : null;
+async function readExtensionIdsFromTargets(urlBase) {
+  let targets;
+
+  try {
+    targets = await fetchJson(`${urlBase}/json/list`, 4_000);
+  } catch {
+    return [];
+  }
+
+  if (!Array.isArray(targets)) {
+    return [];
+  }
+
+  const ids = new Set();
+
+  for (const target of targets) {
+    const url = typeof target?.url === "string" ? target.url : "";
+    const match = /^chrome-extension:\/\/([^/]+)\//.exec(url);
+
+    if (match && isLikelyExtensionId(match[1])) {
+      ids.add(match[1]);
+    }
+  }
+
+  return [...ids];
+}
+
+async function probeExtensionPopup(urlBase, extensionId, timeoutMs) {
+  let target = null;
+  let popupClient = null;
+
+  try {
+    target = await openTarget(urlBase, `chrome-extension://${extensionId}/popup.html`);
+
+    popupClient = new CdpClient(target.webSocketDebuggerUrl);
+    await popupClient.connect();
+    await popupClient.send("Runtime.enable");
+    await popupClient.send("DOM.enable").catch(() => undefined);
+
+    const ready = await waitFor(
+      async () => {
+        const snapshot = await popupClient.evaluate(`
+          (() => {
+            const title = (document.querySelector('.wb-popup__title')?.textContent ?? '').trim();
+            const hasStartLite = Boolean(document.querySelector("[data-action='start-lite']"));
+            const hasStartFull = Boolean(document.querySelector("[data-action='start-full']"));
+            const runtimeId =
+              typeof chrome === "object" &&
+              chrome !== null &&
+              typeof chrome.runtime === "object" &&
+              chrome.runtime !== null &&
+              typeof chrome.runtime.id === "string"
+                ? chrome.runtime.id
+                : null;
+
+            return {
+              title,
+              hasStartLite,
+              hasStartFull,
+              runtimeId
+            };
+          })()
+        `);
+
+        const isPopupReady =
+          snapshot &&
+          snapshot.title === "WebBlackbox" &&
+          snapshot.hasStartLite === true &&
+          snapshot.hasStartFull === true &&
+          snapshot.runtimeId === extensionId;
+
+        return isPopupReady ? snapshot : null;
+      },
+      timeoutMs,
+      150,
+      `Popup probe timed out for extension '${extensionId}'`
+    ).catch(() => null);
+
+    return Boolean(ready);
+  } catch {
+    return false;
+  } finally {
+    if (popupClient) {
+      popupClient.close();
+    }
+
+    if (target?.id) {
+      await closeTarget(urlBase, target.id);
+    }
+  }
 }
 
 function isLikelyExtensionId(value) {
