@@ -452,7 +452,16 @@ const refs = {
   shareLoadApiKey: getElement<HTMLInputElement>("share-load-api-key"),
   archivePassphraseDialog: getElement<HTMLDialogElement>("archive-passphrase-dialog"),
   archivePassphraseContext: getElement<HTMLElement>("archive-passphrase-context"),
-  archivePassphraseInput: getElement<HTMLInputElement>("archive-passphrase-input")
+  archivePassphraseInput: getElement<HTMLInputElement>("archive-passphrase-input"),
+  playwrightPreviewDialog: getElement<HTMLDialogElement>("playwright-preview-dialog"),
+  playwrightRangeStart: getElement<HTMLInputElement>("playwright-range-start"),
+  playwrightRangeEnd: getElement<HTMLInputElement>("playwright-range-end"),
+  playwrightMaxActions: getElement<HTMLInputElement>("playwright-max-actions"),
+  playwrightIncludeHar: getElement<HTMLInputElement>("playwright-include-har"),
+  playwrightScriptPreview: getElement<HTMLTextAreaElement>("playwright-script-preview"),
+  playwrightRefresh: getElement<HTMLButtonElement>("playwright-refresh"),
+  playwrightCopy: getElement<HTMLButtonElement>("playwright-copy"),
+  playwrightDownload: getElement<HTMLButtonElement>("playwright-download")
 };
 
 const panelTabButtons = Array.from(
@@ -954,18 +963,7 @@ function bindGlobalActions(): void {
   });
 
   refs.exportPlaywright.addEventListener("click", () => {
-    const player = state.player;
-
-    if (!player) {
-      return;
-    }
-
-    downloadTextFile(
-      "webblackbox-replay.spec.ts",
-      player.generatePlaywrightScript({ includeHarReplay: true }),
-      "text/plain"
-    );
-    setFeedback("Playwright script exported.");
+    void openPlaywrightPreviewDialog();
   });
 
   refs.exportPlaywrightMocks.addEventListener("click", () => {
@@ -1057,6 +1055,34 @@ function bindGlobalActions(): void {
   refs.preflightJumpSlowest.addEventListener("click", () => {
     hideQuickTriagePanel();
     jumpToSlowestRequest();
+  });
+
+  refs.playwrightRefresh.addEventListener("click", () => {
+    regeneratePlaywrightPreview();
+  });
+
+  refs.playwrightCopy.addEventListener("click", () => {
+    void copyPlaywrightPreview();
+  });
+
+  refs.playwrightDownload.addEventListener("click", () => {
+    downloadPlaywrightPreview();
+  });
+
+  refs.playwrightRangeStart.addEventListener("change", () => {
+    regeneratePlaywrightPreview();
+  });
+
+  refs.playwrightRangeEnd.addEventListener("change", () => {
+    regeneratePlaywrightPreview();
+  });
+
+  refs.playwrightMaxActions.addEventListener("change", () => {
+    regeneratePlaywrightPreview();
+  });
+
+  refs.playwrightIncludeHar.addEventListener("change", () => {
+    regeneratePlaywrightPreview();
   });
 
   document.querySelectorAll<HTMLButtonElement>("button[data-dialog-cancel]").forEach((button) => {
@@ -1456,6 +1482,106 @@ async function copyBugReportFromQuickTriage(): Promise<void> {
 
   await copyText(player.generateBugReport());
   setFeedback("Bug report copied.");
+}
+
+async function openPlaywrightPreviewDialog(): Promise<void> {
+  const model = state.model;
+  const player = state.player;
+
+  if (!model || !player) {
+    setFeedback("Load an archive before generating Playwright.");
+    return;
+  }
+
+  const durationSeconds = Math.max(0, model.durationMono / 1000);
+  refs.playwrightRangeStart.value = "0";
+  refs.playwrightRangeEnd.value = durationSeconds.toFixed(1);
+  refs.playwrightMaxActions.value = "40";
+  refs.playwrightIncludeHar.checked = true;
+  regeneratePlaywrightPreview();
+  await openDialog(refs.playwrightPreviewDialog, refs.playwrightRangeStart);
+}
+
+function regeneratePlaywrightPreview(): void {
+  const player = state.player;
+  const options = readPlaywrightPreviewOptions();
+
+  if (!player || !options) {
+    refs.playwrightScriptPreview.value = "";
+    return;
+  }
+
+  const script = player.generatePlaywrightScript({
+    range: options.range,
+    maxActions: options.maxActions,
+    includeHarReplay: options.includeHarReplay
+  });
+  refs.playwrightScriptPreview.value = script;
+}
+
+function readPlaywrightPreviewOptions(): {
+  range?: { monoStart?: number; monoEnd?: number };
+  maxActions: number;
+  includeHarReplay: boolean;
+} | null {
+  const model = state.model;
+
+  if (!model) {
+    return null;
+  }
+
+  const durationMs = Math.max(0, model.durationMono);
+  const maxSeconds = durationMs / 1000;
+  const startSecondsRaw = asFiniteNumber(Number.parseFloat(refs.playwrightRangeStart.value)) ?? 0;
+  const endSecondsRaw =
+    asFiniteNumber(Number.parseFloat(refs.playwrightRangeEnd.value)) ?? maxSeconds;
+  const startSeconds = clamp(startSecondsRaw, 0, maxSeconds);
+  const endSeconds = clamp(Math.max(startSeconds, endSecondsRaw), 0, maxSeconds);
+  const maxActionsRaw = asFiniteNumber(Number.parseFloat(refs.playwrightMaxActions.value)) ?? 40;
+  const maxActions = Math.max(1, Math.min(500, Math.round(maxActionsRaw)));
+  const includeHarReplay = refs.playwrightIncludeHar.checked;
+  refs.playwrightRangeStart.value = startSeconds.toFixed(1);
+  refs.playwrightRangeEnd.value = endSeconds.toFixed(1);
+  refs.playwrightMaxActions.value = String(maxActions);
+  const monoStart = model.minMono + startSeconds * 1000;
+  const monoEnd = model.minMono + endSeconds * 1000;
+  const isFullRange = startSeconds <= 0 && Math.abs(endSeconds - maxSeconds) < 0.05;
+
+  return {
+    range: isFullRange ? undefined : { monoStart, monoEnd },
+    maxActions,
+    includeHarReplay
+  };
+}
+
+async function copyPlaywrightPreview(): Promise<void> {
+  if (!refs.playwrightScriptPreview.value.trim()) {
+    regeneratePlaywrightPreview();
+  }
+
+  const content = refs.playwrightScriptPreview.value.trim();
+
+  if (!content) {
+    return;
+  }
+
+  await copyText(content);
+  setFeedback("Playwright preview copied.");
+}
+
+function downloadPlaywrightPreview(): void {
+  if (!refs.playwrightScriptPreview.value.trim()) {
+    regeneratePlaywrightPreview();
+  }
+
+  const content = refs.playwrightScriptPreview.value.trim();
+
+  if (!content) {
+    return;
+  }
+
+  downloadTextFile("webblackbox-replay.spec.ts", `${content}\n`, "text/plain");
+  setFeedback("Playwright script exported.");
 }
 
 async function exportPlaywrightMocks(): Promise<void> {

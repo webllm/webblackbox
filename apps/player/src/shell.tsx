@@ -656,6 +656,74 @@ export function PlayerShell(): React.JSX.Element {
         </form>
       </dialog>
 
+      <dialog id="playwright-preview-dialog" className="share-dialog">
+        <form id="playwright-preview-form" className="share-dialog-card" method="dialog">
+          <header className="share-dialog-head">
+            <h2>Playwright Preview</h2>
+            <p>Preview, tweak, and export generated replay script.</p>
+          </header>
+          <div className="playwright-preview-grid">
+            <label className="share-dialog-field">
+              <span>Start (seconds)</span>
+              <Input
+                id="playwright-range-start"
+                className="share-dialog-input"
+                type="number"
+                min="0"
+                step="0.1"
+                defaultValue="0"
+              />
+            </label>
+            <label className="share-dialog-field">
+              <span>End (seconds)</span>
+              <Input
+                id="playwright-range-end"
+                className="share-dialog-input"
+                type="number"
+                min="0"
+                step="0.1"
+                defaultValue="0"
+              />
+            </label>
+            <label className="share-dialog-field">
+              <span>Max actions</span>
+              <Input
+                id="playwright-max-actions"
+                className="share-dialog-input"
+                type="number"
+                min="1"
+                max="500"
+                step="1"
+                defaultValue="40"
+              />
+            </label>
+          </div>
+          <label className="share-dialog-toggle">
+            <Checkbox id="playwright-include-har" defaultChecked />
+            Include HAR replay
+          </label>
+          <textarea
+            id="playwright-script-preview"
+            className="playwright-script-preview"
+            spellCheck={false}
+          ></textarea>
+          <div className="share-dialog-actions">
+            <Button id="playwright-refresh" type="button" variant="ghost">
+              Regenerate
+            </Button>
+            <Button id="playwright-copy" type="button" variant="secondary">
+              Copy
+            </Button>
+            <Button id="playwright-download" type="button" variant="secondary">
+              Download
+            </Button>
+            <Button id="playwright-close" type="button" variant="ghost" data-dialog-cancel>
+              Close
+            </Button>
+          </div>
+        </form>
+      </dialog>
+
       <div id="archive-drop-overlay" className="archive-drop-overlay" hidden>
         <div className="archive-drop-overlay-card">
           <strong>Drop Archive to Load</strong>

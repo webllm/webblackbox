@@ -1943,6 +1943,31 @@ input[type="file"],
   gap: 8px;
 }
 
+.playwright-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.playwright-script-preview {
+  width: 100%;
+  min-height: 280px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  border-radius: 10px;
+  background: rgba(7, 12, 20, 0.94);
+  color: #d3e0f5;
+  font-family:
+    "JetBrains Mono",
+    "Fira Code",
+    "SFMono-Regular",
+    Menlo,
+    monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 10px;
+  resize: vertical;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1959,6 +1984,10 @@ input[type="file"],
 
   .actions {
     justify-content: flex-start;
+  }
+
+  .playwright-preview-grid {
+    grid-template-columns: 1fr;
   }
 }
 
