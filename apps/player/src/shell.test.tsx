@@ -47,4 +47,55 @@ describe("PlayerShell", () => {
     expect(maskCheckbox).not.toBeChecked();
     expect(playbackRate).toHaveValue("2");
   });
+
+  it("renders timeline, network, and console panels with expected controls", () => {
+    render(<PlayerShell />);
+
+    const tablist = screen.getByRole("tablist", { name: "Log panels" });
+    expect(tablist).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Event" })).toHaveClass("active");
+    expect(screen.getByRole("heading", { name: "Timeline" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Network" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Console" })).toBeInTheDocument();
+    expect(document.querySelector("#timeline-list")).toBeInTheDocument();
+    expect(document.querySelector("#waterfall-body")).toBeInTheDocument();
+    expect(document.querySelector("#console-list")).toBeInTheDocument();
+
+    expect(screen.getByText("Copy cURL")).toBeInTheDocument();
+    expect(screen.getByText("Replay request")).toBeInTheDocument();
+    expect(screen.getByText("0 / 0 requests")).toBeInTheDocument();
+  });
+
+  it("supports network and console filter interactions", async () => {
+    const user = userEvent.setup();
+    render(<PlayerShell />);
+
+    const networkSearch = screen.getByPlaceholderText("Filter URL, host, id, method");
+    const methodFilter = document.querySelector("#network-method-filter");
+    const statusFilter = document.querySelector("#network-status-filter");
+    const typeFilter = document.querySelector("#network-type-filter");
+    const consoleSearch = screen.getByPlaceholderText("Filter logs by type or content");
+
+    if (!(methodFilter instanceof HTMLSelectElement)) {
+      throw new Error("Expected #network-method-filter to be a select element");
+    }
+    if (!(statusFilter instanceof HTMLSelectElement)) {
+      throw new Error("Expected #network-status-filter to be a select element");
+    }
+    if (!(typeFilter instanceof HTMLSelectElement)) {
+      throw new Error("Expected #network-type-filter to be a select element");
+    }
+
+    await user.type(networkSearch, "api/orders");
+    await user.selectOptions(methodFilter, "POST");
+    await user.selectOptions(statusFilter, "server-error");
+    await user.selectOptions(typeFilter, "fetch");
+    await user.type(consoleSearch, "timeout");
+
+    expect(networkSearch).toHaveValue("api/orders");
+    expect(methodFilter).toHaveValue("POST");
+    expect(statusFilter).toHaveValue("server-error");
+    expect(typeFilter).toHaveValue("fetch");
+    expect(consoleSearch).toHaveValue("timeout");
+  });
 });
