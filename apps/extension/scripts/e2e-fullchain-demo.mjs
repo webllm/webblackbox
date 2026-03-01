@@ -3,7 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { constants, createWriteStream } from "node:fs";
-import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -111,7 +111,14 @@ async function main() {
       .catch(() => undefined);
   }
 
+  // Open demo early so content scripts can wake the extension worker in CI/headless runs.
+  const demoTarget = await openTarget(baseUrl, demoUrl);
+  state.openedTargetIds.push(demoTarget.id);
+
   let swTarget = await waitForExtensionServiceWorker(baseUrl, 8_000).catch(() => null);
+  if (!swTarget) {
+    swTarget = await waitForExtensionServiceWorker(baseUrl, 20_000).catch(() => null);
+  }
   const extensionId = swTarget
     ? extractExtensionId(swTarget.url)
     : await waitForExtensionIdFromProfile(profileDir, extensionDir, 25_000);
@@ -139,9 +146,6 @@ async function main() {
       line: params?.exceptionDetails?.lineNumber ?? null
     });
   });
-
-  const demoTarget = await openTarget(baseUrl, demoUrl);
-  state.openedTargetIds.push(demoTarget.id);
 
   if (!popupTarget) {
     popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
@@ -858,11 +862,17 @@ async function waitForExtensionIdFromProfile(profileDir, extensionDir, timeoutMs
 
   return waitFor(
     async () => {
-      return readExtensionIdFromProfile(profileDir, normalizedExtensionDir);
+      const idFromSettings = await readExtensionIdFromProfile(profileDir, normalizedExtensionDir);
+
+      if (idFromSettings) {
+        return idFromSettings;
+      }
+
+      return readSingleExtensionIdFromLocalSettings(profileDir);
     },
     timeoutMs,
     250,
-    `Extension id not found in profile for path '${normalizedExtensionDir}'`
+    `Extension id not found in profile/local settings for path '${normalizedExtensionDir}'`
   );
 }
 
@@ -914,6 +924,23 @@ async function readExtensionIdFromProfile(profileDir, normalizedExtensionDir) {
   }
 
   return null;
+}
+
+async function readSingleExtensionIdFromLocalSettings(profileDir) {
+  const settingsDir = resolve(profileDir, "Default", "Local Extension Settings");
+  let entries;
+
+  try {
+    entries = await readdir(settingsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && isLikelyExtensionId(entry.name))
+    .map((entry) => entry.name);
+
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function isLikelyExtensionId(value) {
