@@ -10,8 +10,10 @@ const SAFE_SERIALIZE_MAX_DEPTH = 3;
 const SAFE_SERIALIZE_MAX_PROPERTIES = 24;
 const SAFE_SERIALIZE_MAX_STRING_CHARS = 1_200;
 
+/** `window.postMessage` source tag used by injected lite capture hooks. */
 export const INJECTED_MESSAGE_SOURCE = "webblackbox-injected";
 
+/** Message contract emitted by injected hooks into the page window. */
 export type InjectedCaptureWindowMessage =
   | {
       source: typeof INJECTED_MESSAGE_SOURCE;
@@ -29,10 +31,16 @@ export type InjectedCaptureWindowMessage =
       mono: number;
     };
 
+/** Options for installing browser-side injected hooks. */
 export type InjectedHooksOptions = {
+  /** Global flag name used to prevent duplicate hook installation. */
   flag?: string;
 };
 
+/**
+ * Installs lightweight console/error/network/storage hooks into the current page.
+ * Hooks emit capture events via `window.postMessage`.
+ */
 export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = {}): void {
   if (typeof window === "undefined") {
     return;

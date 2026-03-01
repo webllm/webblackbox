@@ -8,11 +8,17 @@ import type { PipelineStorage } from "@webblackbox/pipeline";
 import type { RawRecorderEvent, RecorderHooks } from "@webblackbox/recorder";
 import type { RecorderPlugin } from "@webblackbox/recorder";
 
+/**
+ * Lite capture sampling knobs exposed by the browser SDK.
+ */
 export type LiteCaptureSampling = Pick<
   RecorderConfig["sampling"],
   "mousemoveHz" | "scrollHz" | "domFlushMs" | "snapshotIntervalMs" | "screenshotIdleMs"
 >;
 
+/**
+ * Runtime capture status payload mirrored to UI and hooks.
+ */
 export type LiteCaptureState = {
   active: boolean;
   sid?: string;
@@ -21,12 +27,21 @@ export type LiteCaptureState = {
   sampling?: Partial<LiteCaptureSampling>;
 };
 
+/**
+ * Options for wiring a low-level capture agent.
+ */
 export type LiteCaptureAgentOptions = {
+  /** Emits a normalized batch of raw recorder events. */
   emitBatch: (events: RawRecorderEvent[]) => void;
+  /** Optional marker callback used by custom hosts. */
   onMarker?: (message: string) => void;
+  /** Toggles in-page recording indicator UI. */
   showIndicator?: boolean;
 };
 
+/**
+ * Byte limits for payload materialization in lite mode.
+ */
 export type LiteMaterializerLimits = {
   screenshotMaxDataUrlLength?: number;
   screenshotMaxBytes?: number;
@@ -35,12 +50,18 @@ export type LiteMaterializerLimits = {
   defaultBodyCaptureMaxBytes?: number;
 };
 
+/**
+ * Context passed to raw-event materializers.
+ */
 export type LiteMaterializerContext = {
   config: RecorderConfig;
   putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
   limits?: LiteMaterializerLimits;
 };
 
+/**
+ * Partial override model for recorder config in lite mode.
+ */
 export type LiteRecorderConfigOverride = Partial<
   Omit<RecorderConfig, "mode" | "sampling" | "redaction" | "sitePolicies">
 > & {
@@ -49,6 +70,9 @@ export type LiteRecorderConfigOverride = Partial<
   sitePolicies?: RecorderConfig["sitePolicies"];
 };
 
+/**
+ * High-level constructor options for `WebBlackboxLiteSdk`.
+ */
 export type WebBlackboxLiteSdkOptions = {
   sid?: string;
   tabId?: number;
@@ -70,6 +94,9 @@ export type WebBlackboxLiteSdkOptions = {
   recorderHooks?: RecorderHooks;
 };
 
+/**
+ * Export-time options for generating `.webblackbox` archives.
+ */
 export type WebBlackboxLiteExportOptions = {
   passphrase?: string;
   stopCapture?: boolean;
@@ -78,6 +105,9 @@ export type WebBlackboxLiteExportOptions = {
   recentWindowMs?: ExportPolicy["recentWindowMs"];
 };
 
+/**
+ * Result payload returned by `WebBlackboxLiteSdk.export()`.
+ */
 export type WebBlackboxLiteExportResult = {
   fileName: string;
   bytes: Uint8Array;

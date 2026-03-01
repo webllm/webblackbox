@@ -72,6 +72,10 @@ type MutationBatchSummary = {
   attributeNames: string[];
 };
 
+/**
+ * Browser-side event capture agent used by `WebBlackboxLiteSdk`.
+ * It collects DOM/input/network/error/perf signals and emits buffered raw events.
+ */
 export class LiteCaptureAgent {
   private readonly eventBuffer: RawRecorderEvent[] = [];
   private readonly preRecordingBuffer: RawRecorderEvent[] = [];
@@ -100,6 +104,7 @@ export class LiteCaptureAgent {
   private droppedLowPriorityEvents = 0;
   private disposed = false;
 
+  /** Creates and installs capture hooks for the current page context. */
   public constructor(private readonly options: LiteCaptureAgentOptions) {
     this.installInputAndLifecycleCapture();
     this.installPerformanceCapture();
@@ -107,6 +112,7 @@ export class LiteCaptureAgent {
     this.emitLifecycleEvent("visibilitychange", { state: document.visibilityState });
   }
 
+  /** Updates recording state and sampling profile from the host SDK. */
   public setRecordingStatus(state: LiteCaptureState): void {
     if (this.disposed) {
       return;
@@ -140,6 +146,7 @@ export class LiteCaptureAgent {
     this.flush();
   }
 
+  /** Emits a manual marker event and optional snapshot/screenshot side effects. */
   public emitMarker(message: string): void {
     if (this.disposed) {
       return;
@@ -163,6 +170,7 @@ export class LiteCaptureAgent {
     }
   }
 
+  /** Forces indicator rendering state regardless of capture state. */
   public setIndicatorState(sid?: string, mode?: string): void {
     if (this.disposed) {
       return;
@@ -171,10 +179,12 @@ export class LiteCaptureAgent {
     this.ensureIndicator(sid, mode);
   }
 
+  /** Flushes the current buffered raw events immediately. */
   public flush(): void {
     this.flushEvents();
   }
 
+  /** Tears down listeners/timers and releases all internal buffers. */
   public dispose(): void {
     if (this.disposed) {
       return;
@@ -1444,4 +1454,5 @@ function shouldBufferBeforeRecording(event: RawRecorderEvent): boolean {
   );
 }
 
+/** Default sanitized sampling profile used by `LiteCaptureAgent`. */
 export { DEFAULT_SAMPLING as DEFAULT_LITE_CAPTURE_SAMPLING };

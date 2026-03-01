@@ -37,6 +37,9 @@ const PIPELINE_BATCH_MAX_EVENTS = 160;
 const PIPELINE_BATCH_FLUSH_DELAY_MS = 120;
 const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
 
+/**
+ * Browser-focused SDK for recording, buffering, and exporting Lite sessions.
+ */
 export class WebBlackboxLiteSdk {
   private readonly sid: string;
 
@@ -70,6 +73,9 @@ export class WebBlackboxLiteSdk {
 
   private disposed = false;
 
+  /**
+   * Creates a new Lite SDK instance with optional runtime/storage overrides.
+   */
   public constructor(options: WebBlackboxLiteSdkOptions = {}) {
     this.sid = normalizeSessionId(options.sid);
     this.tabId = normalizeTabId(options.tabId);
@@ -115,14 +121,17 @@ export class WebBlackboxLiteSdk {
     }
   }
 
+  /** Active session id used by this SDK instance. */
   public get sessionId(): string {
     return this.sid;
   }
 
+  /** Whether capture is currently active. */
   public get isRecording(): boolean {
     return this.recording;
   }
 
+  /** Returns a copy of session metadata used for capture/export. */
   public getSessionMetadata(): SessionMetadata {
     return {
       ...this.session,
@@ -130,6 +139,7 @@ export class WebBlackboxLiteSdk {
     };
   }
 
+  /** Returns a defensive copy of the effective recorder config. */
   public getRecorderConfig(): RecorderConfig {
     return {
       ...this.config,
@@ -152,6 +162,7 @@ export class WebBlackboxLiteSdk {
     };
   }
 
+  /** Starts the capture pipeline and begins recording if not already active. */
   public async start(): Promise<void> {
     this.assertNotDisposed();
 
@@ -174,6 +185,7 @@ export class WebBlackboxLiteSdk {
     });
   }
 
+  /** Stops active capture and flushes all queued raw/normalized events. */
   public async stop(): Promise<void> {
     this.assertNotDisposed();
 
@@ -197,15 +209,18 @@ export class WebBlackboxLiteSdk {
     await this.pipeline.flush();
   }
 
+  /** Emits a user marker event into the capture stream. */
   public emitMarker(message: string): void {
     this.assertNotDisposed();
     this.captureAgent.emitMarker(message);
   }
 
+  /** Convenience wrapper for ingesting one raw event. */
   public ingestRawEvent(rawEvent: RawRecorderEvent): void {
     this.ingestRawEvents([rawEvent]);
   }
 
+  /** Ingests a batch of raw events into recorder/pipeline queues. */
   public ingestRawEvents(rawEvents: RawRecorderEvent[]): void {
     this.assertNotDisposed();
 
@@ -226,6 +241,7 @@ export class WebBlackboxLiteSdk {
       });
   }
 
+  /** Flushes capture agent, recorder queue, and pipeline queue to storage. */
   public async flush(): Promise<void> {
     this.assertNotDisposed();
 
@@ -238,6 +254,7 @@ export class WebBlackboxLiteSdk {
     await this.pipeline.flush();
   }
 
+  /** Exports a `.webblackbox` archive for the current session. */
   public async export(
     options: WebBlackboxLiteExportOptions = {}
   ): Promise<WebBlackboxLiteExportResult> {
@@ -267,10 +284,12 @@ export class WebBlackboxLiteSdk {
     };
   }
 
+  /** Downloads an export result using a browser file save flow. */
   public downloadArchive(result: WebBlackboxLiteExportResult, fileName = result.fileName): void {
     WebBlackboxLiteSdk.downloadArchive(result, fileName);
   }
 
+  /** Static helper for downloading archive bytes as a local file. */
   public static downloadArchive(
     result: Pick<WebBlackboxLiteExportResult, "bytes" | "fileName">,
     fileName = result.fileName
@@ -297,6 +316,7 @@ export class WebBlackboxLiteSdk {
     }, 0);
   }
 
+  /** Stops capture (if needed) and releases capture agent resources. */
   public async dispose(): Promise<void> {
     if (this.disposed) {
       return;

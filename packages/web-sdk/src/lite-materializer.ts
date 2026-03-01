@@ -25,6 +25,7 @@ type LiteBodyCaptureRule = {
   mimeAllowlist: string[];
 };
 
+/** Returns whether a raw content event should be transformed into lite payload artifacts. */
 export function shouldMaterializeLiteRawEvent(rawEvent: RawRecorderEvent): boolean {
   if (rawEvent.source !== "content") {
     return false;
@@ -66,6 +67,10 @@ export function shouldMaterializeLiteRawEvent(rawEvent: RawRecorderEvent): boole
   return false;
 }
 
+/**
+ * Converts raw capture payloads (screenshots, DOM/storage snapshots, network bodies)
+ * into lite-normalized payloads, persisting large blobs through `context.putBlob`.
+ */
 export async function materializeLiteRawEvent(
   rawEvent: RawRecorderEvent,
   context: LiteMaterializerContext
