@@ -375,11 +375,12 @@ type ChunkRow = {
   value: StoredChunk;
 };
 type BlobRow = DbRow<StoredBlob>;
+type BlobRefsRow = DbRow<string[]>;
 type SessionRow = DbRow<SessionMetadata>;
 type IndexRow = DbRow<StoredIndexes>;
 type IntegrityRow = DbRow<HashesManifest>;
 
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const CHUNKS_BY_SID_SEQ_INDEX = "by-sid-seq";
 
 export class IndexedDbPipelineStorage implements PipelineStorage {
@@ -450,6 +451,8 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
+    const trackingSid =
+      typeof sidHint === "string" && sidHint.trim().length > 0 ? sidHint.trim() : null;
     const existing = await this.getBlob(blob.hash);
 
     if (existing) {
@@ -466,6 +469,9 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
           allowQuotaRecovery: false
         }
       );
+      if (trackingSid) {
+        await this.trackBlobHashForSession(trackingSid, blob.hash);
+      }
       return;
     }
 
@@ -480,6 +486,9 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
         protectedSid: sidHint
       }
     );
+    if (trackingSid) {
+      await this.trackBlobHashForSession(trackingSid, blob.hash);
+    }
   }
 
   public async getBlob(hash: string): Promise<StoredBlob | undefined> {
@@ -531,6 +540,8 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async deleteSession(sid: string, blobHashes: string[] = []): Promise<void> {
+    const trackedBlobHashes = await this.getTrackedBlobHashes(sid);
+    const mergedBlobHashes = mergeBlobHashes(blobHashes, trackedBlobHashes);
     const db = await this.db();
 
     await runTransaction(db, "sessions", "readwrite", (store) => {
@@ -543,8 +554,9 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       return requestToPromise(store.delete(sid));
     });
     await this.deleteChunksBySid(sid);
+    await this.deleteTrackedBlobHashes(sid);
 
-    for (const hash of blobHashes) {
+    for (const hash of mergedBlobHashes) {
       await this.decrementOrDeleteBlob(hash);
     }
   }
@@ -659,9 +671,8 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   private async deleteSessionWithBlobCleanup(sid: string): Promise<void> {
-    const chunks = await this.listChunks(sid);
-    const blobHashes = collectBlobHashesFromChunks(chunks);
-    await this.deleteSession(sid, [...blobHashes]);
+    const blobHashes = await this.resolveBlobHashesForSession(sid);
+    await this.deleteSession(sid, blobHashes);
   }
 
   private open(): Promise<IDBDatabase> {
@@ -675,7 +686,14 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       request.onupgradeneeded = () => {
         const db = request.result;
 
-        for (const storeName of ["sessions", "chunks", "blobs", "indexes", "integrity"]) {
+        for (const storeName of [
+          "sessions",
+          "chunks",
+          "blobs",
+          "blobRefs",
+          "indexes",
+          "integrity"
+        ]) {
           if (!db.objectStoreNames.contains(storeName)) {
             db.createObjectStore(storeName, { keyPath: "key" });
           }
@@ -718,6 +736,50 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
           await requestToPromise(store.delete(row.key));
         }
       });
+    });
+  }
+
+  private async resolveBlobHashesForSession(sid: string): Promise<string[]> {
+    const tracked = await this.getTrackedBlobHashes(sid);
+
+    if (tracked.length > 0) {
+      return tracked;
+    }
+
+    const chunks = await this.listChunks(sid);
+    return [...collectBlobHashesFromChunks(chunks)];
+  }
+
+  private async trackBlobHashForSession(sid: string, hash: string): Promise<void> {
+    if (!SHA256_HEX_PATTERN.test(hash)) {
+      return;
+    }
+
+    const existing = await this.get<BlobRefsRow>("blobRefs", sid);
+    const next = mergeBlobHashes(existing?.value ?? [], [hash]);
+
+    await this.put<BlobRefsRow>(
+      "blobRefs",
+      {
+        key: sid,
+        value: next
+      },
+      {
+        allowQuotaRecovery: true,
+        protectedSid: sid
+      }
+    );
+  }
+
+  private async getTrackedBlobHashes(sid: string): Promise<string[]> {
+    const row = await this.get<BlobRefsRow>("blobRefs", sid);
+    return normalizeBlobHashes(row?.value ?? []);
+  }
+
+  private async deleteTrackedBlobHashes(sid: string): Promise<void> {
+    const db = await this.db();
+    await runTransaction(db, "blobRefs", "readwrite", (store) => {
+      return requestToPromise(store.delete(sid));
     });
   }
 
@@ -796,6 +858,34 @@ function collectBlobHashesFromChunks(chunks: StoredChunk[]): Set<string> {
   }
 
   return hashes;
+}
+
+function normalizeBlobHashes(values: unknown): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  const output = new Set<string>();
+
+  for (const value of values) {
+    if (typeof value === "string" && SHA256_HEX_PATTERN.test(value)) {
+      output.add(value);
+    }
+  }
+
+  return [...output];
+}
+
+function mergeBlobHashes(...sources: unknown[]): string[] {
+  const output = new Set<string>();
+
+  for (const source of sources) {
+    for (const hash of normalizeBlobHashes(source)) {
+      output.add(hash);
+    }
+  }
+
+  return [...output];
 }
 
 function collectBlobHashesFromUnknown(value: unknown, output: Set<string>): void {
