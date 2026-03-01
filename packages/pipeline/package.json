@@ -25,5 +25,8 @@
   "dependencies": {
     "@webblackbox/protocol": "workspace:*",
     "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }
