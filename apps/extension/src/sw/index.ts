@@ -240,9 +240,6 @@ const SKIPPED_FULL_MODE_CONTENT_RAW_TYPES = new Set([
   "pageError",
   "unhandledrejection",
   "resourceError",
-  "localStorageOp",
-  "sessionStorageOp",
-  "indexedDbOp",
   "sse",
   "notice"
 ]);
@@ -2815,7 +2812,7 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
 }
 
 function shouldInjectHooksForMode(mode: CaptureMode): boolean {
-  return mode === "lite";
+  return mode === "lite" || mode === "full";
 }
 
 function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDownloadResult {
