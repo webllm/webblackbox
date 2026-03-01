@@ -204,6 +204,7 @@ type ArchiveModel = {
 type PlayerState = {
   player: WebBlackboxPlayer | null;
   comparePlayer: WebBlackboxPlayer | null;
+  compareModel: ArchiveModel | null;
   compareSummary: PlayerComparison | null;
   model: ArchiveModel | null;
   loadedArchiveBytes: Uint8Array | null;
@@ -297,6 +298,7 @@ const ACTION_MARKER_TYPES = new Set([
 const state: PlayerState = {
   player: null,
   comparePlayer: null,
+  compareModel: null,
   compareSummary: null,
   model: null,
   loadedArchiveBytes: null,
@@ -1409,6 +1411,7 @@ async function handleCompareArchiveChange(): Promise<void> {
 
   if (!file) {
     state.comparePlayer = null;
+    state.compareModel = null;
     refreshCompareSummary();
     renderSummary();
     return;
@@ -1416,11 +1419,15 @@ async function handleCompareArchiveChange(): Promise<void> {
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    state.comparePlayer = await openArchiveWithPassphraseFallback(bytes, file.name);
+    const comparePlayer = await openArchiveWithPassphraseFallback(bytes, file.name);
+    state.comparePlayer = comparePlayer;
+    state.compareModel = buildArchiveModel(comparePlayer);
     refreshCompareSummary();
     renderSummary();
     setFeedback(`Loaded comparison archive: ${file.name}`);
   } catch (error) {
+    state.comparePlayer = null;
+    state.compareModel = null;
     setFeedback(`Failed to load comparison archive ${file.name}: ${String(error)}`);
   }
 }
@@ -1431,6 +1438,7 @@ function refreshCompareSummary(): void {
     return;
   }
 
+  state.compareModel = null;
   state.compareSummary = null;
 }
 
@@ -2630,46 +2638,225 @@ function renderSummary(): void {
   refs.compareDetails.textContent = state.compareSummary
     ? formatCompareSummary(state.compareSummary)
     : "Load a comparison archive to inspect event deltas.";
-  refs.compareRegressions.innerHTML = renderCompareRegressions(state.compareSummary);
+  refs.compareRegressions.innerHTML = renderCompareRegressions(
+    state.compareSummary,
+    model,
+    state.compareModel
+  );
 }
 
-function renderCompareRegressions(summary: PlayerComparison | null): string {
-  if (!summary || summary.endpointRegressions.length === 0) {
-    return `<p class="empty compare-empty">No endpoint regression deltas.</p>`;
+function renderCompareRegressions(
+  summary: PlayerComparison | null,
+  leftModel: ArchiveModel | null,
+  rightModel: ArchiveModel | null
+): string {
+  if (!summary || !leftModel || !rightModel) {
+    return `<p class="empty compare-empty">No comparison archive loaded.</p>`;
   }
 
-  const rows = summary.endpointRegressions.slice(0, 8);
+  const regressionRows = summary.endpointRegressions.slice(0, 8);
+  const timelineRows = renderCompareTimelineRows(leftModel, rightModel);
+  const waterfallRows = renderCompareWaterfallRows(leftModel, rightModel);
+  const endpointSection =
+    regressionRows.length === 0
+      ? `<p class="empty compare-empty">No endpoint regression deltas.</p>`
+      : `
+      <table class="compare-regressions-table">
+        <thead>
+          <tr>
+            <th>Endpoint</th>
+            <th>Count Δ</th>
+            <th>Fail-rate Δ</th>
+            <th>P95 Δ</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${regressionRows
+            .map((entry) => {
+              const endpointLabel = `${entry.method} ${entry.endpoint}`;
+              const failRateDelta = `${formatDelta(
+                Number((entry.failureRateDelta * 100).toFixed(2))
+              )}%`;
+              const p95Delta = `${formatDelta(Number(entry.p95DurationDeltaMs.toFixed(1)))}ms`;
+
+              return `<tr>
+                <td title="${escapeHtml(endpointLabel)}">${escapeHtml(endpointLabel)}</td>
+                <td class="mono">${formatDelta(entry.countDelta)}</td>
+                <td class="mono">${escapeHtml(failRateDelta)}</td>
+                <td class="mono">${escapeHtml(p95Delta)}</td>
+              </tr>`;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    `;
 
   return `
-    <table class="compare-regressions-table">
-      <thead>
-        <tr>
-          <th>Endpoint</th>
-          <th>Count Δ</th>
-          <th>Fail-rate Δ</th>
-          <th>P95 Δ</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows
-          .map((entry) => {
-            const endpointLabel = `${entry.method} ${entry.endpoint}`;
-            const failRateDelta = `${formatDelta(
-              Number((entry.failureRateDelta * 100).toFixed(2))
-            )}%`;
-            const p95Delta = `${formatDelta(Number(entry.p95DurationDeltaMs.toFixed(1)))}ms`;
-
-            return `<tr>
-              <td title="${escapeHtml(endpointLabel)}">${escapeHtml(endpointLabel)}</td>
-              <td class="mono">${formatDelta(entry.countDelta)}</td>
-              <td class="mono">${escapeHtml(failRateDelta)}</td>
-              <td class="mono">${escapeHtml(p95Delta)}</td>
-            </tr>`;
-          })
-          .join("")}
-      </tbody>
-    </table>
+    <section class="compare-dual-block">
+      <header class="compare-dual-head">
+        <h3>Timeline (A/B)</h3>
+      </header>
+      <div class="compare-dual-grid">
+        ${timelineRows}
+      </div>
+    </section>
+    <section class="compare-dual-block">
+      <header class="compare-dual-head">
+        <h3>Waterfall Alignment</h3>
+      </header>
+      <table class="compare-waterfall-table">
+        <thead>
+          <tr>
+            <th>Endpoint</th>
+            <th>Session A</th>
+            <th>Session B</th>
+            <th>Signal</th>
+          </tr>
+        </thead>
+        <tbody>${waterfallRows}</tbody>
+      </table>
+    </section>
+    <section class="compare-dual-block">
+      <header class="compare-dual-head">
+        <h3>Endpoint Regressions</h3>
+      </header>
+      ${endpointSection}
+    </section>
   `;
+}
+
+function renderCompareTimelineRows(leftModel: ArchiveModel, rightModel: ArchiveModel): string {
+  const leftRows = leftModel.events.slice(Math.max(0, leftModel.events.length - 10));
+  const rightRows = rightModel.events.slice(Math.max(0, rightModel.events.length - 10));
+  const rowCount = Math.max(leftRows.length, rightRows.length);
+  const rows: string[] = [];
+
+  for (let index = 0; index < rowCount; index += 1) {
+    const left = leftRows[index] ?? null;
+    const right = rightRows[index] ?? null;
+
+    rows.push(`
+      <div class="compare-timeline-col">
+        <span class="compare-timeline-label">A</span>
+        <span class="mono">${left ? formatMono(left.mono - leftModel.minMono) : "—"}</span>
+        <span title="${left ? escapeHtml(left.id) : ""}">${left ? escapeHtml(left.type) : "—"}</span>
+      </div>
+      <div class="compare-timeline-col">
+        <span class="compare-timeline-label">B</span>
+        <span class="mono">${right ? formatMono(right.mono - rightModel.minMono) : "—"}</span>
+        <span title="${right ? escapeHtml(right.id) : ""}">${right ? escapeHtml(right.type) : "—"}</span>
+      </div>
+    `);
+  }
+
+  return rows.join("");
+}
+
+type CompareEndpointSummary = {
+  key: string;
+  firstStartMono: number;
+  count: number;
+  failureCount: number;
+  p95Ms: number;
+};
+
+function renderCompareWaterfallRows(leftModel: ArchiveModel, rightModel: ArchiveModel): string {
+  const leftSummary = summarizeWaterfallByEndpoint(leftModel.waterfall);
+  const rightSummary = summarizeWaterfallByEndpoint(rightModel.waterfall);
+  const keys = new Set<string>([...leftSummary.keys(), ...rightSummary.keys()]);
+  const rows = [...keys]
+    .map((key) => {
+      const left = leftSummary.get(key) ?? null;
+      const right = rightSummary.get(key) ?? null;
+      const rank = Math.min(
+        left?.firstStartMono ?? Number.POSITIVE_INFINITY,
+        right?.firstStartMono ?? Number.POSITIVE_INFINITY
+      );
+      return { key, left, right, rank };
+    })
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, 12);
+
+  return rows
+    .map((row) => {
+      const leftCell = row.left ? formatEndpointSummaryCell(row.left) : "—";
+      const rightCell = row.right ? formatEndpointSummaryCell(row.right) : "—";
+      const signal =
+        row.left && row.right
+          ? row.right.failureCount > row.left.failureCount
+            ? "regressed"
+            : "stable"
+          : row.right
+            ? "new"
+            : "missing";
+      const signalClass =
+        signal === "regressed"
+          ? "compare-signal compare-signal-regressed"
+          : signal === "new"
+            ? "compare-signal compare-signal-new"
+            : signal === "missing"
+              ? "compare-signal compare-signal-missing"
+              : "compare-signal";
+
+      return `<tr>
+        <td title="${escapeHtml(row.key)}">${escapeHtml(row.key)}</td>
+        <td class="mono">${escapeHtml(leftCell)}</td>
+        <td class="mono">${escapeHtml(rightCell)}</td>
+        <td><span class="${signalClass}">${signal}</span></td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function summarizeWaterfallByEndpoint(
+  entries: NetworkWaterfallEntry[]
+): Map<string, CompareEndpointSummary> {
+  const grouped = new Map<string, NetworkWaterfallEntry[]>();
+
+  for (const entry of entries) {
+    const key = `${entry.method.toUpperCase()} ${shortUrl(entry.url)}`;
+    const bucket = grouped.get(key);
+
+    if (bucket) {
+      bucket.push(entry);
+    } else {
+      grouped.set(key, [entry]);
+    }
+  }
+
+  const summary = new Map<string, CompareEndpointSummary>();
+
+  for (const [key, bucket] of grouped.entries()) {
+    const durations = bucket
+      .map((entry) => entry.durationMs)
+      .filter((value) => Number.isFinite(value))
+      .sort((left, right) => left - right);
+    const p95Index = Math.max(0, Math.floor((durations.length - 1) * 0.95));
+    const p95Ms = durations[p95Index] ?? 0;
+    const failureCount = bucket.reduce((count, entry) => {
+      const status = typeof entry.status === "number" ? entry.status : 0;
+      return count + (entry.failed || status >= 400 ? 1 : 0);
+    }, 0);
+    const firstStartMono = bucket.reduce(
+      (minMono, entry) => Math.min(minMono, entry.startMono),
+      bucket[0]?.startMono ?? Number.POSITIVE_INFINITY
+    );
+
+    summary.set(key, {
+      key,
+      firstStartMono,
+      count: bucket.length,
+      failureCount,
+      p95Ms
+    });
+  }
+
+  return summary;
+}
+
+function formatEndpointSummaryCell(entry: CompareEndpointSummary): string {
+  const failRate = entry.count > 0 ? (entry.failureCount / entry.count) * 100 : 0;
+  return `${entry.count} req • ${failRate.toFixed(0)}% fail • p95 ${entry.p95Ms.toFixed(0)}ms`;
 }
 
 function renderPanels(): void {
