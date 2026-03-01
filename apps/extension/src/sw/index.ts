@@ -289,6 +289,7 @@ const SESSION_ANNOTATIONS_STORAGE_KEY = "webblackbox.runtime.sessionAnnotations"
 const STOPPED_SESSION_TTL_MS = 10 * 60_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
+const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 const PERF_WARN_MS = 40;
 const OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
 const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
@@ -402,8 +403,12 @@ function syncContentPortRecordingState(port: PortLike): void {
       mode: runtime.mode,
       sampling
     });
-  } catch {
-    void 0;
+  } catch (error) {
+    logPortSendFailure("sw.recording-status", error, {
+      tabId,
+      sid: runtime.sid,
+      mode: runtime.mode
+    });
   }
 }
 
@@ -3564,4 +3569,27 @@ function shouldLogPerf(): boolean {
     (globalThis as unknown as Record<string, unknown>)[PERF_LOG_FLAG] === true ||
     (globalThis as unknown as Record<string, unknown>).__WEBBLACKBOX_PERF_LOGS__ === true
   );
+}
+
+function shouldLogPortDebug(): boolean {
+  return (
+    shouldLogPerf() ||
+    (globalThis as unknown as Record<string, unknown>)[PORT_DEBUG_LOG_FLAG] === true
+  );
+}
+
+function logPortSendFailure(
+  kind: string,
+  error: unknown,
+  context: Record<string, unknown> = {}
+): void {
+  if (!shouldLogPortDebug()) {
+    return;
+  }
+
+  console.debug("[WebBlackbox][port] service worker postMessage failed", {
+    kind,
+    ...context,
+    error: error instanceof Error ? error.message : String(error)
+  });
 }

@@ -20,6 +20,7 @@ let readyPingAttempts = 0;
 const READY_PING_MAX_ATTEMPTS = 50;
 const READY_PING_INTERVAL_MS = 150;
 const DEFAULT_TAB_ID = -1;
+const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 
 if (contentPort) {
   contentPort.onMessage.addListener((message) => {
@@ -62,8 +63,8 @@ function emitBatch(events: RawRecorderEvent[]): void {
       kind: "content.events",
       events
     });
-  } catch {
-    void 0;
+  } catch (error) {
+    debugPortSendFailure("content.events", error);
   }
 }
 
@@ -77,8 +78,8 @@ function emitMarker(message: string): void {
       kind: "content.marker",
       message
     });
-  } catch {
-    void 0;
+  } catch (error) {
+    debugPortSendFailure("content.marker", error);
   }
 }
 
@@ -153,8 +154,8 @@ function sendReadyPing(): void {
     contentPort.postMessage({
       kind: "content.ready"
     });
-  } catch {
-    void 0;
+  } catch (error) {
+    debugPortSendFailure("content.ready", error);
   }
 }
 
@@ -165,6 +166,20 @@ function stopReadyPing(): void {
     clearInterval(readyPingTimer);
     readyPingTimer = 0;
   }
+}
+
+function debugPortSendFailure(kind: string, error: unknown): void {
+  const flags = globalThis as unknown as Record<string, unknown>;
+  const enabled = flags[PORT_DEBUG_LOG_FLAG] === true || flags.__WEBBLACKBOX_PERF__ === true;
+
+  if (!enabled) {
+    return;
+  }
+
+  console.debug("[WebBlackbox][port] content postMessage failed", {
+    kind,
+    error: error instanceof Error ? error.message : String(error)
+  });
 }
 
 function isMarkerCommand(message: unknown): boolean {
