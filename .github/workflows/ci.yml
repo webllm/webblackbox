@@ -23,7 +23,11 @@ jobs:
           cache: pnpm
 
       - name: Setup Chrome
+        id: setup-chrome
         uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: 146
+          install-dependencies: true
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -57,11 +61,9 @@ jobs:
       - name: Bundle Size Gate
         run: pnpm bundle:size
 
-      - name: Setup Xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
-
       - name: E2E Fullchain (Record -> Export -> Replay)
         env:
-          WB_E2E_HEADLESS: "0"
+          WB_E2E_CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          WB_E2E_HEADLESS: "1"
           WB_E2E_USE_POPUP_UI: "0"
-        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" pnpm --filter @webblackbox/extension e2e:fullchain:lite
+        run: pnpm --filter @webblackbox/extension e2e:fullchain:lite
