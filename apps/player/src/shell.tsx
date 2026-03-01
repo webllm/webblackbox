@@ -43,6 +43,18 @@ export function PlayerShell(): React.JSX.Element {
           </span>
         </div>
         <div className="status-actions">
+          <label className="triage-wrap" htmlFor="quick-triage-dismiss-seconds">
+            <span>Quick Triage</span>
+            <Input
+              id="quick-triage-dismiss-seconds"
+              type="number"
+              min="1"
+              max="120"
+              step="1"
+              defaultValue="10"
+            />
+            <span>s</span>
+          </label>
           <label className="mask-wrap" htmlFor="mask-response-preview">
             <Checkbox id="mask-response-preview" defaultChecked />
             Mask response preview

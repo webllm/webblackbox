@@ -252,6 +252,7 @@ type PlayerState = {
   responsePreviewByHash: Map<string, ResponsePreview | null>;
   responseJsonExpanded: boolean;
   responseCopyText: string;
+  quickTriageAutoDismissMs: number;
   preflightDismissTimer: number | null;
 };
 
@@ -274,12 +275,17 @@ const TRAIL_WINDOW_MS = 3_500;
 const PANEL_RENDER_BUCKET_MS = 120;
 const PLAYBACK_STEP_MS = 1_000;
 const TRIAGE_SLOW_REQUEST_MS = 1_000;
+const QUICK_TRIAGE_AUTO_DISMISS_DEFAULT_SECONDS = 10;
+const QUICK_TRIAGE_AUTO_DISMISS_MIN_SECONDS = 1;
+const QUICK_TRIAGE_AUTO_DISMISS_MAX_SECONDS = 120;
 const RESPONSE_PREVIEW_COLLAPSED_CHARS = 900;
 const RESPONSE_PREVIEW_EXPANDED_CHARS = 10_000;
 const LOG_GRID_SPLIT_MIN = 26;
 const LOG_GRID_SPLIT_MAX = 74;
 const LOG_GRID_SPLIT_KEY_STEP = 2;
 const LOG_GRID_SPLIT_STORAGE_KEY = "webblackbox.player.logGridSplit";
+const QUICK_TRIAGE_AUTO_DISMISS_SECONDS_STORAGE_KEY =
+  "webblackbox.player.quickTriageAutoDismissSeconds";
 const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
 const SHARE_SERVER_API_KEYS_STORAGE_KEY = "webblackbox.player.shareServerApiKeysByOrigin";
 const LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY = "webblackbox.player.shareServerApiKey";
@@ -342,6 +348,7 @@ const state: PlayerState = {
   responsePreviewByHash: new Map<string, ResponsePreview | null>(),
   responseJsonExpanded: false,
   responseCopyText: "",
+  quickTriageAutoDismissMs: readQuickTriageAutoDismissMs(),
   preflightDismissTimer: null
 };
 
@@ -399,6 +406,7 @@ const refs = {
   playbackForward: getElement<HTMLButtonElement>("playback-forward"),
   playbackRate: getElement<HTMLSelectElement>("playback-rate"),
   maskResponsePreview: getElement<HTMLInputElement>("mask-response-preview"),
+  quickTriageDismissSeconds: getElement<HTMLInputElement>("quick-triage-dismiss-seconds"),
   progressShell: getElement<HTMLElement>("progress-shell"),
   playbackProgress: getElement<HTMLInputElement>("playback-progress"),
   playbackMarkers: getElement<HTMLElement>("playback-markers"),
@@ -465,6 +473,8 @@ const refs = {
   playwrightCopy: getElement<HTMLButtonElement>("playwright-copy"),
   playwrightDownload: getElement<HTMLButtonElement>("playwright-download")
 };
+
+refs.quickTriageDismissSeconds.value = String(Math.round(state.quickTriageAutoDismissMs / 1_000));
 
 const panelTabButtons = Array.from(
   refs.panelTabs.querySelectorAll<HTMLButtonElement>("button[data-log-panel]")
@@ -604,6 +614,11 @@ function bindGlobalActions(): void {
       const context = state.progressHoverContext;
       void showProgressHover(context.mono, context.ratio, context.markerKind);
     }
+  });
+
+  refs.quickTriageDismissSeconds.addEventListener("change", () => {
+    const rawSeconds = Number(refs.quickTriageDismissSeconds.value);
+    setQuickTriageAutoDismissSeconds(rawSeconds);
   });
 
   refs.progressHoverResponseToggle.addEventListener("click", () => {
@@ -1469,7 +1484,7 @@ function showQuickTriagePanel(model: ArchiveModel, archiveName: string): void {
   state.preflightDismissTimer = window.setTimeout(() => {
     state.preflightDismissTimer = null;
     refs.preflightPanel.hidden = true;
-  }, 5_000);
+  }, state.quickTriageAutoDismissMs);
 }
 
 function hideQuickTriagePanel(): void {
@@ -1479,6 +1494,31 @@ function hideQuickTriagePanel(): void {
   }
 
   refs.preflightPanel.hidden = true;
+}
+
+function readQuickTriageAutoDismissMs(): number {
+  const savedSeconds = readStoredNumber(QUICK_TRIAGE_AUTO_DISMISS_SECONDS_STORAGE_KEY);
+  const normalizedSeconds = normalizeQuickTriageAutoDismissSeconds(savedSeconds);
+  return normalizedSeconds * 1_000;
+}
+
+function normalizeQuickTriageAutoDismissSeconds(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return QUICK_TRIAGE_AUTO_DISMISS_DEFAULT_SECONDS;
+  }
+
+  return clamp(
+    Math.round(value),
+    QUICK_TRIAGE_AUTO_DISMISS_MIN_SECONDS,
+    QUICK_TRIAGE_AUTO_DISMISS_MAX_SECONDS
+  );
+}
+
+function setQuickTriageAutoDismissSeconds(value: number): void {
+  const normalizedSeconds = normalizeQuickTriageAutoDismissSeconds(value);
+  state.quickTriageAutoDismissMs = normalizedSeconds * 1_000;
+  refs.quickTriageDismissSeconds.value = String(normalizedSeconds);
+  writeStoredNumber(QUICK_TRIAGE_AUTO_DISMISS_SECONDS_STORAGE_KEY, normalizedSeconds);
 }
 
 async function copyBugReportFromQuickTriage(): Promise<void> {

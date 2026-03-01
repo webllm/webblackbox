@@ -88,7 +88,7 @@ textarea {
   width: 100%;
   height: 100vh;
   display: grid;
-  grid-template-rows: auto auto auto 8px auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto 8px auto auto minmax(0, 1fr);
   gap: 0;
   overflow: hidden;
 }
@@ -408,6 +408,19 @@ input[type="file"],
   display: inline-flex;
   align-items: center;
   gap: 10px;
+}
+
+.triage-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--sys-color-on-surface-subtle);
+  white-space: nowrap;
+}
+
+.triage-wrap .ui-input {
+  width: 52px;
+  min-height: 20px;
 }
 
 .mask-wrap {
