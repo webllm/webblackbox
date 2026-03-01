@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { constants, createWriteStream } from "node:fs";
 import { access, mkdir, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +23,15 @@ const chromeCandidates = [
   process.env.WB_E2E_CHROME_BIN,
   "/Users/unadlib/Library/Caches/ms-playwright/chromium-1212/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
   "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+  "google-chrome",
+  "google-chrome-stable",
+  "chromium-browser",
+  "chromium"
 ].filter(Boolean);
 
 const state = {
@@ -218,17 +226,57 @@ async function ensureExtensionBuildReady(dir) {
 
 async function resolveChromeBinary(candidates) {
   for (const candidate of candidates) {
-    try {
-      await access(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // continue
+    const resolved = await resolveChromeCandidate(candidate);
+
+    if (resolved) {
+      return resolved;
     }
   }
 
   throw new Error(
     "Chrome binary not found. Set WB_E2E_CHROME_BIN or install Chrome for Testing/Google Chrome."
   );
+}
+
+async function resolveChromeCandidate(candidate) {
+  if (typeof candidate !== "string" || candidate.trim().length === 0) {
+    return null;
+  }
+
+  const trimmed = candidate.trim();
+
+  if (isAbsolute(trimmed) || trimmed.startsWith(".")) {
+    try {
+      await access(trimmed, constants.X_OK);
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
+  const which = spawnSync("which", [trimmed], {
+    encoding: "utf8"
+  });
+
+  if (which.status !== 0) {
+    return null;
+  }
+
+  const resolved = which.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+
+  if (!resolved) {
+    return null;
+  }
+
+  try {
+    await access(resolved, constants.X_OK);
+    return resolved;
+  } catch {
+    return null;
+  }
 }
 
 function startChrome(binary, options) {

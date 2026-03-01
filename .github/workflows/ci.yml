@@ -22,6 +22,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -36,3 +39,8 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: E2E Fullchain (Record -> Export -> Replay)
+        env:
+          WB_E2E_HEADLESS: "1"
+        run: pnpm --filter @webblackbox/extension e2e:fullchain:lite
