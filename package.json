@@ -16,6 +16,7 @@
     "test": "turbo run test",
     "coverage:core": "pnpm --filter @webblackbox/recorder test:coverage && pnpm --filter @webblackbox/pipeline test:coverage && pnpm --filter @webblackbox/player-sdk test:coverage",
     "bench": "pnpm run bench:recorder && pnpm run bench:pipeline",
+    "bench:ci": "node scripts/bench-regression-check.mjs",
     "bench:recorder": "pnpm --filter @webblackbox/recorder bench",
     "bench:pipeline": "pnpm --filter @webblackbox/pipeline bench",
     "format": "prettier --write .",

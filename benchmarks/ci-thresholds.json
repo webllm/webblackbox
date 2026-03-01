@@ -1,0 +1,13 @@
+{
+  "recorder": {
+    "ringOptimizedMinOpsPerSec": 100000,
+    "recorderIngestMinOpsPerSec": 50000,
+    "snapshotLatencyMaxMs": 20
+  },
+  "pipeline": {
+    "ingestMinOpsPerSec": 20000,
+    "fullExportMaxMs": 10000,
+    "filteredExportMaxMs": 8000,
+    "archiveDropRatioMin": 0.2
+  }
+}

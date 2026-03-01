@@ -40,6 +40,17 @@ jobs:
       - name: Coverage (Core Packages)
         run: pnpm coverage:core
 
+      - name: Benchmark Regression Gate
+        run: pnpm bench:ci
+
+      - name: Upload Benchmark Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-report
+          path: benchmarks/last-ci-report.json
+          if-no-files-found: ignore
+
       - name: Build
         run: pnpm build
 

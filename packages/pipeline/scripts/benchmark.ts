@@ -17,6 +17,28 @@ const DEFAULT_BLOB_POOL = 24;
 const DEFAULT_BLOB_BYTES = 24 * 1024;
 const EVENT_STEP_MS = 120;
 
+type PipelineBenchmarkReport = {
+  eventCount: number;
+  payloadBytes: number;
+  screenshotInterval: number;
+  maxArchiveMb: number;
+  recentMinutes: number;
+  ingestDurationMs: number;
+  ingestThroughputOpsPerSec: number;
+  chunkCount: number;
+  uniqueBlobCount: number;
+  fullExportDurationMs: number;
+  fullParseDurationMs: number;
+  fullExportBytes: number;
+  fullExportEvents: number;
+  filteredExportDurationMs: number;
+  filteredParseDurationMs: number;
+  filteredExportBytes: number;
+  filteredExportEvents: number;
+  archiveDropRatio: number;
+  eventDropRatio: number;
+};
+
 function readPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
   const parsed = Number(raw);
@@ -270,6 +292,33 @@ async function run(): Promise<void> {
       ? 0
       : 1 - filteredParsed.events.length / fullParsed.events.length;
 
+  const report: PipelineBenchmarkReport = {
+    eventCount,
+    payloadBytes,
+    screenshotInterval,
+    maxArchiveMb,
+    recentMinutes,
+    ingestDurationMs: ingestMs,
+    ingestThroughputOpsPerSec: ingestOps,
+    chunkCount: chunks.length,
+    uniqueBlobCount: storedBlobs.length,
+    fullExportDurationMs: fullExportMs,
+    fullParseDurationMs: fullParseMs,
+    fullExportBytes: fullExport.bytes.byteLength,
+    fullExportEvents: fullParsed.events.length,
+    filteredExportDurationMs: filteredExportMs,
+    filteredParseDurationMs: filteredParseMs,
+    filteredExportBytes: filteredExport.bytes.byteLength,
+    filteredExportEvents: filteredParsed.events.length,
+    archiveDropRatio: exportDropRatio,
+    eventDropRatio: filteredEventDropRatio
+  };
+
+  if (isJsonOutputMode()) {
+    console.log(JSON.stringify(report));
+    return;
+  }
+
   console.log("\nIngest");
   console.log(`  Duration: ${formatMs(ingestMs)}`);
   console.log(`  Throughput: ${formatOps(ingestOps)}`);
@@ -291,6 +340,10 @@ async function run(): Promise<void> {
   console.log("\nReduction");
   console.log(`  Archive size drop: ${(exportDropRatio * 100).toFixed(2)}%`);
   console.log(`  Event count drop: ${(filteredEventDropRatio * 100).toFixed(2)}%`);
+}
+
+function isJsonOutputMode(): boolean {
+  return process.argv.includes("--json") || process.env.BENCH_OUTPUT === "json";
 }
 
 run().catch((error) => {

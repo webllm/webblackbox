@@ -19,6 +19,18 @@ type BenchmarkResult = {
   heapDeltaMb: number;
 };
 
+type RecorderBenchmarkReport = {
+  ringEvents: number;
+  recorderEvents: number;
+  ringWindowMinutes: number;
+  ringBaseline: BenchmarkResult;
+  ringOptimized: BenchmarkResult;
+  recorderIngest: BenchmarkResult;
+  snapshotLatencyMs: number;
+  freezeSignals: number;
+  speedupRatio: number;
+};
+
 const DEFAULT_RING_EVENTS = 120_000;
 const DEFAULT_RECORDER_EVENTS = 160_000;
 const DEFAULT_WINDOW_MINUTES = 1;
@@ -262,12 +274,6 @@ function printResult(result: BenchmarkResult): void {
 function main(): void {
   const ringEvents = readPositiveInt("BENCH_RING_EVENTS", DEFAULT_RING_EVENTS);
   const recorderEvents = readPositiveInt("BENCH_RECORDER_EVENTS", DEFAULT_RECORDER_EVENTS);
-  console.log("WebBlackbox Recorder Benchmarks");
-  console.log("--------------------------------");
-  console.log(`Ring benchmark events: ${ringEvents.toLocaleString()}`);
-  console.log(`Recorder ingest events: ${recorderEvents.toLocaleString()}`);
-  console.log(`Ring window: ${DEFAULT_WINDOW_MINUTES} minute`);
-
   const spliceResult = runRingBufferBenchmark("RingBuffer baseline (splice pruning)", () => {
     return new SpliceRingBuffer(DEFAULT_WINDOW_MINUTES);
   });
@@ -278,16 +284,41 @@ function main(): void {
     }
   );
   const recorder = runRecorderIngestBenchmark();
+  const speedup =
+    optimizedResult.throughputOpsPerSec / Math.max(spliceResult.throughputOpsPerSec, 0.000_001);
 
+  const report: RecorderBenchmarkReport = {
+    ringEvents,
+    recorderEvents,
+    ringWindowMinutes: DEFAULT_WINDOW_MINUTES,
+    ringBaseline: spliceResult,
+    ringOptimized: optimizedResult,
+    recorderIngest: recorder.result,
+    snapshotLatencyMs: recorder.snapshotMs,
+    freezeSignals: recorder.freezeCount,
+    speedupRatio: speedup
+  };
+
+  if (isJsonOutputMode()) {
+    console.log(JSON.stringify(report));
+    return;
+  }
+
+  console.log("WebBlackbox Recorder Benchmarks");
+  console.log("--------------------------------");
+  console.log(`Ring benchmark events: ${ringEvents.toLocaleString()}`);
+  console.log(`Recorder ingest events: ${recorderEvents.toLocaleString()}`);
+  console.log(`Ring window: ${DEFAULT_WINDOW_MINUTES} minute`);
   printResult(spliceResult);
   printResult(optimizedResult);
   printResult(recorder.result);
   console.log(`\nRecorder snapshot() latency: ${formatMs(recorder.snapshotMs)}`);
   console.log(`Freeze signals observed during ingest: ${recorder.freezeCount.toLocaleString()}`);
-
-  const speedup =
-    optimizedResult.throughputOpsPerSec / Math.max(spliceResult.throughputOpsPerSec, 0.000_001);
   console.log(`\nRing buffer speedup (optimized / baseline): ${speedup.toFixed(2)}x`);
+}
+
+function isJsonOutputMode(): boolean {
+  return process.argv.includes("--json") || process.env.BENCH_OUTPUT === "json";
 }
 
 main();

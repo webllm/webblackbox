@@ -40,6 +40,12 @@ Run only pipeline benchmarks:
 pnpm bench:pipeline
 ```
 
+Run CI regression checks (uses conservative fixed thresholds from `benchmarks/ci-thresholds.json`):
+
+```bash
+pnpm bench:ci
+```
+
 ## Recorder benchmark
 
 Command:
