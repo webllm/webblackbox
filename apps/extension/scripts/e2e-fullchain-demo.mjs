@@ -533,6 +533,12 @@ function startChrome(binary, options) {
     args.unshift("--headless=new");
   }
 
+  if (process.platform === "linux") {
+    args.unshift("--disable-dev-shm-usage");
+    args.unshift("--disable-setuid-sandbox");
+    args.unshift("--no-sandbox");
+  }
+
   const proc = spawn(binary, args, {
     stdio: ["ignore", "pipe", "pipe"]
   });
