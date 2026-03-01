@@ -62,6 +62,7 @@ function renderSessionCard(session: SessionListItem, now: number): string {
   const elapsed = formatDuration(session.startedAt, session.stoppedAt ?? now);
   const eventCount = session.eventCount ?? 0;
   const errorCount = session.errorCount ?? 0;
+  const budgetAlertCount = session.budgetAlertCount ?? 0;
   const sizeBytes = session.sizeBytes ?? 0;
   const tags = session.tags ?? [];
   const note = typeof session.note === "string" ? session.note : "";
@@ -89,6 +90,7 @@ function renderSessionCard(session: SessionListItem, now: number): string {
         <span class="wb-chip" title="${escapeHtml(startedAt)}">started ${escapeHtml(startedRelative)}</span>
         <span class="wb-chip">events ${eventCount}</span>
         <span class="wb-chip">errors ${errorCount}</span>
+        <span class="wb-chip">budget alerts ${budgetAlertCount}</span>
         <span class="wb-chip">size ${escapeHtml(formatByteSize(sizeBytes))}</span>
         <span class="wb-chip">duration ${escapeHtml(elapsed)}</span>
         ${endedAt ? `<span class="wb-chip" title="${escapeHtml(endedAt)}">ended</span>` : ""}

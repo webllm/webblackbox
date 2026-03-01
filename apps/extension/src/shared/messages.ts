@@ -99,6 +99,7 @@ export type SessionListItem = {
   ringBufferMinutes?: number;
   eventCount?: number;
   errorCount?: number;
+  budgetAlertCount?: number;
   sizeBytes?: number;
   tags?: string[];
   note?: string;

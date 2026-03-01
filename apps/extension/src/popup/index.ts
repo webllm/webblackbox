@@ -81,9 +81,10 @@ function render(container: HTMLElement): void {
         : `Idle (Last ${exportSession.mode} on Tab ${exportSession.tabId})`
       : "Idle";
   const summarySession = activeSession ?? exportSession;
+  const budgetAlerts = summarySession?.budgetAlertCount ?? 0;
   const ringUsage = summarySession ? describeRingBufferUsage(summarySession, now) : null;
   const captureSummary = summarySession
-    ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors • ${formatByteSize(summarySession.sizeBytes ?? 0)}`
+    ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors • ${budgetAlerts} budget alerts • ${formatByteSize(summarySession.sizeBytes ?? 0)}`
     : "No captured events";
   const recentFreeze =
     state.lastFreeze && now - state.lastFreeze.at <= 10 * 60 * 1000 ? state.lastFreeze : null;

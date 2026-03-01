@@ -29,6 +29,11 @@ import {
   type SessionListItem
 } from "../shared/messages.js";
 import {
+  DEFAULT_PERFORMANCE_BUDGET,
+  normalizePerformanceBudget,
+  type PerformanceBudgetConfig
+} from "../shared/performance-budget.js";
+import {
   isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
   isMimeAllowed as isMimeAllowedUtil,
   isTextualMimeType as isTextualMimeTypeUtil,
@@ -75,7 +80,14 @@ type SessionRuntime = {
   capturedEventCount: number;
   capturedErrorCount: number;
   capturedSizeBytes: number;
+  budgetAlertCount: number;
+  performanceBudget: PerformanceBudgetConfig;
+  networkBudgetSample: {
+    total: number;
+    failed: number;
+  };
   lastFreezeNotices: Map<string, number>;
+  lastBudgetBreachAt: Map<string, number>;
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
   heapSnapshotCapture: HeapSnapshotCaptureState | null;
@@ -201,6 +213,8 @@ const FULL_MODE_MIN_SCREENSHOT_INTERVAL_MS = 12_000;
 const FULL_MODE_NAV_SNAPSHOT_COOLDOWN_MS = 30_000;
 const FREEZE_NOTICE_COOLDOWN_MS = 20_000;
 const FREEZE_BADGE_HIGHLIGHT_MS = 15_000;
+const PERFORMANCE_BUDGET_BREACH_COOLDOWN_MS = 15_000;
+const PERFORMANCE_BUDGET_ERROR_RATE_MIN_SAMPLES = 10;
 const BEST_EFFORT_QUEUE_MAX_PENDING = 80;
 const PIPELINE_BATCH_MAX_EVENTS = 160;
 const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
@@ -554,6 +568,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   const startedAt = Date.now();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
   const recorderConfig = await loadRecorderConfig(mode);
+  const performanceBudget = await loadPerformanceBudgetConfig();
   const annotation = getSessionAnnotation(sid);
   const metadata: SessionMetadata = {
     sid,
@@ -610,7 +625,14 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     capturedEventCount: 0,
     capturedErrorCount: 0,
     capturedSizeBytes: 0,
+    budgetAlertCount: 0,
+    performanceBudget,
+    networkBudgetSample: {
+      total: 0,
+      failed: 0
+    },
     lastFreezeNotices: new Map<string, number>(),
+    lastBudgetBreachAt: new Map<string, number>(),
     queue: Promise.resolve(),
     removeCdpListeners: [],
     heapSnapshotCapture: null,
@@ -626,6 +648,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
       onEvent: (event) => {
         updateSessionMetadataFromEvent(runtime, event);
         trackSessionCounters(runtime, event);
+        evaluatePerformanceBudget(runtime, event);
         enqueuePipelineEvent(runtime, event);
       },
       onFreeze: (reason) => {
@@ -1198,6 +1221,115 @@ function trackSessionCounters(runtime: SessionRuntime, event: WebBlackboxEvent):
   if (runtime.capturedEventCount % 50 === 0) {
     pushSessionList();
   }
+}
+
+function evaluatePerformanceBudget(runtime: SessionRuntime, event: WebBlackboxEvent): void {
+  const budget = runtime.performanceBudget;
+  let updated = false;
+
+  if (event.type === "perf.vitals") {
+    const lcpMs = readLcpFromVitalsEvent(event.data);
+
+    if (lcpMs !== null && lcpMs >= budget.lcpWarnMs) {
+      updated =
+        registerPerformanceBudgetBreach(runtime, "lcp", `LCP ${Math.round(lcpMs)}ms`) || updated;
+    }
+  }
+
+  if (event.type === "network.response") {
+    const payload = asRecord(event.data);
+    const duration = asFiniteNumber(payload?.duration);
+    const status = asFiniteNumber(payload?.status);
+    const ok = payload?.ok === true;
+    const failed = payload?.failed === true || (typeof status === "number" && status >= 400) || !ok;
+
+    runtime.networkBudgetSample.total += 1;
+
+    if (failed) {
+      runtime.networkBudgetSample.failed += 1;
+    }
+
+    if (typeof duration === "number" && duration >= budget.requestWarnMs) {
+      updated =
+        registerPerformanceBudgetBreach(
+          runtime,
+          "slow-request",
+          `Slow request ${Math.round(duration)}ms`
+        ) || updated;
+    }
+
+    if (runtime.networkBudgetSample.total >= PERFORMANCE_BUDGET_ERROR_RATE_MIN_SAMPLES) {
+      const errorRatePct =
+        (runtime.networkBudgetSample.failed / runtime.networkBudgetSample.total) * 100;
+
+      if (errorRatePct >= budget.errorRateWarnPct) {
+        updated =
+          registerPerformanceBudgetBreach(
+            runtime,
+            "error-rate",
+            `Error rate ${errorRatePct.toFixed(1)}%`
+          ) || updated;
+      }
+    }
+  }
+
+  if (updated) {
+    pushSessionList();
+  }
+}
+
+function readLcpFromVitalsEvent(payload: unknown): number | null {
+  const record = asRecord(payload);
+  const metric = asString(record?.metric) ?? asString(record?.name);
+
+  if (
+    metric &&
+    metric !== "largest-contentful-paint" &&
+    metric !== "largest-contentful-paint-render-time" &&
+    metric !== "largest-contentful-paint-load-time" &&
+    metric !== "lcp"
+  ) {
+    return null;
+  }
+
+  const value = asFiniteNumber(record?.value);
+  const startTime = asFiniteNumber(record?.startTime);
+  const duration = asFiniteNumber(record?.duration);
+  const candidate = Math.max(
+    value ?? Number.NEGATIVE_INFINITY,
+    startTime ?? Number.NEGATIVE_INFINITY,
+    duration ?? Number.NEGATIVE_INFINITY
+  );
+
+  return Number.isFinite(candidate) ? candidate : null;
+}
+
+function registerPerformanceBudgetBreach(
+  runtime: SessionRuntime,
+  key: string,
+  detail: string
+): boolean {
+  const now = Date.now();
+  const lastBreachAt = runtime.lastBudgetBreachAt.get(key) ?? Number.NEGATIVE_INFINITY;
+
+  if (now - lastBreachAt < PERFORMANCE_BUDGET_BREACH_COOLDOWN_MS) {
+    return false;
+  }
+
+  runtime.lastBudgetBreachAt.set(key, now);
+  runtime.budgetAlertCount += 1;
+  console.info("[WebBlackbox] performance budget breach", {
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    key,
+    detail
+  });
+
+  if (runtime.performanceBudget.autoFreezeOnBreach) {
+    handleFreezeNotice(runtime, "perf");
+  }
+
+  return true;
 }
 
 function enqueuePipelineEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
@@ -2932,6 +3064,7 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     ringBufferMinutes: runtime.config.ringBufferMinutes,
     eventCount: runtime.capturedEventCount,
     errorCount: runtime.capturedErrorCount,
+    budgetAlertCount: runtime.budgetAlertCount,
     sizeBytes: runtime.capturedSizeBytes,
     tags: [...runtime.tags],
     note: runtime.note
@@ -3065,6 +3198,17 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   };
 
   return applyModeRuntimeConfig(mode, mergedConfig);
+}
+
+async function loadPerformanceBudgetConfig(): Promise<PerformanceBudgetConfig> {
+  const storedValues = await chromeApi?.storage?.local?.get(OPTIONS_STORAGE_KEY);
+  const stored = asRecord(storedValues?.[OPTIONS_STORAGE_KEY]);
+
+  if (!stored) {
+    return { ...DEFAULT_PERFORMANCE_BUDGET };
+  }
+
+  return normalizePerformanceBudget(stored.performanceBudget);
 }
 
 function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFIG {
@@ -3316,6 +3460,7 @@ function notifyOffscreenPipelineStatus(): void {
       ringBufferMinutes: runtime.config.ringBufferMinutes,
       eventCount: runtime.capturedEventCount,
       errorCount: runtime.capturedErrorCount,
+      budgetAlertCount: runtime.budgetAlertCount,
       sizeBytes: runtime.capturedSizeBytes,
       tags: [...runtime.tags],
       note: runtime.note

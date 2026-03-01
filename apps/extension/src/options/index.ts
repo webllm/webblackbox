@@ -1,11 +1,21 @@
 import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
+import {
+  DEFAULT_PERFORMANCE_BUDGET,
+  normalizePerformanceBudget,
+  type PerformanceBudgetConfig
+} from "../shared/performance-budget.js";
 
 const STORAGE_KEY = "webblackbox.options";
 
 const chromeApi = getChromeApi();
 const root = document.getElementById("options-root");
+
+type OptionsState = {
+  recorderConfig: typeof DEFAULT_RECORDER_CONFIG;
+  performanceBudget: PerformanceBudgetConfig;
+};
 
 if (root) {
   bootstrap(root).catch((error) => {
@@ -14,11 +24,12 @@ if (root) {
 }
 
 async function bootstrap(container: HTMLElement): Promise<void> {
-  const config = await loadConfig();
-  render(container, config);
+  const options = await loadOptionsState();
+  render(container, options);
 }
 
-function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG): void {
+function render(container: HTMLElement, options: OptionsState): void {
+  const { recorderConfig: config, performanceBudget } = options;
   container.innerHTML = `
     <section class="card" style="max-width:760px;">
       <h1>Capture Settings</h1>
@@ -57,6 +68,25 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
         Runtime safety mode keeps performance-trigger freeze disabled for lite/full recording.
       </p>
 
+      <section style="margin-top:14px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:rgba(20,33,61,0.02);display:grid;gap:8px;">
+        <h2 style="margin:0;font-size:14px;">Performance Budget Alerts</h2>
+        <label style="display:block;margin:4px 0 4px;">LCP warn threshold (ms)</label>
+        <input id="budgetLcpWarnMs" type="number" min="500" max="30000" step="100" value="${performanceBudget.lcpWarnMs}" />
+
+        <label style="display:block;margin:4px 0 4px;">Slow request threshold (ms)</label>
+        <input id="budgetRequestWarnMs" type="number" min="100" max="60000" step="100" value="${performanceBudget.requestWarnMs}" />
+
+        <label style="display:block;margin:4px 0 4px;">Error-rate warn threshold (%)</label>
+        <input id="budgetErrorRateWarnPct" type="number" min="1" max="100" step="1" value="${performanceBudget.errorRateWarnPct}" />
+
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input id="budgetAutoFreezeOnBreach" type="checkbox" ${
+            performanceBudget.autoFreezeOnBreach ? "checked" : ""
+          } />
+          <label for="budgetAutoFreezeOnBreach">Auto-freeze on budget breach</label>
+        </div>
+      </section>
+
       <label style="display:block;margin:12px 0 6px;">Blocked Selectors (one per line)</label>
       <textarea id="blockedSelectors" rows="6" style="width:100%;">${config.redaction.blockedSelectors.join("\n")}</textarea>
 
@@ -84,8 +114,12 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
   const resetButton = container.querySelector<HTMLButtonElement>("#resetConfig");
 
   saveButton?.addEventListener("click", async () => {
-    const nextConfig = readConfigFromForm(container);
-    await saveConfig(nextConfig);
+    const nextRecorderConfig = readConfigFromForm(container);
+    const nextPerformanceBudget = readPerformanceBudgetFromForm(container);
+    await saveOptionsState({
+      recorderConfig: nextRecorderConfig,
+      performanceBudget: nextPerformanceBudget
+    });
 
     const status = container.querySelector<HTMLElement>("#statusText");
     if (status) {
@@ -94,39 +128,74 @@ function render(container: HTMLElement, config: typeof DEFAULT_RECORDER_CONFIG):
   });
 
   resetButton?.addEventListener("click", async () => {
-    await saveConfig(DEFAULT_RECORDER_CONFIG);
-    render(container, normalizeOptionsConfig(DEFAULT_RECORDER_CONFIG));
+    await saveOptionsState({
+      recorderConfig: DEFAULT_RECORDER_CONFIG,
+      performanceBudget: DEFAULT_PERFORMANCE_BUDGET
+    });
+    render(container, {
+      recorderConfig: normalizeOptionsConfig(DEFAULT_RECORDER_CONFIG),
+      performanceBudget: { ...DEFAULT_PERFORMANCE_BUDGET }
+    });
   });
 }
 
-async function loadConfig(): Promise<typeof DEFAULT_RECORDER_CONFIG> {
+async function loadOptionsState(): Promise<OptionsState> {
   const values = await chromeApi?.storage?.local.get(STORAGE_KEY);
   const stored = values?.[STORAGE_KEY];
 
   if (!stored || typeof stored !== "object") {
-    return normalizeOptionsConfig(DEFAULT_RECORDER_CONFIG);
+    return {
+      recorderConfig: normalizeOptionsConfig(DEFAULT_RECORDER_CONFIG),
+      performanceBudget: { ...DEFAULT_PERFORMANCE_BUDGET }
+    };
   }
 
-  return normalizeOptionsConfig({
-    ...DEFAULT_RECORDER_CONFIG,
-    ...(stored as Partial<typeof DEFAULT_RECORDER_CONFIG>),
-    sampling: {
-      ...DEFAULT_RECORDER_CONFIG.sampling,
-      ...((stored as Partial<typeof DEFAULT_RECORDER_CONFIG>).sampling ?? {})
-    },
-    redaction: {
-      ...DEFAULT_RECORDER_CONFIG.redaction,
-      ...((stored as Partial<typeof DEFAULT_RECORDER_CONFIG>).redaction ?? {})
-    }
+  const record = stored as Partial<typeof DEFAULT_RECORDER_CONFIG> & {
+    performanceBudget?: unknown;
+  };
+
+  return {
+    recorderConfig: normalizeOptionsConfig({
+      ...DEFAULT_RECORDER_CONFIG,
+      ...record,
+      sampling: {
+        ...DEFAULT_RECORDER_CONFIG.sampling,
+        ...(record.sampling ?? {})
+      },
+      redaction: {
+        ...DEFAULT_RECORDER_CONFIG.redaction,
+        ...(record.redaction ?? {})
+      }
+    }),
+    performanceBudget: normalizePerformanceBudget(record.performanceBudget)
+  };
+}
+
+async function saveOptionsState(options: OptionsState): Promise<void> {
+  const normalizedConfig = normalizeOptionsConfig(options.recorderConfig);
+  const normalizedBudget = normalizePerformanceBudget(options.performanceBudget);
+  const payload = {
+    ...normalizedConfig,
+    performanceBudget: normalizedBudget
+  };
+
+  await chromeApi?.storage?.local.set({
+    [STORAGE_KEY]: payload
   });
 }
 
-async function saveConfig(config: typeof DEFAULT_RECORDER_CONFIG): Promise<void> {
-  const normalized = normalizeOptionsConfig(config);
+function readPerformanceBudgetFromForm(container: HTMLElement): PerformanceBudgetConfig {
+  const raw = {
+    lcpWarnMs: Number(container.querySelector<HTMLInputElement>("#budgetLcpWarnMs")?.value),
+    requestWarnMs: Number(container.querySelector<HTMLInputElement>("#budgetRequestWarnMs")?.value),
+    errorRateWarnPct: Number(
+      container.querySelector<HTMLInputElement>("#budgetErrorRateWarnPct")?.value
+    ),
+    autoFreezeOnBreach:
+      container.querySelector<HTMLInputElement>("#budgetAutoFreezeOnBreach")?.checked ?? false
+  };
 
-  await chromeApi?.storage?.local.set({
-    [STORAGE_KEY]: normalized
-  });
+  return normalizePerformanceBudget(raw);
 }
 
 function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CONFIG {

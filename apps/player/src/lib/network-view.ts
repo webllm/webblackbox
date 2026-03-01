@@ -3,6 +3,8 @@ import type { NetworkWaterfallEntry } from "@webblackbox/player-sdk";
 import { describeRequestName, resolveNetworkInitiator } from "./network-labels.js";
 import { resolveNetworkSizeBytes } from "./network-size.js";
 
+const NETWORK_DURATION_ALERT_MS = 3_000;
+
 export type NetworkStatusFilter =
   | "all"
   | "success"
@@ -225,6 +227,10 @@ export function resolveNetworkStatusClass(entry: NetworkWaterfallEntry): string 
 
   if (typeof status !== "number") {
     return "wf-status-neutral";
+  }
+
+  if (entry.durationMs >= NETWORK_DURATION_ALERT_MS) {
+    return "wf-status-error";
   }
 
   if (status >= 500) {
