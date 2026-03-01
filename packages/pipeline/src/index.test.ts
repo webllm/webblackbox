@@ -5,7 +5,11 @@ import type { SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
 
 import { readWebBlackboxArchive } from "./exporter.js";
 import { FlightRecorderPipeline } from "./pipeline.js";
-import { MemoryPipelineStorage } from "./storage.js";
+import {
+  derivePipelineStorageKey,
+  EncryptedPipelineStorage,
+  MemoryPipelineStorage
+} from "./storage.js";
 
 const SESSION: SessionMetadata = {
   sid: "S-test",
@@ -288,6 +292,48 @@ describe("pipeline", () => {
         path.startsWith("events/")
       )
     ).toBe(true);
+  });
+
+  it("supports optional at-rest encryption for chunk/blob cache payloads", async () => {
+    const baseStorage = new MemoryPipelineStorage();
+    const key = await derivePipelineStorageKey("cache-passphrase", {
+      salt: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+    });
+    const storage = new EncryptedPipelineStorage(baseStorage, {
+      key: key.key
+    });
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    const screenshotHash = await pipeline.putBlob("image/webp", Uint8Array.from([1, 2, 3, 4]));
+    await pipeline.ingest(
+      createEvent("E-atrest-1", "screen.screenshot", 100, {
+        shotId: screenshotHash,
+        format: "webp",
+        size: 4
+      })
+    );
+    await pipeline.ingest(createEvent("E-atrest-2", "network.request", 120));
+    await pipeline.flush();
+
+    const rawChunks = await baseStorage.listChunks(SESSION.sid);
+    expect(rawChunks.length).toBeGreaterThan(0);
+    const rawChunkText = new TextDecoder().decode(rawChunks[0]?.bytes ?? new Uint8Array());
+    expect(rawChunkText).not.toContain("E-atrest-1");
+
+    const rawBlob = await baseStorage.getBlob(screenshotHash);
+    expect(rawBlob).toBeDefined();
+    expect(Array.from(rawBlob?.bytes ?? [])).not.toEqual([1, 2, 3, 4]);
+
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+    expect(parsed.events.map((event) => event.id)).toEqual(
+      expect.arrayContaining(["E-atrest-1", "E-atrest-2"])
+    );
   });
 
   it("supports export filtering by screenshot and recent time window", async () => {

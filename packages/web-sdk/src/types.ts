@@ -62,6 +62,7 @@ export type WebBlackboxLiteSdkOptions = {
   indexedDbName?: string;
   storage?: "memory" | "indexeddb";
   pipelineStorage?: PipelineStorage;
+  pipelineStorageEncryptionKey?: CryptoKey | Promise<CryptoKey>;
   injectHooks?: boolean;
   injectHookFlag?: string;
   plugins?: RecorderPlugin[];

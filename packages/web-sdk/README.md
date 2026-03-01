@@ -28,6 +28,24 @@ sdk.downloadArchive(exported);
 await sdk.dispose();
 ```
 
+## Optional IndexedDB Cache Encryption
+
+When using `storage: "indexeddb"`, you can provide `pipelineStorageEncryptionKey` to encrypt cached chunk/blob payload bytes at rest.
+
+```ts
+import { derivePipelineStorageKey } from "@webblackbox/pipeline";
+import { WebBlackboxLiteSdk } from "webblackbox/lite-sdk";
+
+const derived = await derivePipelineStorageKey("cache-passphrase");
+
+const sdk = new WebBlackboxLiteSdk({
+  storage: "indexeddb",
+  pipelineStorageEncryptionKey: derived.key
+});
+```
+
+Persist `derived.salt` + `derived.iterations` using your own key-management policy if you need to reopen the same encrypted cache.
+
 ## Default Safety Tuning
 
 `WebBlackboxLiteSdk` applies lite-focused runtime defaults to reduce long-session freezes and archive bloat:

@@ -8,6 +8,7 @@ import {
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
 import {
+  EncryptedPipelineStorage,
   FlightRecorderPipeline,
   IndexedDbPipelineStorage,
   MemoryPipelineStorage,
@@ -582,19 +583,35 @@ function normalizeExportBoundedInt(
 
 function resolveStorage(options: WebBlackboxLiteSdkOptions, sid: string): PipelineStorage {
   if (options.pipelineStorage) {
-    return options.pipelineStorage;
+    return maybeWrapEncryptedStorage(options.pipelineStorage, options);
   }
 
   if (options.storage === "indexeddb") {
     if (typeof indexedDB === "undefined") {
       console.warn("[WebBlackboxLiteSdk] indexedDB unavailable; falling back to memory storage");
-      return new MemoryPipelineStorage();
+      return maybeWrapEncryptedStorage(new MemoryPipelineStorage(), options);
     }
 
-    return new IndexedDbPipelineStorage(options.indexedDbName ?? `webblackbox-lite-${sid}`);
+    return maybeWrapEncryptedStorage(
+      new IndexedDbPipelineStorage(options.indexedDbName ?? `webblackbox-lite-${sid}`),
+      options
+    );
   }
 
-  return new MemoryPipelineStorage();
+  return maybeWrapEncryptedStorage(new MemoryPipelineStorage(), options);
+}
+
+function maybeWrapEncryptedStorage(
+  storage: PipelineStorage,
+  options: WebBlackboxLiteSdkOptions
+): PipelineStorage {
+  if (!options.pipelineStorageEncryptionKey) {
+    return storage;
+  }
+
+  return new EncryptedPipelineStorage(storage, {
+    key: options.pipelineStorageEncryptionKey
+  });
 }
 
 function resolveRecorderPlugins(options: WebBlackboxLiteSdkOptions): RecorderPlugin[] {

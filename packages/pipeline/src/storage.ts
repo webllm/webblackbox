@@ -52,6 +52,24 @@ const EMPTY_INDEXES: StoredIndexes = {
 };
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_QUOTA_RECOVERY_ATTEMPTS = 2;
+const STORAGE_ENCRYPTION_MAGIC = new Uint8Array([0x57, 0x42, 0x45, 0x31]); // WBE1
+const STORAGE_ENCRYPTION_IV_BYTES = 12;
+const STORAGE_ENCRYPTION_KDF_ITERATIONS = 120_000;
+
+export type PipelineStorageKeyOptions = {
+  salt?: Uint8Array;
+  iterations?: number;
+};
+
+export type DerivedPipelineStorageKey = {
+  key: CryptoKey;
+  salt: Uint8Array;
+  iterations: number;
+};
+
+export type EncryptedPipelineStorageOptions = {
+  key: CryptoKey | Promise<CryptoKey>;
+};
 
 export class MemoryPipelineStorage implements PipelineStorage {
   private readonly sessions = new Map<string, SessionMetadata>();
@@ -146,6 +164,201 @@ export class MemoryPipelineStorage implements PipelineStorage {
           refCount: blob.refCount - 1
         });
       }
+    }
+  }
+}
+
+/**
+ * Derives an AES-GCM key for at-rest pipeline storage encryption.
+ * Persist the returned salt to derive the same key for future reads.
+ */
+export async function derivePipelineStorageKey(
+  passphrase: string,
+  options: PipelineStorageKeyOptions = {}
+): Promise<DerivedPipelineStorageKey> {
+  const iterations = normalizePositiveInt(options.iterations, STORAGE_ENCRYPTION_KDF_ITERATIONS);
+  const salt = options.salt ? Uint8Array.from(options.salt) : randomBytes(16);
+  const cryptoApi = requireCryptoApi();
+  const baseKey = await cryptoApi.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  const key = await cryptoApi.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations,
+      salt: toArrayBuffer(salt)
+    },
+    baseKey,
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    false,
+    ["encrypt", "decrypt"]
+  );
+
+  return {
+    key,
+    salt,
+    iterations
+  };
+}
+
+/**
+ * PipelineStorage wrapper that encrypts chunk/blob payload bytes before writing
+ * and decrypts on read. Metadata/indexes remain plaintext for queryability.
+ */
+export class EncryptedPipelineStorage implements PipelineStorage {
+  private readonly keyPromise: Promise<CryptoKey>;
+
+  public constructor(
+    private readonly storage: PipelineStorage,
+    options: EncryptedPipelineStorageOptions
+  ) {
+    this.keyPromise = Promise.resolve(options.key);
+  }
+
+  public async putSession(metadata: SessionMetadata): Promise<void> {
+    await this.storage.putSession(metadata);
+  }
+
+  public async getSession(sid: string): Promise<SessionMetadata | undefined> {
+    return this.storage.getSession(sid);
+  }
+
+  public async putChunk(chunk: StoredChunk): Promise<void> {
+    await this.storage.putChunk({
+      ...chunk,
+      bytes: await this.encryptStoredBytes(chunk.bytes)
+    });
+  }
+
+  public async listChunks(sid: string): Promise<StoredChunk[]> {
+    const chunks = await this.storage.listChunks(sid);
+    return Promise.all(
+      chunks.map(async (chunk) => {
+        return {
+          ...chunk,
+          bytes: await this.decryptStoredBytes(chunk.bytes)
+        };
+      })
+    );
+  }
+
+  public async getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined> {
+    const chunk = await this.storage.getChunk(sid, chunkId);
+
+    if (!chunk) {
+      return undefined;
+    }
+
+    return {
+      ...chunk,
+      bytes: await this.decryptStoredBytes(chunk.bytes)
+    };
+  }
+
+  public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
+    await this.storage.putBlob(
+      {
+        ...blob,
+        bytes: await this.encryptStoredBytes(blob.bytes)
+      },
+      sidHint
+    );
+  }
+
+  public async getBlob(hash: string): Promise<StoredBlob | undefined> {
+    const blob = await this.storage.getBlob(hash);
+
+    if (!blob) {
+      return undefined;
+    }
+
+    return {
+      ...blob,
+      bytes: await this.decryptStoredBytes(blob.bytes)
+    };
+  }
+
+  public async listBlobs(): Promise<StoredBlob[]> {
+    const blobs = await this.storage.listBlobs();
+    return Promise.all(
+      blobs.map(async (blob) => {
+        return {
+          ...blob,
+          bytes: await this.decryptStoredBytes(blob.bytes)
+        };
+      })
+    );
+  }
+
+  public async putIndexes(sid: string, indexes: StoredIndexes): Promise<void> {
+    await this.storage.putIndexes(sid, indexes);
+  }
+
+  public async getIndexes(sid: string): Promise<StoredIndexes> {
+    return this.storage.getIndexes(sid);
+  }
+
+  public async putIntegrity(sid: string, manifest: HashesManifest): Promise<void> {
+    await this.storage.putIntegrity(sid, manifest);
+  }
+
+  public async getIntegrity(sid: string): Promise<HashesManifest | undefined> {
+    return this.storage.getIntegrity(sid);
+  }
+
+  public async deleteSession(sid: string, blobHashes?: string[]): Promise<void> {
+    await this.storage.deleteSession(sid, blobHashes);
+  }
+
+  private async encryptStoredBytes(bytes: Uint8Array): Promise<Uint8Array> {
+    const key = await this.keyPromise;
+    const iv = randomBytes(STORAGE_ENCRYPTION_IV_BYTES);
+    const cryptoApi = requireCryptoApi();
+    const encrypted = await cryptoApi.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(iv)
+      },
+      key,
+      toArrayBuffer(bytes)
+    );
+
+    return concatBytes(STORAGE_ENCRYPTION_MAGIC, iv, new Uint8Array(encrypted));
+  }
+
+  private async decryptStoredBytes(bytes: Uint8Array): Promise<Uint8Array> {
+    if (!looksEncryptedStorageBytes(bytes)) {
+      return bytes;
+    }
+
+    const key = await this.keyPromise;
+    const ivStart = STORAGE_ENCRYPTION_MAGIC.byteLength;
+    const ivEnd = ivStart + STORAGE_ENCRYPTION_IV_BYTES;
+    const iv = bytes.slice(ivStart, ivEnd);
+    const encrypted = bytes.slice(ivEnd);
+    const cryptoApi = requireCryptoApi();
+
+    try {
+      const decrypted = await cryptoApi.subtle.decrypt(
+        {
+          name: "AES-GCM",
+          iv: toArrayBuffer(iv)
+        },
+        key,
+        toArrayBuffer(encrypted)
+      );
+
+      return new Uint8Array(decrypted);
+    } catch {
+      throw new Error("Unable to decrypt pipeline storage payload.");
     }
   }
 }
@@ -614,6 +827,64 @@ function collectBlobHashesFromUnknown(value: unknown, output: Set<string>): void
       stack.push(item);
     }
   }
+}
+
+function normalizePositiveInt(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  return Math.floor(value);
+}
+
+function requireCryptoApi(): Crypto {
+  if (typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.subtle !== "undefined") {
+    return globalThis.crypto;
+  }
+
+  throw new Error("Web Crypto API is required for pipeline storage encryption.");
+}
+
+function randomBytes(size: number): Uint8Array {
+  const bytes = new Uint8Array(size);
+  const cryptoApi = requireCryptoApi();
+  cryptoApi.getRandomValues(bytes);
+  return bytes;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+
+  return output;
+}
+
+function looksEncryptedStorageBytes(bytes: Uint8Array): boolean {
+  const expectedLength = STORAGE_ENCRYPTION_MAGIC.byteLength + STORAGE_ENCRYPTION_IV_BYTES + 1;
+
+  if (bytes.byteLength < expectedLength) {
+    return false;
+  }
+
+  for (let index = 0; index < STORAGE_ENCRYPTION_MAGIC.byteLength; index += 1) {
+    if (bytes[index] !== STORAGE_ENCRYPTION_MAGIC[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 async function runTransaction<TResult>(

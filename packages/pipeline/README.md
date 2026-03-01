@@ -63,6 +63,31 @@ console.log(`Exported: ${result.fileName} (${result.bytes.length} bytes)`);
 
 `includeScreenshots`, `maxArchiveBytes`, and `recentWindowMs` are optional export filters. If omitted, export includes the full retained session.
 
+### Optional At-Rest Storage Encryption
+
+`EncryptedPipelineStorage` encrypts chunk/blob cache payload bytes before persistence (for example when using IndexedDB storage).
+
+```typescript
+import {
+  EncryptedPipelineStorage,
+  IndexedDbPipelineStorage,
+  derivePipelineStorageKey
+} from "@webblackbox/pipeline";
+
+const derived = await derivePipelineStorageKey("cache-passphrase");
+
+const storage = new EncryptedPipelineStorage(
+  new IndexedDbPipelineStorage("webblackbox-flight-recorder"),
+  {
+    key: derived.key
+  }
+);
+
+// Persist derived.salt + derived.iterations with your own secure key policy.
+```
+
+Note: this protects event/blob payload bytes at rest; indexes and session metadata remain plaintext for queryability.
+
 ### Blob Storage
 
 ```typescript

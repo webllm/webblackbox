@@ -558,6 +558,7 @@ All WebBlackbox data uses protocol version `1`. The version is embedded in every
 - **Configurable masking** — Add custom patterns and CSS selectors for sensitive data
 - **Hash-based masking** — Optionally hash sensitive values instead of replacing with `[REDACTED]` for correlation analysis without exposing raw values
 - **Archive encryption** — AES-GCM with PBKDF2 key derivation (120,000 iterations) for secure sharing
+- **Optional cache encryption** — Pipeline storage can encrypt chunk/blob payload bytes at rest (e.g., IndexedDB)
 - **Integrity verification** — SHA-256 checksums for all archive files
 - **Minimal permissions** — Extension requests only the permissions necessary for CDP access and event capture
 
