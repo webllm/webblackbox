@@ -3177,7 +3177,19 @@ function pushSessionList(): void {
 
 function broadcast(message: ExtensionOutboundMessage): void {
   for (const port of connectedPorts) {
-    port.postMessage(message);
+    try {
+      port.postMessage(message);
+    } catch (error) {
+      connectedPorts.delete(port);
+
+      if (offscreenPort === port) {
+        offscreenPort = null;
+      }
+
+      logPortSendFailure(message.kind, error, {
+        portName: port.name
+      });
+    }
   }
 }
 
@@ -3458,29 +3470,43 @@ async function restoreRuntimeState(): Promise<void> {
 }
 
 function notifyOffscreenPipelineStatus(): void {
-  if (!offscreenPort) {
+  const port = offscreenPort;
+
+  if (!port) {
     return;
   }
 
-  offscreenPort.postMessage({
-    kind: "sw.pipeline-status",
-    activeSessions: sessionsByTab.size,
-    sessions: [...sessionsByTab.values()].map((runtime) => ({
-      sid: runtime.sid,
-      tabId: runtime.tabId,
-      mode: runtime.mode,
-      startedAt: runtime.startedAt,
-      active: true,
-      ringBufferMinutes: runtime.config.ringBufferMinutes,
-      eventCount: runtime.capturedEventCount,
-      errorCount: runtime.capturedErrorCount,
-      budgetAlertCount: runtime.budgetAlertCount,
-      sizeBytes: runtime.capturedSizeBytes,
-      tags: [...runtime.tags],
-      note: runtime.note
-    })),
-    updatedAt: Date.now()
-  });
+  try {
+    port.postMessage({
+      kind: "sw.pipeline-status",
+      activeSessions: sessionsByTab.size,
+      sessions: [...sessionsByTab.values()].map((runtime) => ({
+        sid: runtime.sid,
+        tabId: runtime.tabId,
+        mode: runtime.mode,
+        startedAt: runtime.startedAt,
+        active: true,
+        ringBufferMinutes: runtime.config.ringBufferMinutes,
+        eventCount: runtime.capturedEventCount,
+        errorCount: runtime.capturedErrorCount,
+        budgetAlertCount: runtime.budgetAlertCount,
+        sizeBytes: runtime.capturedSizeBytes,
+        tags: [...runtime.tags],
+        note: runtime.note
+      })),
+      updatedAt: Date.now()
+    });
+  } catch (error) {
+    connectedPorts.delete(port);
+
+    if (offscreenPort === port) {
+      offscreenPort = null;
+    }
+
+    logPortSendFailure("sw.pipeline-status", error, {
+      activeSessions: sessionsByTab.size
+    });
+  }
 }
 
 async function notifyTabStatus(
