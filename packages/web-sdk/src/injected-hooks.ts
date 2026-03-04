@@ -1154,7 +1154,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     }
 
     if (value instanceof Date) {
-      return value.toISOString();
+      return serializeDate(value);
     }
 
     if (value instanceof ArrayBuffer) {
@@ -1205,7 +1205,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     }
 
     if (value instanceof Date) {
-      return value.toISOString();
+      return serializeDate(value);
     }
 
     if (value instanceof URL) {
@@ -1225,5 +1225,9 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     }
 
     return `${value.slice(0, maxLength - 3)}...`;
+  }
+
+  function serializeDate(value: Date): string {
+    return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
   }
 }

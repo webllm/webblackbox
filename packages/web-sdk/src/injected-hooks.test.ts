@@ -23,6 +23,7 @@ describe("injected-hooks", () => {
   beforeEach(() => {
     captured.length = 0;
     vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     vi.spyOn(window, "postMessage").mockImplementation((message: unknown) => {
       const row = message as InjectedCaptureWindowMessage;
@@ -126,5 +127,23 @@ describe("injected-hooks", () => {
       encoding: "utf8"
     });
     expect(String((networkBody?.payload as { body?: unknown }).body ?? "")).toContain('"ok":true');
+  });
+
+  it("serializes invalid Date values without throwing", () => {
+    const flag = "__WB_TEST_INJECTED_INVALID_DATE__";
+    installInjectedLiteCaptureHooks({ flag });
+
+    expect(() => {
+      console.log(new Date("this-is-not-a-date"));
+    }).not.toThrow();
+
+    const consoleEvent = captured.filter((message) => message.rawType === "console").at(-1);
+    const payload = (consoleEvent?.payload ?? {}) as {
+      args?: unknown[];
+      text?: unknown;
+    };
+
+    expect(payload.args?.[0]).toBe("Invalid Date");
+    expect(String(payload.text ?? "")).toContain("Invalid Date");
   });
 });
