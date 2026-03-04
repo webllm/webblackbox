@@ -18,11 +18,14 @@ const captureAgent = new LiteCaptureAgent({
 let recordingActive = false;
 let readyPingTimer = 0;
 let readyPingAttempts = 0;
+let pendingEvents: RawRecorderEvent[] = [];
 
 const READY_PING_MAX_ATTEMPTS = 50;
 const READY_PING_INTERVAL_MS = 150;
 const PORT_RECONNECT_INITIAL_MS = 250;
 const PORT_RECONNECT_MAX_MS = 5_000;
+const PENDING_EVENT_MAX = 1_200;
+const PENDING_EVENT_FLUSH_CHUNK = 200;
 const DEFAULT_TAB_ID = -1;
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 
@@ -44,6 +47,7 @@ window.addEventListener("pagehide", cleanup, { once: true });
 function cleanup(): void {
   stopReadyPing();
   stopPortReconnect();
+  pendingEvents = [];
   captureAgent.dispose();
 }
 
@@ -84,6 +88,10 @@ function bindContentPort(port: PortLike): void {
   port.onMessage.addListener(onMessage);
   port.onDisconnect.addListener(onDisconnect);
   requestRecordingStatusHandshake(true);
+
+  if (recordingActive) {
+    flushPendingEvents();
+  }
 }
 
 function schedulePortReconnect(): void {
@@ -109,9 +117,51 @@ function stopPortReconnect(): void {
   }
 }
 
+function queuePendingEvents(events: RawRecorderEvent[]): void {
+  if (!recordingActive || events.length === 0) {
+    return;
+  }
+
+  pendingEvents.push(...events);
+  trimPendingEvents();
+}
+
+function trimPendingEvents(): void {
+  if (pendingEvents.length <= PENDING_EVENT_MAX) {
+    return;
+  }
+
+  pendingEvents.splice(0, pendingEvents.length - PENDING_EVENT_MAX);
+}
+
+function flushPendingEvents(): void {
+  if (!contentPort || !recordingActive || pendingEvents.length === 0) {
+    return;
+  }
+
+  while (pendingEvents.length > 0) {
+    const batch = pendingEvents.splice(0, PENDING_EVENT_FLUSH_CHUNK);
+
+    try {
+      contentPort.postMessage({
+        kind: "content.events",
+        events: batch
+      });
+    } catch (error) {
+      debugPortSendFailure("content.events.replay", error);
+      pendingEvents = [...batch, ...pendingEvents];
+      trimPendingEvents();
+      contentPort = null;
+      schedulePortReconnect();
+      return;
+    }
+  }
+}
+
 function emitBatch(events: RawRecorderEvent[]): void {
   if (!contentPort || events.length === 0) {
     if (!contentPort) {
+      queuePendingEvents(events);
       connectContentPort();
     }
 
@@ -124,6 +174,7 @@ function emitBatch(events: RawRecorderEvent[]): void {
       events
     });
   } catch (error) {
+    queuePendingEvents(events);
     debugPortSendFailure("content.events", error);
   }
 }
@@ -162,7 +213,9 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
 
     if (message.active) {
       stopReadyPing();
+      flushPendingEvents();
     } else {
+      pendingEvents = [];
       requestRecordingStatusHandshake(false);
     }
 
