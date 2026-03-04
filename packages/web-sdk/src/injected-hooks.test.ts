@@ -146,4 +146,28 @@ describe("injected-hooks", () => {
     expect(payload.args?.[0]).toBe("Invalid Date");
     expect(String(payload.text ?? "")).toContain("Invalid Date");
   });
+
+  it("handles objects with throwing getters without breaking console", () => {
+    const flag = "__WB_TEST_INJECTED_THROWING_GETTER__";
+    installInjectedLiteCaptureHooks({ flag });
+
+    const value: Record<string, unknown> = {};
+    Object.defineProperty(value, "boom", {
+      enumerable: true,
+      get: () => {
+        throw new Error("boom");
+      }
+    });
+
+    expect(() => {
+      console.log(value);
+    }).not.toThrow();
+
+    const consoleEvent = captured.filter((message) => message.rawType === "console").at(-1);
+    const payload = (consoleEvent?.payload ?? {}) as {
+      args?: unknown[];
+    };
+
+    expect(payload.args?.[0]).toEqual({ boom: "[Unreadable]" });
+  });
 });

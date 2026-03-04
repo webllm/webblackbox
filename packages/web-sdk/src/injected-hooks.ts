@@ -1174,14 +1174,26 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     if (typeof value === "object") {
       const output: Record<string, unknown> = {};
       let count = 0;
+      let keys: string[];
 
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      try {
+        keys = Object.keys(value as Record<string, unknown>);
+      } catch {
+        return summarizeValue(value);
+      }
+
+      for (const key of keys) {
         if (count >= SAFE_SERIALIZE_MAX_PROPERTIES) {
           output.__truncated = true;
           break;
         }
 
-        output[key] = safeSerialize(entry, depth + 1);
+        try {
+          output[key] = safeSerialize((value as Record<string, unknown>)[key], depth + 1);
+        } catch {
+          output[key] = "[Unreadable]";
+        }
+
         count += 1;
       }
 
