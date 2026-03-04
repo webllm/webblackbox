@@ -170,4 +170,30 @@ describe("injected-hooks", () => {
 
     expect(payload.args?.[0]).toEqual({ boom: "[Unreadable]" });
   });
+
+  it("does not duplicate xhr end events when reusing the same xhr instance", () => {
+    vi.spyOn(XMLHttpRequest.prototype, "open").mockImplementation(() => undefined);
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => undefined);
+    vi.spyOn(XMLHttpRequest.prototype, "getResponseHeader").mockImplementation(() => null);
+    vi.spyOn(XMLHttpRequest.prototype, "getAllResponseHeaders").mockImplementation(() => "");
+
+    const flag = "__WB_TEST_INJECTED_XHR_REUSE__";
+    installInjectedLiteCaptureHooks({ flag });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.test/first");
+    xhr.send();
+    xhr.dispatchEvent(new Event("loadend"));
+
+    xhr.open("GET", "https://example.test/second");
+    xhr.send();
+    xhr.dispatchEvent(new Event("loadend"));
+
+    const endEvents = captured.filter(
+      (message) =>
+        message.rawType === "xhr" && (message.payload as { phase?: unknown }).phase === "end"
+    );
+
+    expect(endEvents).toHaveLength(2);
+  });
 });

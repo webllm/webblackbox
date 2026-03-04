@@ -519,27 +519,31 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         { once: true }
       );
 
-      this.addEventListener("loadend", () => {
-        const contentType = normalizeContentType(this.getResponseHeader("content-type"));
+      this.addEventListener(
+        "loadend",
+        () => {
+          const contentType = normalizeContentType(this.getResponseHeader("content-type"));
 
-        emit("xhr", {
-          phase: "end",
-          reqId,
-          requestId: reqId,
-          method: xhr.__wbMethod ?? "GET",
-          url: this.responseURL || xhr.__wbUrl || "unknown",
-          status: this.status,
-          statusText: this.statusText,
-          ok: this.status >= 200 && this.status < 400,
-          headers: parseXhrResponseHeaders(this.getAllResponseHeaders()),
-          mimeType: contentType,
-          encodedDataLength: parseHeaderInt(this.getResponseHeader("content-length")),
-          failed: Boolean(xhr.__wbFailed),
-          duration: monotonicTime() - (xhr.__wbStartedMono ?? monotonicTime())
-        });
+          emit("xhr", {
+            phase: "end",
+            reqId,
+            requestId: reqId,
+            method: xhr.__wbMethod ?? "GET",
+            url: this.responseURL || xhr.__wbUrl || "unknown",
+            status: this.status,
+            statusText: this.statusText,
+            ok: this.status >= 200 && this.status < 400,
+            headers: parseXhrResponseHeaders(this.getAllResponseHeaders()),
+            mimeType: contentType,
+            encodedDataLength: parseHeaderInt(this.getResponseHeader("content-length")),
+            failed: Boolean(xhr.__wbFailed),
+            duration: monotonicTime() - (xhr.__wbStartedMono ?? monotonicTime())
+          });
 
-        void emitXhrResponseBody(reqId, xhr, contentType);
-      });
+          void emitXhrResponseBody(reqId, xhr, contentType);
+        },
+        { once: true }
+      );
 
       xhrSend.call(this, body as unknown as XMLHttpRequestBodyInit | null | undefined);
     };
