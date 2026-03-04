@@ -453,7 +453,21 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         }
       ).__wbFailed = false;
 
-      xhrOpen.call(this, method, url, async ?? true, username ?? null, password ?? null);
+      const openArgs: unknown[] = [method, url];
+
+      if (arguments.length >= 3) {
+        openArgs.push(async);
+      }
+
+      if (arguments.length >= 4) {
+        openArgs.push(username);
+      }
+
+      if (arguments.length >= 5) {
+        openArgs.push(password);
+      }
+
+      Reflect.apply(xhrOpen, this, openArgs);
     };
 
     XMLHttpRequest.prototype.send = function (

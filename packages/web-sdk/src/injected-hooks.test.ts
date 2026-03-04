@@ -196,4 +196,28 @@ describe("injected-hooks", () => {
 
     expect(endEvents).toHaveLength(2);
   });
+
+  it("preserves xhr open argument shape without forcing null credentials", () => {
+    const openSpy = vi.spyOn(XMLHttpRequest.prototype, "open").mockImplementation(() => undefined);
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => undefined);
+
+    const flag = "__WB_TEST_INJECTED_XHR_OPEN_ARGS__";
+    installInjectedLiteCaptureHooks({ flag });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.test/no-auth");
+    xhr.open("GET", "https://example.test/with-auth", true, "demo-user", "demo-pass");
+
+    const firstCall = openSpy.mock.calls[0];
+    const secondCall = openSpy.mock.calls[1];
+
+    expect(firstCall).toEqual(["GET", "https://example.test/no-auth"]);
+    expect(secondCall).toEqual([
+      "GET",
+      "https://example.test/with-auth",
+      true,
+      "demo-user",
+      "demo-pass"
+    ]);
+  });
 });
