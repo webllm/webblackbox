@@ -1,11 +1,13 @@
 import { LiteCaptureAgent } from "webblackbox/lite-capture-agent";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
-import { getChromeApi } from "../shared/chrome-api.js";
+import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
 
 const chromeApi = getChromeApi();
-let contentPort = chromeApi?.runtime?.connect({ name: PORT_NAMES.content }) ?? null;
+let contentPort: PortLike | null = null;
+let reconnectTimer = 0;
+let reconnectAttempts = 0;
 
 const captureAgent = new LiteCaptureAgent({
   emitBatch: emitBatch,
@@ -19,21 +21,12 @@ let readyPingAttempts = 0;
 
 const READY_PING_MAX_ATTEMPTS = 50;
 const READY_PING_INTERVAL_MS = 150;
+const PORT_RECONNECT_INITIAL_MS = 250;
+const PORT_RECONNECT_MAX_MS = 5_000;
 const DEFAULT_TAB_ID = -1;
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 
-if (contentPort) {
-  contentPort.onMessage.addListener((message) => {
-    handleSwMessage(message as ExtensionOutboundMessage);
-  });
-
-  contentPort.onDisconnect.addListener(() => {
-    contentPort = null;
-    stopReadyPing();
-  });
-
-  requestRecordingStatusHandshake(true);
-}
+connectContentPort();
 
 chromeApi?.runtime?.onMessage.addListener((message) => {
   if (isMarkerCommand(message)) {
@@ -50,11 +43,78 @@ window.addEventListener("pagehide", cleanup, { once: true });
 
 function cleanup(): void {
   stopReadyPing();
+  stopPortReconnect();
   captureAgent.dispose();
+}
+
+function connectContentPort(): void {
+  if (!chromeApi?.runtime || contentPort) {
+    return;
+  }
+
+  try {
+    const port = chromeApi.runtime.connect({ name: PORT_NAMES.content });
+    bindContentPort(port);
+  } catch (error) {
+    debugPortSendFailure("runtime.connect", error);
+    schedulePortReconnect();
+  }
+}
+
+function bindContentPort(port: PortLike): void {
+  stopPortReconnect();
+  reconnectAttempts = 0;
+  contentPort = port;
+
+  const onMessage = (message: unknown) => {
+    handleSwMessage(message as ExtensionOutboundMessage);
+  };
+
+  const onDisconnect = () => {
+    if (contentPort === port) {
+      contentPort = null;
+    }
+
+    port.onMessage.removeListener(onMessage);
+    port.onDisconnect.removeListener(onDisconnect);
+    stopReadyPing();
+    schedulePortReconnect();
+  };
+
+  port.onMessage.addListener(onMessage);
+  port.onDisconnect.addListener(onDisconnect);
+  requestRecordingStatusHandshake(true);
+}
+
+function schedulePortReconnect(): void {
+  if (!chromeApi?.runtime || reconnectTimer > 0 || contentPort) {
+    return;
+  }
+
+  const delay = Math.min(PORT_RECONNECT_INITIAL_MS * 2 ** reconnectAttempts, PORT_RECONNECT_MAX_MS);
+  reconnectAttempts += 1;
+
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = 0;
+    connectContentPort();
+  }, delay);
+}
+
+function stopPortReconnect(): void {
+  reconnectAttempts = 0;
+
+  if (reconnectTimer > 0) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = 0;
+  }
 }
 
 function emitBatch(events: RawRecorderEvent[]): void {
   if (!contentPort || events.length === 0) {
+    if (!contentPort) {
+      connectContentPort();
+    }
+
     return;
   }
 
@@ -70,6 +130,7 @@ function emitBatch(events: RawRecorderEvent[]): void {
 
 function emitMarker(message: string): void {
   if (!contentPort) {
+    connectContentPort();
     return;
   }
 
@@ -115,6 +176,7 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
 
 function requestRecordingStatusHandshake(force = false): void {
   if (!contentPort) {
+    connectContentPort();
     return;
   }
 
