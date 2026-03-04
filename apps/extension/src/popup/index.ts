@@ -3,6 +3,7 @@ import { DEFAULT_EXPORT_POLICY, type ExportPolicy, type FreezeReason } from "@we
 import { getChromeApi } from "../shared/chrome-api.js";
 import {
   PORT_NAMES,
+  type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type SessionListItem
 } from "../shared/messages.js";
@@ -51,6 +52,14 @@ async function bootstrap(container: HTMLElement): Promise<void> {
   });
 
   render(container);
+}
+
+function postUiMessage(message: ExtensionInboundMessage): void {
+  try {
+    port?.postMessage(message);
+  } catch {
+    void 0;
+  }
 }
 
 function render(container: HTMLElement): void {
@@ -173,7 +182,7 @@ function bindActions(
     }
 
     state.tabId = tabId;
-    port?.postMessage({
+    postUiMessage({
       kind: "ui.start",
       tabId,
       mode: "lite"
@@ -189,7 +198,7 @@ function bindActions(
     }
 
     state.tabId = tabId;
-    port?.postMessage({
+    postUiMessage({
       kind: "ui.start",
       tabId,
       mode: "full"
@@ -201,7 +210,7 @@ function bindActions(
       return;
     }
 
-    port?.postMessage({
+    postUiMessage({
       kind: "ui.stop",
       tabId: activeSession.tabId
     });
@@ -220,7 +229,7 @@ function bindActions(
 
     const policy = readExportPolicyFromForm(container);
 
-    port?.postMessage({
+    postUiMessage({
       kind: "ui.export",
       sid: exportSession.sid,
       passphrase: passphrase.trim() || undefined,

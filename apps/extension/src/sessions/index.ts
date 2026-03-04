@@ -1,6 +1,7 @@
 import { getChromeApi } from "../shared/chrome-api.js";
 import {
   PORT_NAMES,
+  type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type SessionListItem
 } from "../shared/messages.js";
@@ -22,6 +23,14 @@ if (root) {
       render(root);
     }
   });
+}
+
+function postUiMessage(message: ExtensionInboundMessage): void {
+  try {
+    port?.postMessage(message);
+  } catch {
+    void 0;
+  }
 }
 
 function render(container: HTMLElement): void {
@@ -278,7 +287,7 @@ function bindActions(container: HTMLElement): void {
         return;
       }
 
-      port?.postMessage({
+      postUiMessage({
         kind: "ui.export",
         sid,
         passphrase: passphrase.trim() || undefined
@@ -294,7 +303,7 @@ function bindActions(container: HTMLElement): void {
         return;
       }
 
-      port?.postMessage({
+      postUiMessage({
         kind: "ui.stop",
         tabId
       });
@@ -317,7 +326,7 @@ function bindActions(container: HTMLElement): void {
         return;
       }
 
-      port?.postMessage({
+      postUiMessage({
         kind: "ui.delete",
         sid
       });
@@ -336,7 +345,7 @@ function bindActions(container: HTMLElement): void {
       const tagsInput = form.querySelector<HTMLInputElement>("[data-annotate-tags]");
       const noteInput = form.querySelector<HTMLTextAreaElement>("[data-annotate-note]");
 
-      port?.postMessage({
+      postUiMessage({
         kind: "ui.annotate",
         sid,
         tags: parseTagInput(tagsInput?.value ?? ""),
