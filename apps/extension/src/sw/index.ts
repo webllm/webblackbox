@@ -1555,11 +1555,17 @@ async function requestOffscreenPipelineOnce<TResult>(
       timeout
     });
 
-    port.postMessage({
-      kind: "sw.pipeline-request",
-      requestId,
-      ...request
-    });
+    try {
+      port.postMessage({
+        kind: "sw.pipeline-request",
+        requestId,
+        ...request
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      pendingOffscreenRequests.delete(requestId);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 
   return result as TResult;
