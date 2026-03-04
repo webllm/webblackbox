@@ -82,7 +82,7 @@ port?.onMessage.addListener((message) => {
   }
 });
 
-port?.postMessage({
+postToSw({
   kind: "offscreen.ready",
   t: Date.now()
 });
@@ -194,7 +194,15 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 }
 
 function postPipelineResponse(message: OffscreenPipelineResponse): void {
-  port?.postMessage(message);
+  postToSw(message);
+}
+
+function postToSw(message: unknown): void {
+  try {
+    port?.postMessage(message);
+  } catch {
+    void 0;
+  }
 }
 
 async function downloadExportedBundle(
