@@ -45,7 +45,11 @@ import {
   getShareServerApiKeyForBaseUrl,
   setShareServerApiKeyForBaseUrl
 } from "./lib/share-api-key.js";
-import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
+import {
+  normalizeShareServerBaseUrl,
+  resolveShareArchiveRequest,
+  resolveShareServerOrigin
+} from "./lib/share.js";
 import {
   readScreenshotContext,
   readScreenshotMarker,
@@ -289,6 +293,7 @@ const QUICK_TRIAGE_AUTO_DISMISS_SECONDS_STORAGE_KEY =
 const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
 const SHARE_SERVER_API_KEYS_STORAGE_KEY = "webblackbox.player.shareServerApiKeysByOrigin";
 const LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY = "webblackbox.player.shareServerApiKey";
+const DEFAULT_SHARE_SERVER_BASE_URL = "http://localhost:8787";
 const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
 const STAGE_HEIGHT_KEY_STEP = 24;
@@ -301,6 +306,10 @@ const ACTION_MARKER_TYPES = new Set([
   "user.marker"
 ]);
 
+const initialShareServerBaseUrl =
+  readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? DEFAULT_SHARE_SERVER_BASE_URL;
+const initialShareServerApiKeysByOrigin = readStoredShareServerApiKeys(initialShareServerBaseUrl);
+
 const state: PlayerState = {
   player: null,
   comparePlayer: null,
@@ -309,8 +318,8 @@ const state: PlayerState = {
   model: null,
   loadedArchiveBytes: null,
   loadedArchiveName: null,
-  shareServerBaseUrl: readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? "http://localhost:8787",
-  shareServerApiKeysByOrigin: {},
+  shareServerBaseUrl: initialShareServerBaseUrl,
+  shareServerApiKeysByOrigin: initialShareServerApiKeysByOrigin,
   selectedEventId: null,
   selectedActionId: null,
   selectedRequestId: null,
@@ -484,7 +493,6 @@ const networkSortButtons = Array.from(
 );
 const panelCards = Array.from(document.querySelectorAll<HTMLElement>("[data-log-panel-target]"));
 
-purgeStoredShareServerApiKeys();
 bindGlobalActions();
 void renderAll({ forcePanels: true, forceScreenshot: true });
 void maybeAutoLoadSharedArchiveFromLocation();
@@ -1667,11 +1675,7 @@ async function shareLoadedArchive(): Promise<void> {
 
   state.shareServerBaseUrl = normalizedBaseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
-  setShareServerApiKeyForBaseUrl(
-    state.shareServerApiKeysByOrigin,
-    normalizedBaseUrl,
-    shareConfig.apiKey
-  );
+  rememberShareServerApiKey(normalizedBaseUrl, shareConfig.apiKey);
 
   const headers: Record<string, string> = {
     "content-type": "application/octet-stream",
@@ -1755,7 +1759,7 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
 
   state.shareServerBaseUrl = resolved.baseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
-  setShareServerApiKeyForBaseUrl(state.shareServerApiKeysByOrigin, resolved.baseUrl, trimmedApiKey);
+  rememberShareServerApiKey(resolved.baseUrl, trimmedApiKey);
 
   try {
     const headers: Record<string, string> = {};
@@ -4327,7 +4331,94 @@ function setFeedback(text: string): void {
   refs.feedback.textContent = text;
 }
 
-function purgeStoredShareServerApiKeys(): void {
-  removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
-  removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
+function rememberShareServerApiKey(baseUrl: string, apiKey: string): void {
+  setShareServerApiKeyForBaseUrl(state.shareServerApiKeysByOrigin, baseUrl, apiKey);
+  persistShareServerApiKeys(state.shareServerApiKeysByOrigin);
+}
+
+function readStoredShareServerApiKeys(baseUrl: string): Record<string, string> {
+  const parsed = parseStoredShareServerApiKeys(readStoredText(SHARE_SERVER_API_KEYS_STORAGE_KEY));
+  const legacyApiKey = readStoredText(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
+
+  if (legacyApiKey) {
+    const origin = resolveShareServerOrigin(baseUrl);
+
+    if (origin && !parsed[origin]) {
+      parsed[origin] = legacyApiKey;
+    }
+
+    removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
+    persistShareServerApiKeys(parsed);
+  }
+
+  return parsed;
+}
+
+function parseStoredShareServerApiKeys(raw: string | null): Record<string, string> {
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const candidate = asRecord(JSON.parse(raw));
+
+    if (!candidate) {
+      return {};
+    }
+
+    const parsed: Record<string, string> = {};
+
+    for (const [originCandidate, apiKeyCandidate] of Object.entries(candidate)) {
+      if (typeof apiKeyCandidate !== "string") {
+        continue;
+      }
+
+      const origin = resolveShareServerOrigin(originCandidate);
+      const apiKey = apiKeyCandidate.trim();
+
+      if (!origin || apiKey.length === 0) {
+        continue;
+      }
+
+      parsed[origin] = apiKey;
+    }
+
+    return parsed;
+  } catch {
+    removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
+    return {};
+  }
+}
+
+function persistShareServerApiKeys(apiKeysByOrigin: Record<string, string>): void {
+  const entries: Array<{ origin: string; apiKey: string }> = [];
+
+  for (const [originCandidate, apiKeyCandidate] of Object.entries(apiKeysByOrigin)) {
+    const origin = resolveShareServerOrigin(originCandidate);
+    const apiKey = apiKeyCandidate.trim();
+
+    if (!origin || apiKey.length === 0) {
+      continue;
+    }
+
+    entries.push({
+      origin,
+      apiKey
+    });
+  }
+
+  entries.sort((left, right) => left.origin.localeCompare(right.origin));
+
+  if (entries.length === 0) {
+    removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
+    return;
+  }
+
+  const serialized: Record<string, string> = {};
+
+  for (const entry of entries) {
+    serialized[entry.origin] = entry.apiKey;
+  }
+
+  writeStoredText(SHARE_SERVER_API_KEYS_STORAGE_KEY, JSON.stringify(serialized));
 }
