@@ -583,4 +583,4 @@ All WebBlackbox data uses protocol version `1`. The version is embedded in every
 
 ## License
 
-Private
+MIT

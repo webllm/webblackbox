@@ -2,6 +2,7 @@
   "name": "@webblackbox/monorepo",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "description": "MCP engineering monorepo powered by pnpm + turbo",
   "packageManager": "pnpm@10.28.1",
   "engines": {
