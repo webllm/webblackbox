@@ -41,6 +41,15 @@ import { createReplayHeaders as buildReplayHeaders, shouldAttachReplayBody } fro
 import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
+  buildActionScopeIndex,
+  extractReqIdFromEvent,
+  inferEventScope,
+  mergeEventScopes,
+  matchesScopeFilter,
+  type EventScope,
+  type ScopeFilter
+} from "./lib/scope.js";
+import {
   bindShareApiKeyInputToTargetOrigin,
   getShareServerApiKeyForBaseUrl,
   setShareServerApiKeyForBaseUrl
@@ -177,7 +186,9 @@ type ScreenshotRecord = {
 
 type ArchiveModel = {
   events: WebBlackboxEvent[];
+  eventScopeById: Map<string, EventScope>;
   actionTimeline: ActionTimelineEntry[];
+  actionScopeByActId: Map<string, EventScope>;
   actionSearchText: string[];
   consoleSignals: WebBlackboxEvent[];
   consoleSignalSearchText: string[];
@@ -190,6 +201,7 @@ type ArchiveModel = {
   pointers: PointerSample[];
   waterfall: NetworkWaterfallEntry[];
   waterfallByReqId: Map<string, NetworkWaterfallEntry>;
+  requestScopeByReqId: Map<string, EventScope>;
   realtime: RealtimeNetworkEntry[];
   storage: StorageTimelineEntry[];
   perf: PerformanceArtifactEntry[];
@@ -220,12 +232,14 @@ type PlayerState = {
   selectedRequestId: string | null;
   textFilter: string;
   typeFilter: TimelineFilter;
+  scopeFilter: ScopeFilter;
   consoleFilter: string;
   networkView: {
     query: string;
     method: string;
     status: NetworkStatusFilter;
     type: NetworkTypeFilter;
+    scope: ScopeFilter;
     sortKey: NetworkSortKey;
     sortDirection: NetworkSortDirection;
   };
@@ -325,12 +339,14 @@ const state: PlayerState = {
   selectedRequestId: null,
   textFilter: "",
   typeFilter: "all",
+  scopeFilter: "all",
   consoleFilter: "",
   networkView: {
     query: "",
     method: "all",
     status: "all",
     type: "all",
+    scope: "all",
     sortKey: "start",
     sortDirection: "asc"
   },
@@ -403,11 +419,14 @@ const refs = {
   logGridDivider: getElement<HTMLElement>("log-grid-divider"),
   textFilter: getElement<HTMLInputElement>("text-filter"),
   typeFilter: getElement<HTMLSelectElement>("type-filter"),
+  scopeFilter: getElement<HTMLSelectElement>("scope-filter"),
   networkFilter: getElement<HTMLInputElement>("network-filter"),
   networkMethodFilter: getElement<HTMLSelectElement>("network-method-filter"),
   networkStatusFilter: getElement<HTMLSelectElement>("network-status-filter"),
   networkTypeFilter: getElement<HTMLSelectElement>("network-type-filter"),
+  networkScopeFilter: getElement<HTMLSelectElement>("network-scope-filter"),
   consoleFilter: getElement<HTMLInputElement>("console-filter"),
+  networkScopeSummary: getElement<HTMLElement>("network-scope-summary"),
   networkSummary: getElement<HTMLElement>("network-summary"),
   panelTabs: getElement<HTMLElement>("panel-tabs"),
   playbackToggle: getElement<HTMLButtonElement>("playback-toggle"),
@@ -522,6 +541,12 @@ function bindGlobalActions(): void {
     renderSummary();
   });
 
+  refs.scopeFilter.addEventListener("change", () => {
+    state.scopeFilter = refs.scopeFilter.value as ScopeFilter;
+    renderPanels();
+    renderSummary();
+  });
+
   refs.networkFilter.addEventListener("input", () => {
     state.networkView.query = refs.networkFilter.value.trim();
     renderWaterfall();
@@ -539,6 +564,11 @@ function bindGlobalActions(): void {
 
   refs.networkTypeFilter.addEventListener("change", () => {
     state.networkView.type = refs.networkTypeFilter.value as NetworkTypeFilter;
+    renderWaterfall();
+  });
+
+  refs.networkScopeFilter.addEventListener("change", () => {
+    state.networkView.scope = refs.networkScopeFilter.value as ScopeFilter;
     renderWaterfall();
   });
 
@@ -2070,40 +2100,84 @@ function renderPanelTabCounts(): void {
     state.playheadMono,
     (event) => event.mono
   );
-  const visibleNetworkCount = upperBoundByMono(
+  const visibleNetworkTotalCount = upperBoundByMono(
     model.waterfall,
     state.playheadMono,
     (entry) => entry.startMono
   );
-  const visibleActionCount = upperBoundByMono(
+  const visibleActionTotalCount = upperBoundByMono(
     model.actionTimeline,
     state.playheadMono,
     (entry) => entry.startMono
   );
-  const visibleConsoleCount = upperBoundByMono(
+  const visibleConsoleTotalCount = upperBoundByMono(
     model.consoleSignals,
     state.playheadMono,
     (event) => event.mono
   );
-  const visibleRealtimeCount = upperBoundByMono(
+  const visibleRealtimeTotalCount = upperBoundByMono(
     model.realtime,
     state.playheadMono,
     (entry) => entry.mono
   );
-  const visibleStorageCount = upperBoundByMono(
+  const visibleStorageTotalCount = upperBoundByMono(
     model.storage,
     state.playheadMono,
     (entry) => entry.mono
   );
-  const visiblePerfCount = upperBoundByMono(model.perf, state.playheadMono, (entry) => entry.mono);
+  const visiblePerfTotalCount = upperBoundByMono(
+    model.perf,
+    state.playheadMono,
+    (entry) => entry.mono
+  );
   const visibleCompareCount = state.compareSummary ? 1 : 0;
   const selectedEvent = state.selectedEventId
     ? (model.eventById.get(state.selectedEventId) ?? null)
     : null;
-  const visibleDetailsCount = selectedEvent && selectedEvent.mono <= state.playheadMono ? 1 : 0;
+  const visibleDetailsCount =
+    selectedEvent &&
+    selectedEvent.mono <= state.playheadMono &&
+    matchesScopeFilter(resolveEventScope(model, selectedEvent), state.scopeFilter)
+      ? 1
+      : 0;
+  const visibleTimelineCount = model.events
+    .slice(0, visibleEventCount)
+    .filter((event) =>
+      matchesScopeFilter(resolveEventScope(model, event), state.scopeFilter)
+    ).length;
+  const visibleActionCount = model.actionTimeline
+    .slice(0, visibleActionTotalCount)
+    .filter((action) =>
+      matchesScopeFilter(resolveActionScope(model, action), state.scopeFilter)
+    ).length;
+  const visibleNetworkCount = model.waterfall
+    .slice(0, visibleNetworkTotalCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveRequestScope(model, entry.reqId), state.networkView.scope)
+    ).length;
+  const visibleConsoleCount = model.consoleSignals
+    .slice(0, visibleConsoleTotalCount)
+    .filter((event) =>
+      matchesScopeFilter(resolveEventScope(model, event), state.scopeFilter)
+    ).length;
+  const visibleRealtimeCount = model.realtime
+    .slice(0, visibleRealtimeTotalCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveScopeByEventId(model, entry.eventId), state.scopeFilter)
+    ).length;
+  const visibleStorageCount = model.storage
+    .slice(0, visibleStorageTotalCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveScopeByEventId(model, entry.eventId), state.scopeFilter)
+    ).length;
+  const visiblePerfCount = model.perf
+    .slice(0, visiblePerfTotalCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveScopeByEventId(model, entry.eventId), state.scopeFilter)
+    ).length;
 
   const counts: Record<LogPanelKey, number> = {
-    timeline: visibleEventCount,
+    timeline: visibleTimelineCount,
     details: visibleDetailsCount,
     actions: visibleActionCount,
     network: visibleNetworkCount,
@@ -2644,6 +2718,28 @@ function renderSummary(): void {
     state.playheadMono,
     (entry) => entry.mono
   );
+  let visibleMainEventCount = 0;
+  let visibleIframeEventCount = 0;
+
+  for (let index = 0; index < visibleEventCount; index += 1) {
+    const event = model.events[index];
+
+    if (!event) {
+      continue;
+    }
+
+    if (resolveEventScope(model, event) === "iframe") {
+      visibleIframeEventCount += 1;
+    } else {
+      visibleMainEventCount += 1;
+    }
+  }
+
+  const visibleNetworkEntries = model.waterfall.slice(0, visibleRequestCount);
+  const visibleNetworkMainCount = visibleNetworkEntries.filter(
+    (entry) => resolveRequestScope(model, entry.reqId) === "main"
+  ).length;
+  const visibleNetworkIframeCount = Math.max(0, visibleRequestCount - visibleNetworkMainCount);
   const triage = computeTriageStats(model.events, model.waterfall, TRIAGE_SLOW_REQUEST_MS);
 
   const compareDelta = state.compareSummary
@@ -2671,8 +2767,12 @@ function renderSummary(): void {
     <div class="pill">origin ${escapeHtml(state.player.archive.manifest.site.origin)}</div>
     <div class="pill">playhead ${formatMono(state.playheadMono - model.minMono)}</div>
     <div class="pill">visible events ${visibleEventCount}</div>
+    <div class="pill">main events ${visibleMainEventCount}</div>
+    <div class="pill">iframe events ${visibleIframeEventCount}</div>
     <div class="pill">visible errors ${visibleErrorCount}</div>
     <div class="pill">visible requests ${visibleRequestCount}</div>
+    <div class="pill">main requests ${visibleNetworkMainCount}</div>
+    <div class="pill">iframe requests ${visibleNetworkIframeCount}</div>
     <div class="pill">visible actions ${visibleActionCount}</div>
     <div class="pill">visible screenshots ${visibleShotCount}</div>
     <div class="pill">all actions ${model.totals.actionSpans}</div>
@@ -2914,6 +3014,7 @@ function renderPanels(): void {
     refs.eventDetails.textContent =
       "Select a timeline event or action card to inspect payload details.";
     refs.waterfallBody.innerHTML = "";
+    refs.networkScopeSummary.textContent = "main 0 | iframe 0";
     refs.networkSummary.textContent = "0 / 0 requests";
     refs.requestDetails.textContent = "Select a request row to inspect network details.";
     renderNetworkSortButtons();
@@ -3043,10 +3144,25 @@ function renderTimelineRow(event: WebBlackboxEvent): string {
   const relativeMono = Math.max(0, event.mono - (model?.minMono ?? 0));
   const buttonClass = selectedClass ? `event ${selectedClass}` : "event";
   const eventLabel = formatTimelineEventLabel(event.id);
+  const scope = model ? resolveEventScope(model, event) : inferEventScope(event);
+  const scopeTagClass =
+    scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
+  const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+  const sessionLabel = event.cdp ? truncateId(event.cdp) : "";
+  const frameLabel = event.frame ? truncateId(event.frame) : "";
+  const sourceLabel =
+    sessionLabel && frameLabel ? `${sessionLabel} · ${frameLabel}` : sessionLabel || frameLabel;
+  const sourceTag = sourceLabel
+    ? `<span class="scope-session mono" title="${escapeHtml(event.cdp ?? event.frame ?? "")}">${escapeHtml(sourceLabel)}</span>`
+    : "";
 
   return `<li class="event-row"><button data-event-id="${escapeHtml(event.id)}" class="${buttonClass}">
         <span class="id" title="${escapeHtml(event.id)}">${escapeHtml(eventLabel)}</span>
-        <span class="tag">${escapeHtml(event.type)}</span>
+        <span class="tag-wrap">
+          <span class="tag">${escapeHtml(event.type)}</span>
+          <span class="${scopeTagClass}">${scopeLabel}</span>
+          ${sourceTag}
+        </span>
         <span class="mono">${formatMono(relativeMono)}</span>
       </button></li>`;
 }
@@ -3130,7 +3246,16 @@ function renderEventDetails(): void {
     return;
   }
 
-  refs.eventDetails.textContent = JSON.stringify(selected, null, 2);
+  refs.eventDetails.textContent = JSON.stringify(
+    {
+      scope: resolveEventScope(model, selected),
+      cdpSession: selected.cdp ?? null,
+      frame: selected.frame ?? null,
+      event: selected
+    },
+    null,
+    2
+  );
 }
 
 function renderActionRootCauseDetails(model: ArchiveModel): void {
@@ -3167,6 +3292,7 @@ function renderActionRootCauseDetails(model: ArchiveModel): void {
     status: entry.status,
     failed: entry.failed,
     durationMs: Number(entry.durationMs.toFixed(2)),
+    scope: resolveRequestScope(model, entry.reqId),
     linked: model.waterfallByReqId.get(entry.reqId) ?? null
   }));
 
@@ -3183,6 +3309,7 @@ function renderActionRootCauseDetails(model: ArchiveModel): void {
         requestCount: action.requestCount,
         errorCount: action.errorCount
       },
+      scope: resolveActionScope(model, action),
       triggerEvent,
       screenshot: action.screenshot,
       nearbyNetwork: requestContext,
@@ -3217,6 +3344,7 @@ function renderWaterfall(): void {
 
   if (!model || !player) {
     refs.waterfallBody.innerHTML = "";
+    refs.networkScopeSummary.textContent = "main 0 | iframe 0";
     refs.networkSummary.textContent = "0 / 0 requests";
     refs.requestDetails.textContent = "Select a request row to inspect network details.";
     refs.copyCurl.disabled = true;
@@ -3231,7 +3359,10 @@ function renderWaterfall(): void {
     (entry) => entry.startMono
   );
   const visibleEntries = model.waterfall.slice(0, visibleCount);
-  const filteredEntries = applyNetworkViewFilters(visibleEntries, state.networkView);
+  const queryFilteredEntries = applyNetworkViewFilters(visibleEntries, state.networkView);
+  const filteredEntries = queryFilteredEntries.filter((entry) =>
+    matchesScopeFilter(resolveRequestScope(model, entry.reqId), state.networkView.scope)
+  );
   const sortedEntries = sortNetworkEntries(
     filteredEntries,
     state.networkView.sortKey,
@@ -3239,7 +3370,7 @@ function renderWaterfall(): void {
   );
   const renderedEntries = sortedEntries.slice(0, MAX_WATERFALL_ROWS);
 
-  renderNetworkSummary(visibleEntries, filteredEntries, renderedEntries);
+  renderNetworkSummary(model, visibleEntries, filteredEntries, renderedEntries);
 
   if (renderedEntries.length === 0) {
     state.selectedRequestId = null;
@@ -3278,6 +3409,10 @@ function renderWaterfall(): void {
       const initiator = resolveNetworkInitiator(entry);
       const size = formatNetworkSize(entry);
       const elapsed = `${entry.durationMs.toFixed(1)} ms`;
+      const scope = resolveRequestScope(model, entry.reqId);
+      const scopeClass =
+        scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
+      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
       const offset = Math.max(0, entry.startMono - timelineStart);
       const left = clamp((offset / timelineSpan) * 100, 0, 100);
       const width = clamp((Math.max(entry.durationMs, 1) / timelineSpan) * 100, 0.8, 100 - left);
@@ -3285,7 +3420,10 @@ function renderWaterfall(): void {
       return `<tr class="${selectedClass}" data-req-id="${escapeHtml(entry.reqId)}">
         <td class="waterfall-col-name">
           <button class="waterfall-btn" data-req-id="${escapeHtml(entry.reqId)}" title="${escapeHtml(entry.url)}">${escapeHtml(requestName.name)}</button>
-          <span class="waterfall-host">${escapeHtml(requestName.host)}</span>
+          <span class="waterfall-host">
+            ${escapeHtml(requestName.host)}
+            <span class="${scopeClass}">${scopeLabel}</span>
+          </span>
         </td>
         <td class="waterfall-col-method mono">${escapeHtml(method)}</td>
         <td class="waterfall-col-status ${statusClass} mono">${escapeHtml(status)}</td>
@@ -3320,11 +3458,15 @@ function renderWaterfall(): void {
       id: event.id,
       type: event.type,
       mono: event.mono,
+      scope: resolveEventScope(model, event),
+      frame: event.frame ?? null,
+      cdp: event.cdp ?? null,
       data: event.data
     }));
 
   refs.requestDetails.textContent = JSON.stringify(
     {
+      requestScope: resolveRequestScope(model, selectedEntry.reqId),
       request: selectedEntry,
       linkedEvents
     },
@@ -3338,15 +3480,21 @@ function renderWaterfall(): void {
 }
 
 function renderNetworkSummary(
+  model: ArchiveModel,
   visibleEntries: NetworkWaterfallEntry[],
   filteredEntries: NetworkWaterfallEntry[],
   renderedEntries: NetworkWaterfallEntry[]
 ): void {
   if (visibleEntries.length === 0) {
+    refs.networkScopeSummary.textContent = "main 0 | iframe 0";
     refs.networkSummary.textContent = "0 / 0 requests";
     return;
   }
 
+  const filteredMainCount = filteredEntries.filter(
+    (entry) => resolveRequestScope(model, entry.reqId) === "main"
+  ).length;
+  const filteredIframeCount = Math.max(0, filteredEntries.length - filteredMainCount);
   const filteredBytes = sumNetworkTransferBytes(filteredEntries);
   const totalBytes = sumNetworkTransferBytes(visibleEntries);
   const hiddenCount = Math.max(0, filteredEntries.length - renderedEntries.length);
@@ -3355,6 +3503,7 @@ function renderNetworkSummary(
       ? ` | showing ${renderedEntries.length}/${filteredEntries.length} (${hiddenCount} hidden; narrow filters to inspect more)`
       : "";
 
+  refs.networkScopeSummary.textContent = `main ${filteredMainCount} | iframe ${filteredIframeCount}`;
   refs.networkSummary.textContent = `${filteredEntries.length} / ${visibleEntries.length} requests | ${formatByteSize(filteredBytes)} / ${formatByteSize(totalBytes)} transferred${truncatedSuffix}`;
 }
 
@@ -3372,11 +3521,13 @@ function renderConsoleSignals(): void {
     (event) => event.mono
   );
   const query = state.consoleFilter.trim();
-  const visibleSignals = model.consoleSignals.slice(0, visibleCount);
+  const visibleSignals = model.consoleSignals
+    .slice(0, visibleCount)
+    .filter((event) => matchesScopeFilter(resolveEventScope(model, event), state.scopeFilter));
 
   if (!query) {
     const scoped = visibleSignals.slice(Math.max(0, visibleSignals.length - MAX_SIGNAL_ROWS));
-    renderSignalEvents(refs.consoleList, scoped);
+    renderSignalEvents(refs.consoleList, scoped, model);
     return;
   }
 
@@ -3386,14 +3537,14 @@ function renderConsoleSignals(): void {
     if (model.consoleSignalSearchText[index]?.includes(query)) {
       const event = model.consoleSignals[index];
 
-      if (event) {
+      if (event && matchesScopeFilter(resolveEventScope(model, event), state.scopeFilter)) {
         filtered.push(event);
       }
     }
   }
 
   const scoped = filtered.slice(Math.max(0, filtered.length - MAX_SIGNAL_ROWS));
-  renderSignalEvents(refs.consoleList, scoped);
+  renderSignalEvents(refs.consoleList, scoped, model);
 }
 
 function renderRealtimeSignals(): void {
@@ -3405,7 +3556,12 @@ function renderRealtimeSignals(): void {
   }
 
   const visibleCount = upperBoundByMono(model.realtime, state.playheadMono, (event) => event.mono);
-  const scoped = model.realtime.slice(Math.max(0, visibleCount - MAX_SIGNAL_ROWS), visibleCount);
+  const filteredByScope = model.realtime
+    .slice(0, visibleCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveScopeByEventId(model, entry.eventId), state.scopeFilter)
+    );
+  const scoped = filteredByScope.slice(Math.max(0, filteredByScope.length - MAX_SIGNAL_ROWS));
 
   refs.realtimeList.innerHTML = scoped
     .map((entry) => {
@@ -3415,8 +3571,12 @@ function renderRealtimeSignals(): void {
           ? `${entry.payloadPreview.slice(0, 120)}...`
           : entry.payloadPreview
         : "(no payload)";
+      const scope = resolveScopeByEventId(model, entry.eventId);
+      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeClass =
+        scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
 
-      return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="signal-text">${escapeHtml(direction)}${escapeHtml(entry.streamId ?? "-")} @ ${entry.mono.toFixed(2)}ms ${escapeHtml(preview)}</span></li>`;
+      return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="${scopeClass}">${scopeLabel}</span><span class="signal-text">${escapeHtml(direction)}${escapeHtml(entry.streamId ?? "-")} @ ${entry.mono.toFixed(2)}ms ${escapeHtml(preview)}</span></li>`;
     })
     .join("");
 }
@@ -3430,14 +3590,23 @@ function renderStorageSignals(): void {
   }
 
   const visibleCount = upperBoundByMono(model.storage, state.playheadMono, (entry) => entry.mono);
-  const scoped = model.storage.slice(Math.max(0, visibleCount - MAX_SIGNAL_ROWS), visibleCount);
+  const filteredByScope = model.storage
+    .slice(0, visibleCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveScopeByEventId(model, entry.eventId), state.scopeFilter)
+    );
+  const scoped = filteredByScope.slice(Math.max(0, filteredByScope.length - MAX_SIGNAL_ROWS));
 
   refs.storageList.innerHTML = scoped
     .map((entry) => {
       const operation = entry.operation ? `${entry.operation} ` : "";
       const hash = entry.hash ? ` hash=${entry.hash}` : "";
       const summary = `${entry.kind} ${operation}@ ${entry.mono.toFixed(2)}ms${hash}`;
-      return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="signal-text">${escapeHtml(summary)}</span></li>`;
+      const scope = resolveScopeByEventId(model, entry.eventId);
+      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeClass =
+        scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
+      return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="${scopeClass}">${scopeLabel}</span><span class="signal-text">${escapeHtml(summary)}</span></li>`;
     })
     .join("");
 }
@@ -3451,14 +3620,23 @@ function renderPerfSignals(): void {
   }
 
   const visibleCount = upperBoundByMono(model.perf, state.playheadMono, (entry) => entry.mono);
-  const scoped = model.perf.slice(Math.max(0, visibleCount - MAX_SIGNAL_ROWS), visibleCount);
+  const filteredByScope = model.perf
+    .slice(0, visibleCount)
+    .filter((entry) =>
+      matchesScopeFilter(resolveScopeByEventId(model, entry.eventId), state.scopeFilter)
+    );
+  const scoped = filteredByScope.slice(Math.max(0, filteredByScope.length - MAX_SIGNAL_ROWS));
 
   refs.perfList.innerHTML = scoped
     .map((entry) => {
       const size = typeof entry.size === "number" ? ` size=${entry.size}` : "";
       const hash = entry.hash ? ` hash=${entry.hash}` : "";
       const summary = `${entry.kind} @ ${entry.mono.toFixed(2)}ms${size}${hash}`;
-      return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="signal-text">${escapeHtml(summary)}</span></li>`;
+      const scope = resolveScopeByEventId(model, entry.eventId);
+      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeClass =
+        scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
+      return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="${scopeClass}">${scopeLabel}</span><span class="signal-text">${escapeHtml(summary)}</span></li>`;
     })
     .join("");
 }
@@ -3698,8 +3876,9 @@ function resetScreenshotResources(): void {
 function applyTimelineFilters(model: ArchiveModel, visibleCount: number): WebBlackboxEvent[] {
   const text = state.textFilter.trim().toLowerCase();
   const filterType = state.typeFilter;
+  const scopeFilter = state.scopeFilter;
 
-  if (!text && filterType === "all") {
+  if (!text && filterType === "all" && scopeFilter === "all") {
     return model.events.slice(0, visibleCount);
   }
 
@@ -3716,6 +3895,10 @@ function applyTimelineFilters(model: ArchiveModel, visibleCount: number): WebBla
       continue;
     }
 
+    if (!matchesScopeFilter(resolveEventScope(model, event), scopeFilter)) {
+      continue;
+    }
+
     if (text && !model.eventSearchText[index]?.includes(text)) {
       continue;
     }
@@ -3729,8 +3912,9 @@ function applyTimelineFilters(model: ArchiveModel, visibleCount: number): WebBla
 function applyActionFilters(model: ArchiveModel, visibleCount: number): ActionTimelineEntry[] {
   const text = state.textFilter.trim().toLowerCase();
   const filterType = state.typeFilter;
+  const scopeFilter = state.scopeFilter;
 
-  if (!text && filterType === "all") {
+  if (!text && filterType === "all" && scopeFilter === "all") {
     return model.actionTimeline.slice(0, visibleCount);
   }
 
@@ -3744,6 +3928,10 @@ function applyActionFilters(model: ArchiveModel, visibleCount: number): ActionTi
     }
 
     if (!matchesActionTypeFilter(action, filterType)) {
+      continue;
+    }
+
+    if (!matchesScopeFilter(resolveActionScope(model, action), scopeFilter)) {
       continue;
     }
 
@@ -3805,6 +3993,57 @@ function matchesActionTypeFilter(action: ActionTimelineEntry, filterType: Timeli
   return true;
 }
 
+function resolveEventScope(model: ArchiveModel, event: WebBlackboxEvent): EventScope {
+  return model.eventScopeById.get(event.id) ?? inferEventScope(event);
+}
+
+function resolveRequestScope(model: ArchiveModel, reqId: string): EventScope {
+  return model.requestScopeByReqId.get(reqId) ?? "main";
+}
+
+function resolveScopeByEventId(model: ArchiveModel, eventId: string): EventScope {
+  const event = model.eventById.get(eventId);
+
+  if (!event) {
+    return "main";
+  }
+
+  return resolveEventScope(model, event);
+}
+
+function resolveActionScope(model: ArchiveModel, action: ActionTimelineEntry): EventScope {
+  const indexedScope = model.actionScopeByActId.get(action.actId);
+
+  if (indexedScope) {
+    return indexedScope;
+  }
+
+  const triggerEvent = model.eventById.get(action.triggerEventId);
+
+  if (triggerEvent && resolveEventScope(model, triggerEvent) === "iframe") {
+    return "iframe";
+  }
+
+  const hasIframeRequest = action.requests.some(
+    (request) => resolveRequestScope(model, request.reqId) === "iframe"
+  );
+
+  if (hasIframeRequest) {
+    return "iframe";
+  }
+
+  const hasIframeError = action.errors.some((error) => {
+    const event = model.eventById.get(error.eventId);
+    return Boolean(event && resolveEventScope(model, event) === "iframe");
+  });
+
+  if (hasIframeError) {
+    return "iframe";
+  }
+
+  return "main";
+}
+
 function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   const events = [...player.events].sort(
     (left, right) => left.mono - right.mono || left.t - right.t
@@ -3812,22 +4051,28 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   const actionTimeline = player
     .getActionTimeline()
     .sort((left, right) => left.startMono - right.startMono);
+  const derived = player.buildDerived();
   const actionSearchText = actionTimeline.map((entry) => buildActionSearchText(entry));
   const consoleSignals: WebBlackboxEvent[] = [];
   const consoleSignalSearchText: string[] = [];
   const eventById = new Map<string, WebBlackboxEvent>();
+  const eventScopeById = new Map<string, EventScope>();
   const eventSearchText: string[] = [];
   const errorPrefix: number[] = [];
   const requestPrefix: number[] = [];
   const screenshots: ScreenshotRecord[] = [];
   const shotByEventId = new Map<string, ScreenshotRecord>();
   const pointers: PointerSample[] = [];
+  const requestScopeByReqId = new Map<string, EventScope>();
 
   let errorCount = 0;
   let requestCount = 0;
 
   for (const event of events) {
+    const scope = inferEventScope(event);
+
     eventById.set(event.id, event);
+    eventScopeById.set(event.id, scope);
 
     if (event.type.startsWith("error.")) {
       errorCount += 1;
@@ -3842,9 +4087,17 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
       requestCount += 1;
     }
 
+    const reqId = extractReqIdFromEvent(event);
+
+    if (reqId) {
+      requestScopeByReqId.set(reqId, mergeEventScopes(requestScopeByReqId.get(reqId), scope));
+    }
+
     errorPrefix.push(errorCount);
     requestPrefix.push(requestCount);
-    eventSearchText.push(buildEventSearchText(event));
+    eventSearchText.push(
+      `${buildEventSearchText(event)} ${scope} ${event.cdp ?? ""} ${event.frame ?? ""}`.toLowerCase()
+    );
 
     const data = asRecord(event.data);
 
@@ -3900,14 +4153,20 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     waterfallByReqId.set(entry.reqId, entry);
   }
 
-  const derived = player.buildDerived();
+  const actionScopeByActId = buildActionScopeIndex(
+    derived.actionSpans,
+    eventById,
+    requestScopeByReqId
+  );
   const minMono = events[0]?.mono ?? 0;
   const maxMono = events[events.length - 1]?.mono ?? 0;
   const progressMarkers = buildProgressMarkers(events, minMono, maxMono);
 
   return {
     events,
+    eventScopeById,
     actionTimeline,
+    actionScopeByActId,
     actionSearchText,
     consoleSignals,
     consoleSignalSearchText,
@@ -3920,6 +4179,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     pointers,
     waterfall,
     waterfallByReqId,
+    requestScopeByReqId,
     realtime: player.getRealtimeNetworkTimeline(),
     storage: player.getStorageTimeline(),
     perf: player.getPerformanceArtifacts(),
@@ -4088,13 +4348,31 @@ function resolveShotForMono(
   return screenshots[end] ?? null;
 }
 
-function renderSignalEvents(container: HTMLElement, events: WebBlackboxEvent[]): void {
+function renderSignalEvents(
+  container: HTMLElement,
+  events: WebBlackboxEvent[],
+  model: ArchiveModel
+): void {
   const scoped = events.slice(-MAX_SIGNAL_ROWS);
 
   container.innerHTML = scoped
     .map((event) => {
       const text = stringifySignalPayload(event.data);
-      return `<li class="signal"><span class="signal-type">${escapeHtml(event.type)}</span><span class="signal-text">${escapeHtml(text)}</span></li>`;
+      const eventScope = resolveEventScope(model, event);
+      const scopeLabel = eventScope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeClass =
+        eventScope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
+      const sourceLabel = [
+        event.cdp ? truncateId(event.cdp) : "",
+        event.frame ? truncateId(event.frame) : ""
+      ]
+        .filter((value) => value.length > 0)
+        .join(" · ");
+      const sourceTag = sourceLabel
+        ? `<span class="scope-session mono" title="${escapeHtml(event.cdp ?? event.frame ?? "")}">${escapeHtml(sourceLabel)}</span>`
+        : "";
+
+      return `<li class="signal"><span class="signal-type">${escapeHtml(event.type)}</span><span class="${scopeClass}">${scopeLabel}</span>${sourceTag}<span class="signal-text">${escapeHtml(text)}</span></li>`;
     })
     .join("");
 }

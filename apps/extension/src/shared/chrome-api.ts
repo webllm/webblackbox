@@ -5,6 +5,7 @@ export type PortDisconnectHandler = () => void;
 export type PortLike = {
   name: string;
   sender?: {
+    frameId?: number;
     tab?: {
       id?: number;
     };
@@ -93,7 +94,7 @@ export type ChromeApi = {
       addListener(
         callback: (
           message: unknown,
-          sender: { tab?: { id?: number } },
+          sender: { tab?: { id?: number }; frameId?: number },
           sendResponse: (response: unknown) => void
         ) => boolean | void
       ): void;

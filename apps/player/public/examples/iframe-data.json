@@ -1,0 +1,6 @@
+{
+  "ok": true,
+  "service": "webblackbox-iframe-example",
+  "version": 1,
+  "items": ["alpha", "beta", "gamma"]
+}

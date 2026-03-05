@@ -419,7 +419,7 @@ chromeApi?.runtime?.onMessage.addListener((rawMessage, sender) => {
     return;
   }
 
-  void handleInboundMessage(message, undefined, sender.tab?.id);
+  void handleInboundMessage(message, undefined, sender.tab?.id, sender.frameId);
   return false;
 });
 
@@ -434,7 +434,8 @@ chromeApi?.commands?.onCommand.addListener((command) => {
 async function handleInboundMessage(
   message: ExtensionInboundMessage,
   port?: PortLike,
-  senderTabId?: number
+  senderTabId?: number,
+  senderFrameId?: number
 ): Promise<void> {
   if (message.kind === "ui.start") {
     const tabId = await resolveUiActionTabId(message.tabId);
@@ -480,6 +481,7 @@ async function handleInboundMessage(
 
   if (message.kind === "content.marker") {
     const tabId = senderTabId ?? port?.sender?.tab?.id;
+    const frame = normalizeContentFrameId(senderFrameId ?? port?.sender?.frameId);
 
     if (typeof tabId === "number") {
       ingestRawEvent({
@@ -489,6 +491,7 @@ async function handleInboundMessage(
         sid: sessionsByTab.get(tabId)?.sid ?? "",
         t: Date.now(),
         mono: monotonicTime(),
+        frame,
         payload: {
           message: message.message
         }
@@ -526,6 +529,7 @@ async function handleInboundMessage(
 
   if (message.kind === "content.events") {
     const tabId = senderTabId ?? port?.sender?.tab?.id;
+    const frame = normalizeContentFrameId(senderFrameId ?? port?.sender?.frameId);
 
     if (typeof tabId !== "number") {
       return;
@@ -536,7 +540,8 @@ async function handleInboundMessage(
     for (const rawEvent of message.events) {
       ingestRawEvent({
         ...rawEvent,
-        tabId
+        tabId,
+        frame: rawEvent.frame ?? frame
       });
 
       if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
@@ -2622,6 +2627,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeContentFrameId(value: unknown): string | undefined {
+  const candidate = asFiniteNumber(value);
+
+  if (candidate === null) {
+    return undefined;
+  }
+
+  const frameId = Math.max(0, Math.floor(candidate));
+
+  if (frameId <= 0) {
+    return undefined;
+  }
+
+  return `content-frame-${frameId}`;
 }
 
 function asString(value: unknown): string | null {

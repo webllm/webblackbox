@@ -71,11 +71,16 @@ describe("PlayerShell", () => {
     render(<PlayerShell />);
 
     const networkSearch = screen.getByPlaceholderText("Filter URL, host, id, method");
+    const scopeFilter = document.querySelector("#scope-filter");
     const methodFilter = document.querySelector("#network-method-filter");
     const statusFilter = document.querySelector("#network-status-filter");
     const typeFilter = document.querySelector("#network-type-filter");
+    const networkScopeFilter = document.querySelector("#network-scope-filter");
     const consoleSearch = screen.getByPlaceholderText("Filter logs by type or content");
 
+    if (!(scopeFilter instanceof HTMLSelectElement)) {
+      throw new Error("Expected #scope-filter to be a select element");
+    }
     if (!(methodFilter instanceof HTMLSelectElement)) {
       throw new Error("Expected #network-method-filter to be a select element");
     }
@@ -85,17 +90,24 @@ describe("PlayerShell", () => {
     if (!(typeFilter instanceof HTMLSelectElement)) {
       throw new Error("Expected #network-type-filter to be a select element");
     }
+    if (!(networkScopeFilter instanceof HTMLSelectElement)) {
+      throw new Error("Expected #network-scope-filter to be a select element");
+    }
 
     await user.type(networkSearch, "api/orders");
+    await user.selectOptions(scopeFilter, "iframe");
     await user.selectOptions(methodFilter, "POST");
     await user.selectOptions(statusFilter, "server-error");
     await user.selectOptions(typeFilter, "fetch");
+    await user.selectOptions(networkScopeFilter, "iframe");
     await user.type(consoleSearch, "timeout");
 
     expect(networkSearch).toHaveValue("api/orders");
+    expect(scopeFilter).toHaveValue("iframe");
     expect(methodFilter).toHaveValue("POST");
     expect(statusFilter).toHaveValue("server-error");
     expect(typeFilter).toHaveValue("fetch");
+    expect(networkScopeFilter).toHaveValue("iframe");
     expect(consoleSearch).toHaveValue("timeout");
   });
 });

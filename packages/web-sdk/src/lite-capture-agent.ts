@@ -80,6 +80,7 @@ export class LiteCaptureAgent {
   private readonly eventBuffer: RawRecorderEvent[] = [];
   private readonly preRecordingBuffer: RawRecorderEvent[] = [];
   private readonly cleanupCallbacks: Array<() => void> = [];
+  private readonly frameMarker = resolveContentFrameMarker();
 
   private recordingActive = false;
   private sid = "";
@@ -930,6 +931,7 @@ export class LiteCaptureAgent {
       sid: this.sid,
       t: Date.now(),
       mono: monotonicTime(),
+      frame: this.frameMarker,
       payload
     });
   }
@@ -1138,6 +1140,14 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 
 function monotonicTime(): number {
   return performance.timeOrigin + performance.now();
+}
+
+function resolveContentFrameMarker(): string | undefined {
+  try {
+    return window.top === window ? undefined : "content-iframe";
+  } catch {
+    return "content-iframe";
+  }
 }
 
 function clickPayload(event: MouseEvent, mode: LiteCaptureState["mode"]): Record<string, unknown> {

@@ -278,6 +278,11 @@ export function PlayerShell(): React.JSX.Element {
               <option value="storage">Storage</option>
               <option value="console">Console</option>
             </Select>
+            <Select id="scope-filter" defaultValue="all">
+              <option value="all">All Scopes</option>
+              <option value="main">Main Page</option>
+              <option value="iframe">Iframes/Child Targets</option>
+            </Select>
           </section>
           <section className="actions">
             <Button id="export-report" type="button" variant="secondary">
@@ -444,6 +449,14 @@ export function PlayerShell(): React.JSX.Element {
                 <option value="text">Text</option>
                 <option value="other">Other</option>
               </Select>
+              <Select id="network-scope-filter" defaultValue="all">
+                <option value="all">All Scopes</option>
+                <option value="main">Main Page</option>
+                <option value="iframe">Iframes/Child Targets</option>
+              </Select>
+              <span id="network-scope-summary" className="network-scope-summary mono">
+                main 0 | iframe 0
+              </span>
               <span id="network-summary" className="network-summary mono">
                 0 / 0 requests
               </span>

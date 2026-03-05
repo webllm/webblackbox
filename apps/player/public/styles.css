@@ -1115,7 +1115,7 @@ input[type="file"],
 
 .filters {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px;
+  grid-template-columns: minmax(0, 1fr) 170px 190px;
   gap: 4px;
 }
 
@@ -1445,6 +1445,49 @@ input[type="file"],
   white-space: nowrap;
 }
 
+.tag-wrap {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.scope-tag {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  font-size: 8px;
+  line-height: 13px;
+  font-family: var(--mono-font-family);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.scope-tag-main {
+  border-color: #9aa0a6;
+  background: #f1f3f4;
+  color: #3c4043;
+}
+
+.scope-tag-iframe {
+  border-color: #1a73e8;
+  background: #e8f0fe;
+  color: #0b57d0;
+}
+
+.scope-session {
+  max-width: 86px;
+  color: #6b7280;
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .event .mono {
   color: var(--sys-color-on-surface-subtle);
   font-size: 9px;
@@ -1483,6 +1526,9 @@ input[type="file"],
 }
 
 .signal {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   border-bottom: 1px solid var(--sys-color-divider);
   padding: 4px 8px 4px 10px;
   font-size: 11px;
@@ -1501,12 +1547,15 @@ input[type="file"],
 }
 
 .signal-text {
+  min-width: 0;
+  flex: 1;
   color: var(--sys-color-on-surface-subtle);
 }
 
 .network-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--sys-color-divider);
@@ -1531,6 +1580,12 @@ input[type="file"],
 
 .network-summary {
   margin-left: auto;
+  color: var(--sys-color-on-surface-subtle);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.network-scope-summary {
   color: var(--sys-color-on-surface-subtle);
   font-size: 9px;
   white-space: nowrap;
@@ -1667,6 +1722,11 @@ input[type="file"],
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.waterfall-host .scope-tag {
+  margin-left: 4px;
+  vertical-align: middle;
 }
 
 .waterfall-col-method,
