@@ -65,11 +65,6 @@ export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
   private readonly chunkCodec: (typeof CHUNK_CODECS)[number];
 
-  private readonly indexer = new EventIndexer();
-
-  private readonly blobHashes = new Set<string>();
-  private readonly sessionBlobHashes = new Set<string>();
-
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = resolveChunkCodec(options.chunkCodec);
     const maxChunkBytes = options.maxChunkBytes ?? 512 * 1024;
@@ -139,25 +134,12 @@ export class FlightRecorderPipeline {
     await this.flush();
 
     if (options.purge) {
-      await this.options.storage.deleteSession(this.options.session.sid, [
-        ...this.sessionBlobHashes
-      ]);
+      await this.options.storage.deleteSession(this.options.session.sid);
     }
-
-    this.sessionBlobHashes.clear();
-    this.blobHashes.clear();
   }
 
   public async putBlob(mime: string, bytes: Uint8Array): Promise<string> {
     const hash = await sha256Hex(bytes);
-    this.sessionBlobHashes.add(hash);
-
-    if (this.blobHashes.has(hash)) {
-      return hash;
-    }
-
-    this.blobHashes.add(hash);
-
     const blob: StoredBlob = {
       hash,
       mime,
@@ -176,7 +158,9 @@ export class FlightRecorderPipeline {
     request: RequestIndexEntry[];
     inverted: InvertedIndexEntry[];
   }> {
-    const snapshot = this.indexer.snapshot();
+    await this.flush();
+    const chunks = await this.options.storage.listChunks(this.options.session.sid);
+    const snapshot = await this.buildIndexesFromChunks(chunks);
     await this.options.storage.putIndexes(this.options.session.sid, snapshot);
     return snapshot;
   }
@@ -252,10 +236,19 @@ export class FlightRecorderPipeline {
   }
 
   private async listSessionBlobs(): Promise<StoredBlob[]> {
-    const hashes = [...this.sessionBlobHashes].sort();
+    const chunks = await this.options.storage.listChunks(this.options.session.sid);
+    const hashes = new Set<string>();
     const blobs: StoredBlob[] = [];
 
-    for (const hash of hashes) {
+    for (const chunk of chunks) {
+      const events = await decodeChunkEvents(chunk.bytes, chunk.meta.codec);
+
+      for (const hash of collectBlobHashesFromEvents(events)) {
+        hashes.add(hash);
+      }
+    }
+
+    for (const hash of [...hashes].sort()) {
       const blob = await this.options.storage.getBlob(hash);
 
       if (blob) {
@@ -278,7 +271,6 @@ export class FlightRecorderPipeline {
   }
 
   private async listReferencedSessionBlobsFromChunks(chunks: StoredChunk[]): Promise<StoredBlob[]> {
-    const blobsByHash = await this.listSessionBlobMap();
     const referencedHashes = new Set<string>();
 
     for (const chunk of chunks) {
@@ -293,7 +285,7 @@ export class FlightRecorderPipeline {
     const referenced: StoredBlob[] = [];
 
     for (const hash of [...referencedHashes].sort()) {
-      const blob = blobsByHash.get(hash);
+      const blob = await this.options.storage.getBlob(hash);
 
       if (blob) {
         referenced.push(blob);
@@ -549,8 +541,17 @@ export class FlightRecorderPipeline {
     };
 
     await this.options.storage.putChunk(chunk);
-    this.indexer.addChunk(chunk.meta);
-    this.indexer.addEvents(events);
+  }
+
+  private async buildIndexesFromChunks(chunks: StoredChunk[]): Promise<ExportIndexes> {
+    const indexer = new EventIndexer();
+
+    for (const chunk of chunks) {
+      indexer.addChunk(chunk.meta);
+      indexer.addEvents(await decodeChunkEvents(chunk.bytes, chunk.meta.codec));
+    }
+
+    return indexer.snapshot();
   }
 
   private buildManifest(chunks: StoredChunk[], blobCount: number): ExportManifest {

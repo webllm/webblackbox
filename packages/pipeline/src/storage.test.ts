@@ -104,15 +104,17 @@ async function writeRawRows(
 }
 
 describe("storage", () => {
-  it("supports memory storage CRUD and blob ref-count cleanup", async () => {
+  it("supports memory storage CRUD and session-scoped blob ref-count cleanup", async () => {
     const storage = new MemoryPipelineStorage();
     const hash = "f".repeat(64);
 
     await storage.putSession(SESSION_A);
+    await storage.putSession(SESSION_B);
     await storage.putChunk(createChunk(SESSION_A.sid, "C-2", 2, "second"));
     await storage.putChunk(createChunk(SESSION_A.sid, "C-1", 1, "first"));
     await storage.putBlob(createBlob(hash, Uint8Array.from([1, 2, 3])), SESSION_A.sid);
     await storage.putBlob(createBlob(hash, Uint8Array.from([1, 2, 3])), SESSION_A.sid);
+    await storage.putBlob(createBlob(hash, Uint8Array.from([1, 2, 3])), SESSION_B.sid);
     await storage.putIndexes(SESSION_A.sid, {
       time: [chunkMeta("C-1", 1)],
       request: [],
@@ -130,11 +132,14 @@ describe("storage", () => {
     expect(await storage.getSession(SESSION_A.sid)).toEqual(expect.objectContaining(SESSION_A));
     expect((await storage.getBlob(hash))?.refCount).toBe(2);
 
-    await storage.deleteSession(SESSION_A.sid, [hash]);
+    await storage.deleteSession(SESSION_A.sid);
     expect(await storage.getSession(SESSION_A.sid)).toBeUndefined();
     expect((await storage.getBlob(hash))?.refCount).toBe(1);
     expect((await storage.getIndexes(SESSION_A.sid)).time).toEqual([]);
     expect(await storage.getIntegrity(SESSION_A.sid)).toBeUndefined();
+
+    await storage.deleteSession(SESSION_B.sid);
+    expect(await storage.getBlob(hash)).toBeUndefined();
 
     await storage.deleteSession(SESSION_A.sid, ["0".repeat(64), "missing"]);
   });
@@ -252,6 +257,7 @@ describe("storage", () => {
       files: {}
     });
 
+    await storage.putBlob(sharedBlob, SESSION_A.sid);
     await storage.putBlob(sharedBlob, SESSION_A.sid);
     await storage.putBlob(sharedBlob, SESSION_B.sid);
     expect((await storage.getBlob(sharedHash))?.refCount).toBe(2);

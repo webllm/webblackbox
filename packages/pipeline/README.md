@@ -6,7 +6,7 @@ The event processing pipeline for WebBlackbox. Handles chunking, indexing, blob 
 
 - **FlightRecorderPipeline** — Main pipeline orchestrating the full event processing lifecycle
 - **EventChunker** — Groups events into size-bounded chunks with codec support
-- **EventIndexer** — Builds time-based, request-based, and inverted text search indexes
+- **EventIndexer** — Builds time-based, request-based, and inverted text search indexes on demand from stored chunks
 - **Codec** — NDJSON chunk codec support for `none`, `gzip`, `br`, and `zst`
 - **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
 - **PipelineStorage** — Abstract storage interface with in-memory implementation
@@ -47,7 +47,7 @@ for (const event of events) {
 // Flush remaining events
 await pipeline.flush();
 
-// Build search indexes
+// Build search indexes on demand from persisted chunks
 const indexes = await pipeline.finalizeIndexes();
 
 // Export as archive
@@ -131,6 +131,8 @@ type FinalizedChunk = {
 ```
 
 ## Indexing
+
+`FlightRecorderPipeline` does not retain full request/text indexes in memory while recording. It rebuilds them from persisted chunks when `finalizeIndexes()` or `exportBundle()` runs, which keeps long-running extension sessions memory-bounded.
 
 The `EventIndexer` builds three types of indexes:
 

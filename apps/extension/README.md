@@ -128,6 +128,12 @@ The build output is in the `build/` directory. Build entries:
 | `sessions.ts`  | `build/sessions.js`  | Sessions page        |
 | `injected.ts`  | `build/injected.js`  | Injected page script |
 
+## E2E
+
+- `pnpm e2e:fullchain:full` runs the full-mode end-to-end capture/export demo.
+- `pnpm e2e:memory:full` runs a synthetic long-session full-mode stress case and samples JS heap usage for the target page, service worker, and offscreen document.
+- Useful env vars for the memory regression script: `WB_E2E_STRESS_REQUESTS`, `WB_E2E_STRESS_CONCURRENCY`, `WB_E2E_MEMORY_SAMPLE_MS`, `WB_E2E_OFFSCREEN_FINAL_GROWTH_MB`, `WB_E2E_SW_FINAL_GROWTH_MB`.
+
 ## Loading in Chrome
 
 1. Run `pnpm build` in the extension directory

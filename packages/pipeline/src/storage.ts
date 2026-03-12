@@ -78,6 +78,8 @@ export class MemoryPipelineStorage implements PipelineStorage {
 
   private readonly blobs = new Map<string, StoredBlob>();
 
+  private readonly blobRefs = new Map<string, Set<string>>();
+
   private readonly indexes = new Map<string, StoredIndexes>();
 
   private readonly integrity = new Map<string, HashesManifest>();
@@ -107,12 +109,19 @@ export class MemoryPipelineStorage implements PipelineStorage {
   }
 
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
-    void sidHint;
+    const trackingSid = normalizeTrackingSid(sidHint);
+
+    if (trackingSid && !this.trackBlobHashForSession(trackingSid, blob.hash)) {
+      return;
+    }
+
     const existing = this.blobs.get(blob.hash);
 
     if (existing) {
-      existing.refCount += 1;
-      this.blobs.set(blob.hash, existing);
+      this.blobs.set(blob.hash, {
+        ...existing,
+        refCount: existing.refCount + 1
+      });
       return;
     }
 
@@ -144,12 +153,16 @@ export class MemoryPipelineStorage implements PipelineStorage {
   }
 
   public async deleteSession(sid: string, blobHashes: string[] = []): Promise<void> {
+    const trackedBlobHashes = this.getTrackedBlobHashes(sid);
+    const mergedBlobHashes = mergeBlobHashes(blobHashes, trackedBlobHashes);
+
     this.sessions.delete(sid);
     this.chunks.delete(sid);
+    this.blobRefs.delete(sid);
     this.indexes.delete(sid);
     this.integrity.delete(sid);
 
-    for (const hash of blobHashes) {
+    for (const hash of mergedBlobHashes) {
       const blob = this.blobs.get(hash);
 
       if (!blob) {
@@ -165,6 +178,27 @@ export class MemoryPipelineStorage implements PipelineStorage {
         });
       }
     }
+  }
+
+  private trackBlobHashForSession(sid: string, hash: string): boolean {
+    if (!SHA256_HEX_PATTERN.test(hash)) {
+      return true;
+    }
+
+    const existing = this.blobRefs.get(sid);
+
+    if (existing?.has(hash)) {
+      return false;
+    }
+
+    const next = existing ?? new Set<string>();
+    next.add(hash);
+    this.blobRefs.set(sid, next);
+    return true;
+  }
+
+  private getTrackedBlobHashes(sid: string): string[] {
+    return [...(this.blobRefs.get(sid) ?? new Set<string>())];
   }
 }
 
@@ -451,8 +485,12 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
-    const trackingSid =
-      typeof sidHint === "string" && sidHint.trim().length > 0 ? sidHint.trim() : null;
+    const trackingSid = normalizeTrackingSid(sidHint);
+
+    if (trackingSid && (await this.hasTrackedBlobHashForSession(trackingSid, blob.hash))) {
+      return;
+    }
+
     const existing = await this.getBlob(blob.hash);
 
     if (existing) {
@@ -776,6 +814,15 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     return normalizeBlobHashes(row?.value ?? []);
   }
 
+  private async hasTrackedBlobHashForSession(sid: string, hash: string): Promise<boolean> {
+    if (!SHA256_HEX_PATTERN.test(hash)) {
+      return false;
+    }
+
+    const tracked = await this.getTrackedBlobHashes(sid);
+    return tracked.includes(hash);
+  }
+
   private async deleteTrackedBlobHashes(sid: string): Promise<void> {
     const db = await this.db();
     await runTransaction(db, "blobRefs", "readwrite", (store) => {
@@ -886,6 +933,10 @@ function mergeBlobHashes(...sources: unknown[]): string[] {
   }
 
   return [...output];
+}
+
+function normalizeTrackingSid(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function collectBlobHashesFromUnknown(value: unknown, output: Set<string>): void {

@@ -173,6 +173,8 @@ Three indexes are built for efficient querying:
 2. **Request Index** — Maps network request IDs to event IDs for request tracing
 3. **Inverted Index** — Maps searchable terms to event IDs for full-text search
 
+In the extension pipeline, chunks are persisted first and indexes are rebuilt on demand during `finalizeIndexes()` / export. This avoids keeping full-session request and inverted indexes resident in offscreen memory during long-running recordings.
+
 ### Blob Storage
 
 Binary content is stored as content-addressable blobs:

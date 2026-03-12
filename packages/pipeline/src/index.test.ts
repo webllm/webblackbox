@@ -186,6 +186,55 @@ describe("pipeline", () => {
     expect((await storage.listBlobs()).length).toBe(1);
   });
 
+  it("rebuilds indexes and blob lookup from stored chunks after pipeline recovery", async () => {
+    const storage = new MemoryPipelineStorage();
+    const session: SessionMetadata = {
+      ...SESSION,
+      sid: "S-recovery"
+    };
+    const initialPipeline = new FlightRecorderPipeline({
+      session,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await initialPipeline.start();
+    const shotHash = await initialPipeline.putBlob("image/webp", Uint8Array.from([1, 2, 3, 4]));
+    await initialPipeline.ingest(
+      createEvent("E-recovery-shot", "screen.screenshot", 100, {
+        shotId: shotHash,
+        format: "webp",
+        size: 4
+      })
+    );
+    await initialPipeline.ingest(
+      createEvent("E-recovery-req", "network.request", 120, {
+        reqId: "R-recovery",
+        url: "https://example.com/api/recovery"
+      })
+    );
+    await initialPipeline.flush();
+
+    const recoveredPipeline = new FlightRecorderPipeline({
+      session,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await recoveredPipeline.start();
+
+    const exported = await recoveredPipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const blobPaths = Object.keys(zip.files).filter((path) => path.startsWith("blobs/"));
+
+    expect(parsed.events.map((event) => event.id)).toEqual(
+      expect.arrayContaining(["E-recovery-shot", "E-recovery-req"])
+    );
+    expect(parsed.requestIndex.some((entry) => entry.reqId === "R-recovery")).toBe(true);
+    expect(blobPaths.some((path) => path.includes(shotHash))).toBe(true);
+  });
+
   it("exports only blobs referenced by retained events", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
