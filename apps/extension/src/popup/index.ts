@@ -16,8 +16,8 @@ const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
 
 type PopupExportPolicyForm = {
   includeScreenshots: boolean;
-  maxArchiveMb: number;
-  recentMinutes: number;
+  maxArchiveMb: string;
+  recentMinutes: string;
 };
 
 const state: {
@@ -146,26 +146,22 @@ function render(container: HTMLElement): void {
       <section class="wb-popup__policy">
         <p class="wb-popup__policy-title">Archive Policy</p>
         <label class="wb-toggle">
-          <input id="export-include-screenshots" type="checkbox" ${
-            state.exportPolicyForm.includeScreenshots ? "checked" : ""
-          } />
+          <input id="export-include-screenshots" type="checkbox" />
           <span>Include screenshots</span>
         </label>
         <label class="wb-field-label" for="export-max-size-mb">Max archive size (MB)</label>
-        <input id="export-max-size-mb" type="number" min="1" max="4096" step="1" value="${
-          state.exportPolicyForm.maxArchiveMb
-        }" class="wb-input" />
+        <input id="export-max-size-mb" type="number" min="1" max="4096" step="1" class="wb-input" />
         <label class="wb-field-label" for="export-recent-minutes">Recent window (minutes)</label>
-        <input id="export-recent-minutes" type="number" min="1" max="43200" step="1" value="${
-          state.exportPolicyForm.recentMinutes
-        }" class="wb-input" />
+        <input id="export-recent-minutes" type="number" min="1" max="43200" step="1" class="wb-input" />
       </section>
       <p class="${exportStatusClass}">${state.exportStatus ?? ""}</p>
       <p class="wb-popup__hint">Marker: Ctrl/Cmd + Shift + M</p>
     </section>
   `;
 
+  writeExportPolicyFormToContainer(container, state.exportPolicyForm);
   bindActions(container, activeSession, exportSession);
+  bindExportPolicyForm(container);
 }
 
 function bindActions(
@@ -236,6 +232,23 @@ function bindActions(
       policy
     });
   });
+}
+
+function bindExportPolicyForm(container: HTMLElement): void {
+  const persistDraft = (): void => {
+    state.exportPolicyForm = readPopupExportPolicyFormFromContainer(container);
+    savePopupExportPolicyForm(state.exportPolicyForm);
+  };
+
+  container
+    .querySelector<HTMLInputElement>("#export-include-screenshots")
+    ?.addEventListener("change", persistDraft);
+  container
+    .querySelector<HTMLInputElement>("#export-max-size-mb")
+    ?.addEventListener("input", persistDraft);
+  container
+    .querySelector<HTMLInputElement>("#export-recent-minutes")
+    ?.addEventListener("input", persistDraft);
 }
 
 function openPassphraseDialog(): Promise<string | null> {
@@ -414,41 +427,17 @@ function formatByteSize(bytes: number): string {
 }
 
 function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
-  const includeScreenshots =
-    container.querySelector<HTMLInputElement>("#export-include-screenshots")?.checked ??
-    state.exportPolicyForm.includeScreenshots;
-  const maxArchiveMb = normalizeBoundedInt(
-    Number(container.querySelector<HTMLInputElement>("#export-max-size-mb")?.value),
-    state.exportPolicyForm.maxArchiveMb,
-    1,
-    4096
-  );
-  const recentMinutes = normalizeBoundedInt(
-    Number(container.querySelector<HTMLInputElement>("#export-recent-minutes")?.value),
-    state.exportPolicyForm.recentMinutes,
-    1,
-    43_200
-  );
-
-  state.exportPolicyForm = {
-    includeScreenshots,
-    maxArchiveMb,
-    recentMinutes
-  };
+  state.exportPolicyForm = readPopupExportPolicyFormFromContainer(container);
   savePopupExportPolicyForm(state.exportPolicyForm);
 
-  return {
-    includeScreenshots,
-    maxArchiveBytes: maxArchiveMb * 1024 * 1024,
-    recentWindowMs: recentMinutes * 60 * 1000
-  };
+  return toExportPolicy(state.exportPolicyForm);
 }
 
 function toPopupExportPolicyForm(policy: ExportPolicy): PopupExportPolicyForm {
   return {
     includeScreenshots: policy.includeScreenshots,
-    maxArchiveMb: Math.max(1, Math.round(policy.maxArchiveBytes / (1024 * 1024))),
-    recentMinutes: Math.max(1, Math.round(policy.recentWindowMs / (60 * 1000)))
+    maxArchiveMb: String(Math.max(1, Math.round(policy.maxArchiveBytes / (1024 * 1024)))),
+    recentMinutes: String(Math.max(1, Math.round(policy.recentWindowMs / (60 * 1000))))
   };
 }
 
@@ -471,13 +460,13 @@ function loadPopupExportPolicyForm(): PopupExportPolicyForm {
         typeof parsed.includeScreenshots === "boolean"
           ? parsed.includeScreenshots
           : DEFAULT_EXPORT_POLICY.includeScreenshots,
-      maxArchiveMb: normalizeBoundedInt(
+      maxArchiveMb: normalizeStoredBoundedIntText(
         parsed.maxArchiveMb,
         Math.round(DEFAULT_EXPORT_POLICY.maxArchiveBytes / (1024 * 1024)),
         1,
         4096
       ),
-      recentMinutes: normalizeBoundedInt(
+      recentMinutes: normalizeStoredBoundedIntText(
         parsed.recentMinutes,
         Math.round(DEFAULT_EXPORT_POLICY.recentWindowMs / (60 * 1000)),
         1,
@@ -499,6 +488,88 @@ function savePopupExportPolicyForm(policy: PopupExportPolicyForm): void {
   } catch {
     // ignore storage write failures
   }
+}
+
+function writeExportPolicyFormToContainer(
+  container: HTMLElement,
+  form: PopupExportPolicyForm
+): void {
+  const includeScreenshots = container.querySelector<HTMLInputElement>(
+    "#export-include-screenshots"
+  );
+  const maxArchiveMb = container.querySelector<HTMLInputElement>("#export-max-size-mb");
+  const recentMinutes = container.querySelector<HTMLInputElement>("#export-recent-minutes");
+
+  if (includeScreenshots) {
+    includeScreenshots.checked = form.includeScreenshots;
+  }
+
+  if (maxArchiveMb) {
+    maxArchiveMb.value = form.maxArchiveMb;
+  }
+
+  if (recentMinutes) {
+    recentMinutes.value = form.recentMinutes;
+  }
+}
+
+function readPopupExportPolicyFormFromContainer(container: HTMLElement): PopupExportPolicyForm {
+  return {
+    includeScreenshots:
+      container.querySelector<HTMLInputElement>("#export-include-screenshots")?.checked ??
+      state.exportPolicyForm.includeScreenshots,
+    maxArchiveMb:
+      container.querySelector<HTMLInputElement>("#export-max-size-mb")?.value ??
+      state.exportPolicyForm.maxArchiveMb,
+    recentMinutes:
+      container.querySelector<HTMLInputElement>("#export-recent-minutes")?.value ??
+      state.exportPolicyForm.recentMinutes
+  };
+}
+
+function toExportPolicy(form: PopupExportPolicyForm): ExportPolicy {
+  const defaultPolicyForm = toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY);
+  const maxArchiveMb = normalizeBoundedInt(
+    Number(form.maxArchiveMb),
+    Number(defaultPolicyForm.maxArchiveMb),
+    1,
+    4096
+  );
+  const recentMinutes = normalizeBoundedInt(
+    Number(form.recentMinutes),
+    Number(defaultPolicyForm.recentMinutes),
+    1,
+    43_200
+  );
+
+  return {
+    includeScreenshots: form.includeScreenshots,
+    maxArchiveBytes: maxArchiveMb * 1024 * 1024,
+    recentWindowMs: recentMinutes * 60 * 1000
+  };
+}
+
+function normalizeStoredBoundedIntText(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+
+    if (trimmed.length === 0) {
+      return "";
+    }
+
+    const numeric = Number(trimmed);
+
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return String(Math.max(min, Math.min(max, Math.round(numeric))));
+    }
+  }
+
+  return String(normalizeBoundedInt(value, fallback, min, max));
 }
 
 function normalizeBoundedInt(value: unknown, fallback: number, min: number, max: number): number {
