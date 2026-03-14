@@ -17,6 +17,7 @@
   <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/github/v/release/webllm/webblackbox.svg" alt="Release" /></a>
   <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/badge/Chrome-Extension-4285F4?logo=googlechrome&logoColor=white" alt="Chrome Extension" /></a>
   <a href="https://webllm.github.io/webblackbox/"><img src="https://img.shields.io/badge/Hosted-Player-f97316" alt="Hosted Player" /></a>
+  <img src="https://img.shields.io/badge/TypeScript-first-blue" alt="TypeScript">
 </p>
 
 ---
