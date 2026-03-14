@@ -94,6 +94,18 @@ function movePointer(): void {
   );
 }
 
+function dispatchScroll(scrollX: number, scrollY: number): void {
+  Object.defineProperty(window, "scrollX", {
+    configurable: true,
+    value: scrollX
+  });
+  Object.defineProperty(window, "scrollY", {
+    configurable: true,
+    value: scrollY
+  });
+  document.dispatchEvent(new Event("scroll", { bubbles: true }));
+}
+
 function countEmittedEvents(emitBatch: ReturnType<typeof vi.fn>): number {
   return emitBatch.mock.calls.reduce((total, call) => {
     const [events] = call as [Array<unknown>];
@@ -101,11 +113,26 @@ function countEmittedEvents(emitBatch: ReturnType<typeof vi.fn>): number {
   }, 0);
 }
 
+function emittedRawTypes(emitBatch: ReturnType<typeof vi.fn>): string[] {
+  return emitBatch.mock.calls.flatMap((call) => {
+    const [events] = call as [Array<{ rawType?: string }>];
+    return events.map((event) => event.rawType ?? "");
+  });
+}
+
 describe("LiteCaptureAgent", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     document.body.innerHTML = `<button id="target" type="button">Open</button>`;
     snapdomToBlobMock.mockImplementation(() => new Promise(() => undefined));
+    Object.defineProperty(window, "scrollX", {
+      configurable: true,
+      value: 0
+    });
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      value: 0
+    });
   });
 
   afterEach(() => {
@@ -200,6 +227,60 @@ describe("LiteCaptureAgent", () => {
     });
 
     expect(emittedRawTypes).toContain("localStorageSnapshot");
+
+    agent.dispose();
+  });
+
+  it("coalesces scroll bursts into leading and trailing samples", async () => {
+    const { agent, emitBatch } = createAgent();
+
+    dispatchScroll(0, 120);
+    agent.flush();
+
+    dispatchScroll(0, 240);
+    dispatchScroll(0, 480);
+
+    const immediateScrollEvents = emitBatch.mock.calls.flatMap((call) => {
+      const [events] = call as [Array<{ rawType?: string; payload?: { scrollY?: number } }>];
+      return events.filter((event) => event.rawType === "scroll");
+    });
+
+    expect(immediateScrollEvents).toHaveLength(1);
+    expect(immediateScrollEvents[0]?.payload?.scrollY).toBe(120);
+
+    emitBatch.mockClear();
+
+    await vi.advanceTimersByTimeAsync(160);
+    agent.flush();
+
+    const trailingScrollEvents = emitBatch.mock.calls.flatMap((call) => {
+      const [events] = call as [Array<{ rawType?: string; payload?: { scrollY?: number } }>];
+      return events.filter((event) => event.rawType === "scroll");
+    });
+
+    expect(trailingScrollEvents).toHaveLength(1);
+    expect(trailingScrollEvents[0]?.payload?.scrollY).toBe(480);
+
+    agent.dispose();
+  });
+
+  it("suppresses mousemove capture during the post-scroll burst window", async () => {
+    const { agent, emitBatch } = createAgent();
+
+    dispatchScroll(0, 180);
+    movePointer();
+    agent.flush();
+
+    expect(emittedRawTypes(emitBatch)).toContain("scroll");
+    expect(emittedRawTypes(emitBatch)).not.toContain("mousemove");
+
+    emitBatch.mockClear();
+
+    await vi.advanceTimersByTimeAsync(250);
+    movePointer();
+    agent.flush();
+
+    expect(emittedRawTypes(emitBatch)).toContain("mousemove");
 
     agent.dispose();
   });

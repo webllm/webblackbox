@@ -11,6 +11,8 @@ const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
 const BACKGROUND_CAPTURE_IDLE_MS = 1_500;
 const START_CAPTURE_STORAGE_DELAY_MS = 400;
 const START_CAPTURE_SCREENSHOT_DELAY_MS = 1_000;
+const SCROLL_BURST_DEBOUNCE_MS = 140;
+const POINTERMOVE_SUPPRESS_AFTER_SCROLL_MS = 220;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
@@ -117,6 +119,7 @@ export class LiteCaptureAgent {
   private backgroundCaptureRetryTimer = 0;
   private deferredActionCaptureTimer = 0;
   private deferredStartTaskTimers: number[] = [];
+  private trailingScrollTimer = 0;
   private mutationFlushTimer = 0;
   private flushTimer = 0;
   private lastScrollTime = 0;
@@ -125,7 +128,14 @@ export class LiteCaptureAgent {
   private screenshotPendingReason: string | null = null;
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
   private lastUserActivityMono = monotonicTime();
+  private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
+  private pendingScrollPayload: {
+    target: Record<string, unknown>;
+    scrollX: number;
+    scrollY: number;
+  } | null = null;
+  private lastEmittedScrollPosition: { scrollX: number; scrollY: number } | null = null;
   private hasDomSnapshot = false;
   private hasLocalStorageSnapshot = false;
   private mutationSummary: MutationBatchSummary = createEmptyMutationSummary();
@@ -230,6 +240,7 @@ export class LiteCaptureAgent {
 
   /** Flushes the current buffered raw events immediately. */
   public flush(): void {
+    this.flushPendingScrollEvent();
     this.drainBufferedEvents();
   }
 
@@ -447,16 +458,23 @@ export class LiteCaptureAgent {
         const scrollGapMs = Math.max(16, Math.round(1000 / Math.max(1, this.sampling.scrollHz)));
 
         if (now - this.lastScrollTime < scrollGapMs) {
+          this.queueTrailingScrollEvent(event);
           return;
         }
 
         this.lastScrollTime = now;
+        this.scrollBurstActiveUntilMono =
+          monotonicTime() + Math.max(POINTERMOVE_SUPPRESS_AFTER_SCROLL_MS, scrollGapMs);
 
-        this.queueEvent("scroll", {
+        const payload = {
           target: toFastTargetPayload(event.target),
           scrollX: window.scrollX,
           scrollY: window.scrollY
-        });
+        };
+
+        this.pendingScrollPayload = payload;
+        this.emitQueuedScrollEvent(payload);
+        this.scheduleTrailingScrollFlush(scrollGapMs);
       },
       INPUT_OPTIONS_TRUE
     );
@@ -469,6 +487,10 @@ export class LiteCaptureAgent {
         this.trackPointer(event.clientX, event.clientY);
 
         if (this.mode === "full") {
+          return;
+        }
+
+        if (this.isScrollBurstActive()) {
           return;
         }
 
@@ -716,6 +738,11 @@ export class LiteCaptureAgent {
       this.startCaptureTimer = 0;
     }
 
+    if (this.trailingScrollTimer > 0) {
+      clearTimeout(this.trailingScrollTimer);
+      this.trailingScrollTimer = 0;
+    }
+
     if (this.backgroundCaptureRetryTimer > 0) {
       clearTimeout(this.backgroundCaptureRetryTimer);
       this.backgroundCaptureRetryTimer = 0;
@@ -743,6 +770,8 @@ export class LiteCaptureAgent {
     if (this.mutationSummary.count > 0) {
       this.flushMutationBuffer();
     }
+
+    this.flushPendingScrollEvent();
   }
 
   private scheduleMutationFlush(): void {
@@ -1103,6 +1132,67 @@ export class LiteCaptureAgent {
 
   private markUserActivity(): void {
     this.lastUserActivityMono = monotonicTime();
+  }
+
+  private queueTrailingScrollEvent(event: Event): void {
+    this.pendingScrollPayload = {
+      target: toFastTargetPayload(event.target),
+      scrollX: window.scrollX,
+      scrollY: window.scrollY
+    };
+    this.scrollBurstActiveUntilMono = monotonicTime() + POINTERMOVE_SUPPRESS_AFTER_SCROLL_MS;
+    this.scheduleTrailingScrollFlush(SCROLL_BURST_DEBOUNCE_MS);
+  }
+
+  private scheduleTrailingScrollFlush(delayMs: number): void {
+    if (this.trailingScrollTimer > 0) {
+      clearTimeout(this.trailingScrollTimer);
+    }
+
+    this.trailingScrollTimer = window.setTimeout(
+      () => {
+        this.trailingScrollTimer = 0;
+        this.flushPendingScrollEvent();
+      },
+      Math.max(SCROLL_BURST_DEBOUNCE_MS, delayMs)
+    );
+  }
+
+  private flushPendingScrollEvent(): void {
+    const pending = this.pendingScrollPayload;
+
+    if (!pending) {
+      return;
+    }
+
+    this.pendingScrollPayload = null;
+
+    if (
+      this.lastEmittedScrollPosition &&
+      this.lastEmittedScrollPosition.scrollX === pending.scrollX &&
+      this.lastEmittedScrollPosition.scrollY === pending.scrollY
+    ) {
+      return;
+    }
+
+    this.emitQueuedScrollEvent(pending);
+  }
+
+  private emitQueuedScrollEvent(payload: {
+    target: Record<string, unknown>;
+    scrollX: number;
+    scrollY: number;
+  }): void {
+    this.lastEmittedScrollPosition = {
+      scrollX: payload.scrollX,
+      scrollY: payload.scrollY
+    };
+
+    this.queueEvent("scroll", payload);
+  }
+
+  private isScrollBurstActive(): boolean {
+    return monotonicTime() < this.scrollBurstActiveUntilMono;
   }
 
   private isUserRecentlyActive(idleMs = BACKGROUND_CAPTURE_IDLE_MS): boolean {
