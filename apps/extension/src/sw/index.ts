@@ -44,6 +44,11 @@ import {
   resolveLiteBodyCaptureRule as resolveLiteBodyCaptureRuleUtil,
   transformResponseBodyForCapture
 } from "./body-capture-utils.js";
+import {
+  buildLiteNetworkFailureRawEvent,
+  buildLiteNetworkRequestRawEvent,
+  buildLiteNetworkResponseRawEvent
+} from "./lite-network-baseline.js";
 
 type SessionRuntime = {
   sid: string;
@@ -62,7 +67,14 @@ type SessionRuntime = {
   enabledCdpSessions: Set<string>;
   requestMeta: Map<
     string,
-    { url?: string; mimeType?: string; status?: number; resourceType?: string }
+    {
+      url?: string;
+      method?: string;
+      startedAt?: number;
+      mimeType?: string;
+      status?: number;
+      resourceType?: string;
+    }
   >;
   screenshotInterval: ReturnType<typeof setInterval> | null;
   lastPointer: PointerState | null;
@@ -201,6 +213,7 @@ const pendingOffscreenRequests = new Map<
 const offscreenSessionRecovery = new Map<string, Promise<void>>();
 let offscreenRequestSeq = 0;
 let freezeBadgeTimer: ReturnType<typeof setTimeout> | null = null;
+let liteWebRequestCaptureInstalled = false;
 
 const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
@@ -306,6 +319,7 @@ const OFFSCREEN_PORT_READY_WAIT_MS = 25;
 
 console.info("[WebBlackbox] service worker booted");
 
+installLiteWebRequestCapture();
 void restoreRuntimeState();
 
 chromeApi?.runtime?.onInstalled.addListener(() => {
@@ -2986,6 +3000,137 @@ async function ensureInjectedHooks(tabId: number): Promise<void> {
       files: ["injected.js"]
     })
     .catch(() => undefined);
+}
+
+function installLiteWebRequestCapture(): void {
+  if (!chromeApi?.webRequest || liteWebRequestCaptureInstalled) {
+    return;
+  }
+
+  const filter = { urls: ["<all_urls>"] };
+
+  chromeApi.webRequest.onBeforeRequest.addListener((details) => {
+    const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
+
+    if (!runtime) {
+      return;
+    }
+
+    const startedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
+    runtime.requestMeta.set(details.requestId, {
+      ...runtime.requestMeta.get(details.requestId),
+      url: details.url,
+      method: details.method,
+      startedAt
+    });
+
+    ingestRawEvent(
+      buildLiteNetworkRequestRawEvent(
+        {
+          sid: runtime.sid,
+          tabId: runtime.tabId,
+          frame: normalizeContentFrameId(details.frameId)
+        },
+        {
+          requestId: details.requestId,
+          method: details.method,
+          url: details.url,
+          timeStamp: startedAt
+        }
+      )
+    );
+  }, filter);
+
+  chromeApi.webRequest.onCompleted.addListener((details) => {
+    const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
+
+    if (!runtime) {
+      return;
+    }
+
+    const metadata = runtime.requestMeta.get(details.requestId);
+    const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
+
+    ingestRawEvent(
+      buildLiteNetworkResponseRawEvent(
+        {
+          sid: runtime.sid,
+          tabId: runtime.tabId,
+          frame: normalizeContentFrameId(details.frameId)
+        },
+        {
+          requestId: details.requestId,
+          method: details.method ?? metadata?.method,
+          url: details.url ?? metadata?.url ?? "unknown://request",
+          statusCode: details.statusCode,
+          statusLine: details.statusLine,
+          timeStamp: endedAt,
+          duration:
+            typeof metadata?.startedAt === "number"
+              ? Math.max(0, endedAt - metadata.startedAt)
+              : undefined
+        }
+      )
+    );
+
+    runtime.requestMeta.delete(details.requestId);
+  }, filter);
+
+  chromeApi.webRequest.onErrorOccurred.addListener((details) => {
+    const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
+
+    if (!runtime) {
+      return;
+    }
+
+    const metadata = runtime.requestMeta.get(details.requestId);
+    const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
+
+    ingestRawEvent(
+      buildLiteNetworkFailureRawEvent(
+        {
+          sid: runtime.sid,
+          tabId: runtime.tabId,
+          frame: normalizeContentFrameId(details.frameId)
+        },
+        {
+          requestId: details.requestId,
+          method: details.method ?? metadata?.method,
+          url: details.url ?? metadata?.url ?? "unknown://request",
+          timeStamp: endedAt,
+          duration:
+            typeof metadata?.startedAt === "number"
+              ? Math.max(0, endedAt - metadata.startedAt)
+              : undefined,
+          error: details.error
+        }
+      )
+    );
+
+    runtime.requestMeta.delete(details.requestId);
+  }, filter);
+
+  liteWebRequestCaptureInstalled = true;
+}
+
+function resolveLiteRuntimeForWebRequest(tabId: number): SessionRuntime | undefined {
+  if (!Number.isFinite(tabId) || tabId < 0) {
+    return undefined;
+  }
+
+  const runtime = sessionsByTab.get(tabId);
+
+  if (!runtime || runtime.mode !== "lite" || runtime.stopping) {
+    return undefined;
+  }
+
+  return runtime;
+}
+
+function normalizeLiteNetworkTimestamp(candidate: unknown): number {
+  return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
+    ? Math.round(candidate)
+    : Date.now();
 }
 
 async function ensureOffscreenDocument(): Promise<void> {

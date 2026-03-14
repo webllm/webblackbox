@@ -55,6 +55,8 @@ export type InjectedHooksOptions = {
   flag?: string;
   /** Per-response capture budget; `0` disables response-body sampling. */
   bodyCaptureMaxBytes?: number;
+  /** Disables fetch/xhr/EventSource monkeypatching when browser-side capture is available. */
+  captureNetwork?: boolean;
 };
 
 /**
@@ -82,6 +84,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   let networkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
     options.bodyCaptureMaxBytes
   );
+  const captureNetwork = options.captureNetwork !== false;
 
   if (windowFlags[flag]) {
     if (Object.prototype.hasOwnProperty.call(options, "bodyCaptureMaxBytes")) {
@@ -109,7 +112,9 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   installConsoleHooks();
   installErrorHooks();
   installStorageHooks();
-  installNetworkHooks();
+  if (captureNetwork) {
+    installNetworkHooks();
+  }
   installIndexedDbHooks();
 
   emit("notice", {

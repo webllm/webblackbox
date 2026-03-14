@@ -199,6 +199,32 @@ describe("injected-hooks", () => {
     });
   });
 
+  it("does not patch page-side network hooks when captureNetwork is disabled", async () => {
+    const flag = "__WB_TEST_INJECTED_NETWORK_DISABLED__";
+    window.fetch = vi.fn(async () => new Response("ok")) as typeof fetch;
+    const originalFetchRef = window.fetch;
+    const openSpy = vi.spyOn(XMLHttpRequest.prototype, "open").mockImplementation(() => undefined);
+    const sendSpy = vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => undefined);
+
+    installInjectedLiteCaptureHooks({
+      flag,
+      captureNetwork: false
+    });
+
+    expect(window.fetch).toBe(originalFetchRef);
+
+    await fetch("https://example.test/disabled-network");
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "/disabled-network-xhr");
+    xhr.send();
+    await delay(10);
+
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(captured.some((message) => message.rawType === "fetch")).toBe(false);
+    expect(captured.some((message) => message.rawType === "xhr")).toBe(false);
+  });
+
   it("serializes invalid Date values without throwing", async () => {
     const flag = "__WB_TEST_INJECTED_INVALID_DATE__";
     installInjectedLiteCaptureHooks({ flag });

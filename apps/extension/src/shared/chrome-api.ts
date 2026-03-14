@@ -101,6 +101,50 @@ export type ChromeApi = {
     };
     sendMessage(message: unknown): Promise<unknown>;
   };
+  webRequest?: {
+    onBeforeRequest: {
+      addListener(
+        callback: (details: {
+          requestId: string;
+          tabId: number;
+          frameId?: number;
+          method?: string;
+          url: string;
+          timeStamp?: number;
+        }) => void,
+        filter: { urls: string[] }
+      ): void;
+    };
+    onCompleted: {
+      addListener(
+        callback: (details: {
+          requestId: string;
+          tabId: number;
+          frameId?: number;
+          method?: string;
+          url: string;
+          statusCode?: number;
+          statusLine?: string;
+          timeStamp?: number;
+        }) => void,
+        filter: { urls: string[] }
+      ): void;
+    };
+    onErrorOccurred: {
+      addListener(
+        callback: (details: {
+          requestId: string;
+          tabId: number;
+          frameId?: number;
+          method?: string;
+          url: string;
+          error?: string;
+          timeStamp?: number;
+        }) => void,
+        filter: { urls: string[] }
+      ): void;
+    };
+  };
   scripting?: {
     executeScript(options: {
       target: { tabId: number; allFrames?: boolean };
