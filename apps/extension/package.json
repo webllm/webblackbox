@@ -5,8 +5,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsup --config tsup.config.ts --watch src --watch public --onSuccess \"node scripts/copy-assets.mjs\"",
-    "build": "tsup --config tsup.config.ts --clean && node scripts/copy-assets.mjs",
+    "manifest:sync": "node scripts/sync-manifest-version.mjs",
+    "dev": "node scripts/sync-manifest-version.mjs && tsup --config tsup.config.ts --watch src --watch public --onSuccess \"node scripts/copy-assets.mjs\"",
+    "build": "node scripts/sync-manifest-version.mjs && tsup --config tsup.config.ts --clean && node scripts/copy-assets.mjs",
     "package:chrome": "pnpm run build && node scripts/package-extension.mjs",
     "e2e:check": "node scripts/e2e-extension-check.mjs",
     "e2e:fullchain": "node scripts/e2e-fullchain-demo.mjs",

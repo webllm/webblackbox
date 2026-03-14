@@ -28,7 +28,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && pnpm --filter @webblackbox/extension manifest:sync",
     "release": "changeset publish",
     "commit": "cz",
     "prepare": "husky"
