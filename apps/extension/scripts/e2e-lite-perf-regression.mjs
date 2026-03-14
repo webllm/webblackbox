@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { constants, createWriteStream } from "node:fs";
 import { access, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { createServer as createNetServer } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -17,7 +18,8 @@ const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const profileDir =
   process.env.WB_E2E_PROFILE_DIR ?? `/tmp/webblackbox-ext-lite-perf-profile-${Date.now()}`;
 const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-lite-perf-${Date.now()}.log`;
-const baseUrl = `http://127.0.0.1:${remotePort}`;
+const chromeReadyTimeoutMs = Number(process.env.WB_E2E_CHROME_READY_TIMEOUT_MS ?? "45000");
+const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ?? "2");
 
 const perfRequests = Number(process.env.WB_E2E_PERF_REQUESTS ?? "120");
 const perfConcurrency = Number(process.env.WB_E2E_PERF_CONCURRENCY ?? "6");
@@ -81,6 +83,7 @@ const chromeCandidates = [
 const state = {
   chromeProcess: null,
   logStream: null,
+  baseUrl: null,
   server: null,
   browserClient: null,
   popupClient: null,
@@ -115,18 +118,22 @@ async function main() {
 
   const stressUrl = `http://127.0.0.1:${server.port}/perf/`;
 
-  const { proc, logStream } = startChrome(chromeBinary, {
+  const chrome = await launchChromeWithRetry(chromeBinary, {
     extensionDir,
     profileDir,
     remotePort,
     headless,
-    logPath: chromeLogPath
+    logPath: chromeLogPath,
+    attempts: Math.max(1, Math.floor(chromeLaunchAttempts)),
+    readyTimeoutMs: Math.max(10_000, Math.floor(chromeReadyTimeoutMs))
   });
+  const baseUrl = chrome.baseUrl;
 
-  state.chromeProcess = proc;
-  state.logStream = logStream;
+  state.chromeProcess = chrome.proc;
+  state.logStream = chrome.logStream;
+  state.baseUrl = baseUrl;
 
-  const version = await waitForChromeReady(baseUrl, 25_000);
+  const version = chrome.version;
   console.log(`Chrome: ${version.Browser}`);
   console.log(`Extension ID: ${extensionId}`);
 
@@ -465,6 +472,7 @@ async function resolveChromeCandidate(candidate) {
 function startChrome(binary, options) {
   const args = [
     `--remote-debugging-port=${options.remotePort}`,
+    "--remote-debugging-address=127.0.0.1",
     `--user-data-dir=${options.profileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -473,6 +481,8 @@ function startChrome(binary, options) {
     "--disable-component-update",
     "--disable-default-apps",
     "--disable-popup-blocking",
+    "--safebrowsing-disable-download-protection",
+    "--window-size=1400,1000",
     `--disable-extensions-except=${options.extensionDir}`,
     `--load-extension=${options.extensionDir}`,
     "--enable-logging=stderr",
@@ -498,7 +508,154 @@ function startChrome(binary, options) {
   proc.stdout?.pipe(logStream);
   proc.stderr?.pipe(logStream);
 
+  proc.on("exit", (code, signal) => {
+    if (code !== 0 && code !== null) {
+      console.warn(`Chrome exited with code ${code}.`);
+    }
+
+    if (signal) {
+      console.warn(`Chrome exited via signal ${signal}.`);
+    }
+  });
+
   return { proc, logStream };
+}
+
+async function launchChromeWithRetry(binary, options) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+    const attemptProfileDir =
+      attempt === 1 ? options.profileDir : `${options.profileDir}-retry-${attempt}`;
+    const attemptLogPath =
+      attempt === 1
+        ? options.logPath
+        : options.logPath.replace(/(\.[^.]+)?$/, `-retry-${attempt}$1`);
+
+    await rm(attemptProfileDir, { recursive: true, force: true });
+    await mkdir(attemptProfileDir, { recursive: true });
+
+    const launchPort =
+      attempt === 1 ? await resolveLaunchPort(options.remotePort) : await reserveEphemeralPort();
+    const baseUrl = `http://127.0.0.1:${launchPort}`;
+    const { proc, logStream } = startChrome(binary, {
+      extensionDir: options.extensionDir,
+      profileDir: attemptProfileDir,
+      remotePort: launchPort,
+      headless: options.headless,
+      logPath: attemptLogPath
+    });
+
+    try {
+      const version = await waitForChromeReady(baseUrl, options.readyTimeoutMs, {
+        proc,
+        logPath: attemptLogPath
+      });
+      return {
+        proc,
+        logStream,
+        baseUrl,
+        remotePort: launchPort,
+        profileDir: attemptProfileDir,
+        version
+      };
+    } catch (error) {
+      lastError = error;
+      await terminateChromeProcess(proc);
+      logStream.end();
+
+      if (attempt < options.attempts) {
+        console.warn(
+          `Chrome launch attempt ${attempt} failed; retrying on a fresh profile. ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function terminateChromeProcess(proc) {
+  if (!proc || proc.killed || proc.exitCode !== null) {
+    return;
+  }
+
+  proc.kill("SIGTERM");
+  await Promise.race([
+    new Promise((resolve) => {
+      proc.once("exit", resolve);
+    }),
+    sleep(5_000)
+  ]);
+
+  if (proc.exitCode === null && !proc.killed) {
+    proc.kill("SIGKILL");
+    await Promise.race([
+      new Promise((resolve) => {
+        proc.once("exit", resolve);
+      }),
+      sleep(2_000)
+    ]);
+  }
+}
+
+async function resolveLaunchPort(preferredPort) {
+  if (Number.isFinite(preferredPort) && preferredPort > 0) {
+    const preferredAvailable = await canBindPort(preferredPort);
+    if (preferredAvailable) {
+      return preferredPort;
+    }
+  }
+
+  return reserveEphemeralPort();
+}
+
+async function canBindPort(port) {
+  const server = createNetServer();
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve) => {
+        server.close(() => resolve());
+      }).catch(() => undefined);
+    }
+  }
+}
+
+async function reserveEphemeralPort() {
+  const server = createNetServer();
+
+  try {
+    return await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("Failed to reserve an ephemeral port."));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  } finally {
+    await new Promise((resolve) => {
+      server.close(() => resolve());
+    }).catch(() => undefined);
+  }
 }
 
 async function startStressServer() {
@@ -1926,16 +2083,38 @@ function buildStressPageHtml() {
 </html>`;
 }
 
-async function waitForChromeReady(urlBase, timeoutMs) {
-  return waitFor(
-    async () => {
-      const version = await fetchJson(`${urlBase}/json/version`, 4_000);
-      return version?.Browser ? version : null;
-    },
-    timeoutMs,
-    250,
-    "Chrome DevTools endpoint not ready"
-  );
+async function waitForChromeReady(urlBase, timeoutMs, context = undefined) {
+  try {
+    return await waitFor(
+      async () => {
+        if (context?.proc?.exitCode !== null && context?.proc?.exitCode !== undefined) {
+          throw new Error(
+            `Chrome exited before DevTools was ready (exitCode=${context.proc.exitCode}).`
+          );
+        }
+        const version = await fetchJson(`${urlBase}/json/version`, 4_000);
+        return version?.Browser ? version : null;
+      },
+      timeoutMs,
+      250,
+      "Chrome DevTools endpoint not ready"
+    );
+  } catch (error) {
+    const logTail = context?.logPath ? await readLogTail(context.logPath, 40).catch(() => "") : "";
+    const suffix = logTail ? `\nChrome log tail:\n${logTail}` : "";
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}${suffix}`);
+  }
+}
+
+async function readLogTail(path, maxLines) {
+  const content = await readFile(path, "utf8");
+  const lines = content
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+
+  return lines.slice(-maxLines).join("\n");
 }
 
 async function waitForExtensionTarget(urlBase, browserClient, matcher, timeoutMs, timeoutMessage) {
@@ -2072,7 +2251,8 @@ async function openTarget(urlBase, url) {
 }
 
 async function openPopupRuntimeTarget(popupUrl) {
-  const target = await openTarget(baseUrl, popupUrl);
+  assert(state.baseUrl, "Chrome base URL is unavailable while opening the popup target.");
+  const target = await openTarget(state.baseUrl, popupUrl);
   state.openedTargetIds.push(target.id);
   const client = new CdpClient(target.webSocketDebuggerUrl);
   await client.connect();
@@ -2935,7 +3115,9 @@ async function cleanup() {
   state.browserClient = null;
 
   for (const targetId of state.openedTargetIds.splice(0)) {
-    await closeTarget(baseUrl, targetId);
+    if (state.baseUrl) {
+      await closeTarget(state.baseUrl, targetId);
+    }
   }
 
   if (state.chromeProcess && !state.chromeProcess.killed) {
@@ -2948,6 +3130,7 @@ async function cleanup() {
   }
 
   state.chromeProcess = null;
+  state.baseUrl = null;
 
   if (state.logStream) {
     await new Promise((resolve) => {
