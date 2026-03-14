@@ -32,56 +32,165 @@ Think of it as a **black box for your web app**: always recording in the backgro
 <tr>
 <td width="50%">
 
-**57 Event Types**
-Captures user interactions, network requests/responses, WebSocket & SSE streams, DOM mutations, console logs, storage operations, performance metrics, and more — organized across 13 categories.
+### 🎥 Continuous Recording
+
+Runs silently as a Chrome extension, capturing events via the Chrome DevTools Protocol (CDP) and content script injection. Zero manual setup — install and forget.
+
+- Automatic session lifecycle management
+- Background recording across all tabs
+- Keyboard shortcut `Ctrl+Shift+M` to mark key moments
 
 </td>
 <td width="50%">
 
-**Two Capture Modes**
-`lite` for minimal page-thread overhead in production monitoring. `full` for comprehensive debugging with CDP-driven capture, DOM snapshots, and response body sampling.
+### 📊 57 Event Types × 13 Categories
+
+The most comprehensive web session capture available — user interactions, network traffic, WebSocket & SSE streams, DOM mutations, console logs, storage operations, performance metrics, screenshots, and more.
+
+- Full request/response bodies with MIME-aware capture
+- DOM snapshot diffs for visual regression analysis
+- Web Vitals, long tasks, CPU profiles, heap snapshots
 
 </td>
 </tr>
 <tr>
 <td>
 
-**Privacy-First Redaction**
-Built-in header, cookie, and body pattern masking with configurable CSS selector blocking. Optional hash-based anonymization preserves correlation analysis without exposing raw values.
+### ⚡ Two Capture Modes
+
+**`lite`** — Minimal page-thread overhead for production monitoring. Defers heavy work to offscreen documents, keeps the main thread snappy.
+
+**`full`** — Comprehensive debugging with CDP-driven capture, DOM snapshots, response body sampling, and detailed performance tracing.
+
+- Per-origin site policies to mix modes across domains
+- Configurable sampling rates for mouse, scroll, and DOM events
 
 </td>
 <td>
 
-**Encrypted Archives**
-AES-GCM encryption with PBKDF2 key derivation (120K iterations). Per-file IVs, SHA-256 integrity checksums, and content-addressable blob deduplication.
+### 🔄 Ring Buffer with Auto-Freeze
 
-</td>
-</tr>
-<tr>
-<td>
+Configurable circular buffer (default 10 min) keeps memory usage bounded while always preserving recent context.
 
-**Rich Playback UI**
-React-based player with interactive timeline, network waterfall, console panel, storage inspector, DOM diff viewer, screenshot trail with pointer overlay, and performance dashboard.
-
-</td>
-<td>
-
-**Code Generation**
-Export to HAR, Playwright test scripts, curl/fetch commands, markdown bug reports, and GitHub/Jira issue templates — all derived from captured session data.
+- **Auto-freeze on errors** — Uncaught exceptions & unhandled rejections
+- **Auto-freeze on network failures** — 5xx responses, timeouts, CORS errors
+- **Auto-freeze on long task spikes** — Jank detection via PerformanceObserver
+- **Manual freeze** — User markers for intentional snapshots
 
 </td>
 </tr>
 <tr>
 <td>
 
-**Ring Buffer**
-Configurable circular buffer (default 10 min) keeps memory usage bounded while preserving recent context. Auto-freeze on errors, network failures, or long task spikes.
+### 🔒 Privacy-First Redaction
+
+Sensitive data is automatically masked before it's ever written to disk. Defense-in-depth with multiple redaction layers.
+
+- Header & cookie name pattern matching (`authorization`, `session`, `token`)
+- Request/response body pattern scanning (`password`, `secret`, `otp`)
+- CSS selector blocking for DOM masking (`.secret`, `input[type='password']`)
+- Optional SHA-256 hash masking for correlation without exposure
 
 </td>
 <td>
 
-**MCP Integration**
-Model Context Protocol server for AI-assisted session analysis — triage errors, query events, generate reports, compare sessions, and find root cause candidates.
+### 🔐 Encrypted & Portable Archives
+
+`.webblackbox` ZIP archives with enterprise-grade encryption for secure sharing and compliance.
+
+- **AES-GCM** encryption with per-file initialization vectors
+- **PBKDF2** key derivation (SHA-256, 120K iterations)
+- **SHA-256** integrity checksums for tamper detection
+- Content-addressable blob deduplication for efficient storage
+- Compression: gzip, brotli, or zstandard codecs
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 🖥️ Rich Playback UI
+
+React 19 player application for deep session analysis with multiple synchronized panels.
+
+- **Timeline** — Scrub through events with filtering by type and level
+- **Network Waterfall** — Request/response timings, headers, and bodies
+- **Console** — Log viewer with level filtering and source linking
+- **Storage Inspector** — Cookie, localStorage, sessionStorage, IndexedDB ops
+- **DOM Diff** — Visual comparison of DOM snapshots over time
+- **Screenshots** — Frame trail with pointer position overlay
+
+</td>
+<td>
+
+### 🛠️ Code Generation & Export
+
+Turn captured sessions into actionable artifacts — no manual recreation needed.
+
+- **curl / fetch** — Reproduce any captured network request
+- **Playwright scripts** — Auto-generated E2E tests from user interactions
+- **Playwright mocks** — Test scripts with captured response fixtures
+- **HAR export** — HTTP Archive format for standard tooling
+- **Bug reports** — Markdown reports with environment, steps, and errors
+- **Issue templates** — GitHub and Jira issue templates ready to file
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 🤖 MCP Integration
+
+Model Context Protocol server for AI-assisted session analysis — plug into Claude, ChatGPT, or any MCP-compatible assistant.
+
+- `session_summary` — Triage metrics and top issues at a glance
+- `query_events` — Search events with pagination and filtering
+- `network_issues` — Identify failing requests, slow responses, CORS errors
+- `find_root_cause_candidates` — Error causality analysis
+- `compare_sessions` — Cross-session regression detection
+
+</td>
+<td>
+
+### 🔌 Extensible Plugin System
+
+Custom recorder plugins with hooks for event processing, filtering, and enrichment.
+
+- `onRawEvent` — Transform events before normalization
+- `onEvent` — Process events after normalization
+- **Built-in plugins:**
+  - `createRouteContextPlugin()` — Track SPA route context per stream
+  - `createErrorFingerprintPlugin()` — Deduplicate errors by fingerprint
+  - `createAiRootCausePlugin()` — AI-powered root cause analysis
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 📦 Web SDK (npm)
+
+Published as `webblackbox` on npm — embed lite capture directly in your application without the Chrome extension.
+
+```bash
+npm install webblackbox
+```
+
+- `WebBlackboxLiteSdk` — Start/stop/flush/export archives in-page
+- Framework-agnostic, works in any browser environment
+- Same `.webblackbox` archive format, same Player compatibility
+
+</td>
+<td>
+
+### ☁️ Cloud Share (Optional)
+
+Optional share server for team collaboration — upload encrypted archives and generate read-only share links.
+
+- Encrypted upload with server-side metadata indexing
+- Rate limiting per IP for abuse prevention
+- Redacted metadata — server never sees raw session data
+- Self-hostable Node.js service
 
 </td>
 </tr>
@@ -97,10 +206,10 @@ WebBlackbox is a TypeScript monorepo organized into three tiers — **Recording*
                     ┌─────────────────────────────────────────────────┐
                     │              Chrome Extension                   │
                     │                                                 │
-                    │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-                    │  │ Injected │→ │ Content  │→ │   Service    │  │
-                    │  │  Script  │  │  Script  │  │   Worker     │  │
-                    │  └──────────┘  └──────────┘  └──────┬───────┘  │
+                    │  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
+                    │  │ Injected │→ │ Content  │→ │    Service   │   │
+                    │  │  Script  │  │  Script  │  │    Worker    │   │
+                    │  └──────────┘  └──────────┘  └───────┬──────┘   │
                     │       console, storage    user, DOM  │  CDP     │
                     │                                      ↓          │
                     │                               ┌──────────────┐  │
@@ -114,15 +223,15 @@ WebBlackbox is a TypeScript monorepo organized into three tiers — **Recording*
                                                      ZIP archive
                                                            │
                                                            ↓
-                    ┌──────────────────────────────────────────────────┐
-                    │              Player (React UI)                   │
-                    │                                                  │
+                    ┌─────────────────────────────────────────────────┐
+                    │              Player (React UI)                  │
+                    │                                                 │
                     │  ┌──────────────┐  ┌────────────────────────┐   │
                     │  │  Player SDK  │  │  Timeline │ Network    │   │
                     │  │  (analysis)  │→ │  Console  │ Storage    │   │
                     │  └──────────────┘  │  DOM Diff │ Perf       │   │
                     │                    └────────────────────────┘   │
-                    └──────────────────────────────────────────────────┘
+                    └─────────────────────────────────────────────────┘
 ```
 
 ### Recording Data Flow
