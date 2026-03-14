@@ -13,6 +13,12 @@ const START_CAPTURE_STORAGE_DELAY_MS = 400;
 const START_CAPTURE_SCREENSHOT_DELAY_MS = 1_000;
 const SCROLL_BURST_DEBOUNCE_MS = 140;
 const POINTERMOVE_SUPPRESS_AFTER_SCROLL_MS = 220;
+const MUTATION_PRESSURE_RECORD_LIMIT = 220;
+const MUTATION_PRESSURE_BUFFER_LIMIT = 280;
+const MUTATION_PRESSURE_SUMMARY_LIMIT = 320;
+const MUTATION_PRESSURE_SAMPLE_LIMIT = 80;
+const MUTATION_PRESSURE_COOLDOWN_MS = 2_500;
+const MUTATION_PRESSURE_FLUSH_MS = 300;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
@@ -87,6 +93,8 @@ const INPUT_OPTIONS_TRUE: AddEventListenerOptions = {
 
 type MutationBatchSummary = {
   count: number;
+  sampledCount: number;
+  truncated: boolean;
   childListCount: number;
   attributeCount: number;
   characterDataCount: number;
@@ -131,6 +139,7 @@ export class LiteCaptureAgent {
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
   private lastUserActivityMono = monotonicTime();
   private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
+  private mutationPressureUntilMono = Number.NEGATIVE_INFINITY;
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
   private pendingScrollPayload: {
     target: Record<string, unknown>;
@@ -590,6 +599,7 @@ export class LiteCaptureAgent {
 
   private accumulateMutationRecord(record: MutationRecord, includeDetails: boolean): void {
     this.mutationSummary.count += 1;
+    this.mutationSummary.sampledCount += 1;
     this.mutationSummary.addedNodes += record.addedNodes.length;
     this.mutationSummary.removedNodes += record.removedNodes.length;
 
@@ -623,6 +633,38 @@ export class LiteCaptureAgent {
 
     if (!sampleTargets.includes(selector)) {
       sampleTargets.push(selector);
+    }
+  }
+
+  private accumulateMutationRecords(records: MutationRecord[]): void {
+    if (records.length === 0) {
+      return;
+    }
+
+    const shouldEnterPressure =
+      records.length >= MUTATION_PRESSURE_RECORD_LIMIT ||
+      this.eventBuffer.length >= MUTATION_PRESSURE_BUFFER_LIMIT ||
+      this.mutationSummary.count >= MUTATION_PRESSURE_SUMMARY_LIMIT;
+
+    if (shouldEnterPressure) {
+      this.extendMutationPressureWindow();
+    }
+
+    const pressureActive = this.isMutationPressureActive();
+    const includeDetails =
+      !pressureActive &&
+      records.length <= MUTATION_DETAIL_RECORD_LIMIT &&
+      this.eventBuffer.length <= MUTATION_DETAIL_BUFFER_LIMIT;
+    const sampleLimit = pressureActive ? MUTATION_PRESSURE_SAMPLE_LIMIT : records.length;
+    const sampledCount = Math.min(records.length, sampleLimit);
+
+    for (let index = 0; index < sampledCount; index += 1) {
+      this.accumulateMutationRecord(records[index]!, includeDetails);
+    }
+
+    if (sampledCount < records.length) {
+      this.mutationSummary.count += records.length - sampledCount;
+      this.mutationSummary.truncated = true;
     }
   }
 
@@ -668,14 +710,7 @@ export class LiteCaptureAgent {
   private startMutationAndSnapshots(): void {
     if (this.shouldCaptureMutationSignals() && !this.mutationObserver) {
       this.mutationObserver = new MutationObserver((records) => {
-        const includeDetails =
-          records.length <= MUTATION_DETAIL_RECORD_LIMIT &&
-          this.eventBuffer.length <= MUTATION_DETAIL_BUFFER_LIMIT;
-
-        for (const record of records) {
-          this.accumulateMutationRecord(record, includeDetails);
-        }
-
+        this.accumulateMutationRecords(records);
         this.scheduleMutationFlush();
       });
 
@@ -696,7 +731,7 @@ export class LiteCaptureAgent {
     ) {
       const snapshotIntervalMs = Math.max(500, Math.round(this.sampling.snapshotIntervalMs));
       this.snapshotTimer = window.setInterval(() => {
-        if (this.isUserRecentlyActive()) {
+        if (this.shouldDeferBackgroundCapture()) {
           return;
         }
 
@@ -781,13 +816,17 @@ export class LiteCaptureAgent {
       return;
     }
 
-    this.mutationFlushTimer = window.setTimeout(
-      () => {
-        this.mutationFlushTimer = 0;
-        this.flushMutationBuffer();
-      },
-      Math.max(25, Math.round(this.sampling.domFlushMs))
+    const flushDelayMs = Math.max(
+      25,
+      this.isMutationPressureActive()
+        ? Math.max(Math.round(this.sampling.domFlushMs), MUTATION_PRESSURE_FLUSH_MS)
+        : Math.round(this.sampling.domFlushMs)
     );
+
+    this.mutationFlushTimer = window.setTimeout(() => {
+      this.mutationFlushTimer = 0;
+      this.flushMutationBuffer();
+    }, flushDelayMs);
   }
 
   private flushMutationBuffer(): void {
@@ -814,6 +853,8 @@ export class LiteCaptureAgent {
         timestamp: Date.now(),
         data: {
           count: summary.count,
+          sampledCount: summary.sampledCount,
+          truncated: summary.truncated,
           childListCount: summary.childListCount,
           attributeCount: summary.attributeCount,
           characterDataCount: summary.characterDataCount,
@@ -959,7 +1000,7 @@ export class LiteCaptureAgent {
           return;
         }
 
-        if (this.isUserRecentlyActive()) {
+        if (this.shouldDeferBackgroundCapture()) {
           this.scheduleDeferredStartCapture(BACKGROUND_CAPTURE_IDLE_MS);
           return;
         }
@@ -993,7 +1034,7 @@ export class LiteCaptureAgent {
           (entry) => entry !== timerId
         );
 
-        if (!this.recordingActive || this.isUserRecentlyActive()) {
+        if (!this.recordingActive || this.shouldDeferBackgroundCapture()) {
           return;
         }
 
@@ -1027,7 +1068,7 @@ export class LiteCaptureAgent {
 
     const isAction = reason.startsWith("action:");
 
-    if (!prioritize && !isAction && this.isUserRecentlyActive()) {
+    if (!prioritize && !isAction && this.shouldDeferBackgroundCapture()) {
       this.setPendingScreenshotReason(reason);
       this.scheduleBackgroundCaptureRetry();
       return;
@@ -1201,6 +1242,22 @@ export class LiteCaptureAgent {
     return monotonicTime() - this.lastUserActivityMono < idleMs;
   }
 
+  private extendMutationPressureWindow(): void {
+    this.mutationPressureUntilMono = monotonicTime() + MUTATION_PRESSURE_COOLDOWN_MS;
+  }
+
+  private isMutationPressureActive(): boolean {
+    return monotonicTime() < this.mutationPressureUntilMono;
+  }
+
+  private shouldDeferBackgroundCapture(): boolean {
+    return (
+      this.isUserRecentlyActive() ||
+      this.isMutationPressureActive() ||
+      this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
+    );
+  }
+
   private setPendingScreenshotReason(reason: string, prioritize = false): void {
     if (
       prioritize ||
@@ -1223,7 +1280,7 @@ export class LiteCaptureAgent {
         return;
       }
 
-      if (this.isUserRecentlyActive()) {
+      if (this.shouldDeferBackgroundCapture()) {
         this.scheduleBackgroundCaptureRetry();
         return;
       }
@@ -1662,6 +1719,8 @@ function cssEscape(value: string): string {
 function createEmptyMutationSummary(): MutationBatchSummary {
   return {
     count: 0,
+    sampledCount: 0,
+    truncated: false,
     childListCount: 0,
     attributeCount: 0,
     characterDataCount: 0,

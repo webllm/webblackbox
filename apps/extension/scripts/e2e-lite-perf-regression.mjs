@@ -280,7 +280,16 @@ async function main() {
     indicatorGone
   });
 
-  const sessionsAfterStop = await readRuntimeSessions(popupStop.client);
+  const sessionsAfterStop =
+    (await waitFor(
+      async () => {
+        const rows = await readRuntimeSessions(popupStop.client);
+        return Array.isArray(rows) && rows.length === 0 ? rows : null;
+      },
+      15_000,
+      250,
+      "Runtime sessions were not cleared after stop."
+    )) ?? [];
   assert(
     Array.isArray(sessionsAfterStop) && sessionsAfterStop.length === 0,
     "Runtime sessions were not cleared after stop.",

@@ -247,6 +247,129 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("samples oversized mutation bursts under pressure instead of walking every record", async () => {
+    let observeCallback: MutationCallback | null = null;
+    const disconnect = vi.fn();
+    const OriginalMutationObserver = globalThis.MutationObserver;
+
+    class MockMutationObserver {
+      public constructor(callback: MutationCallback) {
+        observeCallback = callback;
+      }
+
+      public disconnect = disconnect;
+
+      public observe = vi.fn();
+
+      public takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+
+    globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
+
+    try {
+      const { agent, emitBatch } = createAgent();
+      const target = document.querySelector("#target");
+
+      if (!(target instanceof Element) || observeCallback === null) {
+        throw new Error("missing mutation observer callback");
+      }
+
+      const callback: MutationCallback = observeCallback;
+
+      const record = {
+        type: "childList",
+        target,
+        addedNodes: { length: 1 } as NodeList,
+        removedNodes: { length: 0 } as NodeList
+      } as unknown as MutationRecord;
+
+      callback(
+        Array.from({ length: 260 }, () => record),
+        {} as MutationObserver
+      );
+      await vi.advanceTimersByTimeAsync(350);
+      agent.flush();
+
+      const mutationEvent = emitBatch.mock.calls
+        .flatMap((call) => {
+          const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+          return batch;
+        })
+        .find((entry) => entry.rawType === "mutation");
+
+      expect(mutationEvent?.payload?.summary).toMatchObject({
+        count: 260,
+        sampledCount: 80,
+        truncated: true
+      });
+
+      agent.dispose();
+    } finally {
+      globalThis.MutationObserver = OriginalMutationObserver;
+    }
+  });
+
+  it("defers start capture while mutation pressure is active", async () => {
+    let observeCallback: MutationCallback | null = null;
+    const OriginalMutationObserver = globalThis.MutationObserver;
+
+    class MockMutationObserver {
+      public constructor(callback: MutationCallback) {
+        observeCallback = callback;
+      }
+
+      public disconnect = vi.fn();
+
+      public observe = vi.fn();
+
+      public takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+
+    globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
+
+    try {
+      const { agent, emitBatch } = createAgent();
+      const target = document.querySelector("#target");
+
+      if (!(target instanceof Element) || observeCallback === null) {
+        throw new Error("missing mutation observer callback");
+      }
+
+      const callback: MutationCallback = observeCallback;
+
+      const record = {
+        type: "childList",
+        target,
+        addedNodes: { length: 1 } as NodeList,
+        removedNodes: { length: 0 } as NodeList
+      } as unknown as MutationRecord;
+
+      callback(
+        Array.from({ length: 260 }, () => record),
+        {} as MutationObserver
+      );
+      await vi.advanceTimersByTimeAsync(2_100);
+      agent.flush();
+
+      expect(emittedRawTypes(emitBatch)).not.toContain("snapshot");
+
+      emitBatch.mockClear();
+
+      await vi.advanceTimersByTimeAsync(1_600);
+      agent.flush();
+
+      expect(emittedRawTypes(emitBatch)).toContain("snapshot");
+
+      agent.dispose();
+    } finally {
+      globalThis.MutationObserver = OriginalMutationObserver;
+    }
+  });
+
   it("uses lightweight targets for keydown, focus, blur, change, and submit", () => {
     const { agent, emitBatch } = createAgent();
     const field = inputTarget();
