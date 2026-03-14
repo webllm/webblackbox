@@ -30418,7 +30418,7 @@ Select.displayName = "Select";
 
 // src/shell.tsx
 var import_jsx_runtime6 = __toESM(require_jsx_runtime(), 1);
-var playerVersion = true ? "0.1.3" : "0.1.0";
+var playerVersion = true ? "0.2.0" : "0.1.0";
 function PlayerShell() {
   return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("main", { id: "player-shell", className: "shell wb-shell", children: [
     /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("header", { className: "toolbar card", role: "banner", children: [
