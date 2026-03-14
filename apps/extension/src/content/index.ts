@@ -4,6 +4,7 @@ import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
+import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
 
 const chromeApi = getChromeApi();
 let contentPort: PortLike | null = null;
@@ -21,13 +22,13 @@ let readyPingTimer = 0;
 let readyPingAttempts = 0;
 let pendingEvents: RawRecorderEvent[] = [];
 let pendingEventFlushTimer = 0;
+let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
 
 const READY_PING_MAX_ATTEMPTS = 50;
 const READY_PING_INTERVAL_MS = 150;
 const PORT_RECONNECT_INITIAL_MS = 250;
 const PORT_RECONNECT_MAX_MS = 5_000;
 const PENDING_EVENT_MAX = 1_200;
-const PENDING_EVENT_FLUSH_CHUNK = 80;
 const DEFAULT_TAB_ID = -1;
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 
@@ -94,7 +95,7 @@ function bindContentPort(port: PortLike): void {
   requestRecordingStatusHandshake(true);
 
   if (recordingActive) {
-    schedulePendingEventFlush(true);
+    schedulePendingEventFlush();
   }
 }
 
@@ -143,7 +144,7 @@ function flushPendingEvents(): void {
     return;
   }
 
-  const batch = pendingEvents.splice(0, PENDING_EVENT_FLUSH_CHUNK);
+  const batch = pendingEvents.splice(0, CONTENT_EVENT_FLUSH_CHUNK);
 
   try {
     contentPort.postMessage({
@@ -160,7 +161,7 @@ function flushPendingEvents(): void {
   }
 
   if (pendingEvents.length > 0) {
-    schedulePendingEventFlush(true);
+    schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
   }
 }
 
@@ -176,7 +177,7 @@ function emitBatch(events: RawRecorderEvent[]): void {
     return;
   }
 
-  schedulePendingEventFlush(true);
+  schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
 }
 
 function emitMarker(message: string): void {
@@ -214,7 +215,7 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
       recordingActive = true;
       captureAgent.setRecordingStatus(nextState);
       stopReadyPing();
-      schedulePendingEventFlush(true);
+      schedulePendingEventFlush();
     } else {
       const wasRecording = recordingActive;
 
@@ -300,8 +301,10 @@ function schedulePendingEventFlush(immediate = false): void {
     return;
   }
 
+  const delayMs = resolveContentEventFlushDelay(pendingEvents.length, immediate);
+
   if (pendingEventFlushTimer > 0) {
-    if (!immediate) {
+    if (delayMs >= pendingEventFlushDelayMs) {
       return;
     }
 
@@ -309,13 +312,13 @@ function schedulePendingEventFlush(immediate = false): void {
     pendingEventFlushTimer = 0;
   }
 
-  pendingEventFlushTimer = window.setTimeout(
-    () => {
-      pendingEventFlushTimer = 0;
-      flushPendingEvents();
-    },
-    immediate ? 0 : READY_PING_INTERVAL_MS
-  );
+  pendingEventFlushDelayMs = delayMs;
+
+  pendingEventFlushTimer = window.setTimeout(() => {
+    pendingEventFlushTimer = 0;
+    pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
+    flushPendingEvents();
+  }, delayMs);
 }
 
 function stopPendingEventFlush(): void {
@@ -323,6 +326,8 @@ function stopPendingEventFlush(): void {
     clearTimeout(pendingEventFlushTimer);
     pendingEventFlushTimer = 0;
   }
+
+  pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
 }
 
 function debugPortSendFailure(kind: string, error: unknown): void {
