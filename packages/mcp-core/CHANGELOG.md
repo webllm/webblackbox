@@ -1,5 +1,11 @@
 # @webblackbox/mcp-core
 
+## 0.1.2
+
+### Patch Changes
+
+- fix player
+
 ## 0.1.1
 
 ### Patch Changes

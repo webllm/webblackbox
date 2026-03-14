@@ -1,5 +1,17 @@
 # @webblackbox/extension
 
+## 0.1.2
+
+### Patch Changes
+
+- fix player
+- Updated dependencies
+  - @webblackbox/cdp-router@0.1.2
+  - @webblackbox/pipeline@0.1.2
+  - @webblackbox/protocol@0.1.2
+  - @webblackbox/recorder@0.1.2
+  - webblackbox@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
