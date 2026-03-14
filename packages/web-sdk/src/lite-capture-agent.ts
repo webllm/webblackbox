@@ -12,6 +12,8 @@ const BACKGROUND_CAPTURE_IDLE_MS = 1_500;
 const START_CAPTURE_STORAGE_DELAY_MS = 400;
 const START_CAPTURE_SCREENSHOT_DELAY_MS = 1_000;
 const SCROLL_BURST_DEBOUNCE_MS = 140;
+const SCROLL_PRESSURE_WINDOW_MS = 700;
+const SCROLL_PRESSURE_EVENT_COUNT = 6;
 const POINTERMOVE_SUPPRESS_AFTER_SCROLL_MS = 220;
 const MUTATION_PRESSURE_RECORD_LIMIT = 220;
 const MUTATION_PRESSURE_BUFFER_LIMIT = 280;
@@ -27,6 +29,7 @@ const INPUT_PRESSURE_MUTATION_SAMPLE_LIMIT = 16;
 const QUIET_MODE_MUTATION_RECORD_LIMIT = 360;
 const QUIET_MODE_EVENT_BUFFER_LIMIT = 560;
 const QUIET_MODE_COOLDOWN_MS = 3_000;
+const QUIET_MODE_SCROLL_COOLDOWN_MS = 2_000;
 const QUIET_MODE_EDITOR_COOLDOWN_MS = 4_200;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
@@ -101,6 +104,11 @@ const INPUT_OPTIONS_TRUE: AddEventListenerOptions = {
   capture: true
 };
 
+const PASSIVE_INPUT_OPTIONS_TRUE: AddEventListenerOptions = {
+  capture: true,
+  passive: true
+};
+
 type MutationBatchSummary = {
   count: number;
   sampledCount: number;
@@ -155,6 +163,7 @@ export class LiteCaptureAgent {
   private editorPressureUntilMono = Number.NEGATIVE_INFINITY;
   private quietModeUntilMono = Number.NEGATIVE_INFINITY;
   private recentEditableInteractionMonos: number[] = [];
+  private recentScrollMonos: number[] = [];
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
   private pendingScrollPayload: {
     target: Record<string, unknown>;
@@ -350,6 +359,25 @@ export class LiteCaptureAgent {
   private installInputAndLifecycleCapture(): void {
     this.listen(
       document,
+      "wheel",
+      (event: WheelEvent) => {
+        this.markUserActivity();
+
+        if (this.mode === "full") {
+          return;
+        }
+
+        if (Math.abs(event.deltaX) + Math.abs(event.deltaY) <= 0) {
+          return;
+        }
+
+        this.recordScrollPressure();
+      },
+      PASSIVE_INPUT_OPTIONS_TRUE
+    );
+
+    this.listen(
+      document,
       "click",
       (event: MouseEvent) => {
         this.markUserActivity();
@@ -485,6 +513,8 @@ export class LiteCaptureAgent {
           return;
         }
 
+        this.recordScrollPressure();
+
         const now = performance.now();
         const scrollGapMs = Math.max(16, Math.round(1000 / Math.max(1, this.sampling.scrollHz)));
 
@@ -507,7 +537,7 @@ export class LiteCaptureAgent {
         this.emitQueuedScrollEvent(payload);
         this.scheduleTrailingScrollFlush(scrollGapMs);
       },
-      INPUT_OPTIONS_TRUE
+      PASSIVE_INPUT_OPTIONS_TRUE
     );
 
     this.listen(
@@ -543,7 +573,7 @@ export class LiteCaptureAgent {
           target: toFastTargetPayload(event.target)
         });
       },
-      INPUT_OPTIONS_TRUE
+      PASSIVE_INPUT_OPTIONS_TRUE
     );
 
     this.listen(window, "resize", () => {
@@ -776,6 +806,7 @@ export class LiteCaptureAgent {
     this.editorPressureUntilMono = Number.NEGATIVE_INFINITY;
     this.inputPressureUntilMono = Number.NEGATIVE_INFINITY;
     this.recentEditableInteractionMonos = [];
+    this.recentScrollMonos = [];
 
     if (this.snapshotTimer > 0) {
       clearInterval(this.snapshotTimer);
@@ -1255,6 +1286,22 @@ export class LiteCaptureAgent {
     this.scheduleTrailingScrollFlush(SCROLL_BURST_DEBOUNCE_MS);
   }
 
+  private recordScrollPressure(): void {
+    if (!this.recordingActive) {
+      return;
+    }
+
+    const nowMono = monotonicTime();
+    this.recentScrollMonos = this.recentScrollMonos.filter(
+      (entry) => nowMono - entry <= SCROLL_PRESSURE_WINDOW_MS
+    );
+    this.recentScrollMonos.push(nowMono);
+
+    if (this.recentScrollMonos.length >= SCROLL_PRESSURE_EVENT_COUNT) {
+      this.enterQuietMode("scroll");
+    }
+  }
+
   private scheduleTrailingScrollFlush(delayMs: number): void {
     if (this.trailingScrollTimer > 0) {
       clearTimeout(this.trailingScrollTimer);
@@ -1471,8 +1518,13 @@ export class LiteCaptureAgent {
     );
   }
 
-  private enterQuietMode(reason: "mutation" | "editor"): void {
-    const duration = reason === "editor" ? QUIET_MODE_EDITOR_COOLDOWN_MS : QUIET_MODE_COOLDOWN_MS;
+  private enterQuietMode(reason: "mutation" | "editor" | "scroll"): void {
+    const duration =
+      reason === "editor"
+        ? QUIET_MODE_EDITOR_COOLDOWN_MS
+        : reason === "scroll"
+          ? QUIET_MODE_SCROLL_COOLDOWN_MS
+          : QUIET_MODE_COOLDOWN_MS;
     this.quietModeUntilMono = Math.max(this.quietModeUntilMono, monotonicTime() + duration);
     this.pendingQuietRecoverySummary = true;
 

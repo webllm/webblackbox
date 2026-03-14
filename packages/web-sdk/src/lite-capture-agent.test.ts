@@ -116,6 +116,15 @@ function dispatchScroll(scrollX: number, scrollY: number): void {
   document.dispatchEvent(new Event("scroll", { bubbles: true }));
 }
 
+function dispatchWheel(deltaY = 120): void {
+  document.dispatchEvent(
+    new WheelEvent("wheel", {
+      bubbles: true,
+      deltaY
+    })
+  );
+}
+
 function countEmittedEvents(emitBatch: ReturnType<typeof vi.fn>): number {
   return emitBatch.mock.calls.reduce((total, call) => {
     const [events] = call as [Array<unknown>];
@@ -567,6 +576,72 @@ describe("LiteCaptureAgent", () => {
       emitBatch.mockClear();
 
       await vi.advanceTimersByTimeAsync(3_200);
+      agent.flush();
+
+      const snapshotEvent = emitBatch.mock.calls
+        .flatMap((call) => {
+          const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+          return batch;
+        })
+        .find(
+          (entry) => entry.rawType === "snapshot" && entry.payload?.reason === "pressure-recovery"
+        );
+
+      expect(snapshotEvent?.payload).toMatchObject({
+        summaryOnly: true,
+        summaryMode: "pressure",
+        reason: "pressure-recovery"
+      });
+      expect(observe).toHaveBeenCalledTimes(2);
+
+      agent.dispose();
+    } finally {
+      globalThis.MutationObserver = OriginalMutationObserver;
+    }
+  });
+
+  it("enters quiet mode during rapid scroll bursts and recovers with a summary snapshot", async () => {
+    const OriginalMutationObserver = globalThis.MutationObserver;
+    let observeCallback: MutationCallback | null = null;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+
+    class MockMutationObserver {
+      public constructor(callback: MutationCallback) {
+        observeCallback = callback;
+      }
+
+      public disconnect = disconnect;
+
+      public observe = observe;
+
+      public takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+
+    globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
+
+    try {
+      const { agent, emitBatch } = createAgent();
+
+      if (observeCallback === null) {
+        throw new Error("missing mutation observer callback");
+      }
+
+      for (let index = 0; index < 6; index += 1) {
+        dispatchWheel();
+        dispatchScroll(0, (index + 1) * 160);
+      }
+
+      await vi.advanceTimersByTimeAsync(50);
+      agent.flush();
+
+      expect(disconnect).toHaveBeenCalledTimes(1);
+
+      emitBatch.mockClear();
+
+      await vi.advanceTimersByTimeAsync(2_300);
       agent.flush();
 
       const snapshotEvent = emitBatch.mock.calls
