@@ -126,6 +126,8 @@ export class LiteCaptureAgent {
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
   private lastUserActivityMono = monotonicTime();
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
+  private hasDomSnapshot = false;
+  private hasLocalStorageSnapshot = false;
   private mutationSummary: MutationBatchSummary = createEmptyMutationSummary();
   private selectorCache = new WeakMap<Element, string>();
   private selectorCacheSize = 0;
@@ -147,6 +149,25 @@ export class LiteCaptureAgent {
     }
 
     const wasRecording = this.recordingActive;
+
+    if (state.active && !wasRecording) {
+      this.hasDomSnapshot = false;
+      this.hasLocalStorageSnapshot = false;
+    }
+
+    if (!state.active && wasRecording && this.shouldCaptureDomSnapshots() && !this.hasDomSnapshot) {
+      this.emitDomSnapshot("stop");
+    }
+
+    if (
+      !state.active &&
+      wasRecording &&
+      this.shouldCaptureStorageSnapshots() &&
+      !this.hasLocalStorageSnapshot
+    ) {
+      this.emitLocalStorageSnapshot("stop");
+    }
+
     this.recordingActive = state.active;
     this.mode = state.mode ?? this.mode;
     this.sampling = sanitizeSamplingConfig(state.sampling);
@@ -781,6 +802,8 @@ export class LiteCaptureAgent {
     const truncated = html.length > DOM_SNAPSHOT_MAX_HTML_CHARS;
     const sampledHtml = truncated ? html.slice(0, DOM_SNAPSHOT_MAX_HTML_CHARS) : html;
 
+    this.hasDomSnapshot = true;
+
     this.queueEvent("snapshot", {
       reason,
       href: location.href,
@@ -836,6 +859,8 @@ export class LiteCaptureAgent {
         sample: value.slice(0, STORAGE_SNAPSHOT_MAX_VALUE_CHARS)
       };
     }
+
+    this.hasLocalStorageSnapshot = true;
 
     this.queueEvent("localStorageSnapshot", {
       reason,

@@ -201,21 +201,31 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
   }
 
   if (message.kind === "sw.recording-status") {
-    recordingActive = message.active;
     syncInjectedCaptureConfig(message);
-
-    captureAgent.setRecordingStatus({
+    const nextState = {
       active: message.active,
       sid: message.sid,
       tabId: DEFAULT_TAB_ID,
       mode: message.mode,
       sampling: message.sampling
-    });
+    };
 
     if (message.active) {
+      recordingActive = true;
+      captureAgent.setRecordingStatus(nextState);
       stopReadyPing();
       schedulePendingEventFlush(true);
     } else {
+      const wasRecording = recordingActive;
+
+      if (wasRecording) {
+        captureAgent.setRecordingStatus(nextState);
+        flushPendingEvents();
+      } else {
+        captureAgent.setRecordingStatus(nextState);
+      }
+
+      recordingActive = false;
       stopPendingEventFlush();
       pendingEvents = [];
       requestRecordingStatusHandshake(false);

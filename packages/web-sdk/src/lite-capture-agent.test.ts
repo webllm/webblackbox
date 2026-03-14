@@ -163,6 +163,47 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("emits a final dom snapshot when stopping before the idle start capture runs", () => {
+    const { agent, emitBatch } = createAgent();
+
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+
+    const emittedRawTypes = emitBatch.mock.calls.flatMap((call) => {
+      const [events] = call as [Array<{ rawType?: string }>];
+      return events.map((event) => event.rawType);
+    });
+
+    expect(emittedRawTypes).toContain("snapshot");
+
+    agent.dispose();
+  });
+
+  it("emits a final localStorage snapshot when stopping before idle storage capture runs", () => {
+    localStorage.setItem("demo", "value");
+    const { agent, emitBatch } = createAgent();
+
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+
+    const emittedRawTypes = emitBatch.mock.calls.flatMap((call) => {
+      const [events] = call as [Array<{ rawType?: string }>];
+      return events.map((event) => event.rawType);
+    });
+
+    expect(emittedRawTypes).toContain("localStorageSnapshot");
+
+    agent.dispose();
+  });
+
   it("flushes buffered low-priority events asynchronously in chunks", async () => {
     const { agent, emitBatch } = createAgent();
 

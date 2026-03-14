@@ -289,6 +289,13 @@ const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
 const SESSION_ANNOTATIONS_STORAGE_KEY = "webblackbox.runtime.sessionAnnotations";
 const STOPPED_SESSION_TTL_MS = 10 * 60_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
+const STOP_DRAIN_CONTENT_RAW_TYPES = new Set([
+  "snapshot",
+  "localStorageSnapshot",
+  "indexedDbSnapshot",
+  "cookieSnapshot",
+  "screenshot"
+]);
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 const PERF_WARN_MS = 40;
@@ -795,13 +802,19 @@ async function exportSession(
 }
 
 function ingestRawEvent(rawEvent: RawRecorderEvent): void {
-  const runtime = sessionsByTab.get(rawEvent.tabId);
+  const runtime =
+    sessionsByTab.get(rawEvent.tabId) ??
+    (typeof rawEvent.sid === "string" ? sessionsBySid.get(rawEvent.sid) : undefined);
 
   if (!runtime) {
     return;
   }
 
-  if (runtime.stopping && rawEvent.source !== "system") {
+  if (
+    runtime.stopping &&
+    rawEvent.source !== "system" &&
+    !shouldAllowStopDrainContentEvent(runtime, rawEvent)
+  ) {
     return;
   }
 
@@ -842,6 +855,17 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
   }
 
   runtime.recorder.ingest(nextRawEvent);
+}
+
+function shouldAllowStopDrainContentEvent(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent
+): boolean {
+  return (
+    rawEvent.source === "content" &&
+    rawEvent.sid === runtime.sid &&
+    STOP_DRAIN_CONTENT_RAW_TYPES.has(rawEvent.rawType)
+  );
 }
 
 function shouldSkipFullModeContentRawEvent(
