@@ -14,8 +14,9 @@ vi.mock("@zumer/snapdom", () => {
 
 import { INJECTED_MESSAGE_SOURCE } from "./injected-hooks.js";
 import { LiteCaptureAgent } from "./lite-capture-agent.js";
+import type { LiteCaptureState } from "./types.js";
 
-function createAgent() {
+function createAgent(state: Partial<LiteCaptureState> = {}) {
   const emitBatch = vi.fn();
   const agent = new LiteCaptureAgent({
     emitBatch,
@@ -26,7 +27,8 @@ function createAgent() {
     active: true,
     sid: "S-lite-agent-test",
     tabId: 7,
-    mode: "lite"
+    mode: "lite",
+    ...state
   });
   agent.flush();
   emitBatch.mockClear();
@@ -82,6 +84,16 @@ function clickTarget(): void {
   );
 }
 
+function movePointer(): void {
+  document.dispatchEvent(
+    new MouseEvent("pointermove", {
+      bubbles: true,
+      clientX: 12,
+      clientY: 18
+    })
+  );
+}
+
 function countEmittedEvents(emitBatch: ReturnType<typeof vi.fn>): number {
   return emitBatch.mock.calls.reduce((total, call) => {
     const [events] = call as [Array<unknown>];
@@ -114,6 +126,39 @@ describe("LiteCaptureAgent", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
+
+    agent.dispose();
+  });
+
+  it("defers start capture until the page is idle", async () => {
+    const { agent } = createAgent();
+
+    await vi.advanceTimersByTimeAsync(1_900);
+
+    movePointer();
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(snapdomToBlobMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
+
+    agent.dispose();
+  });
+
+  it("disables runtime screenshots when screenshot sampling is set to zero", async () => {
+    const { agent } = createAgent({
+      sampling: {
+        screenshotIdleMs: 0
+      }
+    });
+
+    expect(
+      (agent as unknown as { sampling: { screenshotIdleMs: number } }).sampling.screenshotIdleMs
+    ).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(snapdomToBlobMock).not.toHaveBeenCalled();
 
     agent.dispose();
   });

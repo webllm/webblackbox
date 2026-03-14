@@ -63,7 +63,7 @@ export const samplingProfileSchema = z
     mousemoveHz: z.number().int().positive(),
     scrollHz: z.number().int().positive(),
     domFlushMs: z.number().int().positive(),
-    screenshotIdleMs: z.number().int().positive(),
+    screenshotIdleMs: z.number().int().nonnegative(),
     snapshotIntervalMs: z.number().int().positive(),
     actionWindowMs: z.number().int().positive(),
     bodyCaptureMaxBytes: z.number().int().nonnegative()

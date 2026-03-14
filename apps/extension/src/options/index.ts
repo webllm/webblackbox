@@ -54,7 +54,10 @@ function render(container: HTMLElement, options: OptionsState): void {
       <input id="snapshotIntervalMs" type="number" min="500" max="120000" value="${config.sampling.snapshotIntervalMs}" />
 
       <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
-      <input id="screenshotIdleMs" type="number" min="250" max="120000" value="${config.sampling.screenshotIdleMs}" />
+      <input id="screenshotIdleMs" type="number" min="0" max="120000" value="${config.sampling.screenshotIdleMs}" />
+      <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
+        Set to <code>0</code> to disable record-time screenshots for lite/full mode.
+      </p>
 
       <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
       <input id="bodyCaptureMaxBytes" type="number" min="0" max="1048576" value="${config.sampling.bodyCaptureMaxBytes}" />
@@ -272,7 +275,9 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
         ? Math.min(120_000, Math.max(500, snapshotIntervalMs))
         : DEFAULT_RECORDER_CONFIG.sampling.snapshotIntervalMs,
       screenshotIdleMs: Number.isFinite(screenshotIdleMs)
-        ? Math.min(120_000, Math.max(250, screenshotIdleMs))
+        ? screenshotIdleMs <= 0
+          ? 0
+          : Math.min(120_000, Math.max(250, screenshotIdleMs))
         : DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs,
       bodyCaptureMaxBytes: Number.isFinite(bodyCaptureMaxBytes)
         ? Math.min(1_048_576, Math.max(0, Math.round(bodyCaptureMaxBytes)))

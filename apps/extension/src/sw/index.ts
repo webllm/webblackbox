@@ -1798,23 +1798,27 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       { bestEffort: true }
     );
 
-    const screenshotIntervalMs = Math.max(
-      FULL_MODE_MIN_SCREENSHOT_INTERVAL_MS,
-      normalizeSamplingInterval(
-        runtime.config.sampling.screenshotIdleMs,
-        DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
-      )
+    const normalizedScreenshotIntervalMs = normalizeOptionalSamplingInterval(
+      runtime.config.sampling.screenshotIdleMs,
+      DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
     );
 
-    runtime.screenshotInterval = globalThis.setInterval(() => {
-      enqueue(
-        runtime,
-        async () => {
-          await captureScreenshot(runtime, "interval");
-        },
-        { bestEffort: true }
+    if (normalizedScreenshotIntervalMs > 0) {
+      const screenshotIntervalMs = Math.max(
+        FULL_MODE_MIN_SCREENSHOT_INTERVAL_MS,
+        normalizedScreenshotIntervalMs
       );
-    }, screenshotIntervalMs);
+
+      runtime.screenshotInterval = globalThis.setInterval(() => {
+        enqueue(
+          runtime,
+          async () => {
+            await captureScreenshot(runtime, "interval");
+          },
+          { bestEffort: true }
+        );
+      }, screenshotIntervalMs);
+    }
   } catch (error) {
     console.warn("[WebBlackbox] failed to attach debugger", error);
     runtime.cdpRouter = null;
@@ -2805,6 +2809,20 @@ function normalizeSamplingInterval(candidate: unknown, fallback: number): number
   return Math.max(250, Math.round(value));
 }
 
+function normalizeOptionalSamplingInterval(candidate: unknown, fallback: number): number {
+  const value = asFiniteNumber(candidate);
+
+  if (value === null) {
+    return fallback;
+  }
+
+  if (value <= 0) {
+    return 0;
+  }
+
+  return Math.max(250, Math.round(value));
+}
+
 function resolveExportPolicy(value: unknown): ExportPolicy {
   const row = asRecord(value);
   const includeScreenshots =
@@ -2852,7 +2870,7 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
     scrollHz: Math.max(1, Math.round(asFiniteNumber(sampling.scrollHz) ?? 15)),
     domFlushMs: normalizeSamplingInterval(sampling.domFlushMs, 100),
     snapshotIntervalMs: normalizeSamplingInterval(sampling.snapshotIntervalMs, 20_000),
-    screenshotIdleMs: normalizeSamplingInterval(sampling.screenshotIdleMs, 8_000),
+    screenshotIdleMs: normalizeOptionalSamplingInterval(sampling.screenshotIdleMs, 8_000),
     bodyCaptureMaxBytes: normalizeBodyCaptureMaxBytesUtil(sampling.bodyCaptureMaxBytes, 0)
   };
 }

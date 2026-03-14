@@ -8,6 +8,9 @@ const PRE_RECORDING_BUFFER_MAX = 400;
 const SCREENSHOT_MAX_DATA_URL_LENGTH = 10 * 1024 * 1024;
 const SCREENSHOT_POINTER_STALE_MS = 2_500;
 const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
+const BACKGROUND_CAPTURE_IDLE_MS = 1_500;
+const START_CAPTURE_STORAGE_DELAY_MS = 400;
+const START_CAPTURE_SCREENSHOT_DELAY_MS = 1_000;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
@@ -111,7 +114,9 @@ export class LiteCaptureAgent {
   private snapshotTimer = 0;
   private screenshotTimer = 0;
   private startCaptureTimer = 0;
+  private backgroundCaptureRetryTimer = 0;
   private deferredActionCaptureTimer = 0;
+  private deferredStartTaskTimers: number[] = [];
   private mutationFlushTimer = 0;
   private flushTimer = 0;
   private lastScrollTime = 0;
@@ -119,6 +124,7 @@ export class LiteCaptureAgent {
   private screenshotInFlight = false;
   private screenshotPendingReason: string | null = null;
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
+  private lastUserActivityMono = monotonicTime();
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
   private mutationSummary: MutationBatchSummary = createEmptyMutationSummary();
   private selectorCache = new WeakMap<Element, string>();
@@ -287,6 +293,7 @@ export class LiteCaptureAgent {
       document,
       "click",
       (event: MouseEvent) => {
+        this.markUserActivity();
         this.trackPointer(event.clientX, event.clientY);
         this.queueEvent("click", clickPayload(event, this.mode));
         this.scheduleDeferredActionCapture("action:click");
@@ -298,6 +305,7 @@ export class LiteCaptureAgent {
       document,
       "dblclick",
       (event: MouseEvent) => {
+        this.markUserActivity();
         this.trackPointer(event.clientX, event.clientY);
         this.queueEvent("dblclick", clickPayload(event, this.mode));
         this.scheduleDeferredActionCapture("action:dblclick");
@@ -309,6 +317,7 @@ export class LiteCaptureAgent {
       document,
       "keydown",
       (event: KeyboardEvent) => {
+        this.markUserActivity();
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "m") {
           this.emitMarker("Keyboard marker");
         }
@@ -331,6 +340,7 @@ export class LiteCaptureAgent {
       document,
       "input",
       (event: Event) => {
+        this.markUserActivity();
         const target = event.target;
 
         if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
@@ -357,6 +367,7 @@ export class LiteCaptureAgent {
       document,
       "change",
       (event: Event) => {
+        this.markUserActivity();
         this.queueEvent("input", {
           kind: "change",
           target: this.resolveTargetPayload(event.target)
@@ -369,6 +380,7 @@ export class LiteCaptureAgent {
       document,
       "focus",
       (event: FocusEvent) => {
+        this.markUserActivity();
         this.queueEvent("focus", {
           target: this.resolveTargetPayload(event.target)
         });
@@ -380,6 +392,7 @@ export class LiteCaptureAgent {
       document,
       "blur",
       (event: FocusEvent) => {
+        this.markUserActivity();
         this.queueEvent("blur", {
           target: this.resolveTargetPayload(event.target)
         });
@@ -391,6 +404,7 @@ export class LiteCaptureAgent {
       document,
       "submit",
       (event: Event) => {
+        this.markUserActivity();
         this.queueEvent("submit", {
           target: this.resolveTargetPayload(event.target)
         });
@@ -403,6 +417,7 @@ export class LiteCaptureAgent {
       document,
       "scroll",
       (event: Event) => {
+        this.markUserActivity();
         if (this.mode === "full") {
           return;
         }
@@ -429,6 +444,7 @@ export class LiteCaptureAgent {
       document,
       "pointermove",
       (event: PointerEvent) => {
+        this.markUserActivity();
         this.trackPointer(event.clientX, event.clientY);
 
         if (this.mode === "full") {
@@ -457,10 +473,12 @@ export class LiteCaptureAgent {
     );
 
     this.listen(window, "resize", () => {
+      this.markUserActivity();
       this.emitViewportSnapshot("resize");
     });
 
     this.listen(document, "visibilitychange", () => {
+      this.markUserActivity();
       this.emitLifecycleEvent("visibilitychange", {
         state: document.visibilityState
       });
@@ -587,7 +605,7 @@ export class LiteCaptureAgent {
   }
 
   private shouldCaptureScreenshots(): boolean {
-    return this.mode !== "full";
+    return this.mode !== "full" && this.sampling.screenshotIdleMs > 0;
   }
 
   private shouldCaptureMutationSignals(): boolean {
@@ -633,6 +651,10 @@ export class LiteCaptureAgent {
     ) {
       const snapshotIntervalMs = Math.max(500, Math.round(this.sampling.snapshotIntervalMs));
       this.snapshotTimer = window.setInterval(() => {
+        if (this.isUserRecentlyActive()) {
+          return;
+        }
+
         if (this.shouldCaptureDomSnapshots()) {
           this.emitDomSnapshot("interval");
         }
@@ -673,9 +695,21 @@ export class LiteCaptureAgent {
       this.startCaptureTimer = 0;
     }
 
+    if (this.backgroundCaptureRetryTimer > 0) {
+      clearTimeout(this.backgroundCaptureRetryTimer);
+      this.backgroundCaptureRetryTimer = 0;
+    }
+
     if (this.deferredActionCaptureTimer > 0) {
       clearTimeout(this.deferredActionCaptureTimer);
       this.deferredActionCaptureTimer = 0;
+    }
+
+    for (const timerId of this.deferredStartTaskTimers.splice(
+      0,
+      this.deferredStartTaskTimers.length
+    )) {
+      clearTimeout(timerId);
     }
 
     this.screenshotPendingReason = null;
@@ -847,7 +881,7 @@ export class LiteCaptureAgent {
     this.queueEvent(rawType, payload);
   }
 
-  private scheduleDeferredStartCapture(): void {
+  private scheduleDeferredStartCapture(delayMs = START_CAPTURE_DEFER_MS): void {
     if (this.startCaptureTimer > 0) {
       clearTimeout(this.startCaptureTimer);
       this.startCaptureTimer = 0;
@@ -861,25 +895,58 @@ export class LiteCaptureAgent {
       return;
     }
 
-    this.startCaptureTimer = window.setTimeout(() => {
-      this.startCaptureTimer = 0;
+    this.startCaptureTimer = window.setTimeout(
+      () => {
+        this.startCaptureTimer = 0;
 
-      if (!this.recordingActive) {
-        return;
-      }
+        if (!this.recordingActive) {
+          return;
+        }
 
-      if (this.shouldCaptureDomSnapshots()) {
-        this.emitDomSnapshot("start");
-      }
+        if (this.isUserRecentlyActive()) {
+          this.scheduleDeferredStartCapture(BACKGROUND_CAPTURE_IDLE_MS);
+          return;
+        }
 
-      if (this.shouldCaptureStorageSnapshots()) {
-        this.emitStorageSnapshots("start");
-      }
+        if (this.shouldCaptureDomSnapshots()) {
+          this.scheduleDeferredStartTask(() => {
+            this.emitDomSnapshot("start");
+          }, 0);
+        }
 
-      if (this.shouldCaptureScreenshots()) {
-        this.scheduleScreenshotCapture("start", true);
-      }
-    }, START_CAPTURE_DEFER_MS);
+        if (this.shouldCaptureStorageSnapshots()) {
+          this.scheduleDeferredStartTask(() => {
+            this.emitStorageSnapshots("start");
+          }, START_CAPTURE_STORAGE_DELAY_MS);
+        }
+
+        if (this.shouldCaptureScreenshots()) {
+          this.scheduleDeferredStartTask(() => {
+            this.scheduleScreenshotCapture("start");
+          }, START_CAPTURE_SCREENSHOT_DELAY_MS);
+        }
+      },
+      Math.max(0, delayMs)
+    );
+  }
+
+  private scheduleDeferredStartTask(task: () => void, delayMs: number): void {
+    const timerId = window.setTimeout(
+      () => {
+        this.deferredStartTaskTimers = this.deferredStartTaskTimers.filter(
+          (entry) => entry !== timerId
+        );
+
+        if (!this.recordingActive || this.isUserRecentlyActive()) {
+          return;
+        }
+
+        task();
+      },
+      Math.max(0, delayMs)
+    );
+
+    this.deferredStartTaskTimers.push(timerId);
   }
 
   private scheduleDeferredActionCapture(reason: string): void {
@@ -902,8 +969,15 @@ export class LiteCaptureAgent {
       return;
     }
 
-    const nowMono = monotonicTime();
     const isAction = reason.startsWith("action:");
+
+    if (!prioritize && !isAction && this.isUserRecentlyActive()) {
+      this.setPendingScreenshotReason(reason);
+      this.scheduleBackgroundCaptureRetry();
+      return;
+    }
+
+    const nowMono = monotonicTime();
 
     if (isAction && nowMono - this.lastActionScreenshotMono < SCREENSHOT_ACTION_COOLDOWN_MS) {
       return;
@@ -914,9 +988,7 @@ export class LiteCaptureAgent {
     }
 
     if (this.screenshotInFlight) {
-      if (prioritize || this.screenshotPendingReason === null) {
-        this.screenshotPendingReason = reason;
-      }
+      this.setPendingScreenshotReason(reason, prioritize);
 
       return;
     }
@@ -1002,6 +1074,47 @@ export class LiteCaptureAgent {
       t: Date.now(),
       mono: monotonicTime()
     };
+  }
+
+  private markUserActivity(): void {
+    this.lastUserActivityMono = monotonicTime();
+  }
+
+  private isUserRecentlyActive(idleMs = BACKGROUND_CAPTURE_IDLE_MS): boolean {
+    return monotonicTime() - this.lastUserActivityMono < idleMs;
+  }
+
+  private setPendingScreenshotReason(reason: string, prioritize = false): void {
+    if (
+      prioritize ||
+      this.screenshotPendingReason === null ||
+      this.screenshotPendingReason === "interval"
+    ) {
+      this.screenshotPendingReason = reason;
+    }
+  }
+
+  private scheduleBackgroundCaptureRetry(): void {
+    if (this.backgroundCaptureRetryTimer > 0 || !this.recordingActive) {
+      return;
+    }
+
+    this.backgroundCaptureRetryTimer = window.setTimeout(() => {
+      this.backgroundCaptureRetryTimer = 0;
+
+      if (!this.recordingActive || !this.screenshotPendingReason) {
+        return;
+      }
+
+      if (this.isUserRecentlyActive()) {
+        this.scheduleBackgroundCaptureRetry();
+        return;
+      }
+
+      const pending = this.screenshotPendingReason;
+      this.screenshotPendingReason = null;
+      this.scheduleScreenshotCapture(pending);
+    }, BACKGROUND_CAPTURE_IDLE_MS);
   }
 
   private readPointerSnapshot(): Record<string, unknown> | undefined {
@@ -1265,7 +1378,7 @@ function sanitizeSamplingConfig(raw: unknown): LiteCaptureSampling {
     scrollHz: clampRate(row.scrollHz, DEFAULT_SAMPLING.scrollHz),
     domFlushMs: clampInterval(row.domFlushMs, DEFAULT_SAMPLING.domFlushMs),
     snapshotIntervalMs: clampInterval(row.snapshotIntervalMs, DEFAULT_SAMPLING.snapshotIntervalMs),
-    screenshotIdleMs: clampInterval(row.screenshotIdleMs, DEFAULT_SAMPLING.screenshotIdleMs)
+    screenshotIdleMs: clampOptionalInterval(row.screenshotIdleMs, DEFAULT_SAMPLING.screenshotIdleMs)
   };
 }
 
@@ -1275,6 +1388,14 @@ function clampRate(value: unknown, fallback: number): number {
 
 function clampInterval(value: unknown, fallback: number): number {
   return clampNumber(value, fallback, 25, 120_000);
+}
+
+function clampOptionalInterval(value: unknown, fallback: number): number {
+  if (value === 0) {
+    return 0;
+  }
+
+  return clampNumber(value, fallback, 0, 120_000);
 }
 
 function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
