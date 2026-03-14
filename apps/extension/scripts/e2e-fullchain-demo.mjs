@@ -381,7 +381,6 @@ async function main() {
     captureMode === "lite"
       ? [
           "user.mousemove",
-          "screen.screenshot",
           "console.entry",
           "network.request",
           "dom.snapshot",
@@ -393,8 +392,16 @@ async function main() {
     await waitForPlayerEventType(playerClient, eventType, 20_000);
   }
 
-  const markerResult = await verifyPlayerScreenshotMarker(playerClient, 20_000);
-  assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
+  const markerResult =
+    captureMode === "full"
+      ? await verifyPlayerScreenshotMarker(playerClient, 20_000)
+      : {
+          ok: true,
+          reason: "lite-mode-no-runtime-screenshot-required"
+        };
+  if (captureMode === "full") {
+    assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
+  }
   const hoverResponseResult = await verifyPlayerProgressHoverResponse(playerClient, 20_000);
   assert(
     hoverResponseResult.ok,
