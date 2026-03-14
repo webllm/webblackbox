@@ -19,6 +19,11 @@ const MUTATION_PRESSURE_SUMMARY_LIMIT = 320;
 const MUTATION_PRESSURE_SAMPLE_LIMIT = 80;
 const MUTATION_PRESSURE_COOLDOWN_MS = 2_500;
 const MUTATION_PRESSURE_FLUSH_MS = 300;
+const INPUT_PRESSURE_BURST_WINDOW_MS = 900;
+const INPUT_PRESSURE_BURST_COUNT = 6;
+const INPUT_PRESSURE_COOLDOWN_MS = 1_800;
+const INPUT_PRESSURE_EDITOR_COOLDOWN_MS = 2_400;
+const INPUT_PRESSURE_MUTATION_SAMPLE_LIMIT = 16;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
@@ -141,6 +146,8 @@ export class LiteCaptureAgent {
   private lastUserActivityMono = monotonicTime();
   private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
   private mutationPressureUntilMono = Number.NEGATIVE_INFINITY;
+  private inputPressureUntilMono = Number.NEGATIVE_INFINITY;
+  private recentEditableInteractionMonos: number[] = [];
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
   private pendingScrollPayload: {
     target: Record<string, unknown>;
@@ -362,6 +369,7 @@ export class LiteCaptureAgent {
       "keydown",
       (event: KeyboardEvent) => {
         this.markUserActivity();
+        this.recordEditableInteraction(event.target);
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "m") {
           this.emitMarker("Keyboard marker");
         }
@@ -391,6 +399,8 @@ export class LiteCaptureAgent {
           return;
         }
 
+        this.recordEditableInteraction(target);
+
         const isSensitive =
           target.type === "password" ||
           target.type === "email" ||
@@ -412,6 +422,7 @@ export class LiteCaptureAgent {
       "change",
       (event: Event) => {
         this.markUserActivity();
+        this.recordEditableInteraction(event.target);
         this.queueEvent("input", {
           kind: "change",
           target: this.resolveTargetPayload(event.target, "fast")
@@ -651,12 +662,17 @@ export class LiteCaptureAgent {
       this.extendMutationPressureWindow();
     }
 
-    const pressureActive = this.isMutationPressureActive();
+    const inputPressureActive = this.isInputPressureActive();
+    const pressureActive = this.isMutationPressureActive() || inputPressureActive;
     const includeDetails =
       !pressureActive &&
       records.length <= MUTATION_DETAIL_RECORD_LIMIT &&
       this.eventBuffer.length <= MUTATION_DETAIL_BUFFER_LIMIT;
-    const sampleLimit = pressureActive ? MUTATION_PRESSURE_SAMPLE_LIMIT : records.length;
+    const sampleLimit = inputPressureActive
+      ? INPUT_PRESSURE_MUTATION_SAMPLE_LIMIT
+      : pressureActive
+        ? MUTATION_PRESSURE_SAMPLE_LIMIT
+        : records.length;
     const sampledCount = Math.min(records.length, sampleLimit);
 
     for (let index = 0; index < sampledCount; index += 1) {
@@ -1192,6 +1208,30 @@ export class LiteCaptureAgent {
     this.lastUserActivityMono = monotonicTime();
   }
 
+  private recordEditableInteraction(target: EventTarget | null): void {
+    if (!isEditableInteractionTarget(target)) {
+      return;
+    }
+
+    const nowMono = monotonicTime();
+    this.recentEditableInteractionMonos = this.recentEditableInteractionMonos.filter(
+      (entry) => nowMono - entry <= INPUT_PRESSURE_BURST_WINDOW_MS
+    );
+    this.recentEditableInteractionMonos.push(nowMono);
+
+    const duration = isRichTextEditableTarget(target)
+      ? INPUT_PRESSURE_EDITOR_COOLDOWN_MS
+      : this.recentEditableInteractionMonos.length >= INPUT_PRESSURE_BURST_COUNT
+        ? INPUT_PRESSURE_COOLDOWN_MS
+        : 0;
+
+    if (duration <= 0) {
+      return;
+    }
+
+    this.inputPressureUntilMono = Math.max(this.inputPressureUntilMono, nowMono + duration);
+  }
+
   private queueTrailingScrollEvent(event: Event): void {
     this.pendingScrollPayload = {
       target: toFastTargetPayload(event.target),
@@ -1275,7 +1315,9 @@ export class LiteCaptureAgent {
 
   private shouldHoldMutationFlush(): boolean {
     return (
-      this.recordingActive && this.mutationSummary.count > 0 && this.isMutationPressureActive()
+      this.recordingActive &&
+      this.mutationSummary.count > 0 &&
+      (this.isMutationPressureActive() || this.isInputPressureActive())
     );
   }
 
@@ -1287,10 +1329,15 @@ export class LiteCaptureAgent {
     return monotonicTime() < this.mutationPressureUntilMono;
   }
 
+  private isInputPressureActive(): boolean {
+    return monotonicTime() < this.inputPressureUntilMono;
+  }
+
   private shouldDeferBackgroundCapture(): boolean {
     return (
       this.isUserRecentlyActive() ||
       this.isMutationPressureActive() ||
+      this.isInputPressureActive() ||
       this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
     );
   }
@@ -1304,7 +1351,11 @@ export class LiteCaptureAgent {
   }
 
   private resolveDomSnapshotSummaryMode(nodeCount: number): "pressure" | "large-dom" | null {
-    if (this.isMutationPressureActive() || this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT) {
+    if (
+      this.isMutationPressureActive() ||
+      this.isInputPressureActive() ||
+      this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
+    ) {
       return "pressure";
     }
 
@@ -1740,6 +1791,18 @@ function buildDomSnapshotSummaryHtml(options: {
   ];
 
   return body.join("");
+}
+
+function isEditableInteractionTarget(target: EventTarget | null): boolean {
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    return true;
+  }
+
+  return isRichTextEditableTarget(target);
+}
+
+function isRichTextEditableTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && target.isContentEditable;
 }
 
 function safeSelector(target: EventTarget | null): string {
