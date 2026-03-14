@@ -131,7 +131,8 @@ export class LiteCaptureAgent {
   private readonly eventBuffer: RawRecorderEvent[] = [];
   private readonly preRecordingBuffer: RawRecorderEvent[] = [];
   private readonly cleanupCallbacks: Array<() => void> = [];
-  private readonly frameMarker = resolveContentFrameMarker();
+  private readonly frameMarker: string | undefined;
+  private readonly isTopLevelFrame: boolean;
 
   private recordingActive = false;
   private sid = "";
@@ -180,8 +181,13 @@ export class LiteCaptureAgent {
 
   /** Creates and installs capture hooks for the current page context. */
   public constructor(private readonly options: LiteCaptureAgentOptions) {
+    const frameContext = resolveContentFrameContext(options.frameScope);
+    this.frameMarker = frameContext.marker;
+    this.isTopLevelFrame = frameContext.isTopLevel;
     this.installInputAndLifecycleCapture();
-    this.installPerformanceCapture();
+    if (this.isTopLevelFrame) {
+      this.installPerformanceCapture();
+    }
     this.installInjectedMessageBridge();
     this.emitLifecycleEvent("visibilitychange", { state: document.visibilityState });
   }
@@ -742,19 +748,19 @@ export class LiteCaptureAgent {
   }
 
   private shouldCaptureScreenshots(): boolean {
-    return this.mode !== "full" && this.sampling.screenshotIdleMs > 0;
+    return this.mode !== "full" && this.isTopLevelFrame && this.sampling.screenshotIdleMs > 0;
   }
 
   private shouldCaptureMutationSignals(): boolean {
-    return this.mode !== "full";
+    return this.mode !== "full" && this.isTopLevelFrame;
   }
 
   private shouldCaptureDomSnapshots(): boolean {
-    return this.mode !== "full";
+    return this.mode !== "full" && this.isTopLevelFrame;
   }
 
   private shouldCaptureStorageSnapshots(): boolean {
-    return this.mode !== "full";
+    return this.mode !== "full" && this.isTopLevelFrame;
   }
 
   private startMutationAndSnapshots(): void {
@@ -1021,6 +1027,10 @@ export class LiteCaptureAgent {
   }
 
   private emitViewportSnapshot(reason: string): void {
+    if (!this.isTopLevelFrame) {
+      return;
+    }
+
     this.queueEvent("resize", {
       reason,
       width: window.innerWidth,
@@ -1897,12 +1907,42 @@ function monotonicTime(): number {
   return performance.timeOrigin + performance.now();
 }
 
-function resolveContentFrameMarker(): string | undefined {
-  try {
-    return window.top === window ? undefined : "content-iframe";
-  } catch {
-    return "content-iframe";
+function resolveContentFrameContext(scope: LiteCaptureAgentOptions["frameScope"] = "auto"): {
+  marker: string | undefined;
+  isTopLevel: boolean;
+} {
+  if (scope === "top") {
+    return {
+      marker: undefined,
+      isTopLevel: true
+    };
   }
+
+  if (scope === "child") {
+    return {
+      marker: "content-iframe",
+      isTopLevel: false
+    };
+  }
+
+  try {
+    if (window.top === window) {
+      return {
+        marker: undefined,
+        isTopLevel: true
+      };
+    }
+  } catch {
+    return {
+      marker: "content-iframe",
+      isTopLevel: false
+    };
+  }
+
+  return {
+    marker: "content-iframe",
+    isTopLevel: false
+  };
 }
 
 function toLiteTargetPayload(

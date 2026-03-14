@@ -37,6 +37,8 @@ export type LiteCaptureAgentOptions = {
   onMarker?: (message: string) => void;
   /** Toggles in-page recording indicator UI. */
   showIndicator?: boolean;
+  /** Overrides frame-role detection for tests or custom embedding. */
+  frameScope?: "auto" | "top" | "child";
 };
 
 /**

@@ -14,13 +14,17 @@ vi.mock("@zumer/snapdom", () => {
 
 import { INJECTED_MESSAGE_SOURCE } from "./injected-hooks.js";
 import { LiteCaptureAgent } from "./lite-capture-agent.js";
-import type { LiteCaptureState } from "./types.js";
+import type { LiteCaptureAgentOptions, LiteCaptureState } from "./types.js";
 
-function createAgent(state: Partial<LiteCaptureState> = {}) {
+function createAgent(
+  state: Partial<LiteCaptureState> = {},
+  options: Partial<LiteCaptureAgentOptions> = {}
+) {
   const emitBatch = vi.fn();
   const agent = new LiteCaptureAgent({
     emitBatch,
-    showIndicator: false
+    showIndicator: false,
+    ...options
   });
 
   agent.setRecordingStatus({
@@ -301,6 +305,43 @@ describe("LiteCaptureAgent", () => {
     expect(typeof snapshotEvent?.payload?.html).toBe("string");
     expect(String(snapshotEvent?.payload?.html)).toContain('data-webblackbox-summary="true"');
     expect(String(snapshotEvent?.payload?.html)).not.toContain("Full DOM content should not");
+
+    agent.dispose();
+  });
+
+  it("keeps child-frame capture lightweight", async () => {
+    const { agent, emitBatch } = createAgent(
+      {
+        sampling: {
+          screenshotIdleMs: 1_000
+        }
+      },
+      {
+        frameScope: "child"
+      }
+    );
+
+    clickTarget();
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite",
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
+
+    const rawTypes = emittedRawTypes(emitBatch);
+
+    expect(rawTypes).toContain("click");
+    expect(rawTypes).not.toContain("snapshot");
+    expect(rawTypes).not.toContain("localStorageSnapshot");
+    expect(rawTypes).not.toContain("cookieSnapshot");
+    expect(rawTypes).not.toContain("indexedDbSnapshot");
+    expect(snapdomToBlobMock).not.toHaveBeenCalled();
 
     agent.dispose();
   });

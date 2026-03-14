@@ -2981,7 +2981,7 @@ function normalizeHashesManifest(value: unknown): HashesManifest {
 async function ensureInjectedHooks(tabId: number): Promise<void> {
   await chromeApi?.scripting
     ?.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId },
       world: "MAIN",
       files: ["injected.js"]
     })
