@@ -28,6 +28,10 @@ Think of it as a **black box for your web app**: always recording in the backgro
 
 The hosted Player is available at: https://webllm.github.io/webblackbox/
 
+**Demo**:
+
+https://github.com/user-attachments/assets/46273fc0-36f2-4aeb-9dfa-9c60cfcba98c
+
 ### Why WebBlackbox?
 
 - 📊 **Record everything** — 57 event types across 13 categories, captured silently via CDP and content scripts
