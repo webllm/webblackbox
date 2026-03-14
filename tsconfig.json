@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
-  "extends": "./packages/config-typescript/base.json",
+  "extends": "./config/typescript/base.json",
   "files": [],
   "references": [
     {

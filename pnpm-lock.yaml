@@ -157,8 +157,6 @@ importers:
         specifier: workspace:*
         version: link:../protocol
 
-  packages/config-typescript: {}
-
   packages/mcp-core:
     dependencies:
       zod:

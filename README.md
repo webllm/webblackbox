@@ -438,8 +438,9 @@ webblackbox/
 │   ├── web-sdk/            # Browser lite capture SDK (published as `webblackbox`)
 │   ├── player-sdk/         # Playback, querying, analysis APIs
 │   ├── cdp-router/         # Chrome DevTools Protocol routing
-│   ├── mcp-core/           # MCP utility functions
-│   └── config-typescript/  # Shared TypeScript configuration
+│   └── mcp-core/           # MCP utility functions
+├── config/
+│   └── typescript/         # Shared TypeScript configuration
 ├── turbo.json              # Turbo monorepo orchestration
 ├── pnpm-workspace.yaml     # pnpm workspace config
 └── package.json            # Root dependencies & scripts
