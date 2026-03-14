@@ -916,18 +916,16 @@ export class LiteCaptureAgent {
   private emitDomSnapshot(reason: string): void {
     const nodeCount = document.getElementsByTagName("*").length;
     const summaryMode = this.resolveDomSnapshotSummaryMode(nodeCount);
-    const html = summaryMode
-      ? buildDomSnapshotSummaryHtml({
-          href: location.href,
-          title: document.title,
-          reason,
-          nodeCount,
-          summaryMode,
-          capturedAtIso: new Date().toISOString()
-        })
-      : document.documentElement.outerHTML;
-    const truncated = summaryMode !== null || html.length > DOM_SNAPSHOT_MAX_HTML_CHARS;
-    const sampledHtml = truncated ? html.slice(0, DOM_SNAPSHOT_MAX_HTML_CHARS) : html;
+    const html = buildDomSnapshotSummaryHtml({
+      href: location.href,
+      title: document.title,
+      reason,
+      nodeCount,
+      summaryMode,
+      capturedAtIso: new Date().toISOString()
+    });
+    const truncated = true;
+    const sampledHtml = html.slice(0, DOM_SNAPSHOT_MAX_HTML_CHARS);
 
     this.hasDomSnapshot = true;
 
@@ -939,8 +937,8 @@ export class LiteCaptureAgent {
       htmlLength: html.length,
       truncated,
       html: sampledHtml,
-      summaryOnly: summaryMode !== null,
-      summaryMode: summaryMode ?? undefined
+      summaryOnly: true,
+      summaryMode
     });
   }
 
@@ -1395,7 +1393,9 @@ export class LiteCaptureAgent {
     );
   }
 
-  private resolveDomSnapshotSummaryMode(nodeCount: number): "pressure" | "large-dom" | null {
+  private resolveDomSnapshotSummaryMode(
+    nodeCount: number
+  ): "pressure" | "large-dom" | "runtime-lite" {
     if (
       this.isQuietModeActive() ||
       this.isMutationPressureActive() ||
@@ -1409,7 +1409,7 @@ export class LiteCaptureAgent {
       return "large-dom";
     }
 
-    return null;
+    return "runtime-lite";
   }
 
   private setPendingScreenshotReason(reason: string, prioritize = false): void {
@@ -1971,7 +1971,7 @@ function buildDomSnapshotSummaryHtml(options: {
   title: string;
   reason: string;
   nodeCount: number;
-  summaryMode: "pressure" | "large-dom";
+  summaryMode: "pressure" | "large-dom" | "runtime-lite";
   capturedAtIso: string;
 }): string {
   const body = [

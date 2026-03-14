@@ -267,6 +267,44 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("uses summary-only html for routine lite dom snapshots", () => {
+    document.body.innerHTML = `
+      <main>
+        <article id="story">
+          <h1>Headline</h1>
+          <p>Full DOM content should not be serialized in lite runtime snapshots.</p>
+        </article>
+      </main>
+    `;
+
+    const { agent, emitBatch } = createAgent();
+
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+
+    const snapshotEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "snapshot");
+
+    expect(snapshotEvent?.payload).toMatchObject({
+      summaryOnly: true,
+      summaryMode: "runtime-lite",
+      truncated: true
+    });
+    expect(typeof snapshotEvent?.payload?.html).toBe("string");
+    expect(String(snapshotEvent?.payload?.html)).toContain('data-webblackbox-summary="true"');
+    expect(String(snapshotEvent?.payload?.html)).not.toContain("Full DOM content should not");
+
+    agent.dispose();
+  });
+
   it("emits a final localStorage snapshot when stopping before idle storage capture runs", () => {
     localStorage.setItem("demo", "value");
     const { agent, emitBatch } = createAgent();
