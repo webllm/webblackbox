@@ -11,7 +11,10 @@ export function PlayerShell(): React.JSX.Element {
     <main id="player-shell" className="shell wb-shell">
       <header className="toolbar card" role="banner">
         <div className="toolbar-left">
-          <span className="brand">WebBlackbox</span>
+          <span className="brand-lockup">
+            <img className="brand-mark" src="./logo.png" alt="" width="22" height="22" />
+            <span className="brand">WebBlackbox</span>
+          </span>
           <span className="toolbar-separator" aria-hidden="true"></span>
           <span className="toolbar-title">Player</span>
         </div>
@@ -167,7 +170,16 @@ export function PlayerShell(): React.JSX.Element {
           <svg id="filmstrip-trail-svg" className="preview-trail" aria-hidden="true"></svg>
           <div id="filmstrip-cursor" className="preview-cursor" hidden></div>
           <div id="stage-placeholder" className="stage-placeholder">
-            Load an archive to start playback.
+            <div className="stage-placeholder__content">
+              <img
+                className="stage-placeholder__logo"
+                src="./logo.png"
+                alt=""
+                width="88"
+                height="88"
+              />
+              <p className="stage-placeholder__text">Load an archive to start playback.</p>
+            </div>
           </div>
         </div>
 
