@@ -14,8 +14,8 @@
   <a href="https://github.com/webllm/webblackbox/actions/workflows/ci.yml"><img src="https://github.com/webllm/webblackbox/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://www.npmjs.com/package/webblackbox"><img src="https://img.shields.io/npm/v/webblackbox.svg?color=f97316" alt="npm version" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/npm/l/webblackbox?color=374151" alt="License" /></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-≥22-339933?logo=node.js&logoColor=white" alt="Node.js" /></a>
+  <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/github/v/release/webllm/webblackbox.svg" alt="Release" /></a>
+  <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/badge/Chrome-Extension-4285F4?logo=googlechrome&logoColor=white" alt="Chrome Extension" /></a>
 </p>
 
 ---
