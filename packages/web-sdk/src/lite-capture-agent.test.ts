@@ -516,6 +516,165 @@ describe("LiteCaptureAgent", () => {
     }
   });
 
+  it("enters quiet mode for sustained mutation churn and recovers with a summary snapshot", async () => {
+    let observeCallback: MutationCallback | null = null;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const OriginalMutationObserver = globalThis.MutationObserver;
+
+    class MockMutationObserver {
+      public constructor(callback: MutationCallback) {
+        observeCallback = callback;
+      }
+
+      public disconnect = disconnect;
+
+      public observe = observe;
+
+      public takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+
+    globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
+
+    try {
+      const { agent, emitBatch } = createAgent();
+      const target = document.querySelector("#target");
+
+      if (!(target instanceof Element) || observeCallback === null) {
+        throw new Error("missing mutation observer callback");
+      }
+
+      const callback: MutationCallback = observeCallback;
+      const record = {
+        type: "childList",
+        target,
+        addedNodes: { length: 1 } as NodeList,
+        removedNodes: { length: 0 } as NodeList
+      } as unknown as MutationRecord;
+
+      callback(
+        Array.from({ length: 420 }, () => record),
+        {} as MutationObserver
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      agent.flush();
+
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      expect(emittedRawTypes(emitBatch)).not.toContain("mutation");
+
+      emitBatch.mockClear();
+
+      await vi.advanceTimersByTimeAsync(3_200);
+      agent.flush();
+
+      const snapshotEvent = emitBatch.mock.calls
+        .flatMap((call) => {
+          const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+          return batch;
+        })
+        .find(
+          (entry) => entry.rawType === "snapshot" && entry.payload?.reason === "pressure-recovery"
+        );
+
+      expect(snapshotEvent?.payload).toMatchObject({
+        summaryOnly: true,
+        summaryMode: "pressure",
+        reason: "pressure-recovery"
+      });
+      expect(observe).toHaveBeenCalledTimes(2);
+
+      agent.dispose();
+    } finally {
+      globalThis.MutationObserver = OriginalMutationObserver;
+    }
+  });
+
+  it("enters quiet mode for rich-text editing churn", async () => {
+    let observeCallback: MutationCallback | null = null;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const OriginalMutationObserver = globalThis.MutationObserver;
+
+    class MockMutationObserver {
+      public constructor(callback: MutationCallback) {
+        observeCallback = callback;
+      }
+
+      public disconnect = disconnect;
+
+      public observe = observe;
+
+      public takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+
+    globalThis.MutationObserver = MockMutationObserver as unknown as typeof MutationObserver;
+
+    try {
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        '<div id="editor" contenteditable="true">editable</div>'
+      );
+
+      const { agent, emitBatch } = createAgent();
+      const editor = document.querySelector<HTMLElement>("#editor");
+
+      if (!editor || observeCallback === null) {
+        throw new Error("missing editor target");
+      }
+
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "A",
+          code: "KeyA",
+          bubbles: true
+        })
+      );
+
+      const callback: MutationCallback = observeCallback;
+      const record = {
+        type: "childList",
+        target: editor,
+        addedNodes: { length: 1 } as NodeList,
+        removedNodes: { length: 0 } as NodeList
+      } as unknown as MutationRecord;
+
+      callback([record], {} as MutationObserver);
+      await vi.advanceTimersByTimeAsync(50);
+      agent.flush();
+
+      expect(disconnect).toHaveBeenCalledTimes(1);
+
+      emitBatch.mockClear();
+
+      await vi.advanceTimersByTimeAsync(5_900);
+      agent.flush();
+
+      const snapshotEvent = emitBatch.mock.calls
+        .flatMap((call) => {
+          const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+          return batch;
+        })
+        .find(
+          (entry) => entry.rawType === "snapshot" && entry.payload?.reason === "pressure-recovery"
+        );
+
+      expect(snapshotEvent?.payload).toMatchObject({
+        summaryOnly: true,
+        summaryMode: "pressure",
+        reason: "pressure-recovery"
+      });
+      expect(observe).toHaveBeenCalledTimes(2);
+
+      agent.dispose();
+    } finally {
+      globalThis.MutationObserver = OriginalMutationObserver;
+    }
+  });
+
   it("uses lightweight targets for keydown, focus, blur, change, and submit", () => {
     const { agent, emitBatch } = createAgent();
     const field = inputTarget();

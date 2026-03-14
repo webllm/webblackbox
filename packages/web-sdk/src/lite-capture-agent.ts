@@ -24,6 +24,10 @@ const INPUT_PRESSURE_BURST_COUNT = 6;
 const INPUT_PRESSURE_COOLDOWN_MS = 1_800;
 const INPUT_PRESSURE_EDITOR_COOLDOWN_MS = 2_400;
 const INPUT_PRESSURE_MUTATION_SAMPLE_LIMIT = 16;
+const QUIET_MODE_MUTATION_RECORD_LIMIT = 360;
+const QUIET_MODE_EVENT_BUFFER_LIMIT = 560;
+const QUIET_MODE_COOLDOWN_MS = 3_000;
+const QUIET_MODE_EDITOR_COOLDOWN_MS = 4_200;
 const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
@@ -133,6 +137,7 @@ export class LiteCaptureAgent {
   private screenshotTimer = 0;
   private startCaptureTimer = 0;
   private backgroundCaptureRetryTimer = 0;
+  private quietModeRecoveryTimer = 0;
   private deferredActionCaptureTimer = 0;
   private deferredStartTaskTimers: number[] = [];
   private trailingScrollTimer = 0;
@@ -147,6 +152,8 @@ export class LiteCaptureAgent {
   private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
   private mutationPressureUntilMono = Number.NEGATIVE_INFINITY;
   private inputPressureUntilMono = Number.NEGATIVE_INFINITY;
+  private editorPressureUntilMono = Number.NEGATIVE_INFINITY;
+  private quietModeUntilMono = Number.NEGATIVE_INFINITY;
   private recentEditableInteractionMonos: number[] = [];
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
   private pendingScrollPayload: {
@@ -162,6 +169,7 @@ export class LiteCaptureAgent {
   private selectorCacheSize = 0;
   private droppedLowPriorityEvents = 0;
   private disposed = false;
+  private pendingQuietRecoverySummary = false;
 
   /** Creates and installs capture hooks for the current page context. */
   public constructor(private readonly options: LiteCaptureAgentOptions) {
@@ -726,20 +734,7 @@ export class LiteCaptureAgent {
 
   private startMutationAndSnapshots(): void {
     if (this.shouldCaptureMutationSignals() && !this.mutationObserver) {
-      this.mutationObserver = new MutationObserver((records) => {
-        this.accumulateMutationRecords(records);
-        this.scheduleMutationFlush();
-      });
-
-      this.mutationObserver.observe(document.documentElement, {
-        attributes: true,
-        childList: true,
-        subtree: true,
-        characterData: false,
-        attributeFilter: OBSERVED_MUTATION_ATTRIBUTES,
-        characterDataOldValue: false,
-        attributeOldValue: false
-      });
+      this.ensureMutationObserverActive();
     }
 
     if (
@@ -776,6 +771,11 @@ export class LiteCaptureAgent {
   private stopMutationAndSnapshots(): void {
     this.mutationObserver?.disconnect();
     this.mutationObserver = null;
+    this.pendingQuietRecoverySummary = false;
+    this.quietModeUntilMono = Number.NEGATIVE_INFINITY;
+    this.editorPressureUntilMono = Number.NEGATIVE_INFINITY;
+    this.inputPressureUntilMono = Number.NEGATIVE_INFINITY;
+    this.recentEditableInteractionMonos = [];
 
     if (this.snapshotTimer > 0) {
       clearInterval(this.snapshotTimer);
@@ -800,6 +800,11 @@ export class LiteCaptureAgent {
     if (this.backgroundCaptureRetryTimer > 0) {
       clearTimeout(this.backgroundCaptureRetryTimer);
       this.backgroundCaptureRetryTimer = 0;
+    }
+
+    if (this.quietModeRecoveryTimer > 0) {
+      clearTimeout(this.quietModeRecoveryTimer);
+      this.quietModeRecoveryTimer = 0;
     }
 
     if (this.deferredActionCaptureTimer > 0) {
@@ -1219,7 +1224,8 @@ export class LiteCaptureAgent {
     );
     this.recentEditableInteractionMonos.push(nowMono);
 
-    const duration = isRichTextEditableTarget(target)
+    const richTextTarget = isRichTextEditableTarget(target);
+    const duration = richTextTarget
       ? INPUT_PRESSURE_EDITOR_COOLDOWN_MS
       : this.recentEditableInteractionMonos.length >= INPUT_PRESSURE_BURST_COUNT
         ? INPUT_PRESSURE_COOLDOWN_MS
@@ -1230,6 +1236,13 @@ export class LiteCaptureAgent {
     }
 
     this.inputPressureUntilMono = Math.max(this.inputPressureUntilMono, nowMono + duration);
+
+    if (richTextTarget) {
+      this.editorPressureUntilMono = Math.max(
+        this.editorPressureUntilMono,
+        nowMono + INPUT_PRESSURE_EDITOR_COOLDOWN_MS
+      );
+    }
   }
 
   private queueTrailingScrollEvent(event: Event): void {
@@ -1317,7 +1330,7 @@ export class LiteCaptureAgent {
     return (
       this.recordingActive &&
       this.mutationSummary.count > 0 &&
-      (this.isMutationPressureActive() || this.isInputPressureActive())
+      (this.isMutationPressureActive() || this.isInputPressureActive() || this.isQuietModeActive())
     );
   }
 
@@ -1333,9 +1346,18 @@ export class LiteCaptureAgent {
     return monotonicTime() < this.inputPressureUntilMono;
   }
 
+  private isEditorPressureActive(): boolean {
+    return monotonicTime() < this.editorPressureUntilMono;
+  }
+
+  private isQuietModeActive(): boolean {
+    return monotonicTime() < this.quietModeUntilMono;
+  }
+
   private shouldDeferBackgroundCapture(): boolean {
     return (
       this.isUserRecentlyActive() ||
+      this.isQuietModeActive() ||
       this.isMutationPressureActive() ||
       this.isInputPressureActive() ||
       this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
@@ -1345,6 +1367,7 @@ export class LiteCaptureAgent {
   private shouldSuppressPointerMoveCapture(): boolean {
     return (
       this.isScrollBurstActive() ||
+      this.isQuietModeActive() ||
       this.isMutationPressureActive() ||
       this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE
     );
@@ -1352,6 +1375,7 @@ export class LiteCaptureAgent {
 
   private resolveDomSnapshotSummaryMode(nodeCount: number): "pressure" | "large-dom" | null {
     if (
+      this.isQuietModeActive() ||
       this.isMutationPressureActive() ||
       this.isInputPressureActive() ||
       this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
@@ -1397,6 +1421,129 @@ export class LiteCaptureAgent {
       this.screenshotPendingReason = null;
       this.scheduleScreenshotCapture(pending);
     }, BACKGROUND_CAPTURE_IDLE_MS);
+  }
+
+  private ensureMutationObserverActive(): void {
+    if (
+      this.mutationObserver ||
+      !this.recordingActive ||
+      !this.shouldCaptureMutationSignals() ||
+      this.isQuietModeActive()
+    ) {
+      return;
+    }
+
+    this.mutationObserver = new MutationObserver((records) => {
+      if (this.isQuietModeActive()) {
+        this.pendingQuietRecoverySummary = true;
+        return;
+      }
+
+      if (this.shouldEnterQuietMode(records)) {
+        this.enterQuietMode(this.isEditorPressureActive() ? "editor" : "mutation");
+        return;
+      }
+
+      this.accumulateMutationRecords(records);
+      this.scheduleMutationFlush();
+    });
+
+    this.mutationObserver.observe(document.documentElement, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      characterData: false,
+      attributeFilter: OBSERVED_MUTATION_ATTRIBUTES,
+      characterDataOldValue: false,
+      attributeOldValue: false
+    });
+  }
+
+  private shouldEnterQuietMode(records: MutationRecord[]): boolean {
+    if (records.length === 0) {
+      return false;
+    }
+
+    return (
+      records.length >= QUIET_MODE_MUTATION_RECORD_LIMIT ||
+      this.eventBuffer.length >= QUIET_MODE_EVENT_BUFFER_LIMIT ||
+      this.isEditorPressureActive()
+    );
+  }
+
+  private enterQuietMode(reason: "mutation" | "editor"): void {
+    const duration = reason === "editor" ? QUIET_MODE_EDITOR_COOLDOWN_MS : QUIET_MODE_COOLDOWN_MS;
+    this.quietModeUntilMono = Math.max(this.quietModeUntilMono, monotonicTime() + duration);
+    this.pendingQuietRecoverySummary = true;
+
+    if (this.mutationFlushTimer > 0) {
+      clearTimeout(this.mutationFlushTimer);
+      this.mutationFlushTimer = 0;
+    }
+
+    if (this.mutationSummary.count > 0) {
+      this.flushMutationBuffer();
+    }
+
+    this.mutationObserver?.disconnect();
+    this.mutationObserver = null;
+    this.scheduleQuietModeRecovery();
+  }
+
+  private scheduleQuietModeRecovery(): void {
+    if (!this.recordingActive || this.quietModeRecoveryTimer > 0) {
+      return;
+    }
+
+    const delayMs = Math.max(
+      BACKGROUND_CAPTURE_IDLE_MS,
+      Math.ceil(this.quietModeUntilMono - monotonicTime())
+    );
+
+    this.quietModeRecoveryTimer = window.setTimeout(() => {
+      this.quietModeRecoveryTimer = 0;
+
+      if (!this.recordingActive) {
+        return;
+      }
+
+      if (this.isQuietModeActive() || this.shouldDeferBackgroundCapture()) {
+        this.scheduleQuietModeRecovery();
+        return;
+      }
+
+      this.ensureMutationObserverActive();
+
+      if (this.pendingQuietRecoverySummary && this.shouldCaptureDomSnapshots()) {
+        this.pendingQuietRecoverySummary = false;
+        this.emitPressureRecoverySnapshot();
+      }
+    }, delayMs);
+  }
+
+  private emitPressureRecoverySnapshot(): void {
+    const nodeCount = document.getElementsByTagName("*").length;
+    const html = buildDomSnapshotSummaryHtml({
+      href: location.href,
+      title: document.title,
+      reason: "pressure-recovery",
+      nodeCount,
+      summaryMode: "pressure",
+      capturedAtIso: new Date().toISOString()
+    });
+
+    this.hasDomSnapshot = true;
+    this.queueEvent("snapshot", {
+      reason: "pressure-recovery",
+      href: location.href,
+      title: document.title,
+      nodeCount,
+      htmlLength: html.length,
+      truncated: true,
+      html,
+      summaryOnly: true,
+      summaryMode: "pressure"
+    });
   }
 
   private readPointerSnapshot(): Record<string, unknown> | undefined {
@@ -1802,7 +1949,25 @@ function isEditableInteractionTarget(target: EventTarget | null): boolean {
 }
 
 function isRichTextEditableTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && target.isContentEditable;
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  const directValue = target.getAttribute("contenteditable");
+
+  if (directValue === "" || directValue === "true" || directValue === "plaintext-only") {
+    return true;
+  }
+
+  return (
+    target.closest(
+      "[contenteditable='true'], [contenteditable='plaintext-only'], [contenteditable='']"
+    ) !== null
+  );
 }
 
 function safeSelector(target: EventTarget | null): string {
