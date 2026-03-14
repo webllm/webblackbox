@@ -1,56 +1,127 @@
-# WebBlackbox
+<p align="center">
+  <img src="logo.png" alt="WebBlackbox" width="128" height="128" />
+</p>
 
-**A flight recorder and time-travel debugger for web applications.** WebBlackbox is a Chrome extension that continuously captures comprehensive session data — user interactions, network traffic, DOM mutations, console logs, storage operations, performance metrics, and screenshots — then exports encrypted, portable archives for offline playback and analysis.
+<h1 align="center">WebBlackbox</h1>
 
-Think of it as a "black box" for your web app: always recording in the background, so when something goes wrong, you have the full context to understand what happened and why.
+<p align="center">
+  <strong>A flight recorder and time-travel debugger for web applications.</strong>
+  <br />
+  <sub>Always recording. So when something goes wrong, you know exactly what happened — and why.</sub>
+</p>
 
-## Key Features
+<p align="center">
+  <a href="https://github.com/webllm/webblackbox/actions/workflows/ci.yml"><img src="https://github.com/webllm/webblackbox/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://www.npmjs.com/package/webblackbox"><img src="https://img.shields.io/npm/v/webblackbox.svg?color=f97316" alt="npm version" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/npm/l/webblackbox?color=374151" alt="License" /></a>
+  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-≥22-339933?logo=node.js&logoColor=white" alt="Node.js" /></a>
+</p>
 
-- **Continuous Recording** — Runs silently as a Chrome extension, capturing events via the Chrome DevTools Protocol (CDP) and content script injection
-- **57 Event Types (current)** — User interactions, network requests/responses, WebSocket/SSE streams, DOM mutations, console logs, storage operations, performance metrics, and more
-- **Two Capture Modes** — `lite` for minimal overhead, `full` for comprehensive debugging
-- **Ring Buffer** — Configurable circular buffer (default 10 minutes) keeps memory usage bounded while preserving recent context
-- **Privacy-First Redaction** — Built-in header, cookie, and body pattern masking with configurable CSS selector blocking
-- **Encrypted Archives** — AES-GCM encryption with PBKDF2 key derivation for secure sharing
-- **Rich Playback** — React-based player with timeline, network waterfall, console panel, storage inspector, and DOM diff analysis
-- **Export Capabilities** — Generate bug reports, HAR files, Playwright test scripts, curl/fetch commands, and GitHub/Jira issue templates
-- **Cloud Share Link (optional)** — Upload archives to the share server with redacted server-side metadata for collaboration
-- **MCP Integration** — Model Context Protocol server for AI-assisted session analysis
-- **Extensible Plugin System** — Custom recorder plugins with hooks for event processing
+---
+
+WebBlackbox is a Chrome extension that continuously captures comprehensive session data — user interactions, network traffic, DOM mutations, console logs, storage operations, performance metrics, and screenshots — then exports encrypted, portable `.webblackbox` archives for offline playback and analysis.
+
+Think of it as a **black box for your web app**: always recording in the background, so when something goes wrong, you have the full context to debug, reproduce, and fix it.
+
+<br />
+
+## Highlights
+
+<table>
+<tr>
+<td width="50%">
+
+**57 Event Types**
+Captures user interactions, network requests/responses, WebSocket & SSE streams, DOM mutations, console logs, storage operations, performance metrics, and more — organized across 13 categories.
+
+</td>
+<td width="50%">
+
+**Two Capture Modes**
+`lite` for minimal page-thread overhead in production monitoring. `full` for comprehensive debugging with CDP-driven capture, DOM snapshots, and response body sampling.
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Privacy-First Redaction**
+Built-in header, cookie, and body pattern masking with configurable CSS selector blocking. Optional hash-based anonymization preserves correlation analysis without exposing raw values.
+
+</td>
+<td>
+
+**Encrypted Archives**
+AES-GCM encryption with PBKDF2 key derivation (120K iterations). Per-file IVs, SHA-256 integrity checksums, and content-addressable blob deduplication.
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Rich Playback UI**
+React-based player with interactive timeline, network waterfall, console panel, storage inspector, DOM diff viewer, screenshot trail with pointer overlay, and performance dashboard.
+
+</td>
+<td>
+
+**Code Generation**
+Export to HAR, Playwright test scripts, curl/fetch commands, markdown bug reports, and GitHub/Jira issue templates — all derived from captured session data.
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Ring Buffer**
+Configurable circular buffer (default 10 min) keeps memory usage bounded while preserving recent context. Auto-freeze on errors, network failures, or long task spikes.
+
+</td>
+<td>
+
+**MCP Integration**
+Model Context Protocol server for AI-assisted session analysis — triage errors, query events, generate reports, compare sessions, and find root cause candidates.
+
+</td>
+</tr>
+</table>
+
+<br />
 
 ## Architecture
 
-WebBlackbox is a TypeScript monorepo organized into three tiers:
+WebBlackbox is a TypeScript monorepo organized into three tiers — **Recording**, **Processing**, and **Playback** — with optional cloud collaboration:
 
 ```
                     ┌─────────────────────────────────────────────────┐
                     │              Chrome Extension                   │
                     │                                                 │
-                    │  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
-                    │  │ Injected │→ │ Content  │→ │   Service    │   │
-                    │  │  Script  │  │  Script  │  │   Worker     │   │
-                    │  └──────────┘  └──────────┘  └──────┬───────┘   │
-                    │       console, storage    user, DOM │  CDP      │
-                    │                                     ↓           │
-                    │                              ┌──────────────┐   │
-                    │                              │  Offscreen   │   │
-                    │                              │  (Pipeline)  │   │
-                    │                              └──────┬───────┘   │
-                    └─────────────────────────────────────┼───────────┘
-                                                          │
-                                                          ↓
-                                                   .webblackbox
-                                                    ZIP archive
-                                                          │
-                                                          ↓
+                    │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+                    │  │ Injected │→ │ Content  │→ │   Service    │  │
+                    │  │  Script  │  │  Script  │  │   Worker     │  │
+                    │  └──────────┘  └──────────┘  └──────┬───────┘  │
+                    │       console, storage    user, DOM  │  CDP     │
+                    │                                      ↓          │
+                    │                               ┌──────────────┐  │
+                    │                               │  Offscreen   │  │
+                    │                               │  (Pipeline)  │  │
+                    │                               └──────┬───────┘  │
+                    └──────────────────────────────────────┼──────────┘
+                                                           │
+                                                           ↓
+                                                    .webblackbox
+                                                     ZIP archive
+                                                           │
+                                                           ↓
                     ┌──────────────────────────────────────────────────┐
                     │              Player (React UI)                   │
                     │                                                  │
-                    │  ┌──────────────┐  ┌────────────────────────┐    │
-                    │  │  Player SDK  │  │  Timeline │ Network    │    │
-                    │  │  (analysis)  │→ │  Console  │ Storage    │    │
-                    │  └──────────────┘  │  DOM Diff │ Perf       │    │
-                    │                    └────────────────────────┘    │
+                    │  ┌──────────────┐  ┌────────────────────────┐   │
+                    │  │  Player SDK  │  │  Timeline │ Network    │   │
+                    │  │  (analysis)  │→ │  Console  │ Storage    │   │
+                    │  └──────────────┘  │  DOM Diff │ Perf       │   │
+                    │                    └────────────────────────┘   │
                     └──────────────────────────────────────────────────┘
 ```
 
@@ -58,8 +129,8 @@ WebBlackbox is a TypeScript monorepo organized into three tiers:
 
 1. **Injected Script** captures console logs, storage operations via `postMessage`
 2. **Content Script** receives injected events + captures user interactions and DOM events
-3. **Service Worker** receives all events, normalizes them through the recorder, routes to the pipeline
-4. **Offscreen Document** runs the pipeline: chunking, indexing, and storage
+3. **Service Worker** normalizes events through the recorder, routes to the pipeline
+4. **Offscreen Document** runs the pipeline: chunking, indexing, compression, and storage
 5. **Export** generates a `.webblackbox` ZIP archive with manifest, events (NDJSON), indexes, and blobs
 
 ### Playback Data Flow
@@ -68,6 +139,8 @@ WebBlackbox is a TypeScript monorepo organized into three tiers:
 2. Player SDK decrypts (if encrypted), decompresses, and loads events/indexes
 3. React UI queries the SDK for timeline events, network waterfalls, console entries, screenshots, and performance data
 4. Interactive panels render the session for analysis
+
+<br />
 
 ## Project Structure
 
@@ -111,20 +184,59 @@ mcp-server ────→ mcp-core
 share-server ──→ player-sdk ──→ protocol
 ```
 
-## Documentation
+<br />
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Performance Benchmarks](docs/PERFORMANCE.md)
-- [Player SDK API Docs](docs/api/player-sdk/index.html)
-- [Contributing](docs/CONTRIBUTING.md)
+## Getting Started
 
-## Packages
+### Prerequisites
 
-### `@webblackbox/protocol`
+- **Node.js** >= 22.0.0
+- **pnpm** 10.28.1
 
-The foundational package defining all data types, Zod validation schemas, constants, and message formats shared across the entire system.
+### Installation
 
-**Event Types** — 57 event types organized by category:
+```bash
+git clone https://github.com/webllm/webblackbox.git
+cd webblackbox
+pnpm install
+pnpm build
+```
+
+### Loading the Chrome Extension
+
+1. Build the extension:
+   ```bash
+   cd apps/extension && pnpm build
+   ```
+2. Open Chrome → `chrome://extensions/`
+3. Enable **Developer mode** (top-right toggle)
+4. Click **Load unpacked** → select `apps/extension/build`
+
+### Using the Extension
+
+| Step       | Action                                                                               |
+| ---------- | ------------------------------------------------------------------------------------ |
+| **Record** | Click the WebBlackbox icon in the toolbar to start a session                         |
+| **Browse** | Navigate your app normally — events are captured in the background via a ring buffer |
+| **Mark**   | Press `Ctrl+Shift+M` (`Cmd+Shift+M` on Mac) to create user markers at key moments    |
+| **Export** | Click the icon again and export to download a `.webblackbox` archive                 |
+| **Replay** | Open the archive in the Player app for full session analysis                         |
+
+### Development
+
+```bash
+pnpm dev            # Watch mode for all packages
+pnpm test           # Run all tests
+pnpm typecheck      # TypeScript type checking
+pnpm lint           # ESLint checks
+pnpm format         # Format with Prettier
+```
+
+<br />
+
+## Event Types
+
+57 event types organized across 13 categories:
 
 | Category        | Events                                                                                                                                                                                  |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -142,7 +254,7 @@ The foundational package defining all data types, Zod validation schemas, consta
 | **Storage**     | `storage.cookie.snapshot`, `storage.local.snapshot`, `storage.local.op`, `storage.session.op`, `storage.idb.op`, `storage.idb.snapshot`, `storage.cache.op`, `storage.sw.lifecycle`     |
 | **Performance** | `perf.vitals`, `perf.longtask`, `perf.trace`, `perf.cpu.profile`, `perf.heap.snapshot`                                                                                                  |
 
-**Core Event Structure:**
+### Core Event Structure
 
 ```typescript
 type WebBlackboxEvent<TData = unknown> = {
@@ -154,63 +266,64 @@ type WebBlackboxEvent<TData = unknown> = {
   t: number; // Wall-clock timestamp (ms)
   mono: number; // Monotonic timestamp (ms)
   dt?: number; // Duration (ms)
-  type: WebBlackboxEventType; // Event type
+  type: string; // Event type
   id: string; // Unique event ID
-  lvl?: EventLevel; // debug | info | warn | error
-  ref?: EventReference; // Cross-references (action, request, etc.)
+  lvl?: string; // debug | info | warn | error
+  ref?: object; // Cross-references (action, request, etc.)
   data: TData; // Event-type-specific payload
 };
 ```
+
+<br />
+
+## Packages
+
+### `@webblackbox/protocol`
+
+The foundational package defining all data types, Zod validation schemas, constants, and message formats shared across the entire system.
 
 ### `@webblackbox/recorder`
 
 Collects and normalizes raw events from multiple sources (CDP, content scripts, system) into the unified `WebBlackboxEvent` format.
 
-- **WebBlackboxRecorder** — Main recorder class with `ingest()`, ring buffer management, and plugin support
+- **WebBlackboxRecorder** — Main class with `ingest()`, ring buffer management, and plugin support
 - **EventRingBuffer** — Time-windowed circular buffer with configurable duration
 - **DefaultEventNormalizer** — Maps CDP and content script events to normalized payloads
-- **ActionSpanTracker** — Tracks user action spans (click, submit, nav) and links related events within time windows
+- **ActionSpanTracker** — Tracks user action spans and links related events within time windows
 - **FreezePolicy** — Evaluates freeze conditions (errors, network failures, long tasks, manual markers)
-- **Redaction** — Recursive payload redaction with header, cookie, body pattern matching and optional hash-based masking
-- **Plugin System** — Extensible via `RecorderPlugin` interface with `onRawEvent` and `onEvent` hooks
-  - `createRouteContextPlugin()` — Track route context per stream
-  - `createErrorFingerprintPlugin()` — Generate error fingerprints
-  - `createAiRootCausePlugin()` — Analyze error root causes
+- **Redaction** — Recursive payload redaction with header, cookie, body pattern matching
+- **Plugin System** — Extensible via `RecorderPlugin` with `onRawEvent` and `onEvent` hooks
 
 ### `@webblackbox/pipeline`
 
 Processes recorded events into portable, indexed archives.
 
-- **FlightRecorderPipeline** — Main pipeline orchestrator: ingestion, chunking, blob storage, index building, and archive export
+- **FlightRecorderPipeline** — Orchestrator: ingestion, chunking, blob storage, index building, and archive export
 - **EventChunker** — Groups events into size-bounded chunks with configurable codecs
 - **EventIndexer** — Builds time-based, request-based, and inverted text search indexes
-- **Codec** — Encode/decode events with chunk codecs (`none`, `gzip`, `br`, `zst`)
+- **Codec** — Encode/decode with chunk codecs (`none`, `gzip`, `br`, `zst`)
 - **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
-- **PipelineStorage** — Abstract storage interface with `MemoryPipelineStorage` implementation
 - **SHA-256** — Content-addressable blob deduplication
 
-### `webblackbox`
+### `webblackbox` (Web SDK)
 
-Browser-side lite capture SDK (published under the unscoped npm name `webblackbox`).
+Browser-side lite capture SDK published as the `webblackbox` npm package.
 
 - **WebBlackboxLiteSdk** — Start/stop/flush/export `.webblackbox` archives directly in-page
 - **LiteCaptureAgent** — Reusable capture agent for DOM/input/screenshot/storage collection
-- **installInjectedLiteCaptureHooks** — Injected runtime hooks for console/network/storage/error capture
-- **materializeLiteRawEvent** — Shared lite raw-event materialization pipeline
+- **installInjectedLiteCaptureHooks** — Runtime hooks for console/network/storage/error capture
 
 ### `@webblackbox/player-sdk`
 
 Client-side SDK for opening, querying, and analyzing recorded sessions.
 
-- **WebBlackboxPlayer** — Main player class with `open()` static method for loading archives
-- **Event Querying** — Rich query API with time range, event type, level, text search, and request ID filtering
+- **WebBlackboxPlayer** — Main class with `open()` static method for loading archives
+- **Event Querying** — Rich query API with time range, type, level, text search, and request ID filtering
 - **Network Waterfall** — Reconstruct complete request/response timings with headers and bodies
 - **Realtime Network Timeline** — WebSocket and SSE stream analysis
 - **Storage Timeline** — Track cookie, localStorage, sessionStorage, IndexedDB, and cache operations
 - **DOM Diff** — Compare DOM snapshots to find added, removed, and changed elements
 - **Session Comparison** — Compare two sessions by event counts, error rates, request patterns
-- **Action Span Analysis** — Derived views with action spans and aggregate statistics
-- **Performance Artifacts** — CPU profiles, heap snapshots, traces, Web Vitals, long tasks
 
 **Code Generation:**
 
@@ -229,32 +342,32 @@ Client-side SDK for opening, querying, and analyzing recorded sessions.
 
 Manages Chrome DevTools Protocol connections for the extension.
 
-- **CdpRouter** — Interface for attaching/detaching debugger targets, sending CDP commands, and receiving events
+- **CdpRouter** — Interface for attaching/detaching debugger targets, sending CDP commands, receiving events
 - **DefaultCdpRouter** — Full implementation with target tracking (tabs, iframes, workers, service workers)
-- **Transport Layer** — Abstraction over `chrome.debugger` API with `createChromeDebuggerTransport()`
-- **Baseline Domains** — Auto-enables Network, Runtime, Log, and Page domains
+- **Transport Layer** — Abstraction over `chrome.debugger` API
 - **Auto-Attach** — Automatic attachment to child targets (iframes, workers)
 
 ### `@webblackbox/mcp-core`
 
 Utility functions for the Model Context Protocol server.
 
-### Apps
+<br />
 
-#### Chrome Extension (`apps/extension`)
+## Apps
+
+### Chrome Extension
 
 Manifest V3 Chrome extension with:
 
 - **Service Worker** — Background event coordination and CDP management
-- **Content Script** — Injects at `document_start` on all pages for user/DOM event capture
+- **Content Script** — Injects at `document_start` for user/DOM event capture
 - **Injected Script** — Web-accessible script for console and storage interception
 - **Offscreen Document** — Runs the pipeline in an offscreen context for processing
 - **Popup** — Quick controls for starting/stopping recording
-- **Options Page** — Configuration UI
+- **Options Page** — Configuration UI for capture modes, redaction, and site policies
 - **Sessions Page** — Browse and manage recorded sessions
-- **Keyboard Shortcut** — `Ctrl+Shift+M` / `Cmd+Shift+M` to create user markers
 
-#### Player (`apps/player`)
+### Player
 
 React 19 application for session playback with:
 
@@ -266,105 +379,28 @@ React 19 application for session playback with:
 - Performance metrics dashboard
 - Screenshot trail with pointer position overlay
 
-#### MCP Server (`apps/mcp-server`)
+### MCP Server
 
-Model Context Protocol server for AI-assisted session analysis.
+Model Context Protocol server exposing tools for AI-assisted analysis:
 
-- Archive discovery (`list_archives`)
-- Session summary and triage (`session_summary`, `network_issues`)
-- Event-level querying (`query_events`)
-- Report generation (`generate_bug_report`)
-- Cross-session diffing (`compare_sessions`)
+`list_archives` · `session_summary` · `query_events` · `network_issues` · `generate_bug_report` · `compare_sessions`
 
-## Technology Stack
+### Share Server
 
-| Component       | Technology                       |
-| --------------- | -------------------------------- |
-| Language        | TypeScript 5.9                   |
-| Runtime         | Node.js 22+                      |
-| Package Manager | pnpm 10.28                       |
-| Monorepo        | Turborepo                        |
-| Bundler         | tsup (esbuild)                   |
-| Testing         | Vitest 4.0                       |
-| Validation      | Zod 4.1                          |
-| UI Framework    | React 19                         |
-| Linting         | ESLint 9, Prettier 3.6           |
-| Git Hooks       | Husky, lint-staged               |
-| Versioning      | Changesets                       |
-| Archive Format  | JSZip                            |
-| Screenshots     | @zumer/snapdom                   |
-| Encryption      | Web Crypto API (AES-GCM, PBKDF2) |
+Optional HTTP server for cloud collaboration — accepts encrypted archive uploads, generates read-only share links with redacted server-side metadata.
 
-## Getting Started
-
-### Prerequisites
-
-- **Node.js** >= 22.0.0
-- **pnpm** 10.28.1
-
-### Installation
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd webblackbox
-
-# Install dependencies
-pnpm install
-
-# Build all packages
-pnpm build
-```
-
-### Development
-
-```bash
-# Run all packages in development mode (parallel watch)
-pnpm dev
-
-# Run tests
-pnpm test
-
-# Type checking
-pnpm typecheck
-
-# Lint
-pnpm lint
-
-# Format code
-pnpm format
-```
-
-### Loading the Chrome Extension
-
-1. Build the extension:
-   ```bash
-   cd apps/extension
-   pnpm build
-   ```
-2. Open Chrome and navigate to `chrome://extensions/`
-3. Enable **Developer mode** (toggle in top-right corner)
-4. Click **Load unpacked** and select the `apps/extension/build` directory
-5. The WebBlackbox icon will appear in your browser toolbar
-
-### Using the Extension
-
-1. **Start Recording** — Click the WebBlackbox extension icon and start a session
-2. **Browse Normally** — The extension records events in the background using a ring buffer
-3. **Mark Events** — Press `Ctrl+Shift+M` (`Cmd+Shift+M` on Mac) to create user markers at key moments
-4. **Export** — Click the extension icon and export to download a `.webblackbox` archive
-5. **Playback** — Open the archive in the Player app for analysis
+<br />
 
 ## Archive Format
 
-WebBlackbox exports sessions as `.webblackbox` files (ZIP archives) with the following structure:
+Sessions are exported as `.webblackbox` files (ZIP archives):
 
 ```
 session.webblackbox (ZIP)
 ├── manifest.json           # Export metadata, stats, encryption info
 ├── events/
-│   ├── C-000001.ndjson     # Event chunk 1 (NDJSON)
-│   ├── C-000002.ndjson     # Event chunk 2
+│   ├── C-000001.ndjson     # Event chunk (NDJSON)
+│   ├── C-000002.ndjson
 │   └── ...
 ├── index/
 │   ├── time.json           # Time-based chunk index
@@ -378,13 +414,9 @@ session.webblackbox (ZIP)
     └── hashes.json         # SHA-256 hashes for all files
 ```
 
-### Encryption
+**Encryption** — Archives can be encrypted with AES-GCM. Key derivation uses PBKDF2 with SHA-256 and 120,000 iterations. Event chunks, indexes, and blobs are encrypted; manifest and integrity remain readable.
 
-Archives can be encrypted with AES-GCM:
-
-- **Key Derivation**: PBKDF2 with SHA-256, 120,000 iterations
-- **Encryption**: AES-GCM with per-file initialization vectors
-- **Scope**: Event chunks, indexes, and blobs are encrypted; manifest and integrity remain readable
+<br />
 
 ## Configuration
 
@@ -392,11 +424,11 @@ Archives can be encrypted with AES-GCM:
 
 ```typescript
 const config: RecorderConfig = {
-  mode: "lite", // "lite" | "full"
+  mode: "lite", // 'lite' | 'full'
   ringBufferMinutes: 10, // Ring buffer duration
   freezeOnError: true, // Auto-freeze on uncaught errors
-  freezeOnNetworkFailure: true, // Auto-freeze on network failures
-  freezeOnLongTaskSpike: true, // Auto-freeze on long task spikes
+  freezeOnNetworkFailure: true,
+  freezeOnLongTaskSpike: true,
 
   sampling: {
     mousemoveHz: 20, // Mouse move capture frequency
@@ -405,36 +437,15 @@ const config: RecorderConfig = {
     screenshotIdleMs: 8000, // Screenshot capture on idle
     snapshotIntervalMs: 20000, // DOM snapshot interval
     actionWindowMs: 1500, // Action span window
-    bodyCaptureMaxBytes: 262144 // Max request/response body size (256KB)
+    bodyCaptureMaxBytes: 262144 // Max body size (256KB)
   },
 
   redaction: {
-    redactHeaders: [
-      // Headers to redact
-      "authorization",
-      "cookie",
-      "set-cookie"
-    ],
-    redactCookieNames: [
-      // Cookie names to redact
-      "token",
-      "session",
-      "auth"
-    ],
-    redactBodyPatterns: [
-      // Body patterns to redact
-      "password",
-      "token",
-      "secret",
-      "otp"
-    ],
-    blockedSelectors: [
-      // CSS selectors to mask in DOM
-      ".secret",
-      "[data-sensitive]",
-      "input[type='password']"
-    ],
-    hashSensitiveValues: true // Hash instead of replacing with [REDACTED]
+    redactHeaders: ["authorization", "cookie", "set-cookie"],
+    redactCookieNames: ["token", "session", "auth"],
+    redactBodyPatterns: ["password", "token", "secret", "otp"],
+    blockedSelectors: [".secret", "[data-sensitive]", "input[type='password']"],
+    hashSensitiveValues: true // Hash instead of [REDACTED]
   },
 
   sitePolicies: [] // Per-origin capture policies
@@ -456,6 +467,8 @@ const policy: SiteCapturePolicy = {
   pathDenylist: ["/api/v1/auth/*"]
 };
 ```
+
+<br />
 
 ## API Reference
 
@@ -490,14 +503,14 @@ const storageOps = player.getStorageTimeline();
 const snapshots = player.getDomSnapshots();
 const diffs = await player.getDomDiffTimeline();
 
-// Performance analysis
+// Performance
 const artifacts = player.getPerformanceArtifacts();
 
 // Code generation
 const curl = player.generateCurl("request-id");
 const har = player.exportHar();
 const bugReport = player.generateBugReport();
-const playwrightTest = player.generatePlaywrightScript();
+const playwright = player.generatePlaywrightScript();
 
 // Session comparison
 const comparison = player.compareWith(otherPlayer);
@@ -514,10 +527,7 @@ const recorder = new WebBlackboxRecorder(DEFAULT_RECORDER_CONFIG, {
   onFreeze: (reason, event) => console.log("Frozen:", reason)
 });
 
-// Ingest raw events
-const result = recorder.ingest(rawEvent);
-
-// Snapshot the ring buffer
+recorder.ingest(rawEvent);
 const events = recorder.snapshotRingBuffer();
 ```
 
@@ -534,33 +544,51 @@ const pipeline = new FlightRecorderPipeline({
 });
 
 await pipeline.start();
-
-// Ingest events
-for (const event of events) {
-  await pipeline.ingest(event);
-}
-
-// Flush and export
+for (const event of events) await pipeline.ingest(event);
 await pipeline.flush();
+
 const indexes = await pipeline.finalizeIndexes();
 const { fileName, bytes } = await pipeline.exportBundle({
   passphrase: "optional-password"
 });
 ```
 
-## Protocol Versioning
-
-All WebBlackbox data uses protocol version `1`. The version is embedded in every event (`v: 1`) and archive manifest (`protocolVersion: 1`), enabling future backwards-compatible evolution.
+<br />
 
 ## Security & Privacy
 
-- **Redaction by default** — Authorization headers, session cookies, and password fields are automatically redacted
-- **Configurable masking** — Add custom patterns and CSS selectors for sensitive data
-- **Hash-based masking** — Optionally hash sensitive values instead of replacing with `[REDACTED]` for correlation analysis without exposing raw values
-- **Archive encryption** — AES-GCM with PBKDF2 key derivation (120,000 iterations) for secure sharing
-- **Optional cache encryption** — Pipeline storage can encrypt chunk/blob payload bytes at rest (e.g., IndexedDB)
-- **Integrity verification** — SHA-256 checksums for all archive files
-- **Minimal permissions** — Extension requests only the permissions necessary for CDP access and event capture
+| Layer                   | Protection                                                                             |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| **Redaction**           | Authorization headers, session cookies, and password fields are automatically redacted |
+| **Custom Masking**      | Add custom patterns and CSS selectors for sensitive data                               |
+| **Hash Masking**        | Optionally hash sensitive values instead of `[REDACTED]` for correlation analysis      |
+| **Archive Encryption**  | AES-GCM with PBKDF2 key derivation (120,000 iterations)                                |
+| **Cache Encryption**    | Pipeline storage can encrypt chunk/blob bytes at rest (e.g., IndexedDB)                |
+| **Integrity**           | SHA-256 checksums for all archive files                                                |
+| **Minimal Permissions** | Extension requests only permissions necessary for CDP access and event capture         |
+
+<br />
+
+## Technology Stack
+
+| Component       | Technology                       |
+| --------------- | -------------------------------- |
+| Language        | TypeScript 5.9                   |
+| Runtime         | Node.js 22+                      |
+| Package Manager | pnpm 10.28                       |
+| Monorepo        | Turborepo                        |
+| Bundler         | tsup (esbuild)                   |
+| Testing         | Vitest 4.0                       |
+| Validation      | Zod 4.1                          |
+| UI Framework    | React 19                         |
+| Linting         | ESLint 9, Prettier 3.6           |
+| Git Hooks       | Husky, lint-staged               |
+| Versioning      | Changesets                       |
+| Archive Format  | JSZip                            |
+| Screenshots     | @zumer/snapdom                   |
+| Encryption      | Web Crypto API (AES-GCM, PBKDF2) |
+
+<br />
 
 ## Scripts
 
@@ -571,16 +599,24 @@ All WebBlackbox data uses protocol version `1`. The version is embedded in every
 | `pnpm test`             | Run all tests                           |
 | `pnpm bench`            | Run recorder + pipeline benchmarks      |
 | `pnpm bundle:size`      | Check bundle size budgets               |
-| `pnpm bench:recorder`   | Run recorder benchmarks                 |
-| `pnpm bench:pipeline`   | Run pipeline benchmarks                 |
 | `pnpm typecheck`        | TypeScript type checking                |
 | `pnpm lint`             | ESLint checks                           |
 | `pnpm format`           | Format code with Prettier               |
-| `pnpm format:check`     | Check code formatting                   |
 | `pnpm changeset`        | Create a changeset for versioning       |
 | `pnpm version-packages` | Apply changesets to bump versions       |
 | `pnpm release`          | Publish packages                        |
 
+<br />
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Performance Benchmarks](docs/PERFORMANCE.md)
+- [Player SDK API Docs](docs/api/player-sdk/index.html)
+- [Contributing](docs/CONTRIBUTING.md)
+
+<br />
+
 ## License
 
-MIT
+[MIT](./LICENSE) © Web LLM
