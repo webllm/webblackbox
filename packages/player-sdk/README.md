@@ -1,4 +1,20 @@
-# @webblackbox/player-sdk
+<p align="center">
+  <a href="https://github.com/webllm/webblackbox"><img src="https://raw.githubusercontent.com/webllm/webblackbox/main/logo.png" alt="WebBlackbox" width="80" /></a>
+</p>
+
+<h1 align="center">@webblackbox/player-sdk</h1>
+
+<p align="center">
+  Session playback, querying, analysis, and code generation SDK.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@webblackbox/player-sdk"><img src="https://img.shields.io/npm/v/@webblackbox/player-sdk.svg?color=f97316" alt="npm version" /></a>
+  <a href="https://github.com/webllm/webblackbox/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@webblackbox/player-sdk?color=374151" alt="License" /></a>
+  <a href="https://github.com/webllm/webblackbox"><img src="https://img.shields.io/badge/Part%20of-WebBlackbox-000?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiByeD0iMyIgZmlsbD0iIzFhMWEyZSIvPjxwYXRoIGQ9Ik0zIDhoMi41bDIuNS00TDEwLjUgMTIgMTMgOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjk3MzE2IiBzdHJva2Utd2lkdGg9IjEuNSIvPjwvc3ZnPg==" alt="WebBlackbox" /></a>
+</p>
+
+---
 
 The session playback and analysis SDK for WebBlackbox. Opens `.webblackbox` archives and provides rich querying, analysis, and code generation capabilities.
 
@@ -363,3 +379,7 @@ type PlayerArchive = {
   integrity: HashesManifest;
 };
 ```
+
+## License
+
+[MIT](https://github.com/webllm/webblackbox/blob/main/LICENSE)

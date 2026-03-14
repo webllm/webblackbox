@@ -1,10 +1,22 @@
-# WebBlackbox MCP Server
+<p align="center">
+  <a href="https://github.com/webllm/webblackbox"><img src="https://raw.githubusercontent.com/webllm/webblackbox/main/logo.png" alt="WebBlackbox" width="80" /></a>
+</p>
 
-Model Context Protocol (MCP) server for AI-assisted web session analysis.
+<h1 align="center">@webblackbox/mcp-server</h1>
 
-## Overview
+<p align="center">
+  MCP server for AI-assisted web session analysis.
+</p>
 
-This server exposes WebBlackbox session data and analysis tools via the [Model Context Protocol](https://modelcontextprotocol.io/), enabling AI assistants to inspect, query, and reason about recorded web sessions.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@webblackbox/mcp-server"><img src="https://img.shields.io/npm/v/@webblackbox/mcp-server.svg?color=f97316" alt="npm version" /></a>
+  <a href="https://github.com/webllm/webblackbox/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@webblackbox/mcp-server?color=374151" alt="License" /></a>
+  <a href="https://github.com/webllm/webblackbox"><img src="https://img.shields.io/badge/Part%20of-WebBlackbox-000?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiByeD0iMyIgZmlsbD0iIzFhMWEyZSIvPjxwYXRoIGQ9Ik0zIDhoMi41bDIuNS00TDEwLjUgMTIgMTMgOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjk3MzE2IiBzdHJva2Utd2lkdGg9IjEuNSIvPjwvc3ZnPg==" alt="WebBlackbox" /></a>
+</p>
+
+---
+
+Model Context Protocol (MCP) server for AI-assisted web session analysis. Exposes WebBlackbox session data and analysis tools via the [Model Context Protocol](https://modelcontextprotocol.io/), enabling AI assistants (Claude, ChatGPT, etc.) to inspect, query, and reason about recorded web sessions.
 
 ## Run With npx
 
@@ -82,3 +94,7 @@ node dist/cli.js --version
 - Encrypted archives require `passphrase`.
 - `query_events` defaults to payload-hidden output (`includeData=false`) to avoid huge responses.
 - Range-scoped tools (`monoStart` / `monoEnd`) preload only intersecting chunks when opening archives.
+
+## License
+
+[MIT](https://github.com/webllm/webblackbox/blob/main/LICENSE)

@@ -1,4 +1,20 @@
-# @webblackbox/protocol
+<p align="center">
+  <a href="https://github.com/webllm/webblackbox"><img src="https://raw.githubusercontent.com/webllm/webblackbox/main/logo.png" alt="WebBlackbox" width="80" /></a>
+</p>
+
+<h1 align="center">@webblackbox/protocol</h1>
+
+<p align="center">
+  Foundational event types, schemas, and validation for the WebBlackbox ecosystem.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@webblackbox/protocol"><img src="https://img.shields.io/npm/v/@webblackbox/protocol.svg?color=f97316" alt="npm version" /></a>
+  <a href="https://github.com/webllm/webblackbox/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@webblackbox/protocol?color=374151" alt="License" /></a>
+  <a href="https://github.com/webllm/webblackbox"><img src="https://img.shields.io/badge/Part%20of-WebBlackbox-000?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiByeD0iMyIgZmlsbD0iIzFhMWEyZSIvPjxwYXRoIGQ9Ik0zIDhoMi41bDIuNS00TDEwLjUgMTIgMTMgOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjk3MzE2IiBzdHJva2Utd2lkdGg9IjEuNSIvPjwvc3ZnPg==" alt="WebBlackbox" /></a>
+</p>
+
+---
 
 The foundational protocol package for WebBlackbox. Defines all event types, message formats, configuration schemas, and validation logic shared across the entire system.
 
@@ -15,7 +31,7 @@ This package provides:
 ## Installation
 
 ```bash
-pnpm add @webblackbox/protocol
+npm install @webblackbox/protocol
 ```
 
 ## Event Types
@@ -259,3 +275,7 @@ Inter-component communication uses typed messages:
 | `PIPE.CHUNK_PUT`     | Pipeline → Storage | Store event chunk        |
 | `PIPE.BUILD_INDEX`   | Pipeline → Indexer | Build search indexes     |
 | `PIPE.EXPORT_DONE`   | Pipeline → SW      | Export complete          |
+
+## License
+
+[MIT](https://github.com/webllm/webblackbox/blob/main/LICENSE)

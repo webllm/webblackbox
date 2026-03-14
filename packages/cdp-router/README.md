@@ -1,4 +1,20 @@
-# @webblackbox/cdp-router
+<p align="center">
+  <a href="https://github.com/webllm/webblackbox"><img src="https://raw.githubusercontent.com/webllm/webblackbox/main/logo.png" alt="WebBlackbox" width="80" /></a>
+</p>
+
+<h1 align="center">@webblackbox/cdp-router</h1>
+
+<p align="center">
+  Chrome DevTools Protocol routing, target tracking, and debugger management.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@webblackbox/cdp-router"><img src="https://img.shields.io/npm/v/@webblackbox/cdp-router.svg?color=f97316" alt="npm version" /></a>
+  <a href="https://github.com/webllm/webblackbox/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@webblackbox/cdp-router?color=374151" alt="License" /></a>
+  <a href="https://github.com/webllm/webblackbox"><img src="https://img.shields.io/badge/Part%20of-WebBlackbox-000?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiByeD0iMyIgZmlsbD0iIzFhMWEyZSIvPjxwYXRoIGQ9Ik0zIDhoMi41bDIuNS00TDEwLjUgMTIgMTMgOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjk3MzE2IiBzdHJva2Utd2lkdGg9IjEuNSIvPjwvc3ZnPg==" alt="WebBlackbox" /></a>
+</p>
+
+---
 
 Chrome DevTools Protocol (CDP) routing layer for WebBlackbox. Manages debugger connections, target tracking, and CDP command execution for the Chrome extension.
 
@@ -171,3 +187,7 @@ interface DebuggerTransport {
   addDetachListener(handler: CdpDetachHandler): () => void;
 }
 ```
+
+## License
+
+[MIT](https://github.com/webllm/webblackbox/blob/main/LICENSE)
