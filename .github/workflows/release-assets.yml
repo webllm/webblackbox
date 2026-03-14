@@ -1,0 +1,75 @@
+name: Release Assets
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag of the GitHub release to upload the Chrome extension zip to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  chrome-extension:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Checkout released ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Package Chrome extension
+        run: pnpm --filter @webblackbox/extension package:chrome
+
+      - name: Resolve Chrome extension archive
+        id: archive
+        run: |
+          archive_path=$(ls -t apps/extension/dist/*-chrome.zip | head -n 1)
+          if [ -z "$archive_path" ]; then
+            echo "Could not find packaged Chrome extension archive." >&2
+            exit 1
+          fi
+          echo "path=$archive_path" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$archive_path")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify target GitHub release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+
+      - name: Upload Chrome extension zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" "${{ steps.archive.outputs.path }}" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Summarize uploaded asset
+        run: |
+          {
+            echo "## Uploaded Chrome Extension Asset"
+            echo ""
+            echo "- Release tag: \`$RELEASE_TAG\`"
+            echo "- Asset: \`${{ steps.archive.outputs.name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
