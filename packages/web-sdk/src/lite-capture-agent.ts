@@ -41,6 +41,11 @@ const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
 const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
 const START_CAPTURE_DEFER_MS = 2_000;
 const TARGET_ENRICH_DELAY_MS = 0;
+const LONG_TASK_PRESSURE_THRESHOLD_MS = 40;
+const LONG_TASK_PRESSURE_COOLDOWN_MS = 1_800;
+const LONG_TASK_PRESSURE_EXTENDED_COOLDOWN_MS = 3_000;
+const RAF_PRESSURE_GAP_MS = 34;
+const RAF_PRESSURE_COOLDOWN_MS = 1_400;
 const EVENT_BUFFER_FLUSH_DELAY_MS = 180;
 const EVENT_BUFFER_FORCE_FLUSH_SIZE = 120;
 const EVENT_BUFFER_EMIT_CHUNK_SIZE = 80;
@@ -123,6 +128,7 @@ type MutationBatchSummary = {
 };
 
 type TargetPayloadDetail = "action" | "input" | "fast" | "navigation";
+type CapturePressureStage = "none" | "soft" | "hard" | "critical";
 
 /**
  * Browser-side event capture agent used by `WebBlackboxLiteSdk`.
@@ -164,6 +170,8 @@ export class LiteCaptureAgent {
   private inputPressureUntilMono = Number.NEGATIVE_INFINITY;
   private editorPressureUntilMono = Number.NEGATIVE_INFINITY;
   private quietModeUntilMono = Number.NEGATIVE_INFINITY;
+  private longTaskPressureUntilMono = Number.NEGATIVE_INFINITY;
+  private rafPressureUntilMono = Number.NEGATIVE_INFINITY;
   private recentEditableInteractionMonos: number[] = [];
   private recentScrollMonos: number[] = [];
   private lastPointerState: { x: number; y: number; t: number; mono: number } | null = null;
@@ -601,6 +609,10 @@ export class LiteCaptureAgent {
         }
 
         for (const entry of list.getEntries()) {
+          if (entry.duration >= LONG_TASK_PRESSURE_THRESHOLD_MS) {
+            this.extendLongTaskPressure(entry.duration);
+          }
+
           this.queueEvent("longtask", {
             name: entry.name,
             startTime: entry.startTime,
@@ -613,6 +625,30 @@ export class LiteCaptureAgent {
       this.cleanupCallbacks.push(() => longTaskObserver.disconnect());
     } catch {
       void 0;
+    }
+
+    if (typeof window.requestAnimationFrame === "function") {
+      let lastFrameMono = monotonicTime();
+      let rafHandle = 0;
+
+      const tick = () => {
+        const nowMono = monotonicTime();
+        const frameGap = nowMono - lastFrameMono;
+        lastFrameMono = nowMono;
+
+        if (frameGap >= RAF_PRESSURE_GAP_MS) {
+          this.extendRafPressure(frameGap);
+        }
+
+        rafHandle = window.requestAnimationFrame(tick);
+      };
+
+      rafHandle = window.requestAnimationFrame(tick);
+      this.cleanupCallbacks.push(() => {
+        if (rafHandle > 0) {
+          window.cancelAnimationFrame(rafHandle);
+        }
+      });
     }
 
     const vitalTypes: Array<{ type: string; rawType: string }> = [
@@ -1381,6 +1417,12 @@ export class LiteCaptureAgent {
 
   private resolveMutationFlushDelay(): number {
     if (!this.isMutationPressureActive()) {
+      const stage = this.resolveCapturePressureStage();
+
+      if (stage === "hard" || stage === "critical") {
+        return Math.max(Math.round(this.sampling.domFlushMs), MUTATION_PRESSURE_FLUSH_MS);
+      }
+
       return Math.max(25, Math.round(this.sampling.domFlushMs));
     }
 
@@ -1396,15 +1438,35 @@ export class LiteCaptureAgent {
   }
 
   private shouldHoldMutationFlush(): boolean {
+    const stage = this.resolveCapturePressureStage();
     return (
       this.recordingActive &&
       this.mutationSummary.count > 0 &&
-      (this.isMutationPressureActive() || this.isInputPressureActive() || this.isQuietModeActive())
+      (stage === "hard" || stage === "critical")
     );
   }
 
   private extendMutationPressureWindow(): void {
     this.mutationPressureUntilMono = monotonicTime() + MUTATION_PRESSURE_COOLDOWN_MS;
+  }
+
+  private extendLongTaskPressure(duration: number): void {
+    const cooldownMs =
+      duration >= LONG_TASK_PRESSURE_THRESHOLD_MS * 2
+        ? LONG_TASK_PRESSURE_EXTENDED_COOLDOWN_MS
+        : LONG_TASK_PRESSURE_COOLDOWN_MS;
+    this.longTaskPressureUntilMono = Math.max(
+      this.longTaskPressureUntilMono,
+      monotonicTime() + cooldownMs
+    );
+  }
+
+  private extendRafPressure(frameGap: number): void {
+    const cooldownMs =
+      frameGap >= RAF_PRESSURE_GAP_MS * 1.5
+        ? LONG_TASK_PRESSURE_COOLDOWN_MS
+        : RAF_PRESSURE_COOLDOWN_MS;
+    this.rafPressureUntilMono = Math.max(this.rafPressureUntilMono, monotonicTime() + cooldownMs);
   }
 
   private isMutationPressureActive(): boolean {
@@ -1423,21 +1485,46 @@ export class LiteCaptureAgent {
     return monotonicTime() < this.quietModeUntilMono;
   }
 
-  private shouldDeferBackgroundCapture(): boolean {
-    return (
-      this.isUserRecentlyActive() ||
-      this.isQuietModeActive() ||
+  private isLongTaskPressureActive(): boolean {
+    return monotonicTime() < this.longTaskPressureUntilMono;
+  }
+
+  private isRafPressureActive(): boolean {
+    return monotonicTime() < this.rafPressureUntilMono;
+  }
+
+  private resolveCapturePressureStage(): CapturePressureStage {
+    if (this.isQuietModeActive() || this.eventBuffer.length >= EVENT_BUFFER_HARD_LIMIT) {
+      return "critical";
+    }
+
+    if (
       this.isMutationPressureActive() ||
       this.isInputPressureActive() ||
+      this.isLongTaskPressureActive() ||
+      this.isRafPressureActive() ||
       this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
-    );
+    ) {
+      return "hard";
+    }
+
+    if (this.isScrollBurstActive()) {
+      return "soft";
+    }
+
+    return "none";
+  }
+
+  private shouldDeferBackgroundCapture(): boolean {
+    return this.resolveCapturePressureStage() !== "none" || this.isUserRecentlyActive();
   }
 
   private shouldSuppressPointerMoveCapture(): boolean {
+    const stage = this.resolveCapturePressureStage();
     return (
       this.isScrollBurstActive() ||
-      this.isQuietModeActive() ||
-      this.isMutationPressureActive() ||
+      stage === "hard" ||
+      stage === "critical" ||
       this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE
     );
   }
@@ -1445,12 +1532,9 @@ export class LiteCaptureAgent {
   private resolveDomSnapshotSummaryMode(
     nodeCount: number
   ): "pressure" | "large-dom" | "runtime-lite" {
-    if (
-      this.isQuietModeActive() ||
-      this.isMutationPressureActive() ||
-      this.isInputPressureActive() ||
-      this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
-    ) {
+    const stage = this.resolveCapturePressureStage();
+
+    if (stage === "hard" || stage === "critical") {
       return "pressure";
     }
 
