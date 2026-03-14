@@ -135,6 +135,7 @@ export class LiteCaptureAgent {
   private readonly isTopLevelFrame: boolean;
 
   private recordingActive = false;
+  private captureInstalled = false;
   private sid = "";
   private tabId = -1;
   private mode: LiteCaptureState["mode"] = "lite";
@@ -184,12 +185,6 @@ export class LiteCaptureAgent {
     const frameContext = resolveContentFrameContext(options.frameScope);
     this.frameMarker = frameContext.marker;
     this.isTopLevelFrame = frameContext.isTopLevel;
-    this.installInputAndLifecycleCapture();
-    if (this.isTopLevelFrame) {
-      this.installPerformanceCapture();
-    }
-    this.installInjectedMessageBridge();
-    this.emitLifecycleEvent("visibilitychange", { state: document.visibilityState });
   }
 
   /** Updates recording state and sampling profile from the host SDK. */
@@ -231,6 +226,8 @@ export class LiteCaptureAgent {
     }
 
     if (this.recordingActive) {
+      this.ensureCaptureInstalled();
+
       if (!wasRecording) {
         this.flushPreRecordingBuffer();
       }
@@ -241,6 +238,7 @@ export class LiteCaptureAgent {
     }
 
     this.stopMutationAndSnapshots();
+    this.teardownCapture();
     this.removeIndicator();
     this.flush();
   }
@@ -299,9 +297,7 @@ export class LiteCaptureAgent {
       this.flushTimer = 0;
     }
 
-    for (const cleanup of this.cleanupCallbacks.splice(0, this.cleanupCallbacks.length)) {
-      cleanup();
-    }
+    this.runCleanupCallbacks();
 
     this.eventBuffer.length = 0;
     this.preRecordingBuffer.length = 0;
@@ -858,6 +854,37 @@ export class LiteCaptureAgent {
     }
 
     this.flushPendingScrollEvent();
+  }
+
+  private ensureCaptureInstalled(): void {
+    if (this.captureInstalled) {
+      return;
+    }
+
+    this.installInputAndLifecycleCapture();
+
+    if (this.isTopLevelFrame) {
+      this.installPerformanceCapture();
+    }
+
+    this.installInjectedMessageBridge();
+    this.captureInstalled = true;
+    this.emitLifecycleEvent("visibilitychange", { state: document.visibilityState });
+  }
+
+  private teardownCapture(): void {
+    if (!this.captureInstalled) {
+      return;
+    }
+
+    this.captureInstalled = false;
+    this.runCleanupCallbacks();
+  }
+
+  private runCleanupCallbacks(): void {
+    for (const cleanup of this.cleanupCallbacks.splice(0, this.cleanupCallbacks.length)) {
+      cleanup();
+    }
   }
 
   private scheduleMutationFlush(): void {

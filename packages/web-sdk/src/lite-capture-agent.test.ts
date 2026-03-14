@@ -44,6 +44,20 @@ function createAgent(
   };
 }
 
+function createInactiveAgent(options: Partial<LiteCaptureAgentOptions> = {}) {
+  const emitBatch = vi.fn();
+  const agent = new LiteCaptureAgent({
+    emitBatch,
+    showIndicator: false,
+    ...options
+  });
+
+  return {
+    agent,
+    emitBatch
+  };
+}
+
 function dispatchInjectedEvents(rawType: string, count: number): void {
   const startedAt = Date.now();
   const events = Array.from({ length: count }, (_, index) => {
@@ -210,6 +224,41 @@ describe("LiteCaptureAgent", () => {
     await vi.advanceTimersByTimeAsync(5_000);
 
     expect(snapdomToBlobMock).not.toHaveBeenCalled();
+
+    agent.dispose();
+  });
+
+  it("installs capture listeners only while recording is active", () => {
+    const { agent, emitBatch } = createInactiveAgent();
+
+    clickTarget();
+    agent.flush();
+    expect(emitBatch).not.toHaveBeenCalled();
+
+    agent.setRecordingStatus({
+      active: true,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+    emitBatch.mockClear();
+
+    clickTarget();
+    agent.flush();
+    expect(emittedRawTypes(emitBatch)).toContain("click");
+
+    emitBatch.mockClear();
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+    emitBatch.mockClear();
+
+    clickTarget();
+    agent.flush();
+    expect(emitBatch).not.toHaveBeenCalled();
 
     agent.dispose();
   });
