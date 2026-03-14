@@ -32,6 +32,11 @@ const interactionRounds = Number(process.env.WB_E2E_PERF_INTERACTION_ROUNDS ?? "
 const interactionMutationBatch = Number(process.env.WB_E2E_PERF_INTERACTION_MUTATIONS ?? "180");
 const interactionScrollStep = Number(process.env.WB_E2E_PERF_INTERACTION_SCROLL_STEP ?? "240");
 const interactionSettleMs = Number(process.env.WB_E2E_PERF_INTERACTION_SETTLE_MS ?? "400");
+const iframeCount = Number(process.env.WB_E2E_PERF_IFRAME_COUNT ?? "10");
+const iframeInteractionRounds = Number(process.env.WB_E2E_PERF_IFRAME_ROUNDS ?? "12");
+const editorRounds = Number(process.env.WB_E2E_PERF_EDITOR_ROUNDS ?? "28");
+const navigationRounds = Number(process.env.WB_E2E_PERF_NAV_ROUNDS ?? "6");
+const navigationWaitMs = Number(process.env.WB_E2E_PERF_NAV_WAIT_MS ?? "8000");
 const warmupRequests = Number(process.env.WB_E2E_PERF_WARMUP_REQUESTS ?? "24");
 const warmupPayloadBytes = Number(process.env.WB_E2E_PERF_WARMUP_PAYLOAD_BYTES ?? "16384");
 const requestP95RatioLimit = Number(process.env.WB_E2E_PERF_FETCH_P95_RATIO ?? "1.6");
@@ -47,6 +52,12 @@ const clickCallP95RatioLimit = Number(process.env.WB_E2E_PERF_CLICK_CALL_P95_RAT
 const clickCallP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_CLICK_CALL_P95_DELTA_MS ?? "8");
 const clickLagP95RatioLimit = Number(process.env.WB_E2E_PERF_CLICK_LAG_P95_RATIO ?? "1.8");
 const clickLagP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_CLICK_LAG_P95_DELTA_MS ?? "8");
+const editorInputP95RatioLimit = Number(process.env.WB_E2E_PERF_EDITOR_INPUT_P95_RATIO ?? "1.8");
+const editorInputP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_EDITOR_INPUT_P95_DELTA_MS ?? "8");
+const editorRafP95RatioLimit = Number(process.env.WB_E2E_PERF_EDITOR_RAF_P95_RATIO ?? "1.5");
+const editorRafP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_EDITOR_RAF_P95_DELTA_MS ?? "10");
+const navigationP95RatioLimit = Number(process.env.WB_E2E_PERF_NAV_P95_RATIO ?? "1.7");
+const navigationP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_NAV_P95_DELTA_MS ?? "80");
 const clickOver16DeltaLimit = Number(process.env.WB_E2E_PERF_CLICK_OVER16_DELTA ?? "4");
 const longTaskTotalDeltaLimitMs = Number(process.env.WB_E2E_PERF_LONGTASK_TOTAL_DELTA_MS ?? "200");
 const longTaskCountDeltaLimit = Number(process.env.WB_E2E_PERF_LONGTASK_COUNT_DELTA ?? "4");
@@ -188,6 +199,36 @@ async function main() {
     baselineInteraction
   );
 
+  const baselineIframe = await runIframeScenario(pageClient, {
+    label: "baseline-iframe",
+    iframeCount: Math.max(4, Math.floor(iframeCount)),
+    rounds: Math.max(4, Math.floor(iframeInteractionRounds)),
+    mutationBatch: Math.max(24, Math.floor(interactionMutationBatch)),
+    scrollStep: Math.max(40, Math.floor(interactionScrollStep)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs))
+  });
+  assert(baselineIframe?.ok === true, "Baseline iframe scenario failed.", baselineIframe);
+
+  const baselineEditor = await runEditorScenario(pageClient, {
+    label: "baseline-editor",
+    rounds: Math.max(8, Math.floor(editorRounds)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs))
+  });
+  assert(baselineEditor?.ok === true, "Baseline editor scenario failed.", baselineEditor);
+
+  const baselineNavigation = await runDocumentNavigationScenario(pageClient, {
+    label: "baseline-navigation",
+    rounds: Math.max(2, Math.floor(navigationRounds)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs)),
+    sourceUrl: stressUrl,
+    targetUrl: `http://127.0.0.1:${server.port}/perf/nav-target`
+  });
+  assert(
+    baselineNavigation?.ok === true,
+    "Baseline document navigation scenario failed.",
+    baselineNavigation
+  );
+
   const popupUrl = `chrome-extension://${extensionId}/popup.html`;
   const popupStart = await openPopupRuntimeTarget(popupUrl);
   state.popupClient = popupStart.client;
@@ -269,6 +310,36 @@ async function main() {
     recordedInteraction
   );
 
+  const recordedIframe = await runIframeScenario(pageClient, {
+    label: "lite-recording-iframe",
+    iframeCount: Math.max(4, Math.floor(iframeCount)),
+    rounds: Math.max(4, Math.floor(iframeInteractionRounds)),
+    mutationBatch: Math.max(24, Math.floor(interactionMutationBatch)),
+    scrollStep: Math.max(40, Math.floor(interactionScrollStep)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs))
+  });
+  assert(recordedIframe?.ok === true, "Lite recording iframe scenario failed.", recordedIframe);
+
+  const recordedEditor = await runEditorScenario(pageClient, {
+    label: "lite-recording-editor",
+    rounds: Math.max(8, Math.floor(editorRounds)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs))
+  });
+  assert(recordedEditor?.ok === true, "Lite recording editor scenario failed.", recordedEditor);
+
+  const recordedNavigation = await runDocumentNavigationScenario(pageClient, {
+    label: "lite-recording-navigation",
+    rounds: Math.max(2, Math.floor(navigationRounds)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs)),
+    sourceUrl: stressUrl,
+    targetUrl: `http://127.0.0.1:${server.port}/perf/nav-target`
+  });
+  assert(
+    recordedNavigation?.ok === true,
+    "Lite recording document navigation scenario failed.",
+    recordedNavigation
+  );
+
   const popupStop = await openPopupRuntimeTarget(popupUrl);
   state.popupClient = popupStop.client;
 
@@ -310,14 +381,26 @@ async function main() {
     baseline.summary,
     recorded.summary,
     baselineInteraction.summary,
-    recordedInteraction.summary
+    recordedInteraction.summary,
+    baselineIframe.summary,
+    recordedIframe.summary,
+    baselineEditor.summary,
+    recordedEditor.summary,
+    baselineNavigation.summary,
+    recordedNavigation.summary
   );
 
   console.log("Warmup summary:", JSON.stringify(warmupSummary.summary));
   console.log("Baseline summary:", JSON.stringify(baseline.summary));
   console.log("Baseline interaction summary:", JSON.stringify(baselineInteraction.summary));
+  console.log("Baseline iframe summary:", JSON.stringify(baselineIframe.summary));
+  console.log("Baseline editor summary:", JSON.stringify(baselineEditor.summary));
+  console.log("Baseline navigation summary:", JSON.stringify(baselineNavigation.summary));
   console.log("Lite recording summary:", JSON.stringify(recorded.summary));
   console.log("Lite recording interaction summary:", JSON.stringify(recordedInteraction.summary));
+  console.log("Lite recording iframe summary:", JSON.stringify(recordedIframe.summary));
+  console.log("Lite recording editor summary:", JSON.stringify(recordedEditor.summary));
+  console.log("Lite recording navigation summary:", JSON.stringify(recordedNavigation.summary));
   console.log("Comparison:", JSON.stringify(comparison));
   console.log(`Chrome log: ${chromeLogPath}`);
   console.log("Lite perf regression passed.");
@@ -437,6 +520,30 @@ async function startStressServer() {
       return;
     }
 
+    if (requestUrl.pathname === "/perf/nav-target") {
+      const html = buildNavigationTargetHtml(requestUrl.searchParams.get("token") ?? "nav");
+      const bytes = Buffer.from(html);
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "content-length": bytes.byteLength
+      });
+      response.end(bytes);
+      return;
+    }
+
+    if (requestUrl.pathname === "/perf/iframe" || requestUrl.pathname === "/perf/iframe/") {
+      const html = buildIframePageHtml(requestUrl.searchParams.get("slot") ?? "0");
+      const bytes = Buffer.from(html);
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "content-length": bytes.byteLength
+      });
+      response.end(bytes);
+      return;
+    }
+
     if (requestUrl.pathname.startsWith("/api/ping/")) {
       const seq = requestUrl.pathname.slice("/api/ping/".length) || "0";
       const token = requestUrl.searchParams.get("token") ?? "missing-token";
@@ -490,6 +597,73 @@ function buildResponsePayload(seq, token, targetBytes) {
   const prefix = `seq=${seq}\ntoken=${token}\n`;
   const padLength = Math.max(0, targetBytes - Buffer.byteLength(prefix));
   return `${prefix}${"x".repeat(padLength)}`;
+}
+
+function escapeHtmlForJs(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildNavigationTargetHtml(token) {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Navigation Target</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #f7f2e9;
+        color: #1f2937;
+        font: 600 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+      }
+
+      main {
+        padding: 28px 32px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: 0 18px 48px rgba(31, 41, 55, 0.12);
+      }
+    </style>
+  </head>
+  <body data-page="nav-target">
+    <main>
+      <p id="nav-ready">nav target ready token=${escapeHtmlForJs(token)}</p>
+    </main>
+  </body>
+</html>`;
+}
+
+function buildIframePageHtml(slot) {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(180deg, #f8fafc 0%, #eff6ff 100%);
+        color: #1f2937;
+        font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+        display: grid;
+        place-items: center;
+      }
+    </style>
+  </head>
+  <body data-page="iframe-target">
+    <span>iframe slot ${escapeHtmlForJs(slot)}</span>
+  </body>
+</html>`;
 }
 
 function buildStressPageHtml() {
@@ -616,7 +790,8 @@ function buildStressPageHtml() {
         flex-wrap: wrap;
       }
 
-      #action-link {
+      #action-link,
+      #document-link {
         display: inline-flex;
         align-items: center;
         min-height: 40px;
@@ -630,9 +805,21 @@ function buildStressPageHtml() {
         background: linear-gradient(180deg, #fff4ea 0%, #ffe8dc 100%);
       }
 
-      #action-link:hover {
+      #document-link {
+        border-color: rgba(30, 123, 77, 0.26);
+        color: #14503a;
+        background: linear-gradient(180deg, #eefbf4 0%, #def6e9 100%);
+      }
+
+      #action-link:hover,
+      #document-link:hover {
         border-color: rgba(192, 74, 43, 0.46);
         background: linear-gradient(180deg, #fff0e2 0%, #ffe1d2 100%);
+      }
+
+      #document-link:hover {
+        border-color: rgba(30, 123, 77, 0.42);
+        background: linear-gradient(180deg, #e5f9ef 0%, #d2f0e0 100%);
       }
 
       #click-log {
@@ -652,6 +839,55 @@ function buildStressPageHtml() {
         display: grid;
         grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 10px;
+      }
+
+      .aux-grid {
+        margin-top: 18px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+        gap: 14px;
+      }
+
+      .aux-panel {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.68);
+        padding: 12px;
+      }
+
+      .aux-panel h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+      }
+
+      #editor-surface {
+        min-height: 120px;
+        border-radius: 12px;
+        border: 1px solid rgba(56, 70, 86, 0.16);
+        background: linear-gradient(180deg, #fffefc 0%, #f9f5ee 100%);
+        padding: 14px;
+        outline: none;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      #editor-surface:focus {
+        border-color: rgba(30, 123, 77, 0.4);
+        box-shadow: 0 0 0 3px rgba(30, 123, 77, 0.08);
+      }
+
+      #iframe-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      #iframe-grid iframe {
+        width: 100%;
+        min-height: 96px;
+        border: 1px solid rgba(56, 70, 86, 0.16);
+        border-radius: 12px;
+        background: #fff;
       }
 
       .cell {
@@ -713,6 +949,10 @@ function buildStressPageHtml() {
         #mutation-grid {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
+
+        .aux-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
       }
     </style>
   </head>
@@ -727,10 +967,24 @@ function buildStressPageHtml() {
         <div id="request-log">idle</div>
         <div class="action-row">
           <a id="action-link" href="#action-target">exercise link</a>
+          <a id="document-link" href="/perf/nav-target?token=default">document nav</a>
           <div id="click-log">clicks: 0</div>
         </div>
         <div id="hover-grid"></div>
         <div id="mutation-grid"></div>
+        <div class="aux-grid">
+          <section class="aux-panel">
+            <h2>Editor</h2>
+            <div id="editor-surface" contenteditable="true" spellcheck="false"></div>
+          </section>
+          <section class="aux-panel">
+            <h2>Iframes</h2>
+            <div id="iframe-grid"></div>
+          </section>
+        </div>
+      </section>
+      <section id="action-target" class="panel">
+        <p>hash target</p>
       </section>
       <div class="scroll-runway" aria-hidden="true"></div>
     </main>
@@ -739,12 +993,16 @@ function buildStressPageHtml() {
         const statusNode = document.getElementById("status");
         const requestLogNode = document.getElementById("request-log");
         const actionLinkNode = document.getElementById("action-link");
+        const documentLinkNode = document.getElementById("document-link");
         const clickLogNode = document.getElementById("click-log");
         const hoverGridNode = document.getElementById("hover-grid");
         const mutationGridNode = document.getElementById("mutation-grid");
+        const editorSurfaceNode = document.getElementById("editor-surface");
+        const iframeGridNode = document.getElementById("iframe-grid");
         const cells = [];
         const labels = [];
         const mutationCells = [];
+        let iframeSetupSignature = "";
         let activeCell = null;
         let clickCount = 0;
         let clickMeasurementStartedAt = 0;
@@ -924,9 +1182,46 @@ function buildStressPageHtml() {
           clickCount = 0;
           clickMeasurementStartedAt = 0;
           activeClickLagSamples = null;
+          if (editorSurfaceNode) {
+            editorSurfaceNode.textContent = "";
+          }
           updateClickLog("clicks: 0");
           requestLogNode.textContent = "idle";
           window.scrollTo(0, 0);
+        }
+
+        async function ensureIframeGrid(frameCount) {
+          if (!iframeGridNode) {
+            return 0;
+          }
+
+          const nextCount = clampInt(frameCount, 8, 1, 16);
+          const signature = "frames-" + nextCount;
+
+          if (iframeSetupSignature === signature && iframeGridNode.childElementCount === nextCount) {
+            return nextCount;
+          }
+
+          iframeSetupSignature = signature;
+          iframeGridNode.innerHTML = "";
+
+          await Promise.all(
+            Array.from({ length: nextCount }, (_, index) => {
+              return new Promise((resolve) => {
+                const frame = document.createElement("iframe");
+                frame.loading = "eager";
+                frame.src =
+                  "/perf/iframe/?slot=" +
+                  encodeURIComponent(String(index)) +
+                  "&seed=" +
+                  encodeURIComponent(signature);
+                frame.addEventListener("load", () => resolve(), { once: true });
+                iframeGridNode.appendChild(frame);
+              });
+            })
+          );
+
+          return nextCount;
         }
 
         actionLinkNode.addEventListener("click", (event) => {
@@ -1299,9 +1594,158 @@ function buildStressPageHtml() {
           };
         }
 
+        async function runIframeScenario(options) {
+          const frames = await ensureIframeGrid(options?.iframeCount);
+          const result = await runInteractionScenario({
+            label:
+              typeof options?.label === "string" && options.label.length > 0
+                ? options.label
+                : "iframe-interaction",
+            rounds: options?.rounds,
+            mutationBatch: options?.mutationBatch,
+            scrollStep: options?.scrollStep,
+            settleMs: options?.settleMs
+          });
+
+          if (result?.summary) {
+            result.summary.iframeCount = frames;
+          }
+
+          return result;
+        }
+
+        async function runEditorScenario(options) {
+          if (globalThis.__WB_LITE_PERF_STATE__?.running) {
+            return {
+              ok: false,
+              reason: "already-running"
+            };
+          }
+
+          resetPageState();
+
+          const label =
+            typeof options?.label === "string" && options.label.length > 0
+              ? options.label
+              : "editor";
+          const rounds = clampInt(options?.rounds, 24, 6, 120);
+          const settleMs = clampInt(options?.settleMs, 250, 0, 3_000);
+          const inputCallSamples = [];
+          const rafGapSamples = [];
+          let samplingActive = true;
+          let frameSeen = false;
+          let lastFrameAt = 0;
+
+          const scenarioState = {
+            label,
+            running: true,
+            done: false,
+            failed: false,
+            rounds,
+            count: 0,
+            error: null
+          };
+
+          globalThis.__WB_LITE_PERF_STATE__ = scenarioState;
+          setStatus(label + " running", "running");
+          requestLogNode.textContent = label + " typing";
+
+          const frameLoop = (now) => {
+            if (!samplingActive) {
+              return;
+            }
+
+            if (frameSeen) {
+              rafGapSamples.push(Math.max(0, now - lastFrameAt));
+            } else {
+              frameSeen = true;
+            }
+
+            lastFrameAt = now;
+            requestAnimationFrame(frameLoop);
+          };
+
+          requestAnimationFrame(frameLoop);
+
+          try {
+            editorSurfaceNode?.focus();
+
+            for (let round = 0; round < rounds; round += 1) {
+              const nextChar = String.fromCharCode(97 + (round % 26));
+              const startedAt = performance.now();
+
+              editorSurfaceNode?.dispatchEvent(
+                new KeyboardEvent("keydown", {
+                  key: nextChar,
+                  code: "Key" + nextChar.toUpperCase(),
+                  bubbles: true
+                })
+              );
+
+              const span = document.createElement("span");
+              span.textContent = nextChar;
+              editorSurfaceNode?.appendChild(span);
+              editorSurfaceNode?.dispatchEvent(
+                new InputEvent("input", {
+                  bubbles: true,
+                  inputType: "insertText",
+                  data: nextChar
+                })
+              );
+
+              inputCallSamples.push(performance.now() - startedAt);
+              scenarioState.count = round + 1;
+
+              await new Promise((resolve) => {
+                requestAnimationFrame(() => resolve());
+              });
+            }
+          } catch (error) {
+            scenarioState.failed = true;
+            scenarioState.error = String(error instanceof Error ? error.message : error);
+          }
+
+          samplingActive = false;
+          requestLogNode.textContent =
+            label +
+            " finished chars=" +
+            String(editorSurfaceNode?.textContent?.length ?? 0);
+
+          await new Promise((resolve) => {
+            setTimeout(resolve, settleMs);
+          });
+
+          const summary = {
+            rounds: scenarioState.count,
+            textLength: editorSurfaceNode?.textContent?.length ?? 0,
+            inputCall: summarizeSeries(inputCallSamples),
+            rafGap: summarizeSeries(rafGapSamples)
+          };
+
+          scenarioState.running = false;
+          scenarioState.done = true;
+          scenarioState.summary = summary;
+          setStatus(
+            label + (scenarioState.failed ? " error" : " done"),
+            scenarioState.failed ? "error" : "done"
+          );
+
+          return {
+            ok: scenarioState.failed === false,
+            state: {
+              rounds: scenarioState.count,
+              error: scenarioState.error,
+              textLength: summary.textLength
+            },
+            summary
+          };
+        }
+
         globalThis.__WB_LITE_PERF__ = {
           runScenario,
           runInteractionScenario,
+          runIframeScenario,
+          runEditorScenario,
           getState() {
             return globalThis.__WB_LITE_PERF_STATE__ ?? null;
           }
@@ -1585,6 +2029,208 @@ async function runInteractionScenario(pageClient, options) {
   );
 }
 
+async function runIframeScenario(pageClient, options) {
+  return withTimeout(
+    pageClient.evaluate(`
+      globalThis.__WB_LITE_PERF__.runIframeScenario(${JSON.stringify(options)})
+    `),
+    perfTimeoutMs,
+    `Iframe scenario timed out: ${options?.label ?? "iframe"}`
+  );
+}
+
+async function runEditorScenario(pageClient, options) {
+  return withTimeout(
+    pageClient.evaluate(`
+      globalThis.__WB_LITE_PERF__.runEditorScenario(${JSON.stringify(options)})
+    `),
+    perfTimeoutMs,
+    `Editor scenario timed out: ${options?.label ?? "editor"}`
+  );
+}
+
+async function runDocumentNavigationScenario(pageClient, options) {
+  const label =
+    typeof options?.label === "string" && options.label.length > 0 ? options.label : "navigation";
+  const rounds = Math.max(1, Math.floor(options?.rounds ?? navigationRounds));
+  const settleMs = Math.max(0, Math.floor(options?.settleMs ?? interactionSettleMs));
+  const sourceUrl = String(options?.sourceUrl ?? "");
+  const targetUrl = String(options?.targetUrl ?? "");
+  const targetWaitMs = Math.max(1_500, Math.min(perfTimeoutMs, Math.floor(navigationWaitMs)));
+  const latencies = [];
+  const strategies = {
+    mouse: 0,
+    jsClick: 0,
+    locationAssign: 0
+  };
+
+  const waitForTargetPage = async () =>
+    waitFor(
+      async () => {
+        const snapshot = await pageClient.evaluate(`(() => ({
+          pageType: document.body?.dataset?.page ?? document.documentElement?.dataset?.page ?? null,
+          readyState: document.readyState,
+          href: location.href
+        }))()`);
+        return snapshot?.pageType === "nav-target" ? snapshot : null;
+      },
+      targetWaitMs,
+      100,
+      `Document navigation target did not load: ${label}`
+    );
+
+  for (let round = 0; round < rounds; round += 1) {
+    const token = `${label}-${round}`;
+    const href = await pageClient.evaluate(`
+      (() => {
+        const link = document.getElementById("document-link");
+        if (link instanceof HTMLAnchorElement) {
+          const nextHref = ${JSON.stringify(targetUrl)} + "?token=" + ${JSON.stringify(token)};
+          link.href = nextHref;
+          const status = document.getElementById("status");
+          const requestLog = document.getElementById("request-log");
+
+          if (status instanceof HTMLElement) {
+            status.textContent =
+              ${JSON.stringify(label)} +
+              " nav " +
+              String(${round} + 1) +
+              "/" +
+              String(${rounds});
+            status.dataset.tone = "running";
+          }
+
+          if (requestLog instanceof HTMLElement) {
+            requestLog.textContent = "navigate " + nextHref;
+          }
+
+          return nextHref;
+        }
+
+        return null;
+      })()
+    `);
+
+    assert(
+      typeof href === "string" && href.length > 0,
+      "Document navigation href is unavailable.",
+      {
+        label,
+        round,
+        href
+      }
+    );
+
+    const point = await pageClient.evaluate(`
+      (() => {
+        const link = document.getElementById("document-link");
+        if (!(link instanceof HTMLElement)) {
+          return null;
+        }
+
+        const rect = link.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2
+        };
+      })()
+    `);
+
+    assert(
+      point &&
+        typeof point.x === "number" &&
+        Number.isFinite(point.x) &&
+        typeof point.y === "number" &&
+        Number.isFinite(point.y),
+      "Document navigation link bounds are unavailable.",
+      { point, label, round }
+    );
+
+    const startedAt = Date.now();
+    let strategy = "mouse";
+    try {
+      await pageClient.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+        button: "none"
+      });
+      await pageClient.send("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: point.x,
+        y: point.y,
+        button: "left",
+        clickCount: 1
+      });
+      await pageClient.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: point.x,
+        y: point.y,
+        button: "left",
+        clickCount: 1
+      });
+      await waitForTargetPage();
+    } catch {
+      strategy = "jsClick";
+      await pageClient.evaluate(`
+        (() => {
+          const link = document.getElementById("document-link");
+
+          if (link instanceof HTMLAnchorElement) {
+            link.click();
+            return true;
+          }
+
+          return false;
+        })()
+      `);
+
+      try {
+        await waitForTargetPage();
+      } catch {
+        strategy = "locationAssign";
+        await pageClient.evaluate(`
+          (() => {
+            const link = document.getElementById("document-link");
+
+            if (link instanceof HTMLAnchorElement) {
+              window.location.href = link.href;
+              return link.href;
+            }
+
+            return null;
+          })()
+        `);
+        await waitForTargetPage();
+      }
+    }
+
+    strategies[strategy] += 1;
+    latencies.push(Date.now() - startedAt);
+
+    await pageClient.send("Page.navigate", {
+      url: sourceUrl
+    });
+    await waitForPerfHarness(pageClient, 20_000);
+
+    if (settleMs > 0) {
+      await sleep(settleMs);
+    }
+  }
+
+  return {
+    ok: true,
+    state: {
+      rounds
+    },
+    summary: {
+      rounds,
+      navigationLatency: summarizeSeries(latencies),
+      strategies
+    }
+  };
+}
+
 async function startSessionFromPopup(popupClient, mode, expectedUrl) {
   const expression = `
     (async () => {
@@ -1699,11 +2345,62 @@ async function waitForIndicatorGone(pageClient, timeoutMs) {
   );
 }
 
+function roundMetric(value) {
+  return Number(value.toFixed(2));
+}
+
+function percentile(sorted, ratio) {
+  if (!sorted.length) {
+    return 0;
+  }
+
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
+  return sorted[index];
+}
+
+function summarizeSeries(values) {
+  const numeric = values
+    .filter((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)
+    .sort((left, right) => left - right);
+
+  if (numeric.length === 0) {
+    return {
+      count: 0,
+      meanMs: 0,
+      p50Ms: 0,
+      p95Ms: 0,
+      maxMs: 0,
+      over16Ms: 0,
+      over32Ms: 0,
+      over50Ms: 0
+    };
+  }
+
+  const total = numeric.reduce((sum, value) => sum + value, 0);
+
+  return {
+    count: numeric.length,
+    meanMs: roundMetric(total / numeric.length),
+    p50Ms: roundMetric(percentile(numeric, 0.5)),
+    p95Ms: roundMetric(percentile(numeric, 0.95)),
+    maxMs: roundMetric(numeric[numeric.length - 1]),
+    over16Ms: numeric.filter((value) => value > 16).length,
+    over32Ms: numeric.filter((value) => value > 32).length,
+    over50Ms: numeric.filter((value) => value > 50).length
+  };
+}
+
 function compareSummaries(
   baselineSummary,
   recordedSummary,
   baselineInteractionSummary,
-  recordedInteractionSummary
+  recordedInteractionSummary,
+  baselineIframeSummary,
+  recordedIframeSummary,
+  baselineEditorSummary,
+  recordedEditorSummary,
+  baselineNavigationSummary,
+  recordedNavigationSummary
 ) {
   assert(
     typeof baselineSummary?.requests?.count === "number" &&
@@ -1728,6 +2425,42 @@ function compareSummaries(
       recordedInteractionSummary.rounds >= interactionRounds,
     "Lite recording interaction summary captured too few rounds.",
     { recordedInteractionSummary, interactionRounds }
+  );
+  assert(
+    typeof baselineIframeSummary?.rounds === "number" &&
+      baselineIframeSummary.rounds >= iframeInteractionRounds,
+    "Baseline iframe scenario captured too few rounds.",
+    { baselineIframeSummary, iframeInteractionRounds }
+  );
+  assert(
+    typeof recordedIframeSummary?.rounds === "number" &&
+      recordedIframeSummary.rounds >= iframeInteractionRounds,
+    "Lite recording iframe scenario captured too few rounds.",
+    { recordedIframeSummary, iframeInteractionRounds }
+  );
+  assert(
+    typeof baselineEditorSummary?.rounds === "number" &&
+      baselineEditorSummary.rounds >= editorRounds,
+    "Baseline editor scenario captured too few rounds.",
+    { baselineEditorSummary, editorRounds }
+  );
+  assert(
+    typeof recordedEditorSummary?.rounds === "number" &&
+      recordedEditorSummary.rounds >= editorRounds,
+    "Lite recording editor scenario captured too few rounds.",
+    { recordedEditorSummary, editorRounds }
+  );
+  assert(
+    typeof baselineNavigationSummary?.rounds === "number" &&
+      baselineNavigationSummary.rounds >= navigationRounds,
+    "Baseline navigation scenario captured too few rounds.",
+    { baselineNavigationSummary, navigationRounds }
+  );
+  assert(
+    typeof recordedNavigationSummary?.rounds === "number" &&
+      recordedNavigationSummary.rounds >= navigationRounds,
+    "Lite recording navigation scenario captured too few rounds.",
+    { recordedNavigationSummary, navigationRounds }
   );
 
   const budgets = [
@@ -1776,6 +2509,51 @@ function compareSummaries(
       baselineInteractionSummary.clickCall.over16Ms,
       recordedInteractionSummary.clickCall.over16Ms,
       clickOver16DeltaLimit
+    ),
+    assertBudget(
+      "iframe.clickCall.p95Ms",
+      baselineIframeSummary.clickCall.p95Ms,
+      recordedIframeSummary.clickCall.p95Ms,
+      {
+        ratioLimit: clickCallP95RatioLimit,
+        deltaLimit: clickCallP95DeltaLimitMs
+      }
+    ),
+    assertBudget(
+      "iframe.clickHandlerLag.p95Ms",
+      baselineIframeSummary.clickHandlerLag.p95Ms,
+      recordedIframeSummary.clickHandlerLag.p95Ms,
+      {
+        ratioLimit: clickLagP95RatioLimit,
+        deltaLimit: clickLagP95DeltaLimitMs
+      }
+    ),
+    assertBudget(
+      "editor.inputCall.p95Ms",
+      baselineEditorSummary.inputCall.p95Ms,
+      recordedEditorSummary.inputCall.p95Ms,
+      {
+        ratioLimit: editorInputP95RatioLimit,
+        deltaLimit: editorInputP95DeltaLimitMs
+      }
+    ),
+    assertBudget(
+      "editor.rafGap.p95Ms",
+      baselineEditorSummary.rafGap.p95Ms,
+      recordedEditorSummary.rafGap.p95Ms,
+      {
+        ratioLimit: editorRafP95RatioLimit,
+        deltaLimit: editorRafP95DeltaLimitMs
+      }
+    ),
+    assertBudget(
+      "navigation.p95Ms",
+      baselineNavigationSummary.navigationLatency.p95Ms,
+      recordedNavigationSummary.navigationLatency.p95Ms,
+      {
+        ratioLimit: navigationP95RatioLimit,
+        deltaLimit: navigationP95DeltaLimitMs
+      }
     )
   ];
 

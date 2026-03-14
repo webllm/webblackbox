@@ -21,6 +21,7 @@ In addition, runtime capture now prefers lower page-thread overhead:
 - pipeline ingest is batched across SW ↔ offscreen and web-sdk recorder ↔ pipeline boundaries
 - pipeline drain is chunked to avoid giant `postMessage` payloads during stop/export
 - injected network body capture is rate-limited and gated by runtime config to reduce page jank
+- extension `e2e:perf:lite` now gates not only request/hover pressure but also real document navigation, iframe-heavy pages, and contenteditable typing
 
 ## Quick start
 
