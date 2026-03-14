@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebBlackbox Iframe Host Example</title>
+    <style>
+      :root {
+        font-family: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      body {
+        margin: 0;
+        padding: 16px;
+        color: #1f2937;
+        background: #f5f7fb;
+      }
+
+      .card {
+        background: #ffffff;
+        border: 1px solid #dbe2ea;
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      p {
+        margin: 6px 0;
+        font-size: 12px;
+        color: #4b5563;
+      }
+
+      .controls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 1px solid #90caf9;
+        background: #e3f2fd;
+        color: #0f172a;
+        border-radius: 6px;
+        font-size: 12px;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #d0e8fc;
+      }
+
+      iframe {
+        width: 100%;
+        min-height: 240px;
+        border: 1px solid #bfd4ea;
+        border-radius: 8px;
+        background: #ffffff;
+      }
+
+      code {
+        color: #0b57d0;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="card">
+      <h1>Main Page (Host)</h1>
+      <p>
+        Open WebBlackbox recorder in <strong>full mode</strong>, interact with both main page and
+        iframe, then inspect scope tags in Player.
+      </p>
+      <div class="controls">
+        <button id="host-action" type="button">Host Console + Fetch</button>
+        <button id="host-error" type="button">Host Promise Rejection</button>
+      </div>
+      <p>Data endpoint: <code>./iframe-data.json</code></p>
+    </section>
+
+    <section class="card">
+      <h1>Embedded Iframe</h1>
+      <iframe id="child-frame" src="./iframe-child.html" title="Iframe child example"></iframe>
+    </section>
+
+    <script>
+      const hostAction = document.getElementById("host-action");
+      const hostError = document.getElementById("host-error");
+
+      async function runHostAction() {
+        const stamp = Date.now();
+        console.log("[host] action", { stamp });
+        const response = await fetch(`./iframe-data.json?source=host&t=${stamp}`);
+        const json = await response.json();
+        console.log("[host] fetch result", json);
+      }
+
+      hostAction?.addEventListener("click", () => {
+        void runHostAction();
+      });
+
+      hostError?.addEventListener("click", () => {
+        Promise.reject(new Error("[host] simulated rejection"));
+      });
+
+      window.addEventListener("message", (event) => {
+        console.log("[host] message from iframe", event.data);
+      });
+
+      setInterval(() => {
+        console.log("[host] heartbeat", { ts: Date.now() });
+      }, 9000);
+
+      console.log("[host] page ready");
+    </script>
+  </body>
+</html>

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebBlackbox Iframe Child Example</title>
+    <style>
+      :root {
+        font-family: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      body {
+        margin: 0;
+        padding: 12px;
+        color: #111827;
+        background: #f8fafc;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 1px solid #b39ddb;
+        background: #ede7f6;
+        color: #1f2937;
+        border-radius: 6px;
+        font-size: 12px;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #e2d7f4;
+      }
+
+      p {
+        margin: 8px 0;
+        font-size: 12px;
+        color: #4b5563;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <button id="child-action" type="button">Iframe Console + Fetch</button>
+      <button id="child-error" type="button">Iframe Throw Error</button>
+    </div>
+    <p>Interact here and on host page to generate mixed main/iframe logs.</p>
+
+    <script>
+      const childAction = document.getElementById("child-action");
+      const childError = document.getElementById("child-error");
+
+      async function runChildAction() {
+        const stamp = Date.now();
+        console.log("[iframe] action", { stamp });
+        const response = await fetch(`./iframe-data.json?source=iframe&t=${stamp}`);
+        const json = await response.json();
+        console.log("[iframe] fetch result", json);
+        window.parent.postMessage({ source: "iframe", type: "action", stamp }, "*");
+      }
+
+      childAction?.addEventListener("click", () => {
+        void runChildAction();
+      });
+
+      childError?.addEventListener("click", () => {
+        throw new Error("[iframe] simulated exception");
+      });
+
+      setInterval(() => {
+        console.log("[iframe] heartbeat", { ts: Date.now() });
+      }, 7000);
+
+      console.log("[iframe] ready");
+      window.parent.postMessage({ source: "iframe", type: "ready", ts: Date.now() }, "*");
+    </script>
+  </body>
+</html>
