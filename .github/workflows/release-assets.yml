@@ -73,3 +73,47 @@ jobs:
             echo "- Release tag: \`$RELEASE_TAG\`"
             echo "- Asset: \`${{ steps.archive.outputs.name }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  player-pages:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+      PLAYER_SITE_URL: https://webllm.github.io/webblackbox/
+    steps:
+      - name: Checkout released ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Deploy player to gh-pages
+        run: |
+          pnpm --filter @webblackbox/player pages:deploy -- \
+            --message "Deploy player for $RELEASE_TAG"
+
+      - name: Summarize player deployment
+        run: |
+          {
+            echo "## Deployed Player"
+            echo ""
+            echo "- Release tag: \`$RELEASE_TAG\`"
+            echo "- Site: \`$PLAYER_SITE_URL\`"
+            echo "- Branch: \`gh-pages\`"
+          } >> "$GITHUB_STEP_SUMMARY"
