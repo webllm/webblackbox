@@ -181,6 +181,20 @@ export type ChromeApi = {
         lastAccessed?: number;
       }>
     >;
+    onUpdated?: {
+      addListener(
+        callback: (
+          tabId: number,
+          changeInfo: {
+            status?: "loading" | "complete";
+            url?: string;
+          }
+        ) => void
+      ): void;
+    };
+    onRemoved?: {
+      addListener(callback: (tabId: number) => void): void;
+    };
     sendMessage(tabId: number, message: unknown): Promise<unknown>;
   };
 };

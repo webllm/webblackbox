@@ -201,6 +201,7 @@ const chromeApi = getChromeApi();
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
 const sessionAnnotations = new Map<string, SessionAnnotation>();
+const contentCaptureInjectedTabs = new Set<number>();
 const connectedPorts = new Set<PortLike>();
 let offscreenPort: PortLike | null = null;
 const pendingOffscreenRequests = new Map<
@@ -383,6 +384,37 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
 
   port.onMessage.addListener(onMessage);
   port.onDisconnect.addListener(onDisconnect);
+});
+
+chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "loading") {
+    contentCaptureInjectedTabs.delete(tabId);
+    return;
+  }
+
+  if (changeInfo.status !== "complete") {
+    return;
+  }
+
+  const runtime = sessionsByTab.get(tabId);
+
+  if (!runtime || runtime.stoppedAt) {
+    return;
+  }
+
+  void ensureContentCaptureScript(tabId)
+    .then(async () => {
+      if (shouldInjectHooksForMode(runtime.mode)) {
+        await ensureInjectedHooks(tabId);
+      }
+
+      await notifyTabStatus(tabId, true, runtime.sid, runtime.mode, toStatusSampling(runtime));
+    })
+    .catch(() => undefined);
+});
+
+chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
+  contentCaptureInjectedTabs.delete(tabId);
 });
 
 async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
@@ -733,6 +765,8 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     mono: monotonicTime(),
     payload: recorderConfig
   });
+
+  await ensureContentCaptureScript(tabId);
 
   if (shouldInjectHooksForMode(mode)) {
     await ensureInjectedHooks(tabId);
@@ -3001,6 +3035,24 @@ async function ensureInjectedHooks(tabId: number): Promise<void> {
       files: ["injected.js"]
     })
     .catch(() => undefined);
+}
+
+async function ensureContentCaptureScript(tabId: number): Promise<void> {
+  if (contentCaptureInjectedTabs.has(tabId)) {
+    return;
+  }
+
+  const injected = await chromeApi?.scripting
+    ?.executeScript({
+      target: { tabId },
+      files: ["content.js"]
+    })
+    .then(() => true)
+    .catch(() => false);
+
+  if (injected) {
+    contentCaptureInjectedTabs.add(tabId);
+  }
 }
 
 function installLiteWebRequestCapture(): void {
