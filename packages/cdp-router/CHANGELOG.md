@@ -1,5 +1,13 @@
 # @webblackbox/cdp-router
 
+## 0.1.3
+
+### Patch Changes
+
+- fix chrome ext
+- Updated dependencies
+  - @webblackbox/protocol@0.1.3
+
 ## 0.1.2
 
 ### Patch Changes

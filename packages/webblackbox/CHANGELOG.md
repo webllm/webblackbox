@@ -1,5 +1,15 @@
 # webblackbox
 
+## 0.1.3
+
+### Patch Changes
+
+- fix chrome ext
+- Updated dependencies
+  - @webblackbox/pipeline@0.1.3
+  - @webblackbox/protocol@0.1.3
+  - @webblackbox/recorder@0.1.3
+
 ## 0.1.2
 
 ### Patch Changes

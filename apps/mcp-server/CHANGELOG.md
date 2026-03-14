@@ -1,5 +1,13 @@
 # @webblackbox/mcp-server
 
+## 0.1.3
+
+### Patch Changes
+
+- fix chrome ext
+- Updated dependencies
+  - @webblackbox/player-sdk@0.1.3
+
 ## 0.1.2
 
 ### Patch Changes
