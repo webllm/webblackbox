@@ -327,7 +327,9 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   }
 
   if (port.name === PORT_NAMES.content) {
-    void syncContentPortStateOnConnect(port);
+    void syncContentPortStateOnConnect(port).catch((error) => {
+      logInboundMessageFailure("content.connect", error, port);
+    });
   }
 
   pushSessionList();
@@ -343,7 +345,7 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
       return;
     }
 
-    void handleInboundMessage(message, port);
+    dispatchInboundMessage(message, port);
   };
 
   const onDisconnect = () => {
@@ -427,9 +429,23 @@ chromeApi?.runtime?.onMessage.addListener((rawMessage, sender) => {
     return;
   }
 
-  void handleInboundMessage(message, undefined, sender.tab?.id, sender.frameId);
+  dispatchInboundMessage(message, undefined, sender.tab?.id, sender.frameId);
   return false;
 });
+
+function dispatchInboundMessage(
+  message: ExtensionInboundMessage,
+  port?: PortLike,
+  senderTabId?: number,
+  senderFrameId?: number
+): void {
+  void handleInboundMessage(message, port, senderTabId, senderFrameId).catch((error) => {
+    logInboundMessageFailure(message.kind, error, port, {
+      tabId: senderTabId,
+      frameId: senderFrameId
+    });
+  });
+}
 
 chromeApi?.commands?.onCommand.addListener((command) => {
   if (command !== "mark-bug") {
@@ -539,7 +555,11 @@ async function handleInboundMessage(
     const tabId = senderTabId ?? port?.sender?.tab?.id;
     const frame = normalizeContentFrameId(senderFrameId ?? port?.sender?.frameId);
 
-    if (typeof tabId !== "number") {
+    if (
+      typeof tabId !== "number" ||
+      !Array.isArray(message.events) ||
+      message.events.length === 0
+    ) {
       return;
     }
 
@@ -3714,6 +3734,21 @@ function logPortSendFailure(
   console.debug("[WebBlackbox][port] service worker postMessage failed", {
     kind,
     ...context,
+    error: error instanceof Error ? error.message : String(error)
+  });
+}
+
+function logInboundMessageFailure(
+  kind: string,
+  error: unknown,
+  port?: PortLike,
+  context: Record<string, unknown> = {}
+): void {
+  console.warn("[WebBlackbox] inbound message failed", {
+    kind,
+    port: port?.name,
+    tabId: context.tabId ?? port?.sender?.tab?.id,
+    frameId: context.frameId ?? port?.sender?.frameId,
     error: error instanceof Error ? error.message : String(error)
   });
 }

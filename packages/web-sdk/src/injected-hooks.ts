@@ -9,7 +9,7 @@ const NOISY_CONSOLE_METHODS = new Set(["log", "info", "debug", "dir", "dirxml", 
 const SAFE_SERIALIZE_MAX_DEPTH = 3;
 const SAFE_SERIALIZE_MAX_PROPERTIES = 24;
 const SAFE_SERIALIZE_MAX_STRING_CHARS = 1_200;
-const EMIT_FLUSH_MAX_EVENTS = 48;
+const EMIT_FLUSH_MAX_EVENTS = 24;
 
 /** `window.postMessage` source tag used by injected lite capture hooks. */
 export const INJECTED_MESSAGE_SOURCE = "webblackbox-injected";

@@ -247,7 +247,7 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
-  it("samples oversized mutation bursts under pressure instead of walking every record", async () => {
+  it("holds oversized mutation bursts until pressure cools, then emits a sampled summary", async () => {
     let observeCallback: MutationCallback | null = null;
     const disconnect = vi.fn();
     const OriginalMutationObserver = globalThis.MutationObserver;
@@ -292,6 +292,11 @@ describe("LiteCaptureAgent", () => {
       await vi.advanceTimersByTimeAsync(350);
       agent.flush();
 
+      expect(emittedRawTypes(emitBatch)).not.toContain("mutation");
+
+      await vi.advanceTimersByTimeAsync(2_600);
+      agent.flush();
+
       const mutationEvent = emitBatch.mock.calls
         .flatMap((call) => {
           const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
@@ -309,6 +314,42 @@ describe("LiteCaptureAgent", () => {
     } finally {
       globalThis.MutationObserver = OriginalMutationObserver;
     }
+  });
+
+  it("uses a lightweight summary html snapshot for large pages", () => {
+    document.body.innerHTML = `
+      <section id="grid">
+        ${Array.from({ length: 4_200 }, (_, index) => `<div class="cell">cell-${index}</div>`).join("")}
+      </section>
+    `;
+
+    const { agent, emitBatch } = createAgent();
+
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+
+    const snapshotEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "snapshot");
+
+    expect(snapshotEvent?.payload).toMatchObject({
+      summaryOnly: true,
+      summaryMode: "large-dom",
+      truncated: true
+    });
+    expect(typeof snapshotEvent?.payload?.html).toBe("string");
+    expect(String(snapshotEvent?.payload?.html)).toContain('data-webblackbox-summary="true"');
+    expect(String(snapshotEvent?.payload?.html)).toContain("WebBlackbox Lite DOM Summary");
+    expect(String(snapshotEvent?.payload?.html)).not.toContain("cell-4199");
+
+    agent.dispose();
   });
 
   it("defers start capture while mutation pressure is active", async () => {
@@ -490,6 +531,19 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("suppresses mousemove capture while the event buffer is under pressure", () => {
+    const { agent, emitBatch } = createAgent();
+
+    dispatchInjectedEvents("mutation", 130);
+    movePointer();
+    agent.flush();
+
+    expect(emittedRawTypes(emitBatch)).toContain("mutation");
+    expect(emittedRawTypes(emitBatch)).not.toContain("mousemove");
+
+    agent.dispose();
+  });
+
   it("flushes buffered low-priority events asynchronously in chunks", async () => {
     const { agent, emitBatch } = createAgent();
 
@@ -500,12 +554,12 @@ describe("LiteCaptureAgent", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(emitBatch).toHaveBeenCalledTimes(1);
-    expect(emitBatch.mock.calls[0]?.[0]).toHaveLength(120);
+    expect(emitBatch.mock.calls[0]?.[0]).toHaveLength(80);
 
     await vi.advanceTimersToNextTimerAsync();
 
     expect(countEmittedEvents(emitBatch)).toBe(130);
-    expect(emitBatch.mock.calls.at(-1)?.[0]).toHaveLength(10);
+    expect(emitBatch.mock.calls.at(-1)?.[0]).toHaveLength(50);
 
     agent.dispose();
   });

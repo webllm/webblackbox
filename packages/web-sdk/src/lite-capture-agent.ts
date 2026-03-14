@@ -24,13 +24,14 @@ const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
 const SCREENSHOT_WEBP_QUALITY = 0.66;
 const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
+const DOM_SNAPSHOT_SUMMARY_NODE_THRESHOLD = 3_500;
 const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
 const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
 const START_CAPTURE_DEFER_MS = 2_000;
 const ACTION_CAPTURE_DEFER_MS = 0;
 const EVENT_BUFFER_FLUSH_DELAY_MS = 180;
 const EVENT_BUFFER_FORCE_FLUSH_SIZE = 120;
-const EVENT_BUFFER_EMIT_CHUNK_SIZE = 120;
+const EVENT_BUFFER_EMIT_CHUNK_SIZE = 80;
 const EVENT_BUFFER_SOFT_LIMIT = 420;
 const EVENT_BUFFER_HARD_LIMIT = 1_200;
 const MUTATION_DETAIL_RECORD_LIMIT = 160;
@@ -501,7 +502,7 @@ export class LiteCaptureAgent {
           return;
         }
 
-        if (this.isScrollBurstActive()) {
+        if (this.shouldSuppressPointerMoveCapture()) {
           return;
         }
 
@@ -816,15 +817,16 @@ export class LiteCaptureAgent {
       return;
     }
 
-    const flushDelayMs = Math.max(
-      25,
-      this.isMutationPressureActive()
-        ? Math.max(Math.round(this.sampling.domFlushMs), MUTATION_PRESSURE_FLUSH_MS)
-        : Math.round(this.sampling.domFlushMs)
-    );
+    const flushDelayMs = this.resolveMutationFlushDelay();
 
     this.mutationFlushTimer = window.setTimeout(() => {
       this.mutationFlushTimer = 0;
+
+      if (this.shouldHoldMutationFlush()) {
+        this.scheduleMutationFlush();
+        return;
+      }
+
       this.flushMutationBuffer();
     }, flushDelayMs);
   }
@@ -870,8 +872,19 @@ export class LiteCaptureAgent {
   }
 
   private emitDomSnapshot(reason: string): void {
-    const html = document.documentElement.outerHTML;
-    const truncated = html.length > DOM_SNAPSHOT_MAX_HTML_CHARS;
+    const nodeCount = document.getElementsByTagName("*").length;
+    const summaryMode = this.resolveDomSnapshotSummaryMode(nodeCount);
+    const html = summaryMode
+      ? buildDomSnapshotSummaryHtml({
+          href: location.href,
+          title: document.title,
+          reason,
+          nodeCount,
+          summaryMode,
+          capturedAtIso: new Date().toISOString()
+        })
+      : document.documentElement.outerHTML;
+    const truncated = summaryMode !== null || html.length > DOM_SNAPSHOT_MAX_HTML_CHARS;
     const sampledHtml = truncated ? html.slice(0, DOM_SNAPSHOT_MAX_HTML_CHARS) : html;
 
     this.hasDomSnapshot = true;
@@ -880,10 +893,12 @@ export class LiteCaptureAgent {
       reason,
       href: location.href,
       title: document.title,
-      nodeCount: document.getElementsByTagName("*").length,
+      nodeCount,
       htmlLength: html.length,
       truncated,
-      html: sampledHtml
+      html: sampledHtml,
+      summaryOnly: summaryMode !== null,
+      summaryMode: summaryMode ?? undefined
     });
   }
 
@@ -1242,6 +1257,28 @@ export class LiteCaptureAgent {
     return monotonicTime() - this.lastUserActivityMono < idleMs;
   }
 
+  private resolveMutationFlushDelay(): number {
+    if (!this.isMutationPressureActive()) {
+      return Math.max(25, Math.round(this.sampling.domFlushMs));
+    }
+
+    const remainingPressureMs = Math.max(
+      0,
+      Math.ceil(this.mutationPressureUntilMono - monotonicTime())
+    );
+
+    return Math.max(
+      Math.max(Math.round(this.sampling.domFlushMs), MUTATION_PRESSURE_FLUSH_MS),
+      remainingPressureMs
+    );
+  }
+
+  private shouldHoldMutationFlush(): boolean {
+    return (
+      this.recordingActive && this.mutationSummary.count > 0 && this.isMutationPressureActive()
+    );
+  }
+
   private extendMutationPressureWindow(): void {
     this.mutationPressureUntilMono = monotonicTime() + MUTATION_PRESSURE_COOLDOWN_MS;
   }
@@ -1256,6 +1293,26 @@ export class LiteCaptureAgent {
       this.isMutationPressureActive() ||
       this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT
     );
+  }
+
+  private shouldSuppressPointerMoveCapture(): boolean {
+    return (
+      this.isScrollBurstActive() ||
+      this.isMutationPressureActive() ||
+      this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE
+    );
+  }
+
+  private resolveDomSnapshotSummaryMode(nodeCount: number): "pressure" | "large-dom" | null {
+    if (this.isMutationPressureActive() || this.eventBuffer.length >= EVENT_BUFFER_SOFT_LIMIT) {
+      return "pressure";
+    }
+
+    if (nodeCount >= DOM_SNAPSHOT_SUMMARY_NODE_THRESHOLD) {
+      return "large-dom";
+    }
+
+    return null;
   }
 
   private setPendingScreenshotReason(reason: string, prioritize = false): void {
@@ -1653,6 +1710,38 @@ function readClassName(target: Element): string | undefined {
     : undefined;
 }
 
+function buildDomSnapshotSummaryHtml(options: {
+  href: string;
+  title: string;
+  reason: string;
+  nodeCount: number;
+  summaryMode: "pressure" | "large-dom";
+  capturedAtIso: string;
+}): string {
+  const body = [
+    "<!doctype html>",
+    `<html data-webblackbox-summary="true" data-summary-mode="${escapeHtml(options.summaryMode)}">`,
+    "<head>",
+    '<meta charset="utf-8">',
+    `<title>${escapeHtml(options.title || "WebBlackbox DOM Summary")}</title>`,
+    "</head>",
+    "<body>",
+    "<main>",
+    "<h1>WebBlackbox Lite DOM Summary</h1>",
+    `<p>mode=${escapeHtml(options.summaryMode)}</p>`,
+    `<p>reason=${escapeHtml(options.reason)}</p>`,
+    `<p>href=${escapeHtml(options.href)}</p>`,
+    `<p>title=${escapeHtml(options.title)}</p>`,
+    `<p>nodeCount=${String(options.nodeCount)}</p>`,
+    `<p>capturedAt=${escapeHtml(options.capturedAtIso)}</p>`,
+    "</main>",
+    "</body>",
+    "</html>"
+  ];
+
+  return body.join("");
+}
+
 function safeSelector(target: EventTarget | null): string {
   if (!(target instanceof Element)) {
     return "unknown";
@@ -1714,6 +1803,14 @@ function cssEscape(value: string): string {
   }
 
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function createEmptyMutationSummary(): MutationBatchSummary {
