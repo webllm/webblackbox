@@ -49,6 +49,7 @@ await mkdir(repoDir, { recursive: true });
 try {
   await runCommand("git", ["init"], repoDir);
   await runCommand("git", ["remote", "add", "origin", remoteUrl], repoDir);
+  await configureGitHubAuth(repoDir, remoteUrl);
 
   const userName = await readGitConfig("user.name", workspaceRoot);
   const userEmail = await readGitConfig("user.email", workspaceRoot);
@@ -184,6 +185,53 @@ async function readGitConfig(key, cwd) {
     });
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function configureGitHubAuth(cwd, remoteUrl) {
+  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? "";
+
+  if (!token) {
+    return;
+  }
+
+  const normalizedRemote = normalizeGitHubHttpsRemote(remoteUrl);
+
+  if (!normalizedRemote) {
+    return;
+  }
+
+  const extraHeader = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  await runCommand(
+    "git",
+    ["config", "--local", `http.${normalizedRemote.origin}/.extraheader`, extraHeader],
+    cwd
+  );
+}
+
+function normalizeGitHubHttpsRemote(remoteUrl) {
+  if (typeof remoteUrl !== "string" || remoteUrl.length === 0) {
+    return null;
+  }
+
+  if (remoteUrl.startsWith("git@github.com:")) {
+    return {
+      origin: "https://github.com"
+    };
+  }
+
+  try {
+    const parsed = new URL(remoteUrl);
+
+    if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
+      return null;
+    }
+
+    return {
+      origin: parsed.origin
+    };
   } catch {
     return null;
   }

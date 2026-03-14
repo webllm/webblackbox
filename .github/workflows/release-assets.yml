@@ -104,6 +104,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Deploy player to gh-pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           pnpm --filter @webblackbox/player pages:deploy -- \
             --message "Deploy player for $RELEASE_TAG"
