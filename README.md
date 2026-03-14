@@ -37,6 +37,163 @@ Think of it as a **black box for your web app**: always recording in the backgro
 
 <br />
 
+## Getting Started
+
+### Prerequisites
+
+- **Node.js** >= 22.0.0
+- **pnpm** 10.28.1
+
+### Installation
+
+```bash
+git clone https://github.com/webllm/webblackbox.git
+cd webblackbox
+pnpm install
+pnpm build
+```
+
+### Loading the Chrome Extension
+
+1. Build the extension:
+   ```bash
+   cd apps/extension && pnpm build
+   ```
+2. Open Chrome → `chrome://extensions/`
+3. Enable **Developer mode** (top-right toggle)
+4. Click **Load unpacked** → select `apps/extension/build`
+
+### Using the Extension
+
+| Step       | Action                                                                               |
+| ---------- | ------------------------------------------------------------------------------------ |
+| **Record** | Click the WebBlackbox icon in the toolbar to start a session                         |
+| **Browse** | Navigate your app normally — events are captured in the background via a ring buffer |
+| **Mark**   | Press `Ctrl+Shift+M` (`Cmd+Shift+M` on Mac) to create user markers at key moments    |
+| **Export** | Click the icon again and export to download a `.webblackbox` archive                 |
+| **Replay** | Open the archive in the Player app for full session analysis                         |
+
+<br />
+
+## Event Types
+
+57 event types organized across 13 categories:
+
+| Category        | Events                                                                                                                                                                                  |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Meta**        | `meta.session.start`, `meta.session.end`, `meta.config`                                                                                                                                 |
+| **System**      | `sys.debugger.attach`, `sys.debugger.detach`, `sys.notice`                                                                                                                              |
+| **Navigation**  | `nav.commit`, `nav.history.push`, `nav.history.replace`, `nav.hash`, `nav.reload`                                                                                                       |
+| **User**        | `user.click`, `user.dblclick`, `user.keydown`, `user.input`, `user.submit`, `user.scroll`, `user.mousemove`, `user.focus`, `user.blur`, `user.marker`, `user.visibility`, `user.resize` |
+| **Console**     | `console.entry`                                                                                                                                                                         |
+| **Errors**      | `error.exception`, `error.unhandledrejection`, `error.resource`, `error.assert`                                                                                                         |
+| **Network**     | `network.request`, `network.response`, `network.finished`, `network.failed`, `network.redirect`, `network.body`                                                                         |
+| **WebSocket**   | `network.ws.open`, `network.ws.frame`, `network.ws.close`                                                                                                                               |
+| **SSE**         | `network.sse.message`                                                                                                                                                                   |
+| **DOM**         | `dom.mutation.batch`, `dom.snapshot`, `dom.diff`, `dom.rrweb.event`                                                                                                                     |
+| **Screen**      | `screen.screenshot`, `screen.viewport`                                                                                                                                                  |
+| **Storage**     | `storage.cookie.snapshot`, `storage.local.snapshot`, `storage.local.op`, `storage.session.op`, `storage.idb.op`, `storage.idb.snapshot`, `storage.cache.op`, `storage.sw.lifecycle`     |
+| **Performance** | `perf.vitals`, `perf.longtask`, `perf.trace`, `perf.cpu.profile`, `perf.heap.snapshot`                                                                                                  |
+
+### Core Event Structure
+
+```typescript
+type WebBlackboxEvent<TData = unknown> = {
+  v: 1; // Protocol version
+  sid: string; // Session ID
+  tab: number; // Tab ID
+  nav?: string; // Navigation ID
+  frame?: string; // Frame ID
+  t: number; // Wall-clock timestamp (ms)
+  mono: number; // Monotonic timestamp (ms)
+  dt?: number; // Duration (ms)
+  type: string; // Event type
+  id: string; // Unique event ID
+  lvl?: string; // debug | info | warn | error
+  ref?: object; // Cross-references (action, request, etc.)
+  data: TData; // Event-type-specific payload
+};
+```
+
+<br />
+
+## Packages
+
+### `@webblackbox/protocol`
+
+The foundational package defining all data types, Zod validation schemas, constants, and message formats shared across the entire system.
+
+### `@webblackbox/recorder`
+
+Collects and normalizes raw events from multiple sources (CDP, content scripts, system) into the unified `WebBlackboxEvent` format.
+
+- **WebBlackboxRecorder** — Main class with `ingest()`, ring buffer management, and plugin support
+- **EventRingBuffer** — Time-windowed circular buffer with configurable duration
+- **DefaultEventNormalizer** — Maps CDP and content script events to normalized payloads
+- **ActionSpanTracker** — Tracks user action spans and links related events within time windows
+- **FreezePolicy** — Evaluates freeze conditions (errors, network failures, long tasks, manual markers)
+- **Redaction** — Recursive payload redaction with header, cookie, body pattern matching
+- **Plugin System** — Extensible via `RecorderPlugin` with `onRawEvent` and `onEvent` hooks
+
+### `@webblackbox/pipeline`
+
+Processes recorded events into portable, indexed archives.
+
+- **FlightRecorderPipeline** — Orchestrator: ingestion, chunking, blob storage, index building, and archive export
+- **EventChunker** — Groups events into size-bounded chunks with configurable codecs
+- **EventIndexer** — Builds time-based, request-based, and inverted text search indexes
+- **Codec** — Encode/decode with chunk codecs (`none`, `gzip`, `br`, `zst`)
+- **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
+- **SHA-256** — Content-addressable blob deduplication
+
+### `webblackbox` (Web SDK)
+
+Browser-side lite capture SDK published as the `webblackbox` npm package.
+
+- **WebBlackboxLiteSdk** — Start/stop/flush/export `.webblackbox` archives directly in-page
+- **LiteCaptureAgent** — Reusable capture agent for DOM/input/screenshot/storage collection
+- **installInjectedLiteCaptureHooks** — Runtime hooks for console/network/storage/error capture
+
+### `@webblackbox/player-sdk`
+
+Client-side SDK for opening, querying, and analyzing recorded sessions.
+
+- **WebBlackboxPlayer** — Main class with `open()` static method for loading archives
+- **Event Querying** — Rich query API with time range, type, level, text search, and request ID filtering
+- **Network Waterfall** — Reconstruct complete request/response timings with headers and bodies
+- **Realtime Network Timeline** — WebSocket and SSE stream analysis
+- **Storage Timeline** — Track cookie, localStorage, sessionStorage, IndexedDB, and cache operations
+- **DOM Diff** — Compare DOM snapshots to find added, removed, and changed elements
+- **Session Comparison** — Compare two sessions by event counts, error rates, request patterns
+
+**Code Generation:**
+
+| Method                                   | Output                                         |
+| ---------------------------------------- | ---------------------------------------------- |
+| `generateCurl(reqId)`                    | curl command for a captured request            |
+| `generateFetch(reqId)`                   | fetch() call for a captured request            |
+| `exportHar(range?)`                      | HAR (HTTP Archive) format export               |
+| `generateBugReport(options?)`            | Markdown bug report                            |
+| `generatePlaywrightScript(options?)`     | Playwright test script                         |
+| `generatePlaywrightMockScript(options?)` | Playwright mock script with captured responses |
+| `generateGitHubIssueTemplate(options?)`  | GitHub issue template                          |
+| `generateJiraIssueTemplate(options?)`    | Jira issue template                            |
+
+### `@webblackbox/cdp-router`
+
+Manages Chrome DevTools Protocol connections for the extension.
+
+- **CdpRouter** — Interface for attaching/detaching debugger targets, sending CDP commands, receiving events
+- **DefaultCdpRouter** — Full implementation with target tracking (tabs, iframes, workers, service workers)
+- **Transport Layer** — Abstraction over `chrome.debugger` API
+- **Auto-Attach** — Automatic attachment to child targets (iframes, workers)
+
+### `@webblackbox/mcp-core`
+
+Utility functions for the Model Context Protocol server.
+
+<br />
+
 ## Highlights
 
 <table>
@@ -303,173 +460,6 @@ mcp-server ────→ mcp-core
 
 share-server ──→ player-sdk ──→ protocol
 ```
-
-<br />
-
-## Getting Started
-
-### Prerequisites
-
-- **Node.js** >= 22.0.0
-- **pnpm** 10.28.1
-
-### Installation
-
-```bash
-git clone https://github.com/webllm/webblackbox.git
-cd webblackbox
-pnpm install
-pnpm build
-```
-
-### Loading the Chrome Extension
-
-1. Build the extension:
-   ```bash
-   cd apps/extension && pnpm build
-   ```
-2. Open Chrome → `chrome://extensions/`
-3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** → select `apps/extension/build`
-
-### Using the Extension
-
-| Step       | Action                                                                               |
-| ---------- | ------------------------------------------------------------------------------------ |
-| **Record** | Click the WebBlackbox icon in the toolbar to start a session                         |
-| **Browse** | Navigate your app normally — events are captured in the background via a ring buffer |
-| **Mark**   | Press `Ctrl+Shift+M` (`Cmd+Shift+M` on Mac) to create user markers at key moments    |
-| **Export** | Click the icon again and export to download a `.webblackbox` archive                 |
-| **Replay** | Open the archive in the Player app for full session analysis                         |
-
-### Development
-
-```bash
-pnpm dev            # Watch mode for all packages
-pnpm test           # Run all tests
-pnpm typecheck      # TypeScript type checking
-pnpm lint           # ESLint checks
-pnpm format         # Format with Prettier
-```
-
-<br />
-
-## Event Types
-
-57 event types organized across 13 categories:
-
-| Category        | Events                                                                                                                                                                                  |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Meta**        | `meta.session.start`, `meta.session.end`, `meta.config`                                                                                                                                 |
-| **System**      | `sys.debugger.attach`, `sys.debugger.detach`, `sys.notice`                                                                                                                              |
-| **Navigation**  | `nav.commit`, `nav.history.push`, `nav.history.replace`, `nav.hash`, `nav.reload`                                                                                                       |
-| **User**        | `user.click`, `user.dblclick`, `user.keydown`, `user.input`, `user.submit`, `user.scroll`, `user.mousemove`, `user.focus`, `user.blur`, `user.marker`, `user.visibility`, `user.resize` |
-| **Console**     | `console.entry`                                                                                                                                                                         |
-| **Errors**      | `error.exception`, `error.unhandledrejection`, `error.resource`, `error.assert`                                                                                                         |
-| **Network**     | `network.request`, `network.response`, `network.finished`, `network.failed`, `network.redirect`, `network.body`                                                                         |
-| **WebSocket**   | `network.ws.open`, `network.ws.frame`, `network.ws.close`                                                                                                                               |
-| **SSE**         | `network.sse.message`                                                                                                                                                                   |
-| **DOM**         | `dom.mutation.batch`, `dom.snapshot`, `dom.diff`, `dom.rrweb.event`                                                                                                                     |
-| **Screen**      | `screen.screenshot`, `screen.viewport`                                                                                                                                                  |
-| **Storage**     | `storage.cookie.snapshot`, `storage.local.snapshot`, `storage.local.op`, `storage.session.op`, `storage.idb.op`, `storage.idb.snapshot`, `storage.cache.op`, `storage.sw.lifecycle`     |
-| **Performance** | `perf.vitals`, `perf.longtask`, `perf.trace`, `perf.cpu.profile`, `perf.heap.snapshot`                                                                                                  |
-
-### Core Event Structure
-
-```typescript
-type WebBlackboxEvent<TData = unknown> = {
-  v: 1; // Protocol version
-  sid: string; // Session ID
-  tab: number; // Tab ID
-  nav?: string; // Navigation ID
-  frame?: string; // Frame ID
-  t: number; // Wall-clock timestamp (ms)
-  mono: number; // Monotonic timestamp (ms)
-  dt?: number; // Duration (ms)
-  type: string; // Event type
-  id: string; // Unique event ID
-  lvl?: string; // debug | info | warn | error
-  ref?: object; // Cross-references (action, request, etc.)
-  data: TData; // Event-type-specific payload
-};
-```
-
-<br />
-
-## Packages
-
-### `@webblackbox/protocol`
-
-The foundational package defining all data types, Zod validation schemas, constants, and message formats shared across the entire system.
-
-### `@webblackbox/recorder`
-
-Collects and normalizes raw events from multiple sources (CDP, content scripts, system) into the unified `WebBlackboxEvent` format.
-
-- **WebBlackboxRecorder** — Main class with `ingest()`, ring buffer management, and plugin support
-- **EventRingBuffer** — Time-windowed circular buffer with configurable duration
-- **DefaultEventNormalizer** — Maps CDP and content script events to normalized payloads
-- **ActionSpanTracker** — Tracks user action spans and links related events within time windows
-- **FreezePolicy** — Evaluates freeze conditions (errors, network failures, long tasks, manual markers)
-- **Redaction** — Recursive payload redaction with header, cookie, body pattern matching
-- **Plugin System** — Extensible via `RecorderPlugin` with `onRawEvent` and `onEvent` hooks
-
-### `@webblackbox/pipeline`
-
-Processes recorded events into portable, indexed archives.
-
-- **FlightRecorderPipeline** — Orchestrator: ingestion, chunking, blob storage, index building, and archive export
-- **EventChunker** — Groups events into size-bounded chunks with configurable codecs
-- **EventIndexer** — Builds time-based, request-based, and inverted text search indexes
-- **Codec** — Encode/decode with chunk codecs (`none`, `gzip`, `br`, `zst`)
-- **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
-- **SHA-256** — Content-addressable blob deduplication
-
-### `webblackbox` (Web SDK)
-
-Browser-side lite capture SDK published as the `webblackbox` npm package.
-
-- **WebBlackboxLiteSdk** — Start/stop/flush/export `.webblackbox` archives directly in-page
-- **LiteCaptureAgent** — Reusable capture agent for DOM/input/screenshot/storage collection
-- **installInjectedLiteCaptureHooks** — Runtime hooks for console/network/storage/error capture
-
-### `@webblackbox/player-sdk`
-
-Client-side SDK for opening, querying, and analyzing recorded sessions.
-
-- **WebBlackboxPlayer** — Main class with `open()` static method for loading archives
-- **Event Querying** — Rich query API with time range, type, level, text search, and request ID filtering
-- **Network Waterfall** — Reconstruct complete request/response timings with headers and bodies
-- **Realtime Network Timeline** — WebSocket and SSE stream analysis
-- **Storage Timeline** — Track cookie, localStorage, sessionStorage, IndexedDB, and cache operations
-- **DOM Diff** — Compare DOM snapshots to find added, removed, and changed elements
-- **Session Comparison** — Compare two sessions by event counts, error rates, request patterns
-
-**Code Generation:**
-
-| Method                                   | Output                                         |
-| ---------------------------------------- | ---------------------------------------------- |
-| `generateCurl(reqId)`                    | curl command for a captured request            |
-| `generateFetch(reqId)`                   | fetch() call for a captured request            |
-| `exportHar(range?)`                      | HAR (HTTP Archive) format export               |
-| `generateBugReport(options?)`            | Markdown bug report                            |
-| `generatePlaywrightScript(options?)`     | Playwright test script                         |
-| `generatePlaywrightMockScript(options?)` | Playwright mock script with captured responses |
-| `generateGitHubIssueTemplate(options?)`  | GitHub issue template                          |
-| `generateJiraIssueTemplate(options?)`    | Jira issue template                            |
-
-### `@webblackbox/cdp-router`
-
-Manages Chrome DevTools Protocol connections for the extension.
-
-- **CdpRouter** — Interface for attaching/detaching debugger targets, sending CDP commands, receiving events
-- **DefaultCdpRouter** — Full implementation with target tracking (tabs, iframes, workers, service workers)
-- **Transport Layer** — Abstraction over `chrome.debugger` API
-- **Auto-Attach** — Automatic attachment to child targets (iframes, workers)
-
-### `@webblackbox/mcp-core`
-
-Utility functions for the Model Context Protocol server.
 
 <br />
 
