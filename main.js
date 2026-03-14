@@ -30418,7 +30418,7 @@ Select.displayName = "Select";
 
 // src/shell.tsx
 var import_jsx_runtime6 = __toESM(require_jsx_runtime(), 1);
-var playerVersion = true ? "0.1.0" : "0.1.0";
+var playerVersion = true ? "0.1.3" : "0.1.0";
 function PlayerShell() {
   return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("main", { id: "player-shell", className: "shell wb-shell", children: [
     /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("header", { className: "toolbar card", role: "banner", children: [
@@ -30576,7 +30576,7 @@ function PlayerShell() {
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("img", { id: "filmstrip-preview", alt: "Screenshot playback", className: "preview", hidden: true }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("svg", { id: "filmstrip-trail-svg", className: "preview-trail", "aria-hidden": "true" }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { id: "filmstrip-cursor", className: "preview-cursor", hidden: true }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { id: "stage-placeholder", className: "stage-placeholder", children: /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "stage-placeholder__content", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("label", { id: "stage-placeholder", className: "stage-placeholder", htmlFor: "archive-input", children: /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "stage-placeholder__content", children: [
           /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
             "img",
             {
