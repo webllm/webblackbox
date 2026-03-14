@@ -117,6 +117,26 @@ function getExportButton(): HTMLButtonElement {
   return button;
 }
 
+function getStartLiteButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='start-lite']");
+
+  if (!button) {
+    throw new Error("missing start lite button");
+  }
+
+  return button;
+}
+
+function getStartFullButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='start-full']");
+
+  if (!button) {
+    throw new Error("missing start full button");
+  }
+
+  return button;
+}
+
 function getSessionsButton(): HTMLButtonElement {
   const button = document.querySelector<HTMLButtonElement>("[data-action='open-sessions']");
 
@@ -278,5 +298,46 @@ describe("popup export policy form", () => {
       active: true
     });
     expect(windowClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("disables start buttons only when the current tab is already recording", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-current",
+          tabId: 17,
+          mode: "lite",
+          startedAt: Date.now(),
+          active: true
+        }
+      ]
+    });
+    await flushPopup();
+
+    expect(getStartLiteButton().disabled).toBe(true);
+    expect(getStartFullButton().disabled).toBe(true);
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-other",
+          tabId: 42,
+          mode: "full",
+          startedAt: Date.now(),
+          active: true
+        }
+      ]
+    });
+    await flushPopup();
+
+    expect(getStartLiteButton().disabled).toBe(false);
+    expect(getStartFullButton().disabled).toBe(false);
   });
 });

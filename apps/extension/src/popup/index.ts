@@ -117,6 +117,7 @@ function render(container: HTMLElement): void {
   const exportStatusClass = state.exportStatus?.startsWith("Export failed")
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
+  const startDisabled = Boolean(activeOnCurrentTab);
 
   container.innerHTML = `
     <section class="card wb-popup">
@@ -154,8 +155,8 @@ function render(container: HTMLElement): void {
           : ""
       }
       <div class="wb-popup__actions">
-        <button class="wb-btn wb-btn--brand" data-action="start-lite">Start Lite</button>
-        <button class="wb-btn wb-btn--brand-alt" data-action="start-full">Start Full</button>
+        <button class="wb-btn wb-btn--brand" data-action="start-lite" ${startDisabled ? "disabled" : ""}>Start Lite</button>
+        <button class="wb-btn wb-btn--brand-alt" data-action="start-full" ${startDisabled ? "disabled" : ""}>Start Full</button>
         <button class="wb-btn wb-btn--muted" data-action="stop" ${activeSession ? "" : "disabled"}>Stop</button>
         <button class="wb-btn wb-btn--accent" data-action="export" ${
           exportSession ? "" : "disabled"
@@ -192,6 +193,10 @@ function bindActions(
   exportSession?: SessionListItem
 ): void {
   container.querySelector("[data-action='start-lite']")?.addEventListener("click", async () => {
+    if (activeSession && activeSession.tabId === state.tabId) {
+      return;
+    }
+
     const resolvedTabId = await getActiveTabId();
     const tabId = typeof resolvedTabId === "number" ? resolvedTabId : state.tabId;
 
@@ -208,6 +213,10 @@ function bindActions(
   });
 
   container.querySelector("[data-action='start-full']")?.addEventListener("click", async () => {
+    if (activeSession && activeSession.tabId === state.tabId) {
+      return;
+    }
+
     const resolvedTabId = await getActiveTabId();
     const tabId = typeof resolvedTabId === "number" ? resolvedTabId : state.tabId;
 
