@@ -28,6 +28,10 @@ const perfHoverIntervalMs = Number(process.env.WB_E2E_PERF_HOVER_INTERVAL_MS ?? 
 const perfSettleMs = Number(process.env.WB_E2E_PERF_SETTLE_MS ?? "1200");
 const perfAfterStartSettleMs = Number(process.env.WB_E2E_PERF_AFTER_START_SETTLE_MS ?? "500");
 const perfTimeoutMs = Number(process.env.WB_E2E_PERF_TIMEOUT_MS ?? "120000");
+const interactionRounds = Number(process.env.WB_E2E_PERF_INTERACTION_ROUNDS ?? "18");
+const interactionMutationBatch = Number(process.env.WB_E2E_PERF_INTERACTION_MUTATIONS ?? "180");
+const interactionScrollStep = Number(process.env.WB_E2E_PERF_INTERACTION_SCROLL_STEP ?? "240");
+const interactionSettleMs = Number(process.env.WB_E2E_PERF_INTERACTION_SETTLE_MS ?? "400");
 const warmupRequests = Number(process.env.WB_E2E_PERF_WARMUP_REQUESTS ?? "24");
 const warmupPayloadBytes = Number(process.env.WB_E2E_PERF_WARMUP_PAYLOAD_BYTES ?? "16384");
 const requestP95RatioLimit = Number(process.env.WB_E2E_PERF_FETCH_P95_RATIO ?? "1.6");
@@ -39,6 +43,11 @@ const hoverP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_HOVER_P95_DELTA_MS ?
 const hoverOver32DeltaLimit = Number(process.env.WB_E2E_PERF_HOVER_OVER32_DELTA ?? "6");
 const rafP95RatioLimit = Number(process.env.WB_E2E_PERF_RAF_P95_RATIO ?? "1.35");
 const rafP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_RAF_P95_DELTA_MS ?? "8");
+const clickCallP95RatioLimit = Number(process.env.WB_E2E_PERF_CLICK_CALL_P95_RATIO ?? "1.8");
+const clickCallP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_CLICK_CALL_P95_DELTA_MS ?? "8");
+const clickLagP95RatioLimit = Number(process.env.WB_E2E_PERF_CLICK_LAG_P95_RATIO ?? "1.8");
+const clickLagP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_CLICK_LAG_P95_DELTA_MS ?? "8");
+const clickOver16DeltaLimit = Number(process.env.WB_E2E_PERF_CLICK_OVER16_DELTA ?? "4");
 const longTaskTotalDeltaLimitMs = Number(process.env.WB_E2E_PERF_LONGTASK_TOTAL_DELTA_MS ?? "200");
 const longTaskCountDeltaLimit = Number(process.env.WB_E2E_PERF_LONGTASK_COUNT_DELTA ?? "4");
 
@@ -166,6 +175,19 @@ async function main() {
   assert(baseline?.ok === true, "Baseline perf scenario failed.", baseline);
   assert(baseline.state?.errors === 0, "Baseline perf scenario reported request errors.", baseline);
 
+  const baselineInteraction = await runInteractionScenario(pageClient, {
+    label: "baseline-interaction",
+    rounds: Math.max(4, Math.floor(interactionRounds)),
+    mutationBatch: Math.max(24, Math.floor(interactionMutationBatch)),
+    scrollStep: Math.max(40, Math.floor(interactionScrollStep)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs))
+  });
+  assert(
+    baselineInteraction?.ok === true,
+    "Baseline interaction scenario failed.",
+    baselineInteraction
+  );
+
   const popupUrl = `chrome-extension://${extensionId}/popup.html`;
   const popupStart = await openPopupRuntimeTarget(popupUrl);
   state.popupClient = popupStart.client;
@@ -234,6 +256,19 @@ async function main() {
     recorded
   });
 
+  const recordedInteraction = await runInteractionScenario(pageClient, {
+    label: "lite-recording-interaction",
+    rounds: Math.max(4, Math.floor(interactionRounds)),
+    mutationBatch: Math.max(24, Math.floor(interactionMutationBatch)),
+    scrollStep: Math.max(40, Math.floor(interactionScrollStep)),
+    settleMs: Math.max(100, Math.floor(interactionSettleMs))
+  });
+  assert(
+    recordedInteraction?.ok === true,
+    "Lite recording interaction scenario failed.",
+    recordedInteraction
+  );
+
   const popupStop = await openPopupRuntimeTarget(popupUrl);
   state.popupClient = popupStop.client;
 
@@ -262,11 +297,18 @@ async function main() {
     pageExceptions
   });
 
-  const comparison = compareSummaries(baseline.summary, recorded.summary);
+  const comparison = compareSummaries(
+    baseline.summary,
+    recorded.summary,
+    baselineInteraction.summary,
+    recordedInteraction.summary
+  );
 
   console.log("Warmup summary:", JSON.stringify(warmupSummary.summary));
   console.log("Baseline summary:", JSON.stringify(baseline.summary));
+  console.log("Baseline interaction summary:", JSON.stringify(baselineInteraction.summary));
   console.log("Lite recording summary:", JSON.stringify(recorded.summary));
+  console.log("Lite recording interaction summary:", JSON.stringify(recordedInteraction.summary));
   console.log("Comparison:", JSON.stringify(comparison));
   console.log(`Chrome log: ${chromeLogPath}`);
   console.log("Lite perf regression passed.");
@@ -557,10 +599,49 @@ function buildStressPageHtml() {
         word-break: break-word;
       }
 
+      .action-row {
+        margin-top: 18px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      #action-link {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+        padding: 0 16px;
+        border-radius: 999px;
+        border: 1px solid rgba(192, 74, 43, 0.28);
+        color: #7f2f1b;
+        text-decoration: none;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        background: linear-gradient(180deg, #fff4ea 0%, #ffe8dc 100%);
+      }
+
+      #action-link:hover {
+        border-color: rgba(192, 74, 43, 0.46);
+        background: linear-gradient(180deg, #fff0e2 0%, #ffe1d2 100%);
+      }
+
+      #click-log {
+        min-height: 20px;
+        color: var(--muted);
+      }
+
       #hover-grid {
         margin-top: 18px;
         display: grid;
         grid-template-columns: repeat(8, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      #mutation-grid {
+        margin-top: 18px;
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 10px;
       }
 
@@ -591,9 +672,37 @@ function buildStressPageHtml() {
         font-weight: 700;
       }
 
+      .mutation-cell {
+        min-height: 64px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.72);
+        padding: 10px;
+        transition: transform 80ms linear, border-color 80ms linear;
+      }
+
+      .mutation-cell.hot {
+        transform: translateY(-1px);
+        border-color: rgba(30, 123, 77, 0.34);
+        background: linear-gradient(180deg, #effdf4 0%, #f8fffb 100%);
+      }
+
+      .mutation-cell.warm {
+        border-color: rgba(192, 74, 43, 0.32);
+        background: linear-gradient(180deg, #fff3ec 0%, #fffaf6 100%);
+      }
+
+      .scroll-runway {
+        height: 120vh;
+      }
+
       @media (max-width: 900px) {
         #hover-grid {
           grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        #mutation-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
       }
     </style>
@@ -607,17 +716,30 @@ function buildStressPageHtml() {
           <div id="status" class="pill" data-tone="idle">ready</div>
         </div>
         <div id="request-log">idle</div>
+        <div class="action-row">
+          <a id="action-link" href="#action-target">exercise link</a>
+          <div id="click-log">clicks: 0</div>
+        </div>
         <div id="hover-grid"></div>
+        <div id="mutation-grid"></div>
       </section>
+      <div class="scroll-runway" aria-hidden="true"></div>
     </main>
     <script>
       (() => {
         const statusNode = document.getElementById("status");
         const requestLogNode = document.getElementById("request-log");
+        const actionLinkNode = document.getElementById("action-link");
+        const clickLogNode = document.getElementById("click-log");
         const hoverGridNode = document.getElementById("hover-grid");
+        const mutationGridNode = document.getElementById("mutation-grid");
         const cells = [];
         const labels = [];
+        const mutationCells = [];
         let activeCell = null;
+        let clickCount = 0;
+        let clickMeasurementStartedAt = 0;
+        let activeClickLagSamples = null;
 
         for (let index = 0; index < 32; index += 1) {
           const cell = document.createElement("div");
@@ -635,6 +757,27 @@ function buildStressPageHtml() {
           hoverGridNode.appendChild(cell);
           cells.push(cell);
           labels.push(label);
+        }
+
+        for (let index = 0; index < 72; index += 1) {
+          const cell = document.createElement("div");
+          cell.className = "mutation-cell";
+          cell.dataset.phase = "idle";
+
+          const id = document.createElement("span");
+          id.className = "cell-index";
+          id.textContent = "mut-" + String(index).padStart(2, "0");
+
+          const label = document.createElement("span");
+          label.className = "cell-label";
+          label.textContent = "idle";
+
+          cell.append(id, label);
+          mutationGridNode.appendChild(cell);
+          mutationCells.push({
+            cell,
+            label
+          });
         }
 
         function roundMs(value) {
@@ -701,6 +844,10 @@ function buildStressPageHtml() {
           };
         }
 
+        function updateClickLog(text) {
+          clickLogNode.textContent = text;
+        }
+
         function resetCells() {
           if (activeCell) {
             activeCell.classList.remove("active");
@@ -709,6 +856,34 @@ function buildStressPageHtml() {
 
           for (let index = 0; index < labels.length; index += 1) {
             labels[index].textContent = "idle";
+          }
+        }
+
+        function resetMutationCells() {
+          for (let index = 0; index < mutationCells.length; index += 1) {
+            mutationCells[index].cell.className = "mutation-cell";
+            mutationCells[index].cell.style.transform = "";
+            mutationCells[index].cell.style.opacity = "";
+            mutationCells[index].label.textContent = "idle";
+          }
+        }
+
+        function applyMutationWave(wave, updates) {
+          if (!mutationCells.length) {
+            return;
+          }
+
+          const count = Math.max(1, Math.min(updates, mutationCells.length * 3));
+
+          for (let index = 0; index < count; index += 1) {
+            const cursor = (wave * 17 + index) % mutationCells.length;
+            const entry = mutationCells[cursor];
+            const phase = index % 3 === 0 ? "hot" : index % 2 === 0 ? "warm" : "idle";
+            entry.cell.className = phase === "idle" ? "mutation-cell" : "mutation-cell " + phase;
+            entry.cell.style.transform =
+              phase === "hot" ? "translateY(-1px) scale(1.01)" : phase === "warm" ? "scale(1.005)" : "";
+            entry.cell.style.opacity = phase === "idle" ? "" : String(0.92 + ((wave + index) % 6) * 0.01);
+            entry.label.textContent = phase + "-" + String((wave + index) % 19);
           }
         }
 
@@ -734,6 +909,28 @@ function buildStressPageHtml() {
           statusNode.dataset.tone = tone;
         }
 
+        function resetPageState() {
+          resetCells();
+          resetMutationCells();
+          clickCount = 0;
+          clickMeasurementStartedAt = 0;
+          activeClickLagSamples = null;
+          updateClickLog("clicks: 0");
+          requestLogNode.textContent = "idle";
+          window.scrollTo(0, 0);
+        }
+
+        actionLinkNode.addEventListener("click", (event) => {
+          event.preventDefault();
+          clickCount += 1;
+
+          if (clickMeasurementStartedAt > 0 && Array.isArray(activeClickLagSamples)) {
+            activeClickLagSamples.push(performance.now() - clickMeasurementStartedAt);
+          }
+
+          updateClickLog("clicks: " + String(clickCount));
+        });
+
         async function runScenario(options) {
           if (globalThis.__WB_LITE_PERF_STATE__?.running) {
             return {
@@ -742,7 +939,7 @@ function buildStressPageHtml() {
             };
           }
 
-          resetCells();
+          resetPageState();
 
           const label = typeof options?.label === "string" ? options.label : "scenario";
           const requestCount = clampInt(options?.requests, 60, 1, 1200);
@@ -975,8 +1172,127 @@ function buildStressPageHtml() {
           };
         }
 
+        async function runInteractionScenario(options) {
+          if (globalThis.__WB_LITE_PERF_STATE__?.running) {
+            return {
+              ok: false,
+              reason: "already-running"
+            };
+          }
+
+          resetPageState();
+
+          const label =
+            typeof options?.label === "string" && options.label.length > 0
+              ? options.label
+              : "interaction";
+          const rounds = clampInt(options?.rounds, 16, 4, 80);
+          const mutationBatch = clampInt(options?.mutationBatch, 180, 24, 960);
+          const scrollStep = clampInt(options?.scrollStep, 240, 40, 1_200);
+          const settleMs = clampInt(options?.settleMs, 300, 0, 3_000);
+          const clickCallSamples = [];
+          const clickLagSamples = [];
+          const maxScrollTop = Math.max(
+            0,
+            document.documentElement.scrollHeight - window.innerHeight
+          );
+
+          const scenarioState = {
+            label,
+            running: true,
+            done: false,
+            failed: false,
+            rounds,
+            count: 0,
+            error: null
+          };
+
+          globalThis.__WB_LITE_PERF_STATE__ = scenarioState;
+          activeClickLagSamples = clickLagSamples;
+          setStatus(label + " running", "running");
+          requestLogNode.textContent = label + " preparing interaction storm";
+
+          try {
+            for (let round = 0; round < rounds; round += 1) {
+              applyMutationWave(round, mutationBatch);
+              setActiveCell(round, "int-" + round);
+
+              if (maxScrollTop > 0) {
+                const nextScrollTop = Math.min(
+                  maxScrollTop,
+                  (round * scrollStep) % (maxScrollTop + scrollStep)
+                );
+                window.scrollTo(0, nextScrollTop);
+              }
+
+              document.dispatchEvent(
+                new PointerEvent("pointermove", {
+                  bubbles: true,
+                  clientX: 24 + ((round * 31) % Math.max(160, window.innerWidth - 24)),
+                  clientY: 96 + ((round * 17) % Math.max(160, window.innerHeight - 96))
+                })
+              );
+
+              clickMeasurementStartedAt = performance.now();
+              const startedAt = performance.now();
+              actionLinkNode.click();
+              clickCallSamples.push(performance.now() - startedAt);
+              clickMeasurementStartedAt = 0;
+              scenarioState.count = round + 1;
+
+              await new Promise((resolve) => {
+                requestAnimationFrame(() => resolve());
+              });
+            }
+          } catch (error) {
+            scenarioState.failed = true;
+            scenarioState.error = String(error instanceof Error ? error.message : error);
+          } finally {
+            activeClickLagSamples = null;
+            clickMeasurementStartedAt = 0;
+          }
+
+          setActiveCell(-1, "");
+          requestLogNode.textContent =
+            label +
+            " finished rounds=" +
+            String(scenarioState.count) +
+            " clicks=" +
+            String(clickCount);
+
+          await new Promise((resolve) => {
+            setTimeout(resolve, settleMs);
+          });
+
+          const summary = {
+            rounds: scenarioState.count,
+            clickCount,
+            clickCall: summarizeSeries(clickCallSamples),
+            clickHandlerLag: summarizeSeries(clickLagSamples)
+          };
+
+          scenarioState.running = false;
+          scenarioState.done = true;
+          scenarioState.summary = summary;
+          setStatus(
+            label + (scenarioState.failed ? " error" : " done"),
+            scenarioState.failed ? "error" : "done"
+          );
+
+          return {
+            ok: scenarioState.failed === false,
+            state: {
+              rounds: scenarioState.count,
+              error: scenarioState.error,
+              clickCount
+            },
+            summary
+          };
+        }
+
         globalThis.__WB_LITE_PERF__ = {
           runScenario,
+          runInteractionScenario,
           getState() {
             return globalThis.__WB_LITE_PERF_STATE__ ?? null;
           }
@@ -1250,6 +1566,16 @@ async function runPerfScenario(pageClient, options) {
   );
 }
 
+async function runInteractionScenario(pageClient, options) {
+  return withTimeout(
+    pageClient.evaluate(`
+      globalThis.__WB_LITE_PERF__.runInteractionScenario(${JSON.stringify(options)})
+    `),
+    perfTimeoutMs,
+    `Interaction scenario timed out: ${options?.label ?? "interaction"}`
+  );
+}
+
 async function startSessionFromPopup(popupClient, mode, expectedUrl) {
   const expression = `
     (async () => {
@@ -1364,7 +1690,12 @@ async function waitForIndicatorGone(pageClient, timeoutMs) {
   );
 }
 
-function compareSummaries(baselineSummary, recordedSummary) {
+function compareSummaries(
+  baselineSummary,
+  recordedSummary,
+  baselineInteractionSummary,
+  recordedInteractionSummary
+) {
   assert(
     typeof baselineSummary?.requests?.count === "number" &&
       baselineSummary.requests.count >= perfRequests,
@@ -1376,6 +1707,18 @@ function compareSummaries(baselineSummary, recordedSummary) {
       recordedSummary.requests.count >= perfRequests,
     "Lite recording summary captured too few requests.",
     { recordedSummary, perfRequests }
+  );
+  assert(
+    typeof baselineInteractionSummary?.rounds === "number" &&
+      baselineInteractionSummary.rounds >= interactionRounds,
+    "Baseline interaction summary captured too few rounds.",
+    { baselineInteractionSummary, interactionRounds }
+  );
+  assert(
+    typeof recordedInteractionSummary?.rounds === "number" &&
+      recordedInteractionSummary.rounds >= interactionRounds,
+    "Lite recording interaction summary captured too few rounds.",
+    { recordedInteractionSummary, interactionRounds }
   );
 
   const budgets = [
@@ -1400,6 +1743,30 @@ function compareSummaries(baselineSummary, recordedSummary) {
       baselineSummary.hoverLag.over32Ms,
       recordedSummary.hoverLag.over32Ms,
       hoverOver32DeltaLimit
+    ),
+    assertBudget(
+      "clickCall.p95Ms",
+      baselineInteractionSummary.clickCall.p95Ms,
+      recordedInteractionSummary.clickCall.p95Ms,
+      {
+        ratioLimit: clickCallP95RatioLimit,
+        deltaLimit: clickCallP95DeltaLimitMs
+      }
+    ),
+    assertBudget(
+      "clickHandlerLag.p95Ms",
+      baselineInteractionSummary.clickHandlerLag.p95Ms,
+      recordedInteractionSummary.clickHandlerLag.p95Ms,
+      {
+        ratioLimit: clickLagP95RatioLimit,
+        deltaLimit: clickLagP95DeltaLimitMs
+      }
+    ),
+    assertCountDelta(
+      "clickCall.over16Ms",
+      baselineInteractionSummary.clickCall.over16Ms,
+      recordedInteractionSummary.clickCall.over16Ms,
+      clickOver16DeltaLimit
     )
   ];
 

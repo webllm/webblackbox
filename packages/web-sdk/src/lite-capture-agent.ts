@@ -16,15 +16,33 @@ const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
 const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
 const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
 const START_CAPTURE_DEFER_MS = 2_000;
+const ACTION_CAPTURE_DEFER_MS = 0;
 const EVENT_BUFFER_FLUSH_DELAY_MS = 180;
 const EVENT_BUFFER_FORCE_FLUSH_SIZE = 120;
 const EVENT_BUFFER_EMIT_CHUNK_SIZE = 120;
 const EVENT_BUFFER_SOFT_LIMIT = 420;
 const EVENT_BUFFER_HARD_LIMIT = 1_200;
+const MUTATION_DETAIL_RECORD_LIMIT = 160;
+const MUTATION_DETAIL_BUFFER_LIMIT = 240;
 const MUTATION_SAMPLE_TARGETS_MAX = 24;
 const MUTATION_SAMPLE_ATTRIBUTES_MAX = 16;
 const SELECTOR_CACHE_MAX = 1_500;
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
+const OBSERVED_MUTATION_ATTRIBUTES = [
+  "hidden",
+  "open",
+  "disabled",
+  "checked",
+  "selected",
+  "aria-expanded",
+  "aria-hidden",
+  "aria-pressed",
+  "aria-selected",
+  "aria-current",
+  "aria-busy",
+  "href",
+  "src"
+];
 
 const LOW_PRIORITY_RAW_TYPES = new Set([
   "mousemove",
@@ -93,6 +111,7 @@ export class LiteCaptureAgent {
   private snapshotTimer = 0;
   private screenshotTimer = 0;
   private startCaptureTimer = 0;
+  private deferredActionCaptureTimer = 0;
   private mutationFlushTimer = 0;
   private flushTimer = 0;
   private lastScrollTime = 0;
@@ -184,7 +203,7 @@ export class LiteCaptureAgent {
 
   /** Flushes the current buffered raw events immediately. */
   public flush(): void {
-    this.flushEvents();
+    this.drainBufferedEvents();
   }
 
   /** Tears down listeners/timers and releases all internal buffers. */
@@ -270,7 +289,7 @@ export class LiteCaptureAgent {
       (event: MouseEvent) => {
         this.trackPointer(event.clientX, event.clientY);
         this.queueEvent("click", clickPayload(event, this.mode));
-        this.scheduleScreenshotCapture("action:click", true);
+        this.scheduleDeferredActionCapture("action:click");
       },
       INPUT_OPTIONS_TRUE
     );
@@ -281,7 +300,7 @@ export class LiteCaptureAgent {
       (event: MouseEvent) => {
         this.trackPointer(event.clientX, event.clientY);
         this.queueEvent("dblclick", clickPayload(event, this.mode));
-        this.scheduleScreenshotCapture("action:dblclick", true);
+        this.scheduleDeferredActionCapture("action:dblclick");
       },
       INPUT_OPTIONS_TRUE
     );
@@ -375,7 +394,7 @@ export class LiteCaptureAgent {
         this.queueEvent("submit", {
           target: this.resolveTargetPayload(event.target)
         });
-        this.scheduleScreenshotCapture("action:submit", true);
+        this.scheduleDeferredActionCapture("action:submit");
       },
       INPUT_OPTIONS_TRUE
     );
@@ -506,7 +525,7 @@ export class LiteCaptureAgent {
     }
   }
 
-  private accumulateMutationRecord(record: MutationRecord): void {
+  private accumulateMutationRecord(record: MutationRecord, includeDetails: boolean): void {
     this.mutationSummary.count += 1;
     this.mutationSummary.addedNodes += record.addedNodes.length;
     this.mutationSummary.removedNodes += record.removedNodes.length;
@@ -517,6 +536,10 @@ export class LiteCaptureAgent {
       this.mutationSummary.attributeCount += 1;
     } else if (record.type === "characterData") {
       this.mutationSummary.characterDataCount += 1;
+    }
+
+    if (!includeDetails) {
+      return;
     }
 
     if (record.type === "attributes" && record.attributeName) {
@@ -582,8 +605,12 @@ export class LiteCaptureAgent {
   private startMutationAndSnapshots(): void {
     if (this.shouldCaptureMutationSignals() && !this.mutationObserver) {
       this.mutationObserver = new MutationObserver((records) => {
+        const includeDetails =
+          records.length <= MUTATION_DETAIL_RECORD_LIMIT &&
+          this.eventBuffer.length <= MUTATION_DETAIL_BUFFER_LIMIT;
+
         for (const record of records) {
-          this.accumulateMutationRecord(record);
+          this.accumulateMutationRecord(record, includeDetails);
         }
 
         this.scheduleMutationFlush();
@@ -593,7 +620,8 @@ export class LiteCaptureAgent {
         attributes: true,
         childList: true,
         subtree: true,
-        characterData: true,
+        characterData: false,
+        attributeFilter: OBSERVED_MUTATION_ATTRIBUTES,
         characterDataOldValue: false,
         attributeOldValue: false
       });
@@ -643,6 +671,11 @@ export class LiteCaptureAgent {
     if (this.startCaptureTimer > 0) {
       clearTimeout(this.startCaptureTimer);
       this.startCaptureTimer = 0;
+    }
+
+    if (this.deferredActionCaptureTimer > 0) {
+      clearTimeout(this.deferredActionCaptureTimer);
+      this.deferredActionCaptureTimer = 0;
     }
 
     this.screenshotPendingReason = null;
@@ -849,6 +882,21 @@ export class LiteCaptureAgent {
     }, START_CAPTURE_DEFER_MS);
   }
 
+  private scheduleDeferredActionCapture(reason: string): void {
+    if (!this.recordingActive || !this.shouldCaptureScreenshots()) {
+      return;
+    }
+
+    if (this.deferredActionCaptureTimer > 0) {
+      clearTimeout(this.deferredActionCaptureTimer);
+    }
+
+    this.deferredActionCaptureTimer = window.setTimeout(() => {
+      this.deferredActionCaptureTimer = 0;
+      this.scheduleScreenshotCapture(reason, true);
+    }, ACTION_CAPTURE_DEFER_MS);
+  }
+
   private scheduleScreenshotCapture(reason: string, prioritize = false): void {
     if (!this.recordingActive || !this.shouldCaptureScreenshots()) {
       return;
@@ -1011,19 +1059,9 @@ export class LiteCaptureAgent {
     }
 
     this.eventBuffer.push(event);
-
-    if (this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE) {
-      this.flushEvents();
-      return;
-    }
-
-    if (this.flushTimer > 0) {
-      return;
-    }
-
-    this.flushTimer = window.setTimeout(() => {
-      this.flushEvents();
-    }, EVENT_BUFFER_FLUSH_DELAY_MS);
+    this.scheduleBufferedFlush(
+      this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE ? 0 : EVENT_BUFFER_FLUSH_DELAY_MS
+    );
   }
 
   private resolveTargetPayload(target: EventTarget | null): Record<string, unknown> {
@@ -1036,17 +1074,49 @@ export class LiteCaptureAgent {
     }
 
     this.eventBuffer.push(...this.preRecordingBuffer.splice(0, this.preRecordingBuffer.length));
-
-    if (this.flushTimer > 0) {
-      return;
-    }
-
-    this.flushTimer = window.setTimeout(() => {
-      this.flushEvents();
-    }, 0);
+    this.scheduleBufferedFlush(0);
   }
 
   private flushEvents(): void {
+    if (this.flushTimer > 0) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = 0;
+    }
+
+    if (this.eventBuffer.length === 0) {
+      return;
+    }
+
+    const events = this.eventBuffer.splice(0, EVENT_BUFFER_EMIT_CHUNK_SIZE);
+
+    if (events.length > 0) {
+      this.options.emitBatch(events);
+    }
+
+    if (this.eventBuffer.length > 0) {
+      this.scheduleBufferedFlush(0);
+    }
+  }
+
+  private scheduleBufferedFlush(delayMs: number): void {
+    if (this.flushTimer > 0) {
+      if (delayMs > 0) {
+        return;
+      }
+
+      clearTimeout(this.flushTimer);
+      this.flushTimer = 0;
+    }
+
+    this.flushTimer = window.setTimeout(
+      () => {
+        this.flushEvents();
+      },
+      Math.max(0, delayMs)
+    );
+  }
+
+  private drainBufferedEvents(): void {
     if (this.flushTimer > 0) {
       clearTimeout(this.flushTimer);
       this.flushTimer = 0;
@@ -1075,10 +1145,6 @@ export class LiteCaptureAgent {
     }
 
     if (!LOW_PRIORITY_RAW_TYPES.has(event.rawType)) {
-      if (buffered >= EVENT_BUFFER_HARD_LIMIT) {
-        this.flushEvents();
-      }
-
       return false;
     }
 
@@ -1087,6 +1153,11 @@ export class LiteCaptureAgent {
     }
 
     if (buffered >= EVENT_BUFFER_HARD_LIMIT || this.mode === "full") {
+      if (buffered >= EVENT_BUFFER_HARD_LIMIT && this.mode !== "full") {
+        this.dropBufferedLowPriorityEvents(buffered - EVENT_BUFFER_SOFT_LIMIT + 1);
+        this.scheduleBufferedFlush(0);
+      }
+
       this.droppedLowPriorityEvents += 1;
 
       if (isPerfLoggingEnabled() && this.droppedLowPriorityEvents % 200 === 0) {
@@ -1102,6 +1173,32 @@ export class LiteCaptureAgent {
     }
 
     return false;
+  }
+
+  private dropBufferedLowPriorityEvents(targetDropCount: number): void {
+    if (targetDropCount <= 0 || this.eventBuffer.length === 0) {
+      return;
+    }
+
+    let dropped = 0;
+    const retained: RawRecorderEvent[] = [];
+
+    for (const event of this.eventBuffer) {
+      if (dropped < targetDropCount && LOW_PRIORITY_RAW_TYPES.has(event.rawType)) {
+        dropped += 1;
+        continue;
+      }
+
+      retained.push(event);
+    }
+
+    if (dropped === 0) {
+      return;
+    }
+
+    this.eventBuffer.length = 0;
+    this.eventBuffer.push(...retained);
+    this.droppedLowPriorityEvents += dropped;
   }
 
   private ensureIndicator(sid?: string, mode?: string): void {
