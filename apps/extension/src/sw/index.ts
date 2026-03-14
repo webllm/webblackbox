@@ -3797,8 +3797,7 @@ function parseInboundMessage(message: unknown): ExtensionInboundMessage | null {
 }
 
 async function setIdleBadge(): Promise<void> {
-  await chromeApi?.action?.setBadgeText({ text: "WB" }).catch(() => undefined);
-  await chromeApi?.action?.setBadgeBackgroundColor({ color: "#1864ab" }).catch(() => undefined);
+  await chromeApi?.action?.setBadgeText({ text: "" }).catch(() => undefined);
 }
 
 async function setRecordingBadge(): Promise<void> {

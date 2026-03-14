@@ -24,6 +24,17 @@ WebBlackbox is a Chrome extension that continuously captures comprehensive sessi
 
 Think of it as a **black box for your web app**: always recording in the background, so when something goes wrong, you have the full context to debug, reproduce, and fix it.
 
+### Why WebBlackbox?
+
+- **Record everything** — 57 event types across 13 categories, captured silently via CDP and content scripts
+- **Two modes** — `lite` for production monitoring with minimal overhead; `full` for comprehensive debugging
+- **Privacy by default** — Automatic redaction of auth headers, cookies, passwords, and configurable patterns
+- **Encrypted & portable** — AES-GCM encrypted `.webblackbox` ZIP archives with SHA-256 integrity checks
+- **Replay & analyze** — React player with timeline, network waterfall, console, storage inspector, DOM diffs, and screenshots
+- **Generate artifacts** — Export to HAR, Playwright tests, curl/fetch commands, bug reports, and GitHub/Jira issue templates
+- **AI-ready** — MCP server for session analysis with Claude, ChatGPT, or any MCP-compatible assistant
+- **Use anywhere** — Chrome extension for full capture, or `npm install webblackbox` for in-page lite capture
+
 <br />
 
 ## Highlights
