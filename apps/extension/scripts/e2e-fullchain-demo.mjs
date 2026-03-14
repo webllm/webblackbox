@@ -280,7 +280,15 @@ async function main() {
   const indicatorGone = await waitForIndicatorGone(demoClient, 15_000);
   assert(indicatorGone, "Recorder indicator did not clear after stop", { indicatorGone, stop });
 
-  const sessionsAfterStop = await readRuntimeSessions(popupClient);
+  const sessionsAfterStop = await waitFor(
+    async () => {
+      const rows = await readRuntimeSessions(popupClient);
+      return Array.isArray(rows) && rows.length === 0 ? rows : null;
+    },
+    10_000,
+    200,
+    "Runtime sessions were not cleared"
+  );
   assert(
     Array.isArray(sessionsAfterStop) && sessionsAfterStop.length === 0,
     "Runtime sessions were not cleared",

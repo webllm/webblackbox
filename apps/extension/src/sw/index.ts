@@ -204,6 +204,17 @@ const sessionsBySid = new Map<string, SessionRuntime>();
 const sessionAnnotations = new Map<string, SessionAnnotation>();
 const connectedPorts = new Set<PortLike>();
 let offscreenPort: PortLike | null = null;
+const pendingStopDrainAcks = new Map<
+  string,
+  {
+    sid: string;
+    tabId: number;
+    ackReceived: boolean;
+    resolve: () => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }
+>();
+const inFlightContentMessagesByTab = new Map<number, number>();
 const pendingOffscreenRequests = new Map<
   string,
   {
@@ -318,6 +329,7 @@ const OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
 const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
 const OFFSCREEN_PORT_READY_MAX_ATTEMPTS = 200;
 const OFFSCREEN_PORT_READY_WAIT_MS = 25;
+const STOP_DRAIN_ACK_TIMEOUT_MS = 3_000;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -438,15 +450,29 @@ function syncContentPortRecordingState(port: PortLike): void {
   }
 }
 
-chromeApi?.runtime?.onMessage.addListener((rawMessage, sender) => {
+chromeApi?.runtime?.onMessage.addListener((rawMessage, sender, sendResponse) => {
   const message = parseInboundMessage(rawMessage);
 
   if (!message) {
     return;
   }
 
-  dispatchInboundMessage(message, undefined, sender.tab?.id, sender.frameId);
-  return false;
+  void handleInboundMessage(message, undefined, sender.tab?.id, sender.frameId)
+    .then((result) => {
+      sendResponse(result ?? { ok: true });
+    })
+    .catch((error) => {
+      logInboundMessageFailure(message.kind, error, undefined, {
+        tabId: sender.tab?.id,
+        frameId: sender.frameId
+      });
+      sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+
+  return true;
 });
 
 function dispatchInboundMessage(
@@ -567,6 +593,11 @@ async function handleInboundMessage(
     return;
   }
 
+  if (message.kind === "content.stop-drained") {
+    markStopDrainAckReceived(message.sid);
+    return;
+  }
+
   if (message.kind === "content.events") {
     const tabId = senderTabId ?? port?.sender?.tab?.id;
     const frame = normalizeContentFrameId(senderFrameId ?? port?.sender?.frameId);
@@ -579,19 +610,24 @@ async function handleInboundMessage(
       return;
     }
 
+    adjustInFlightContentMessages(tabId, 1);
     let sliceStartedAt = perfNow();
 
-    for (const rawEvent of message.events) {
-      ingestRawEvent({
-        ...rawEvent,
-        tabId,
-        frame: rawEvent.frame ?? frame
-      });
+    try {
+      for (const rawEvent of message.events) {
+        ingestRawEvent({
+          ...rawEvent,
+          tabId,
+          frame: rawEvent.frame ?? frame
+        });
 
-      if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
-        await wait(0);
-        sliceStartedAt = perfNow();
+        if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
+          await wait(0);
+          sliceStartedAt = perfNow();
+        }
       }
+    } finally {
+      adjustInFlightContentMessages(tabId, -1);
     }
   }
 }
@@ -761,6 +797,7 @@ async function stopSession(tabId: number): Promise<void> {
   }
 
   runtime.stopping = true;
+  const stopDrainAck = createStopDrainAck(runtime);
   await flushBufferedPipelineEvents(runtime);
   await teardownCaptureInstrumentation(runtime);
   sessionsByTab.delete(runtime.tabId);
@@ -773,11 +810,13 @@ async function stopSession(tabId: number): Promise<void> {
     await setRecordingBadge();
   }
 
-  await notifyTabStatus(tabId, false);
+  await notifyTabStatus(tabId, false, runtime.sid, runtime.mode, toStatusSampling(runtime));
   broadcast({ kind: "sw.recording-status", active: false, sid: runtime.sid, mode: runtime.mode });
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
+  await stopDrainAck;
+  await flushBufferedPipelineEvents(runtime);
 }
 
 async function exportSession(
@@ -3754,6 +3793,91 @@ async function notifyTabStatus(
       sampling
     })
     .catch(() => undefined);
+}
+
+function adjustInFlightContentMessages(tabId: number, delta: 1 | -1): void {
+  const next = (inFlightContentMessagesByTab.get(tabId) ?? 0) + delta;
+
+  if (next <= 0) {
+    inFlightContentMessagesByTab.delete(tabId);
+    resolveStopDrainAcksForTab(tabId);
+    return;
+  }
+
+  inFlightContentMessagesByTab.set(tabId, next);
+}
+
+function createStopDrainAck(runtime: SessionRuntime): Promise<void> {
+  const existing = pendingStopDrainAcks.get(runtime.sid);
+
+  if (existing) {
+    clearTimeout(existing.timeout);
+    pendingStopDrainAcks.delete(runtime.sid);
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingStopDrainAcks.delete(runtime.sid);
+      resolve();
+    }, STOP_DRAIN_ACK_TIMEOUT_MS);
+
+    pendingStopDrainAcks.set(runtime.sid, {
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      ackReceived: false,
+      resolve,
+      timeout
+    });
+  });
+}
+
+function markStopDrainAckReceived(sid: string): void {
+  const pending = pendingStopDrainAcks.get(sid);
+
+  if (!pending) {
+    return;
+  }
+
+  pending.ackReceived = true;
+  resolveStopDrainAckIfReady(pending);
+}
+
+function resolveStopDrainAcksForTab(tabId: number): void {
+  for (const pending of pendingStopDrainAcks.values()) {
+    if (pending.tabId === tabId) {
+      resolveStopDrainAckIfReady(pending);
+    }
+  }
+}
+
+function resolveStopDrainAckIfReady(pending: {
+  sid: string;
+  tabId: number;
+  ackReceived: boolean;
+  resolve: () => void;
+  timeout: ReturnType<typeof setTimeout>;
+}): void {
+  if (!pending.ackReceived) {
+    return;
+  }
+
+  if ((inFlightContentMessagesByTab.get(pending.tabId) ?? 0) > 0) {
+    return;
+  }
+
+  pendingStopDrainAcks.delete(pending.sid);
+  clearTimeout(pending.timeout);
+
+  const runtime = sessionsBySid.get(pending.sid);
+
+  if (!runtime) {
+    pending.resolve();
+    return;
+  }
+
+  void runtime.queue.finally(() => {
+    pending.resolve();
+  });
 }
 
 async function relayMarkerCommand(): Promise<void> {

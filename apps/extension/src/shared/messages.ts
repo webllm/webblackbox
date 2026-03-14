@@ -60,6 +60,11 @@ export type ContentReadyMessage = {
   kind: "content.ready";
 };
 
+export type ContentStopDrainedMessage = {
+  kind: "content.stop-drained";
+  sid: string;
+};
+
 export type ExtensionInboundMessage =
   | UiStartSessionMessage
   | UiStopSessionMessage
@@ -68,7 +73,8 @@ export type ExtensionInboundMessage =
   | UiAnnotateSessionMessage
   | ContentEventBatchMessage
   | ContentMarkerMessage
-  | ContentReadyMessage;
+  | ContentReadyMessage
+  | ContentStopDrainedMessage;
 
 export type RecordingStatusMessage = {
   kind: "sw.recording-status";

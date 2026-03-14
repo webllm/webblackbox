@@ -214,6 +214,21 @@ function emitMarker(message: string): void {
   }
 }
 
+function emitStopDrained(sid?: string): void {
+  if (!contentPort || window.top !== window || typeof sid !== "string" || sid.length === 0) {
+    return;
+  }
+
+  try {
+    contentPort.postMessage({
+      kind: "content.stop-drained",
+      sid
+    });
+  } catch (error) {
+    debugPortSendFailure("content.stop-drained", error);
+  }
+}
+
 async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void> {
   if (!message || typeof message !== "object") {
     return;
@@ -241,6 +256,7 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
         await captureAgent.prepareStopCapture();
         captureAgent.setRecordingStatus(nextState);
         await flushAllPendingEvents();
+        emitStopDrained(nextState.sid);
       } else {
         captureAgent.setRecordingStatus(nextState);
       }
