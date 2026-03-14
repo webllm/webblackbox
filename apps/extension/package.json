@@ -14,6 +14,7 @@
     "e2e:fullchain:full": "WB_E2E_MODE=full node scripts/e2e-fullchain-demo.mjs",
     "e2e:memory:full": "node scripts/e2e-full-memory-regression.mjs",
     "e2e:perf:lite": "node scripts/e2e-lite-perf-regression.mjs",
+    "e2e:perf:lite:ci": "WB_E2E_PERF_REQUESTS=32 WB_E2E_PERF_WARMUP_REQUESTS=12 WB_E2E_PERF_INTERACTION_ROUNDS=8 WB_E2E_PERF_IFRAME_ROUNDS=6 WB_E2E_PERF_EDITOR_ROUNDS=12 WB_E2E_PERF_NAV_ROUNDS=3 WB_E2E_PERF_NAV_WAIT_MS=6000 node scripts/e2e-lite-perf-regression.mjs",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

@@ -67,3 +67,10 @@ jobs:
           WB_E2E_HEADLESS: "1"
           WB_E2E_USE_POPUP_UI: "0"
         run: pnpm --filter @webblackbox/extension e2e:fullchain:lite
+
+      - name: E2E Lite Perf Gate
+        env:
+          WB_E2E_CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          WB_E2E_HEADLESS: "1"
+          WB_E2E_REMOTE_PORT: "9246"
+        run: pnpm --filter @webblackbox/extension e2e:perf:lite:ci
