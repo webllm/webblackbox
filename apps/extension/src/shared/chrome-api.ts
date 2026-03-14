@@ -164,6 +164,13 @@ export type ChromeApi = {
     };
   };
   tabs?: {
+    create(createProperties: { url?: string; active?: boolean }): Promise<{
+      id?: number;
+      active?: boolean;
+      url?: string;
+      title?: string;
+      lastAccessed?: number;
+    }>;
     get(tabId: number): Promise<{
       id?: number;
       active?: boolean;

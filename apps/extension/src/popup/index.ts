@@ -162,6 +162,10 @@ function render(container: HTMLElement): void {
           exportSession ? "" : "disabled"
         }>Export</button>
       </div>
+      <div class="wb-popup__nav">
+        <button class="wb-btn wb-btn--surface" data-action="open-sessions">Sessions</button>
+        <button class="wb-btn wb-btn--surface" data-action="open-options">Options</button>
+      </div>
       <section class="wb-popup__policy">
         <p class="wb-popup__policy-title">Archive Policy</p>
         <label class="wb-toggle">
@@ -251,6 +255,25 @@ function bindActions(
       policy
     });
   });
+
+  container.querySelector("[data-action='open-sessions']")?.addEventListener("click", () => {
+    void openExtensionPage("sessions.html");
+  });
+
+  container.querySelector("[data-action='open-options']")?.addEventListener("click", () => {
+    void openExtensionPage("options.html");
+  });
+}
+
+async function openExtensionPage(path: string): Promise<void> {
+  const url = chromeApi?.runtime?.getURL(path);
+
+  if (!url || typeof chromeApi?.tabs?.create !== "function") {
+    return;
+  }
+
+  await chromeApi.tabs.create({ url, active: true });
+  window.close();
 }
 
 function bindExportPolicyForm(container: HTMLElement): void {
