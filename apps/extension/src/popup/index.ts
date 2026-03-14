@@ -124,7 +124,6 @@ function render(container: HTMLElement): void {
         <div class="wb-brand-lockup wb-brand-lockup--tight">
           <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
           <div class="wb-brand-lockup__copy">
-            <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
             <h1 class="wb-popup__title">WebBlackbox</h1>
             <p class="wb-popup__version">v${extensionVersion}</p>
           </div>
