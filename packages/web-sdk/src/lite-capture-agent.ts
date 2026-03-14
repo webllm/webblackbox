@@ -40,6 +40,7 @@ const DOM_SNAPSHOT_SUMMARY_NODE_THRESHOLD = 3_500;
 const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
 const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
 const START_CAPTURE_DEFER_MS = 2_000;
+const TARGET_ENRICH_DELAY_MS = 0;
 const EVENT_BUFFER_FLUSH_DELAY_MS = 180;
 const EVENT_BUFFER_FORCE_FLUSH_SIZE = 120;
 const EVENT_BUFFER_EMIT_CHUNK_SIZE = 80;
@@ -148,6 +149,7 @@ export class LiteCaptureAgent {
   private backgroundCaptureRetryTimer = 0;
   private quietModeRecoveryTimer = 0;
   private deferredStartTaskTimers: number[] = [];
+  private pendingTargetEnrichmentTimers = new Set<number>();
   private trailingScrollTimer = 0;
   private mutationFlushTimer = 0;
   private flushTimer = 0;
@@ -298,6 +300,7 @@ export class LiteCaptureAgent {
     }
 
     this.runCleanupCallbacks();
+    this.clearPendingTargetEnrichmentTimers();
 
     this.eventBuffer.length = 0;
     this.preRecordingBuffer.length = 0;
@@ -879,12 +882,21 @@ export class LiteCaptureAgent {
 
     this.captureInstalled = false;
     this.runCleanupCallbacks();
+    this.clearPendingTargetEnrichmentTimers();
   }
 
   private runCleanupCallbacks(): void {
     for (const cleanup of this.cleanupCallbacks.splice(0, this.cleanupCallbacks.length)) {
       cleanup();
     }
+  }
+
+  private clearPendingTargetEnrichmentTimers(): void {
+    for (const timerId of this.pendingTargetEnrichmentTimers) {
+      clearTimeout(timerId);
+    }
+
+    this.pendingTargetEnrichmentTimers.clear();
   }
 
   private scheduleMutationFlush(): void {
@@ -1699,10 +1711,46 @@ export class LiteCaptureAgent {
       return toNavigationTargetPayload(target);
     }
 
-    return toLiteTargetPayload(target, {
-      selector: this.readCachedSelector(target),
-      includeText: detail === "action"
-    });
+    return this.createDeferredTargetPayload(target, detail);
+  }
+
+  private createDeferredTargetPayload(
+    target: EventTarget | null,
+    detail: Extract<TargetPayloadDetail, "action" | "input">
+  ): Record<string, unknown> {
+    if (!(target instanceof Element)) {
+      return {};
+    }
+
+    const payload = toDeferredTargetPayload(target);
+    const cachedSelector = this.selectorCache.get(target);
+
+    if (cachedSelector) {
+      payload.selector = cachedSelector;
+
+      if (detail === "action") {
+        payload.text = readTargetText(target);
+      }
+
+      return payload;
+    }
+
+    const timerId = window.setTimeout(() => {
+      this.pendingTargetEnrichmentTimers.delete(timerId);
+
+      if (!this.recordingActive || this.disposed) {
+        return;
+      }
+
+      payload.selector = this.readCachedSelector(target);
+
+      if (detail === "action") {
+        payload.text = readTargetText(target);
+      }
+    }, TARGET_ENRICH_DELAY_MS);
+
+    this.pendingTargetEnrichmentTimers.add(timerId);
+    return payload;
   }
 
   private flushPreRecordingBuffer(): void {
@@ -1972,23 +2020,10 @@ function resolveContentFrameContext(scope: LiteCaptureAgentOptions["frameScope"]
   };
 }
 
-function toLiteTargetPayload(
-  target: EventTarget | null,
-  options: {
-    selector: string;
-    includeText: boolean;
-  }
-): Record<string, unknown> {
-  if (!(target instanceof Element)) {
-    return {};
-  }
-
+function toDeferredTargetPayload(target: Element): Record<string, unknown> {
   return {
-    selector: options.selector,
-    tag: target.tagName,
-    id: target.id || undefined,
-    className: readClassName(target),
-    text: options.includeText ? target.textContent?.trim().slice(0, 80) : undefined
+    ...toFastTargetPayload(target),
+    dataTestId: readDataTestId(target)
   };
 }
 
@@ -2002,6 +2037,19 @@ function toFastTargetPayload(target: EventTarget | null): Record<string, unknown
     id: target.id || undefined,
     className: readClassName(target)
   };
+}
+
+function readDataTestId(target: Element): string | undefined {
+  return (
+    target.getAttribute("data-testid") ??
+    target.getAttribute("data-test-id") ??
+    target.getAttribute("data-qa") ??
+    undefined
+  );
+}
+
+function readTargetText(target: Element): string | undefined {
+  return target.textContent?.trim().slice(0, 80) || undefined;
 }
 
 function toNavigationTargetPayload(target: EventTarget | null): Record<string, unknown> {

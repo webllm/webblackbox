@@ -952,7 +952,7 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
-  it("keeps selectors on input events so replay can still target the field", () => {
+  it("enriches input selectors after the hot path", async () => {
     const { agent, emitBatch } = createAgent();
     const field = inputTarget();
 
@@ -966,6 +966,14 @@ describe("LiteCaptureAgent", () => {
         return batch;
       })
       .find((entry) => entry.rawType === "input");
+
+    expect(inputEvent?.payload?.target).toMatchObject({
+      tag: "INPUT",
+      id: "field"
+    });
+    expect(inputEvent?.payload?.target).not.toHaveProperty("selector");
+
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(inputEvent?.payload?.target).toMatchObject({
       selector: "input#field",
@@ -1001,7 +1009,7 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
-  it("keeps full action selectors for non-navigation clicks", () => {
+  it("enriches non-navigation click selectors after the hot path", async () => {
     const { agent, emitBatch } = createAgent();
 
     clickTarget();
@@ -1013,6 +1021,14 @@ describe("LiteCaptureAgent", () => {
         return batch;
       })
       .find((entry) => entry.rawType === "click");
+
+    expect(clickEvent?.payload?.target).toMatchObject({
+      tag: "BUTTON",
+      id: "target"
+    });
+    expect(clickEvent?.payload?.target).not.toHaveProperty("selector");
+
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(clickEvent?.payload?.target).toMatchObject({
       selector: "button#target",
