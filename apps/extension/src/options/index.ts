@@ -21,7 +21,20 @@ type OptionsState = {
 
 if (root) {
   bootstrap(root).catch((error) => {
-    root.innerHTML = `<section class="card"><h1>Settings</h1><p>${String(error)}</p></section>`;
+    root.innerHTML = `
+      <section class="card" style="max-width:760px;">
+        <header class="wb-page-header">
+          <div class="wb-brand-lockup">
+            <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
+            <div class="wb-brand-lockup__copy">
+              <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
+              <h1 style="margin:0;">Capture Settings</h1>
+            </div>
+          </div>
+        </header>
+        <p>${String(error)}</p>
+      </section>
+    `;
   });
 }
 
@@ -34,8 +47,16 @@ function render(container: HTMLElement, options: OptionsState): void {
   const { recorderConfig: config, performanceBudget } = options;
   container.innerHTML = `
     <section class="card" style="max-width:760px;">
-      <h1>Capture Settings</h1>
-      <p>Configure redaction and sampling defaults per browser profile.</p>
+      <header class="wb-page-header">
+        <div class="wb-brand-lockup">
+          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
+          <div class="wb-brand-lockup__copy">
+            <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
+            <h1 style="margin:0;">Capture Settings</h1>
+          </div>
+        </div>
+        <p class="wb-page-header__subtitle">Configure redaction and sampling defaults per browser profile.</p>
+      </header>
       <section style="margin-top:14px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:rgba(20,33,61,0.02);display:grid;gap:10px;">
         <h2 style="margin:0;font-size:14px;">Runtime Profiles</h2>
         <p style="margin:0;font-size:12px;opacity:0.78;">

@@ -37,6 +37,55 @@ main {
   padding: 12px;
 }
 
+.wb-brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.wb-brand-lockup--tight {
+  gap: 8px;
+}
+
+.wb-brand-lockup__icon {
+  width: 32px;
+  height: 32px;
+  display: block;
+  flex: none;
+  border-radius: 9px;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  box-shadow: 0 10px 20px rgba(20, 33, 61, 0.08);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.wb-brand-lockup__copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.wb-brand-lockup__eyebrow {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(20, 33, 61, 0.55);
+}
+
+.wb-page-header {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.wb-page-header__subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--wb-muted-ink);
+}
+
 .wb-popup {
   display: grid;
   gap: 10px;
@@ -52,6 +101,7 @@ main {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
 }
 
 .wb-popup__title {

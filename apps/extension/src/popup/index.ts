@@ -38,7 +38,17 @@ const state: {
 
 if (root) {
   bootstrap(root).catch((error) => {
-    root.innerHTML = `<section class="card"><h1>WebBlackbox</h1><p>${String(error)}</p></section>`;
+    root.innerHTML = `
+      <section class="card">
+        <div class="wb-brand-lockup wb-brand-lockup--tight">
+          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
+          <div class="wb-brand-lockup__copy">
+            <h1 class="wb-popup__title">WebBlackbox</h1>
+          </div>
+        </div>
+        <p>${String(error)}</p>
+      </section>
+    `;
   });
 }
 
@@ -109,7 +119,13 @@ function render(container: HTMLElement): void {
   container.innerHTML = `
     <section class="card wb-popup">
       <header class="wb-popup__header">
-        <h1 class="wb-popup__title">WebBlackbox</h1>
+        <div class="wb-brand-lockup wb-brand-lockup--tight">
+          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
+          <div class="wb-brand-lockup__copy">
+            <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
+            <h1 class="wb-popup__title">WebBlackbox</h1>
+          </div>
+        </div>
         <span class="${badgeClass}">${badgeText}</span>
       </header>
       <div class="wb-popup__meta">

@@ -51,7 +51,13 @@ function render(container: HTMLElement): void {
   container.innerHTML = `
     <section class="card wb-sessions-card">
       <header class="wb-sessions-header">
-        <h1 class="wb-sessions-title">Sessions</h1>
+        <div class="wb-brand-lockup">
+          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
+          <div class="wb-brand-lockup__copy">
+            <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
+            <h1 class="wb-sessions-title">Sessions</h1>
+          </div>
+        </div>
         <span class="wb-sessions-count">${ordered.length} total · ${activeCount} active</span>
       </header>
       <p class="wb-sessions-subtitle">Recent recordings with source context and quick actions.</p>
