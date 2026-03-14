@@ -40,7 +40,7 @@ chromeApi?.runtime?.onMessage.addListener((message) => {
     return false;
   }
 
-  handleSwMessage(message as ExtensionOutboundMessage);
+  void handleSwMessage(message as ExtensionOutboundMessage);
   return false;
 });
 
@@ -75,7 +75,7 @@ function bindContentPort(port: PortLike): void {
   contentPort = port;
 
   const onMessage = (message: unknown) => {
-    handleSwMessage(message as ExtensionOutboundMessage);
+    void handleSwMessage(message as ExtensionOutboundMessage);
   };
 
   const onDisconnect = () => {
@@ -139,9 +139,9 @@ function trimPendingEvents(): void {
   pendingEvents.splice(0, pendingEvents.length - PENDING_EVENT_MAX);
 }
 
-function flushPendingEvents(): void {
+function flushPendingEventsChunk(): boolean {
   if (!contentPort || !recordingActive || pendingEvents.length === 0) {
-    return;
+    return false;
   }
 
   const batch = pendingEvents.splice(0, CONTENT_EVENT_FLUSH_CHUNK);
@@ -157,11 +157,29 @@ function flushPendingEvents(): void {
     trimPendingEvents();
     contentPort = null;
     schedulePortReconnect();
+    return false;
+  }
+
+  return true;
+}
+
+function flushPendingEvents(): void {
+  if (!flushPendingEventsChunk()) {
     return;
   }
 
   if (pendingEvents.length > 0) {
     schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
+  }
+}
+
+async function flushAllPendingEvents(): Promise<void> {
+  stopPendingEventFlush();
+
+  while (contentPort && recordingActive && pendingEvents.length > 0) {
+    if (!flushPendingEventsChunk()) {
+      return;
+    }
   }
 }
 
@@ -196,7 +214,7 @@ function emitMarker(message: string): void {
   }
 }
 
-function handleSwMessage(message: ExtensionOutboundMessage): void {
+async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void> {
   if (!message || typeof message !== "object") {
     return;
   }
@@ -220,8 +238,9 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
       const wasRecording = recordingActive;
 
       if (wasRecording) {
+        await captureAgent.prepareStopCapture();
         captureAgent.setRecordingStatus(nextState);
-        flushPendingEvents();
+        await flushAllPendingEvents();
       } else {
         captureAgent.setRecordingStatus(nextState);
       }

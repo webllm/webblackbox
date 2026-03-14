@@ -2,6 +2,7 @@ import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { MODE_PRODUCT_PROFILES } from "../shared/mode-profile.js";
+import { migrateStoredRecorderConfig, OPTIONS_STORAGE_VERSION } from "../shared/options-storage.js";
 import {
   DEFAULT_PERFORMANCE_BUDGET,
   normalizePerformanceBudget,
@@ -179,9 +180,12 @@ async function loadOptionsState(): Promise<OptionsState> {
     };
   }
 
-  const record = stored as Partial<typeof DEFAULT_RECORDER_CONFIG> & {
-    performanceBudget?: unknown;
-  };
+  const record = migrateStoredRecorderConfig(
+    stored as Partial<typeof DEFAULT_RECORDER_CONFIG> & {
+      optionsVersion?: unknown;
+      performanceBudget?: unknown;
+    }
+  );
 
   return {
     recorderConfig: normalizeOptionsConfig({
@@ -205,6 +209,7 @@ async function saveOptionsState(options: OptionsState): Promise<void> {
   const normalizedBudget = normalizePerformanceBudget(options.performanceBudget);
   const payload = {
     ...normalizedConfig,
+    optionsVersion: OPTIONS_STORAGE_VERSION,
     performanceBudget: normalizedBudget
   };
 

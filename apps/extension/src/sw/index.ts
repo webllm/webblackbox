@@ -34,6 +34,7 @@ import {
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
 import { applyModeProductBoundary } from "../shared/mode-profile.js";
+import { migrateStoredRecorderConfig } from "../shared/options-storage.js";
 import {
   isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
   isMimeAllowed as isMimeAllowedUtil,
@@ -3443,23 +3444,22 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
     return baseConfig;
   }
 
-  const sampling = asRecord(stored.sampling);
-  const redaction = asRecord(stored.redaction);
+  const migrated = migrateStoredRecorderConfig(stored);
 
   const mergedConfig = {
     ...baseConfig,
-    ...stored,
+    ...migrated,
     mode,
     sampling: {
       ...baseConfig.sampling,
-      ...sampling
+      ...(asRecord(migrated.sampling) ?? {})
     },
     redaction: {
       ...baseConfig.redaction,
-      ...redaction
+      ...(asRecord(migrated.redaction) ?? {})
     },
-    sitePolicies: Array.isArray(stored.sitePolicies)
-      ? (stored.sitePolicies as typeof baseConfig.sitePolicies)
+    sitePolicies: Array.isArray(migrated.sitePolicies)
+      ? (migrated.sitePolicies as typeof baseConfig.sitePolicies)
       : baseConfig.sitePolicies
   };
 

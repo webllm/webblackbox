@@ -162,7 +162,9 @@ export class LiteCaptureAgent {
   private lastScrollTime = 0;
   private lastPointerTime = 0;
   private screenshotInFlight = false;
+  private screenshotInFlightPromise: Promise<void> | null = null;
   private screenshotPendingReason: string | null = null;
+  private hasCapturedScreenshot = false;
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
   private lastUserActivityMono = monotonicTime();
   private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
@@ -208,6 +210,7 @@ export class LiteCaptureAgent {
     if (state.active && !wasRecording) {
       this.hasDomSnapshot = false;
       this.hasLocalStorageSnapshot = false;
+      this.hasCapturedScreenshot = false;
     }
 
     if (!state.active && wasRecording && this.shouldCaptureDomSnapshots() && !this.hasDomSnapshot) {
@@ -292,6 +295,23 @@ export class LiteCaptureAgent {
     this.drainBufferedEvents();
   }
 
+  /** Completes any in-flight screenshot and captures one final frame if none was recorded yet. */
+  public async prepareStopCapture(): Promise<void> {
+    if (this.disposed || !this.recordingActive) {
+      return;
+    }
+
+    try {
+      await this.screenshotInFlightPromise;
+    } catch {
+      void 0;
+    }
+
+    if (this.shouldCaptureScreenshots() && !this.hasCapturedScreenshot) {
+      await this.captureScreenshot("stop");
+    }
+  }
+
   /** Tears down listeners/timers and releases all internal buffers. */
   public dispose(): void {
     if (this.disposed) {
@@ -315,6 +335,7 @@ export class LiteCaptureAgent {
     this.mutationSummary = createEmptyMutationSummary();
     this.selectorCache = new WeakMap<Element, string>();
     this.selectorCacheSize = 0;
+    this.hasCapturedScreenshot = false;
   }
 
   private installInjectedMessageBridge(): void {
@@ -1217,8 +1238,9 @@ export class LiteCaptureAgent {
 
     this.screenshotInFlight = true;
 
-    void this.captureScreenshot(reason).finally(() => {
+    const capturePromise = this.captureScreenshot(reason).finally(() => {
       this.screenshotInFlight = false;
+      this.screenshotInFlightPromise = null;
 
       const pending = this.screenshotPendingReason;
       this.screenshotPendingReason = null;
@@ -1227,6 +1249,9 @@ export class LiteCaptureAgent {
         this.scheduleScreenshotCapture(pending);
       }
     });
+
+    this.screenshotInFlightPromise = capturePromise;
+    void capturePromise;
   }
 
   private async captureScreenshot(reason: string): Promise<void> {
@@ -1265,6 +1290,8 @@ export class LiteCaptureAgent {
       ) {
         return;
       }
+
+      this.hasCapturedScreenshot = true;
 
       this.queueEvent("screenshot", {
         reason,

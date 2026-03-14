@@ -272,16 +272,6 @@ async function main() {
   const scenarioResult = await runDemoScenario(demoClient);
   assert(scenarioResult?.ok === true, "Demo scenario failed", scenarioResult);
 
-  if (captureMode === "lite") {
-    const marker = await triggerMarkerFromPopup(
-      popupClient,
-      typeof demoTab?.id === "number" ? demoTab.id : undefined,
-      demoUrl
-    );
-    assert(marker?.ok === true, "Failed to trigger lite screenshot marker", marker);
-    await sleep(1_500);
-  }
-
   await sleep(1_600);
 
   const stop = await stopActiveSessionFromPopup(popupClient, usePopupUiActionsEffective);
@@ -1458,40 +1448,6 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
         saveAs: false
       });
       return { ok: true, sid: ${JSON.stringify(sid)} };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
-}
-
-async function triggerMarkerFromPopup(popupClient, tabId, expectedUrl) {
-  const expression = `
-    (async () => {
-      const tabs = typeof chrome?.tabs?.query === 'function' ? await chrome.tabs.query({}) : [];
-      const target =
-        ${typeof tabId === "number" ? `tabs.find((tab) => tab.id === ${JSON.stringify(tabId)}) ??` : ""}
-        tabs.find((tab) =>
-          typeof tab.id === 'number' &&
-          typeof tab.url === 'string' &&
-          tab.url.startsWith(${JSON.stringify(expectedUrl)})
-        ) ??
-        tabs.find((tab) =>
-          typeof tab.id === 'number' &&
-          typeof tab.url === 'string' &&
-          !tab.url.startsWith('chrome-extension://') &&
-          tab.url !== 'about:blank'
-        );
-
-      if (!target || typeof target.id !== 'number') {
-        return {
-          ok: false,
-          reason: 'target-tab-not-found',
-          tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active }))
-        };
-      }
-
-      await chrome.tabs.sendMessage(target.id, { kind: 'sw.marker-command' });
-      return { ok: true, tabId: target.id };
     })()
   `;
 

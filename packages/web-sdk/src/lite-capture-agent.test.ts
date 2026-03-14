@@ -238,6 +238,24 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("captures a stop screenshot when the session stops before the first idle screenshot lands", async () => {
+    const { agent } = createAgent();
+    const captureScreenshotSpy = vi
+      .spyOn(
+        agent as unknown as {
+          captureScreenshot: (reason: string) => Promise<void>;
+        },
+        "captureScreenshot"
+      )
+      .mockResolvedValue();
+
+    await agent.prepareStopCapture();
+
+    expect(captureScreenshotSpy).toHaveBeenCalledWith("stop");
+
+    agent.dispose();
+  });
+
   it("installs capture listeners only while recording is active", () => {
     const { agent, emitBatch } = createInactiveAgent();
 
