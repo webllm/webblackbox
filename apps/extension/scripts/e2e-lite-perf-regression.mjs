@@ -58,6 +58,7 @@ const editorRafP95RatioLimit = Number(process.env.WB_E2E_PERF_EDITOR_RAF_P95_RAT
 const editorRafP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_EDITOR_RAF_P95_DELTA_MS ?? "10");
 const navigationP95RatioLimit = Number(process.env.WB_E2E_PERF_NAV_P95_RATIO ?? "1.7");
 const navigationP95DeltaLimitMs = Number(process.env.WB_E2E_PERF_NAV_P95_DELTA_MS ?? "80");
+const navigationFallbackDeltaLimit = Number(process.env.WB_E2E_PERF_NAV_FALLBACK_DELTA ?? "1");
 const clickOver16DeltaLimit = Number(process.env.WB_E2E_PERF_CLICK_OVER16_DELTA ?? "4");
 const longTaskTotalDeltaLimitMs = Number(process.env.WB_E2E_PERF_LONGTASK_TOTAL_DELTA_MS ?? "200");
 const longTaskCountDeltaLimit = Number(process.env.WB_E2E_PERF_LONGTASK_COUNT_DELTA ?? "4");
@@ -658,10 +659,81 @@ function buildIframePageHtml(slot) {
         display: grid;
         place-items: center;
       }
+
+      main {
+        display: grid;
+        gap: 10px;
+        justify-items: center;
+      }
+
+      #frame-link {
+        color: #0f4c81;
+        text-decoration: none;
+        border-bottom: 2px solid rgba(15, 76, 129, 0.18);
+      }
+
+      #frame-link:hover {
+        color: #9a3412;
+        border-bottom-color: rgba(154, 52, 18, 0.35);
+      }
     </style>
   </head>
   <body data-page="iframe-target">
-    <span>iframe slot ${escapeHtmlForJs(slot)}</span>
+    <main>
+      <span>iframe slot ${escapeHtmlForJs(slot)}</span>
+      <a id="frame-link" href="#frame-target-${escapeHtmlForJs(slot)}">frame action</a>
+      <div id="frame-click-log">clicks: 0</div>
+      <div id="frame-target-${escapeHtmlForJs(slot)}" hidden></div>
+    </main>
+    <script>
+      (() => {
+        const link = document.getElementById("frame-link");
+        const clickLogNode = document.getElementById("frame-click-log");
+        let clickCount = 0;
+        let clickMeasurementStartedAt = 0;
+        let lastClickLag = 0;
+        let lastCallDuration = 0;
+
+        if (link instanceof HTMLAnchorElement) {
+          link.addEventListener("click", (event) => {
+            event.preventDefault();
+            clickCount += 1;
+
+            if (clickMeasurementStartedAt > 0) {
+              lastClickLag = performance.now() - clickMeasurementStartedAt;
+            }
+
+            if (clickLogNode instanceof HTMLElement) {
+              clickLogNode.textContent = "clicks: " + String(clickCount);
+            }
+          });
+        }
+
+        globalThis.__WB_IFRAME_PERF__ = {
+          triggerClick() {
+            if (!(link instanceof HTMLAnchorElement)) {
+              return {
+                ok: false,
+                reason: "missing-link"
+              };
+            }
+
+            clickMeasurementStartedAt = performance.now();
+            const startedAt = performance.now();
+            link.click();
+            lastCallDuration = performance.now() - startedAt;
+            clickMeasurementStartedAt = 0;
+
+            return {
+              ok: true,
+              clickCount,
+              clickCallMs: lastCallDuration,
+              clickLagMs: lastClickLag
+            };
+          }
+        };
+      })();
+    </script>
   </body>
 </html>`;
 }
@@ -1595,23 +1667,119 @@ function buildStressPageHtml() {
         }
 
         async function runIframeScenario(options) {
-          const frames = await ensureIframeGrid(options?.iframeCount);
-          const result = await runInteractionScenario({
-            label:
-              typeof options?.label === "string" && options.label.length > 0
-                ? options.label
-                : "iframe-interaction",
-            rounds: options?.rounds,
-            mutationBatch: options?.mutationBatch,
-            scrollStep: options?.scrollStep,
-            settleMs: options?.settleMs
-          });
-
-          if (result?.summary) {
-            result.summary.iframeCount = frames;
+          if (globalThis.__WB_LITE_PERF_STATE__?.running) {
+            return {
+              ok: false,
+              reason: "already-running"
+            };
           }
 
-          return result;
+          resetPageState();
+
+          const frames = await ensureIframeGrid(options?.iframeCount);
+          const label =
+            typeof options?.label === "string" && options.label.length > 0
+              ? options.label
+              : "iframe-interaction";
+          const rounds = clampInt(options?.rounds, 12, 4, 96);
+          const settleMs = clampInt(options?.settleMs, 300, 0, 3_000);
+          const clickCallSamples = [];
+          const clickLagSamples = [];
+          const frameNodes = Array.from(iframeGridNode?.querySelectorAll("iframe") ?? []);
+
+          const scenarioState = {
+            label,
+            running: true,
+            done: false,
+            failed: false,
+            rounds,
+            count: 0,
+            error: null
+          };
+
+          globalThis.__WB_LITE_PERF_STATE__ = scenarioState;
+          setStatus(label + " running", "running");
+          requestLogNode.textContent = label + " exercising iframe interactions";
+
+          try {
+            if (frames <= 0 || frameNodes.length === 0) {
+              throw new Error("iframe-grid-empty");
+            }
+
+            for (let round = 0; round < rounds; round += 1) {
+              const frameNode = frameNodes[round % frameNodes.length];
+              const frameWindow = frameNode?.contentWindow;
+              const framePerf = frameWindow?.__WB_IFRAME_PERF__;
+
+              if (!framePerf || typeof framePerf.triggerClick !== "function") {
+                throw new Error("iframe-perf-api-unavailable");
+              }
+
+              const result = framePerf.triggerClick();
+
+              if (!result?.ok) {
+                throw new Error(String(result?.reason ?? "iframe-click-failed"));
+              }
+
+              clickCallSamples.push(
+                typeof result.clickCallMs === "number" && Number.isFinite(result.clickCallMs)
+                  ? result.clickCallMs
+                  : 0
+              );
+              clickLagSamples.push(
+                typeof result.clickLagMs === "number" && Number.isFinite(result.clickLagMs)
+                  ? result.clickLagMs
+                  : 0
+              );
+
+              scenarioState.count = round + 1;
+              setActiveCell(round, "if-" + round);
+
+              await new Promise((resolve) => {
+                requestAnimationFrame(() => resolve());
+              });
+            }
+          } catch (error) {
+            scenarioState.failed = true;
+            scenarioState.error = String(error instanceof Error ? error.message : error);
+          }
+
+          setActiveCell(-1, "");
+          requestLogNode.textContent =
+            label +
+            " finished rounds=" +
+            String(scenarioState.count) +
+            " iframeCount=" +
+            String(frameNodes.length);
+
+          await new Promise((resolve) => {
+            setTimeout(resolve, settleMs);
+          });
+
+          const summary = {
+            rounds: scenarioState.count,
+            iframeCount: frameNodes.length,
+            clickCall: summarizeSeries(clickCallSamples),
+            clickHandlerLag: summarizeSeries(clickLagSamples)
+          };
+
+          scenarioState.running = false;
+          scenarioState.done = true;
+          scenarioState.summary = summary;
+          setStatus(
+            label + (scenarioState.failed ? " error" : " done"),
+            scenarioState.failed ? "error" : "done"
+          );
+
+          return {
+            ok: scenarioState.failed === false,
+            state: {
+              rounds: scenarioState.count,
+              error: scenarioState.error,
+              iframeCount: frameNodes.length
+            },
+            summary
+          };
         }
 
         async function runEditorScenario(options) {
@@ -2057,14 +2225,17 @@ async function runDocumentNavigationScenario(pageClient, options) {
   const sourceUrl = String(options?.sourceUrl ?? "");
   const targetUrl = String(options?.targetUrl ?? "");
   const targetWaitMs = Math.max(1_500, Math.min(perfTimeoutMs, Math.floor(navigationWaitMs)));
+  const mouseTargetWaitMs = Math.max(500, Math.min(targetWaitMs, 1_500));
   const latencies = [];
+  const mouseLatencies = [];
+  const fallbackLatencies = [];
   const strategies = {
     mouse: 0,
     jsClick: 0,
     locationAssign: 0
   };
 
-  const waitForTargetPage = async () =>
+  const waitForTargetPage = async (timeoutMs = targetWaitMs) =>
     waitFor(
       async () => {
         const snapshot = await pageClient.evaluate(`(() => ({
@@ -2074,7 +2245,7 @@ async function runDocumentNavigationScenario(pageClient, options) {
         }))()`);
         return snapshot?.pageType === "nav-target" ? snapshot : null;
       },
-      targetWaitMs,
+      timeoutMs,
       100,
       `Document navigation target did not load: ${label}`
     );
@@ -2147,7 +2318,7 @@ async function runDocumentNavigationScenario(pageClient, options) {
     );
 
     const startedAt = Date.now();
-    let strategy = "mouse";
+    let fallbackStartedAt = 0;
     try {
       await pageClient.send("Input.dispatchMouseEvent", {
         type: "mouseMoved",
@@ -2169,9 +2340,11 @@ async function runDocumentNavigationScenario(pageClient, options) {
         button: "left",
         clickCount: 1
       });
-      await waitForTargetPage();
+      await waitForTargetPage(mouseTargetWaitMs);
+      strategies.mouse += 1;
+      mouseLatencies.push(Date.now() - startedAt);
     } catch {
-      strategy = "jsClick";
+      fallbackStartedAt = Date.now();
       await pageClient.evaluate(`
         (() => {
           const link = document.getElementById("document-link");
@@ -2187,8 +2360,8 @@ async function runDocumentNavigationScenario(pageClient, options) {
 
       try {
         await waitForTargetPage();
+        strategies.jsClick += 1;
       } catch {
-        strategy = "locationAssign";
         await pageClient.evaluate(`
           (() => {
             const link = document.getElementById("document-link");
@@ -2202,10 +2375,12 @@ async function runDocumentNavigationScenario(pageClient, options) {
           })()
         `);
         await waitForTargetPage();
+        strategies.locationAssign += 1;
       }
+
+      fallbackLatencies.push(Date.now() - fallbackStartedAt);
     }
 
-    strategies[strategy] += 1;
     latencies.push(Date.now() - startedAt);
 
     await pageClient.send("Page.navigate", {
@@ -2226,6 +2401,8 @@ async function runDocumentNavigationScenario(pageClient, options) {
     summary: {
       rounds,
       navigationLatency: summarizeSeries(latencies),
+      mouseNavigationLatency: summarizeSeries(mouseLatencies),
+      fallbackNavigationLatency: summarizeSeries(fallbackLatencies),
       strategies
     }
   };
@@ -2402,6 +2579,9 @@ function compareSummaries(
   baselineNavigationSummary,
   recordedNavigationSummary
 ) {
+  const normalizedBaselineNavigationSummary = summarizeNavigation(baselineNavigationSummary);
+  const normalizedRecordedNavigationSummary = summarizeNavigation(recordedNavigationSummary);
+
   assert(
     typeof baselineSummary?.requests?.count === "number" &&
       baselineSummary.requests.count >= perfRequests,
@@ -2451,16 +2631,16 @@ function compareSummaries(
     { recordedEditorSummary, editorRounds }
   );
   assert(
-    typeof baselineNavigationSummary?.rounds === "number" &&
-      baselineNavigationSummary.rounds >= navigationRounds,
+    typeof normalizedBaselineNavigationSummary?.rounds === "number" &&
+      normalizedBaselineNavigationSummary.rounds >= navigationRounds,
     "Baseline navigation scenario captured too few rounds.",
-    { baselineNavigationSummary, navigationRounds }
+    { baselineNavigationSummary: normalizedBaselineNavigationSummary, navigationRounds }
   );
   assert(
-    typeof recordedNavigationSummary?.rounds === "number" &&
-      recordedNavigationSummary.rounds >= navigationRounds,
+    typeof normalizedRecordedNavigationSummary?.rounds === "number" &&
+      normalizedRecordedNavigationSummary.rounds >= navigationRounds,
     "Lite recording navigation scenario captured too few rounds.",
-    { recordedNavigationSummary, navigationRounds }
+    { recordedNavigationSummary: normalizedRecordedNavigationSummary, navigationRounds }
   );
 
   const budgets = [
@@ -2547,13 +2727,19 @@ function compareSummaries(
       }
     ),
     assertBudget(
-      "navigation.p95Ms",
-      baselineNavigationSummary.navigationLatency.p95Ms,
-      recordedNavigationSummary.navigationLatency.p95Ms,
+      "navigation.mouse.p95Ms",
+      normalizedBaselineNavigationSummary.mouseNavigationLatency.p95Ms,
+      normalizedRecordedNavigationSummary.mouseNavigationLatency.p95Ms,
       {
         ratioLimit: navigationP95RatioLimit,
         deltaLimit: navigationP95DeltaLimitMs
       }
+    ),
+    assertCountDelta(
+      "navigation.fallbackCount",
+      normalizedBaselineNavigationSummary.fallbackCount,
+      normalizedRecordedNavigationSummary.fallbackCount,
+      navigationFallbackDeltaLimit
     )
   ];
 
@@ -2578,6 +2764,16 @@ function compareSummaries(
 
   return {
     budgets
+  };
+}
+
+function summarizeNavigation(summary) {
+  const fallbackCount =
+    Number(summary?.strategies?.jsClick ?? 0) + Number(summary?.strategies?.locationAssign ?? 0);
+
+  return {
+    ...(summary && typeof summary === "object" ? summary : {}),
+    fallbackCount
   };
 }
 
