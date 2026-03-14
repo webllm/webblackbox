@@ -79,6 +79,9 @@ export type ChromeApi = {
   };
   runtime?: {
     connect(connectInfo: { name: string }): PortLike;
+    getManifest?: () => {
+      version?: string;
+    };
     getURL(path: string): string;
     getContexts?: (options: {
       contextTypes: string[];

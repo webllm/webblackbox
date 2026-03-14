@@ -110,6 +110,14 @@ main {
   letter-spacing: 0.01em;
 }
 
+.wb-popup__version {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(20, 33, 61, 0.58);
+  font-variant-numeric: tabular-nums;
+}
+
 .wb-popup__badge {
   display: inline-flex;
   align-items: center;

@@ -10,6 +10,7 @@ import {
 
 const chromeApi = getChromeApi();
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.popup });
+const extensionVersion = chromeApi?.runtime?.getManifest?.().version ?? "dev";
 
 const root = document.getElementById("popup-root");
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
@@ -44,6 +45,7 @@ if (root) {
           <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
           <div class="wb-brand-lockup__copy">
             <h1 class="wb-popup__title">WebBlackbox</h1>
+            <p class="wb-popup__version">v${extensionVersion}</p>
           </div>
         </div>
         <p>${String(error)}</p>
@@ -124,6 +126,7 @@ function render(container: HTMLElement): void {
           <div class="wb-brand-lockup__copy">
             <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
             <h1 class="wb-popup__title">WebBlackbox</h1>
+            <p class="wb-popup__version">v${extensionVersion}</p>
           </div>
         </div>
         <span class="${badgeClass}">${badgeText}</span>
