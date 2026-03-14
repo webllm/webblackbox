@@ -151,7 +151,7 @@ The build output is in the `build/` directory. Build entries:
 
 1. User clicks **Start** in popup
 2. Service worker creates session, attaches CDP debugger, initializes recorder
-3. Service worker injects `content.js` into the active tab on demand; it is no longer a manifest-time static content script
+3. `content.js` is already present as a manifest `document_start` content script across frames
 4. Injected content capture begins streaming user events and DOM summaries
 5. In `lite` mode, injected script captures console/network/storage events
 6. CDP provides network, runtime exception, and page navigation events
@@ -186,7 +186,7 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
 - `lite`: lower sampling pressure + perf-trigger freeze disabled (`freezeOnNetworkFailure=false`, `freezeOnLongTaskSpike=false`)
   - page-side response-body sampling is disabled and runtime screenshot cadence is clamped off (`bodyCaptureMaxBytes=0`, `screenshotIdleMs=0`)
   - initial DOM/storage/screenshot capture is deferred briefly after start so the tab does not stall at record activation
-  - `content.js` is injected only when recording starts, instead of loading in every frame at `document_start`
+  - hot listeners, observers, and page-side capture loops stay inactive until recording is enabled, even though `content.js` is loaded at `document_start`
 - `full`: same perf-freeze disable + stricter sampling/body-capture limits
   - page-side heavy capture loops (SnapDOM screenshots, outerHTML snapshots, storage snapshots) are skipped to reduce main-thread impact
   - `injected` fetch/xhr/console patching is not enabled (CDP is the primary source in full mode)
