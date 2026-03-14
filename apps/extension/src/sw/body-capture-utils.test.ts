@@ -77,6 +77,22 @@ describe("body-capture utils", () => {
     expect(rule.enabled).toBe(true);
   });
 
+  it("treats zero bodyCaptureMaxBytes as disabled", () => {
+    const rule = resolveLiteBodyCaptureRule(
+      {
+        sampling: {
+          bodyCaptureMaxBytes: 0
+        },
+        sitePolicies: []
+      },
+      "https://example.com/page",
+      "application/json"
+    );
+
+    expect(rule.enabled).toBe(false);
+    expect(rule.maxBytes).toBe(0);
+  });
+
   it("redacts and truncates utf8 response bodies for capture", () => {
     const transformed = transformResponseBodyForCapture({
       body: `token=secret-123&${"x".repeat(5_000)}`,

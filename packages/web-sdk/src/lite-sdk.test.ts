@@ -121,7 +121,8 @@ describe("WebBlackboxLiteSdk", () => {
 
     expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledTimes(1);
     expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledWith({
-      flag: "__WB_TEST_FLAG__"
+      flag: "__WB_TEST_FLAG__",
+      bodyCaptureMaxBytes: 0
     });
 
     await sdk.start();
@@ -307,7 +308,7 @@ describe("WebBlackboxLiteSdk", () => {
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
       screenshotIdleMs: 12_000,
-      bodyCaptureMaxBytes: 256 * 1024
+      bodyCaptureMaxBytes: 0
     });
 
     await sdk.start();

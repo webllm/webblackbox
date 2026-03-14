@@ -132,7 +132,9 @@ The build output is in the `build/` directory. Build entries:
 
 - `pnpm e2e:fullchain:full` runs the full-mode end-to-end capture/export demo.
 - `pnpm e2e:memory:full` runs a synthetic long-session full-mode stress case and samples JS heap usage for the target page, service worker, and offscreen document.
+- `pnpm e2e:perf:lite` runs a same-page A/B stress case for lite mode and compares baseline vs active-recording request latency, hover delay, `requestAnimationFrame` gaps, and long-task totals.
 - Useful env vars for the memory regression script: `WB_E2E_STRESS_REQUESTS`, `WB_E2E_STRESS_CONCURRENCY`, `WB_E2E_MEMORY_SAMPLE_MS`, `WB_E2E_OFFSCREEN_FINAL_GROWTH_MB`, `WB_E2E_SW_FINAL_GROWTH_MB`.
+- Useful env vars for the lite perf regression script: `WB_E2E_PERF_REQUESTS`, `WB_E2E_PERF_CONCURRENCY`, `WB_E2E_PERF_PAYLOAD_BYTES`, `WB_E2E_PERF_AFTER_START_SETTLE_MS`, `WB_E2E_PERF_FETCH_P95_DELTA_MS`, `WB_E2E_PERF_HOVER_P95_DELTA_MS`.
 
 ## Loading in Chrome
 
@@ -177,6 +179,8 @@ When a freeze condition is detected (uncaught JS error / unhandled rejection, or
 The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. Default values are defined in `DEFAULT_RECORDER_CONFIG`, then mode-specific runtime safety tuning is applied:
 
 - `lite`: lower sampling pressure + perf-trigger freeze disabled (`freezeOnNetworkFailure=false`, `freezeOnLongTaskSpike=false`)
+  - page-side response-body sampling is disabled by default (`bodyCaptureMaxBytes=0`) to avoid fetch/xhr main-thread jank
+  - initial DOM/storage/screenshot capture is deferred briefly after start so the tab does not stall at record activation
 - `full`: same perf-freeze disable + stricter sampling/body-capture limits
   - page-side heavy capture loops (SnapDOM screenshots, outerHTML snapshots, storage snapshots) are skipped to reduce main-thread impact
   - `injected` fetch/xhr/console patching is not enabled (CDP is the primary source in full mode)
@@ -185,7 +189,8 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
 Body capture sizing note:
 
 - Protocol baseline (`DEFAULT_RECORDER_CONFIG`) sets `bodyCaptureMaxBytes=256 KiB`.
-- Extension runtime defaults clamp both lite/full modes to `128 KiB` for safer long-session behavior.
+- Extension `lite` defaults set `bodyCaptureMaxBytes=0` so page-side response-body sampling stays off unless you opt in.
+- Extension `full` defaults clamp CDP-side body capture to `128 KiB` for safer long-session behavior.
 - Options can still override this cap per profile.
 
 The SW ↔ offscreen pipeline path also uses ingest batching with chunked drain to reduce message round-trips and avoid giant postMessage payloads under high event volume.

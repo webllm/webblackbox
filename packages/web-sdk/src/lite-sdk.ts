@@ -31,8 +31,6 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TAB_ID = 0;
-const LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES =
-  DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes;
 const PIPELINE_BATCH_MAX_EVENTS = 160;
 const PIPELINE_BATCH_FLUSH_DELAY_MS = 120;
 const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
@@ -116,7 +114,8 @@ export class WebBlackboxLiteSdk {
 
     if (options.injectHooks !== false) {
       installInjectedLiteCaptureHooks({
-        flag: options.injectHookFlag
+        flag: options.injectHookFlag,
+        bodyCaptureMaxBytes: this.config.sampling.bodyCaptureMaxBytes
       });
     }
   }
@@ -562,7 +561,7 @@ function resolveLiteSdkBaseConfig(): RecorderConfig {
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
       screenshotIdleMs: 12_000,
-      bodyCaptureMaxBytes: LITE_SDK_DEFAULT_BODY_CAPTURE_MAX_BYTES
+      bodyCaptureMaxBytes: 0
     }
   };
 }

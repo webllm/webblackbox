@@ -1,4 +1,5 @@
 import { LiteCaptureAgent } from "webblackbox/lite-capture-agent";
+import { INJECTED_CAPTURE_CONFIG_EVENT } from "webblackbox/injected-hooks";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
@@ -202,6 +203,7 @@ function handleSwMessage(message: ExtensionOutboundMessage): void {
 
   if (message.kind === "sw.recording-status") {
     recordingActive = message.active;
+    syncInjectedCaptureConfig(message);
 
     captureAgent.setRecordingStatus({
       active: message.active,
@@ -303,4 +305,29 @@ function isMarkerCommand(message: unknown): boolean {
   }
 
   return (message as { kind?: unknown }).kind === "sw.marker-command";
+}
+
+function syncInjectedCaptureConfig(
+  message: Extract<ExtensionOutboundMessage, { kind: "sw.recording-status" }>
+): void {
+  const bodyCaptureMaxBytes =
+    message.active && message.mode === "lite"
+      ? normalizeBodyCaptureBudget(message.sampling?.bodyCaptureMaxBytes)
+      : 0;
+
+  window.dispatchEvent(
+    new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
+      detail: {
+        bodyCaptureMaxBytes
+      }
+    })
+  );
+}
+
+function normalizeBodyCaptureBudget(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+
+  return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
 }

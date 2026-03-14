@@ -13,12 +13,14 @@ WebBlackbox sessions can run for long periods and produce large archives. We tra
 
 In addition, runtime capture now prefers lower page-thread overhead:
 
+- extension `lite` disables page-side response-body sampling by default; opt in only when network body payloads are required
+- extension `lite` defers heavy start-of-recording DOM/storage/screenshot capture to avoid foreground-tab activation jank
 - extension `full` mode keeps heavy screenshot/DOM/storage capture on the SW/CDP side
 - content-script side in `full` mode skips page-thread SnapDOM/outerHTML/storage snapshot loops
 - extension `full` mode does not inject fetch/xhr/console hooks into the page
 - pipeline ingest is batched across SW ↔ offscreen and web-sdk recorder ↔ pipeline boundaries
 - pipeline drain is chunked to avoid giant `postMessage` payloads during stop/export
-- injected network body capture is rate-limited (count + bytes per minute) to reduce page jank
+- injected network body capture is rate-limited and gated by runtime config to reduce page jank
 
 ## Quick start
 

@@ -53,7 +53,7 @@ Persist `derived.salt` + `derived.iterations` using your own key-management poli
 - Keeps `freezeOnError=true` for uncaught JS exceptions/rejections
 - Defaults `freezeOnNetworkFailure=false` and `freezeOnLongTaskSpike=false`
 - Uses lower-frequency sampling defaults (`mousemoveHz=14`, `scrollHz=10`, `domFlushMs=160`)
-- Caps default body capture at `128 KiB`
+- Disables response-body capture by default (`bodyCaptureMaxBytes=0`) so lite sessions stay page-thread friendly
 
 You can still override these through `options.config`.
 

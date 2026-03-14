@@ -178,4 +178,26 @@ describe("lite-materializer", () => {
 
     expect(result).toBeNull();
   });
+
+  it("treats a zero body-capture budget as disabled", async () => {
+    const config = cloneConfig();
+    config.sampling.bodyCaptureMaxBytes = 0;
+
+    const result = await materializeLiteRawEvent(
+      createRawEvent("networkBody", {
+        reqId: "R-4",
+        url: "https://example.test/api/private",
+        mimeType: "application/json",
+        encoding: "utf8",
+        body: '{"token":"abc"}',
+        size: 15
+      }),
+      {
+        config,
+        putBlob: async () => "unused"
+      }
+    );
+
+    expect(result).toBeNull();
+  });
 });

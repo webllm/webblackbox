@@ -104,8 +104,12 @@ export function normalizeBodyCaptureMaxBytes(
 ): number {
   const value = asFiniteNumber(candidate);
 
-  if (value === null || value <= 0) {
+  if (value === null) {
     return fallbackMaxBytes;
+  }
+
+  if (value <= 0) {
+    return 0;
   }
 
   return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
@@ -312,12 +316,14 @@ function buildDefaultRule(
       ? options.defaultMimeAllowlist
       : DEFAULT_BODY_MIME_ALLOWLIST;
 
+  const maxBytes = normalizeBodyCaptureMaxBytes(
+    config.sampling.bodyCaptureMaxBytes,
+    options.fallbackMaxBytes ?? DEFAULT_FALLBACK_MAX_BYTES
+  );
+
   return {
-    enabled: true,
-    maxBytes: normalizeBodyCaptureMaxBytes(
-      config.sampling.bodyCaptureMaxBytes,
-      options.fallbackMaxBytes ?? DEFAULT_FALLBACK_MAX_BYTES
-    ),
+    enabled: maxBytes > 0,
+    maxBytes,
     mimeAllowlist: normalizeMimeAllowlist(defaultMimeAllowlist)
   };
 }

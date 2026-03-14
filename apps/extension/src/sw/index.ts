@@ -36,6 +36,7 @@ import {
 import {
   isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
   isMimeAllowed as isMimeAllowedUtil,
+  normalizeBodyCaptureMaxBytes as normalizeBodyCaptureMaxBytesUtil,
   isTextualMimeType as isTextualMimeTypeUtil,
   normalizeMimeType as normalizeMimeTypeUtil,
   redactBodyText as redactBodyTextUtil,
@@ -173,6 +174,7 @@ type RecordingSampling = {
   domFlushMs: number;
   snapshotIntervalMs: number;
   screenshotIdleMs: number;
+  bodyCaptureMaxBytes: number;
 };
 
 type LiteBodyCaptureRule = {
@@ -205,7 +207,6 @@ const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
 const POINTER_STALE_MS = 2_500;
 const NETWORK_BODY_MAX_BYTES = 256 * 1024;
 const FULL_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
-const LITE_MODE_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
 const FULL_MODE_BODY_CAPTURE_MAX_PER_MINUTE = 80;
 const FULL_MODE_BODY_CAPTURE_MAX_PER_SESSION = 2_000;
 const FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS = 15_000;
@@ -2851,12 +2852,13 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
     scrollHz: Math.max(1, Math.round(asFiniteNumber(sampling.scrollHz) ?? 15)),
     domFlushMs: normalizeSamplingInterval(sampling.domFlushMs, 100),
     snapshotIntervalMs: normalizeSamplingInterval(sampling.snapshotIntervalMs, 20_000),
-    screenshotIdleMs: normalizeSamplingInterval(sampling.screenshotIdleMs, 8_000)
+    screenshotIdleMs: normalizeSamplingInterval(sampling.screenshotIdleMs, 8_000),
+    bodyCaptureMaxBytes: normalizeBodyCaptureMaxBytesUtil(sampling.bodyCaptureMaxBytes, 0)
   };
 }
 
 function shouldInjectHooksForMode(mode: CaptureMode): boolean {
-  return mode === "lite" || mode === "full";
+  return mode === "lite";
 }
 
 function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDownloadResult {
@@ -3298,7 +3300,7 @@ function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFI
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
       screenshotIdleMs: 12_000,
-      bodyCaptureMaxBytes: LITE_MODE_BODY_CAPTURE_MAX_BYTES
+      bodyCaptureMaxBytes: 0
     }
   };
 }

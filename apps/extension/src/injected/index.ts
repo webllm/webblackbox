@@ -1,3 +1,5 @@
 import { installInjectedLiteCaptureHooks } from "webblackbox/injected-hooks";
 
-installInjectedLiteCaptureHooks();
+installInjectedLiteCaptureHooks({
+  bodyCaptureMaxBytes: 0
+});

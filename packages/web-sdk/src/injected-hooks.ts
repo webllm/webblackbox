@@ -1,7 +1,7 @@
 type CapturePayload = Record<string, unknown>;
 
 const DEFAULT_FLAG = "__WEBBLACKBOX_INJECTED__";
-const NETWORK_BODY_CAPTURE_MAX_BYTES = 128 * 1024;
+const NETWORK_BODY_CAPTURE_DEFAULT_MAX_BYTES = 128 * 1024;
 const NETWORK_BODY_CAPTURE_MAX_PER_MINUTE = 45;
 const NETWORK_BODY_CAPTURE_MAX_BYTES_PER_MINUTE = 4 * 1024 * 1024;
 const NOISY_CONSOLE_MAX_PER_SEC = 40;
@@ -9,9 +9,17 @@ const NOISY_CONSOLE_METHODS = new Set(["log", "info", "debug", "dir", "dirxml", 
 const SAFE_SERIALIZE_MAX_DEPTH = 3;
 const SAFE_SERIALIZE_MAX_PROPERTIES = 24;
 const SAFE_SERIALIZE_MAX_STRING_CHARS = 1_200;
+const EMIT_FLUSH_MAX_EVENTS = 48;
 
 /** `window.postMessage` source tag used by injected lite capture hooks. */
 export const INJECTED_MESSAGE_SOURCE = "webblackbox-injected";
+
+/** DOM event used to push runtime capture config into the injected page world. */
+export const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
+
+export type InjectedCaptureConfig = {
+  bodyCaptureMaxBytes?: number;
+};
 
 /** Message contract emitted by injected hooks into the page window. */
 export type InjectedCaptureWindowMessage =
@@ -25,6 +33,16 @@ export type InjectedCaptureWindowMessage =
     }
   | {
       source: typeof INJECTED_MESSAGE_SOURCE;
+      kind: "capture-events";
+      events: Array<{
+        rawType: string;
+        payload: CapturePayload;
+        t: number;
+        mono: number;
+      }>;
+    }
+  | {
+      source: typeof INJECTED_MESSAGE_SOURCE;
       kind: "marker";
       message?: string;
       t: number;
@@ -35,6 +53,8 @@ export type InjectedCaptureWindowMessage =
 export type InjectedHooksOptions = {
   /** Global flag name used to prevent duplicate hook installation. */
   flag?: string;
+  /** Per-response capture budget; `0` disables response-body sampling. */
+  bodyCaptureMaxBytes?: number;
 };
 
 /**
@@ -52,12 +72,40 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   let bodyWindowStartedAt = Date.now();
   let bodyWindowCount = 0;
   let bodyWindowBytes = 0;
+  let emitFlushTimer = 0;
+  const pendingCaptureEvents: Array<{
+    rawType: string;
+    payload: CapturePayload;
+    t: number;
+    mono: number;
+  }> = [];
+  let networkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
+    options.bodyCaptureMaxBytes
+  );
 
   if (windowFlags[flag]) {
+    if (Object.prototype.hasOwnProperty.call(options, "bodyCaptureMaxBytes")) {
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: {
+            bodyCaptureMaxBytes: options.bodyCaptureMaxBytes
+          }
+        })
+      );
+    }
+
     return;
   }
 
   windowFlags[flag] = true;
+
+  window.addEventListener(INJECTED_CAPTURE_CONFIG_EVENT, (event: Event) => {
+    const detail = (event as CustomEvent<InjectedCaptureConfig>).detail;
+    networkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
+      detail?.bodyCaptureMaxBytes
+    );
+  });
+
   installConsoleHooks();
   installErrorHooks();
   installStorageHooks();
@@ -70,14 +118,59 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   });
 
   function emit(rawType: string, payload: CapturePayload): void {
-    const message: InjectedCaptureWindowMessage = {
-      source: INJECTED_MESSAGE_SOURCE,
-      kind: "capture-event",
+    pendingCaptureEvents.push({
       rawType,
       payload,
       t: Date.now(),
       mono: monotonicTime()
-    };
+    });
+
+    if (pendingCaptureEvents.length >= EMIT_FLUSH_MAX_EVENTS) {
+      flushPendingCaptureEvents();
+      return;
+    }
+
+    schedulePendingCaptureFlush();
+  }
+
+  function schedulePendingCaptureFlush(): void {
+    if (emitFlushTimer > 0) {
+      return;
+    }
+
+    emitFlushTimer = window.setTimeout(() => {
+      emitFlushTimer = 0;
+      flushPendingCaptureEvents();
+    }, 0);
+  }
+
+  function flushPendingCaptureEvents(): void {
+    if (emitFlushTimer > 0) {
+      clearTimeout(emitFlushTimer);
+      emitFlushTimer = 0;
+    }
+
+    if (pendingCaptureEvents.length === 0) {
+      return;
+    }
+
+    const events = pendingCaptureEvents.splice(0, pendingCaptureEvents.length);
+    const first = events[0];
+    const message: InjectedCaptureWindowMessage =
+      events.length === 1 && first
+        ? {
+            source: INJECTED_MESSAGE_SOURCE,
+            kind: "capture-event",
+            rawType: first.rawType,
+            payload: first.payload,
+            t: first.t,
+            mono: first.mono
+          }
+        : {
+            source: INJECTED_MESSAGE_SOURCE,
+            kind: "capture-events",
+            events
+          };
 
     window.postMessage(message, "*");
   }
@@ -87,6 +180,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   }
 
   function allowBodyCapture(sampledBytes: number): boolean {
+    if (networkBodyCaptureMaxBytes <= 0 || sampledBytes > networkBodyCaptureMaxBytes) {
+      return false;
+    }
+
     const now = Date.now();
 
     if (now - bodyWindowStartedAt >= 60_000) {
@@ -634,14 +731,17 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
     const encodedDataLength = parseHeaderInt(response.headers.get("content-length"));
 
-    if (
-      typeof encodedDataLength === "number" &&
-      encodedDataLength > NETWORK_BODY_CAPTURE_MAX_BYTES
-    ) {
+    const maxBodyCaptureBytes = networkBodyCaptureMaxBytes;
+
+    if (maxBodyCaptureBytes <= 0) {
       return;
     }
 
-    const sampled = await readFetchBodySample(response, NETWORK_BODY_CAPTURE_MAX_BYTES);
+    if (typeof encodedDataLength === "number" && encodedDataLength > maxBodyCaptureBytes) {
+      return;
+    }
+
+    const sampled = await readFetchBodySample(response, maxBodyCaptureBytes);
 
     if (!sampled || sampled.body.length === 0) {
       return;
@@ -688,10 +788,13 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
     const encodedDataLength = parseHeaderInt(xhr.getResponseHeader("content-length"));
 
-    if (
-      typeof encodedDataLength === "number" &&
-      encodedDataLength > NETWORK_BODY_CAPTURE_MAX_BYTES
-    ) {
+    const maxBodyCaptureBytes = networkBodyCaptureMaxBytes;
+
+    if (maxBodyCaptureBytes <= 0) {
+      return;
+    }
+
+    if (typeof encodedDataLength === "number" && encodedDataLength > maxBodyCaptureBytes) {
       return;
     }
 
@@ -701,7 +804,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       return;
     }
 
-    const clipped = clipUtf8Text(bodyText, NETWORK_BODY_CAPTURE_MAX_BYTES);
+    const clipped = clipUtf8Text(bodyText, maxBodyCaptureBytes);
     const sampledSize = new TextEncoder().encode(clipped.value).byteLength;
 
     if (!allowBodyCapture(sampledSize)) {
@@ -927,6 +1030,17 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   function nextRequestId(prefix: "fetch" | "xhr" | "sse"): string {
     networkRequestSeq += 1;
     return `${prefix}-${Date.now().toString(36)}-${networkRequestSeq.toString(36)}`;
+  }
+
+  function normalizeConfiguredBodyCaptureMaxBytes(candidate: unknown): number {
+    if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) {
+      return 0;
+    }
+
+    return Math.max(
+      4 * 1024,
+      Math.min(8 * 1024 * 1024, Math.round(candidate ?? NETWORK_BODY_CAPTURE_DEFAULT_MAX_BYTES))
+    );
   }
 
   function resolveFetchRequestMeta(args: Parameters<typeof fetch>): {

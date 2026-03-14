@@ -3,12 +3,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  INJECTED_CAPTURE_CONFIG_EVENT,
   INJECTED_MESSAGE_SOURCE,
+  type InjectedCaptureConfig,
   type InjectedCaptureWindowMessage,
   installInjectedLiteCaptureHooks
 } from "./injected-hooks.js";
 
-type CaptureEventMessage = Extract<InjectedCaptureWindowMessage, { kind: "capture-event" }>;
+type CaptureEventMessage = {
+  rawType: string;
+  payload: Record<string, unknown>;
+  t: number;
+  mono: number;
+};
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -28,8 +35,22 @@ describe("injected-hooks", () => {
     vi.spyOn(window, "postMessage").mockImplementation((message: unknown) => {
       const row = message as InjectedCaptureWindowMessage;
 
-      if (row?.source === INJECTED_MESSAGE_SOURCE && row.kind === "capture-event") {
-        captured.push(row);
+      if (row?.source !== INJECTED_MESSAGE_SOURCE) {
+        return;
+      }
+
+      if (row.kind === "capture-event") {
+        captured.push({
+          rawType: row.rawType,
+          payload: row.payload,
+          t: row.t,
+          mono: row.mono
+        });
+        return;
+      }
+
+      if (row.kind === "capture-events" && Array.isArray(row.events)) {
+        captured.push(...row.events);
       }
     });
   });
@@ -41,11 +62,12 @@ describe("injected-hooks", () => {
     sessionStorage.clear();
   });
 
-  it("is idempotent for the same flag and emits ready + console events", () => {
+  it("is idempotent for the same flag and emits ready + console events", async () => {
     const flag = "__WB_TEST_INJECTED_CONSOLE__";
 
     installInjectedLiteCaptureHooks({ flag });
     installInjectedLiteCaptureHooks({ flag });
+    await delay(10);
 
     const notices = captured.filter(
       (message) =>
@@ -57,6 +79,7 @@ describe("injected-hooks", () => {
 
     const markerText = `wb-console-${Date.now()}`;
     console.info(markerText, { ok: true });
+    await delay(10);
 
     const consoleEvents = captured.filter((message) => message.rawType === "console");
     expect(consoleEvents.length).toBeGreaterThan(0);
@@ -82,7 +105,10 @@ describe("injected-hooks", () => {
       });
     }) as typeof fetch;
 
-    installInjectedLiteCaptureHooks({ flag });
+    installInjectedLiteCaptureHooks({
+      flag,
+      bodyCaptureMaxBytes: 128 * 1024
+    });
 
     await window.fetch("https://example.test/api/demo", {
       method: "POST",
@@ -129,13 +155,58 @@ describe("injected-hooks", () => {
     expect(String((networkBody?.payload as { body?: unknown }).body ?? "")).toContain('"ok":true');
   });
 
-  it("serializes invalid Date values without throwing", () => {
+  it("skips response-body sampling until capture config enables it", async () => {
+    const flag = "__WB_TEST_INJECTED_FETCH_CONFIG__";
+
+    window.fetch = vi.fn(async () => {
+      return new Response('{"ok":true,"token":"abc"}', {
+        status: 200,
+        headers: {
+          "content-type": "application/json"
+        }
+      });
+    }) as typeof fetch;
+
+    installInjectedLiteCaptureHooks({ flag });
+
+    await window.fetch("https://example.test/api/disabled");
+    await delay(20);
+
+    expect(captured.some((message) => message.rawType === "networkBody")).toBe(false);
+
+    window.dispatchEvent(
+      new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+        detail: {
+          bodyCaptureMaxBytes: 64 * 1024
+        }
+      })
+    );
+
+    await window.fetch("https://example.test/api/enabled");
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (captured.some((message) => message.rawType === "networkBody")) {
+        break;
+      }
+
+      await delay(5);
+    }
+
+    const networkBody = captured.find((message) => message.rawType === "networkBody");
+    expect(networkBody?.payload).toMatchObject({
+      source: "fetch",
+      url: "https://example.test/api/enabled"
+    });
+  });
+
+  it("serializes invalid Date values without throwing", async () => {
     const flag = "__WB_TEST_INJECTED_INVALID_DATE__";
     installInjectedLiteCaptureHooks({ flag });
 
     expect(() => {
       console.log(new Date("this-is-not-a-date"));
     }).not.toThrow();
+    await delay(10);
 
     const consoleEvent = captured.filter((message) => message.rawType === "console").at(-1);
     const payload = (consoleEvent?.payload ?? {}) as {
@@ -147,7 +218,7 @@ describe("injected-hooks", () => {
     expect(String(payload.text ?? "")).toContain("Invalid Date");
   });
 
-  it("handles objects with throwing getters without breaking console", () => {
+  it("handles objects with throwing getters without breaking console", async () => {
     const flag = "__WB_TEST_INJECTED_THROWING_GETTER__";
     installInjectedLiteCaptureHooks({ flag });
 
@@ -162,6 +233,7 @@ describe("injected-hooks", () => {
     expect(() => {
       console.log(value);
     }).not.toThrow();
+    await delay(10);
 
     const consoleEvent = captured.filter((message) => message.rawType === "console").at(-1);
     const payload = (consoleEvent?.payload ?? {}) as {
@@ -171,7 +243,7 @@ describe("injected-hooks", () => {
     expect(payload.args?.[0]).toEqual({ boom: "[Unreadable]" });
   });
 
-  it("does not duplicate xhr end events when reusing the same xhr instance", () => {
+  it("does not duplicate xhr end events when reusing the same xhr instance", async () => {
     vi.spyOn(XMLHttpRequest.prototype, "open").mockImplementation(() => undefined);
     vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => undefined);
     vi.spyOn(XMLHttpRequest.prototype, "getResponseHeader").mockImplementation(() => null);
@@ -188,6 +260,7 @@ describe("injected-hooks", () => {
     xhr.open("GET", "https://example.test/second");
     xhr.send();
     xhr.dispatchEvent(new Event("loadend"));
+    await delay(10);
 
     const endEvents = captured.filter(
       (message) =>
@@ -197,7 +270,7 @@ describe("injected-hooks", () => {
     expect(endEvents).toHaveLength(2);
   });
 
-  it("preserves xhr open argument shape without forcing null credentials", () => {
+  it("preserves xhr open argument shape without forcing null credentials", async () => {
     const openSpy = vi.spyOn(XMLHttpRequest.prototype, "open").mockImplementation(() => undefined);
     vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => undefined);
 
@@ -207,6 +280,7 @@ describe("injected-hooks", () => {
     const xhr = new XMLHttpRequest();
     xhr.open("GET", "https://example.test/no-auth");
     xhr.open("GET", "https://example.test/with-auth", true, "demo-user", "demo-pass");
+    await delay(10);
 
     const firstCall = openSpy.mock.calls[0];
     const secondCall = openSpy.mock.calls[1];

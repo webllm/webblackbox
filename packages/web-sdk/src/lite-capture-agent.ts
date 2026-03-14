@@ -15,6 +15,7 @@ const SCREENSHOT_WEBP_QUALITY = 0.66;
 const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
 const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
 const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
+const START_CAPTURE_DEFER_MS = 2_000;
 const EVENT_BUFFER_FLUSH_DELAY_MS = 180;
 const EVENT_BUFFER_FORCE_FLUSH_SIZE = 120;
 const EVENT_BUFFER_EMIT_CHUNK_SIZE = 120;
@@ -91,6 +92,7 @@ export class LiteCaptureAgent {
   private mutationObserver: MutationObserver | null = null;
   private snapshotTimer = 0;
   private screenshotTimer = 0;
+  private startCaptureTimer = 0;
   private mutationFlushTimer = 0;
   private flushTimer = 0;
   private lastScrollTime = 0;
@@ -224,21 +226,40 @@ export class LiteCaptureAgent {
       }
 
       if (data.kind === "capture-event" && typeof data.rawType === "string") {
-        this.queueRawEvent({
-          source: "content",
-          rawType: data.rawType,
-          tabId: this.tabId,
-          sid: this.sid,
-          t: typeof data.t === "number" ? data.t : Date.now(),
-          mono: typeof data.mono === "number" ? data.mono : monotonicTime(),
-          payload: data.payload ?? {}
-        });
+        this.queueInjectedRawEvent(data);
+        return;
+      }
+
+      if (data.kind === "capture-events" && Array.isArray(data.events)) {
+        for (const item of data.events) {
+          if (item && typeof item.rawType === "string") {
+            this.queueInjectedRawEvent(item);
+          }
+        }
+
         return;
       }
 
       if (data.kind === "marker") {
         this.emitMarker(typeof data.message === "string" ? data.message : "Marker");
       }
+    });
+  }
+
+  private queueInjectedRawEvent(event: {
+    rawType: string;
+    payload?: Record<string, unknown>;
+    t?: number;
+    mono?: number;
+  }): void {
+    this.queueRawEvent({
+      source: "content",
+      rawType: event.rawType,
+      tabId: this.tabId,
+      sid: this.sid,
+      t: typeof event.t === "number" ? event.t : Date.now(),
+      mono: typeof event.mono === "number" ? event.mono : monotonicTime(),
+      payload: event.payload ?? {}
     });
   }
 
@@ -602,18 +623,7 @@ export class LiteCaptureAgent {
     }
 
     this.emitViewportSnapshot("start");
-
-    if (this.shouldCaptureDomSnapshots()) {
-      this.emitDomSnapshot("start");
-    }
-
-    if (this.shouldCaptureStorageSnapshots()) {
-      this.emitStorageSnapshots("start");
-    }
-
-    if (this.shouldCaptureScreenshots()) {
-      this.scheduleScreenshotCapture("start", true);
-    }
+    this.scheduleDeferredStartCapture();
   }
 
   private stopMutationAndSnapshots(): void {
@@ -628,6 +638,11 @@ export class LiteCaptureAgent {
     if (this.screenshotTimer > 0) {
       clearInterval(this.screenshotTimer);
       this.screenshotTimer = 0;
+    }
+
+    if (this.startCaptureTimer > 0) {
+      clearTimeout(this.startCaptureTimer);
+      this.startCaptureTimer = 0;
     }
 
     this.screenshotPendingReason = null;
@@ -797,6 +812,41 @@ export class LiteCaptureAgent {
 
   private emitLifecycleEvent(rawType: string, payload: Record<string, unknown>): void {
     this.queueEvent(rawType, payload);
+  }
+
+  private scheduleDeferredStartCapture(): void {
+    if (this.startCaptureTimer > 0) {
+      clearTimeout(this.startCaptureTimer);
+      this.startCaptureTimer = 0;
+    }
+
+    if (
+      !this.shouldCaptureDomSnapshots() &&
+      !this.shouldCaptureStorageSnapshots() &&
+      !this.shouldCaptureScreenshots()
+    ) {
+      return;
+    }
+
+    this.startCaptureTimer = window.setTimeout(() => {
+      this.startCaptureTimer = 0;
+
+      if (!this.recordingActive) {
+        return;
+      }
+
+      if (this.shouldCaptureDomSnapshots()) {
+        this.emitDomSnapshot("start");
+      }
+
+      if (this.shouldCaptureStorageSnapshots()) {
+        this.emitStorageSnapshots("start");
+      }
+
+      if (this.shouldCaptureScreenshots()) {
+        this.scheduleScreenshotCapture("start", true);
+      }
+    }, START_CAPTURE_DEFER_MS);
   }
 
   private scheduleScreenshotCapture(reason: string, prioritize = false): void {

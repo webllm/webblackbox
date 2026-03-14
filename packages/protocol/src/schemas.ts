@@ -66,7 +66,7 @@ export const samplingProfileSchema = z
     screenshotIdleMs: z.number().int().positive(),
     snapshotIntervalMs: z.number().int().positive(),
     actionWindowMs: z.number().int().positive(),
-    bodyCaptureMaxBytes: z.number().int().positive()
+    bodyCaptureMaxBytes: z.number().int().nonnegative()
   })
   .strict();
 

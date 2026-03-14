@@ -331,13 +331,15 @@ function resolveLiteBodyCaptureRule(
   limits: LiteMaterializerContext["limits"]
 ): LiteBodyCaptureRule {
   const defaultRule: LiteBodyCaptureRule = {
-    enabled: true,
+    enabled: false,
     maxBytes: normalizeBodyCaptureMaxBytes(
       config.sampling.bodyCaptureMaxBytes,
       limits?.defaultBodyCaptureMaxBytes
     ),
     mimeAllowlist: normalizeMimeAllowlist(DEFAULT_BODY_MIME_ALLOWLIST)
   };
+
+  defaultRule.enabled = defaultRule.maxBytes > 0;
 
   if (!url) {
     return defaultRule;
@@ -396,8 +398,12 @@ function normalizeBodyCaptureMaxBytes(candidate: unknown, defaultMaxBytes?: numb
   const value = asFiniteNumber(candidate);
   const fallback = defaultMaxBytes ?? DEFAULT_NETWORK_BODY_MAX_BYTES;
 
-  if (value === null || value <= 0) {
+  if (value === null) {
     return fallback;
+  }
+
+  if (value <= 0) {
+    return 0;
   }
 
   return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));

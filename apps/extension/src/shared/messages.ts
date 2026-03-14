@@ -77,7 +77,12 @@ export type RecordingStatusMessage = {
   mode?: CaptureMode;
   sampling?: Pick<
     SamplingProfile,
-    "mousemoveHz" | "scrollHz" | "domFlushMs" | "snapshotIntervalMs" | "screenshotIdleMs"
+    | "mousemoveHz"
+    | "scrollHz"
+    | "domFlushMs"
+    | "snapshotIntervalMs"
+    | "screenshotIdleMs"
+    | "bodyCaptureMaxBytes"
   >;
 };
 

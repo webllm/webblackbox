@@ -57,7 +57,10 @@ function render(container: HTMLElement, options: OptionsState): void {
       <input id="screenshotIdleMs" type="number" min="250" max="120000" value="${config.sampling.screenshotIdleMs}" />
 
       <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
-      <input id="bodyCaptureMaxBytes" type="number" min="1024" max="1048576" value="${config.sampling.bodyCaptureMaxBytes}" />
+      <input id="bodyCaptureMaxBytes" type="number" min="0" max="1048576" value="${config.sampling.bodyCaptureMaxBytes}" />
+      <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
+        Set to <code>0</code> to disable page-side response-body sampling in lite mode.
+      </p>
 
       <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
         <input id="freezeOnError" type="checkbox" ${config.freezeOnError ? "checked" : ""} />
@@ -272,7 +275,7 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
         ? Math.min(120_000, Math.max(250, screenshotIdleMs))
         : DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs,
       bodyCaptureMaxBytes: Number.isFinite(bodyCaptureMaxBytes)
-        ? Math.min(1_048_576, Math.max(1_024, Math.round(bodyCaptureMaxBytes)))
+        ? Math.min(1_048_576, Math.max(0, Math.round(bodyCaptureMaxBytes)))
         : DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes
     },
     redaction: {
@@ -291,7 +294,13 @@ function normalizeOptionsConfig(
   return {
     ...config,
     freezeOnNetworkFailure: false,
-    freezeOnLongTaskSpike: false
+    freezeOnLongTaskSpike: false,
+    sampling: {
+      ...config.sampling,
+      bodyCaptureMaxBytes: Number.isFinite(config.sampling.bodyCaptureMaxBytes)
+        ? Math.min(1_048_576, Math.max(0, Math.round(config.sampling.bodyCaptureMaxBytes)))
+        : DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes
+    }
   };
 }
 
