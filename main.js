@@ -30418,6 +30418,7 @@ Select.displayName = "Select";
 
 // src/shell.tsx
 var import_jsx_runtime6 = __toESM(require_jsx_runtime(), 1);
+var playerVersion = true ? "0.1.0" : "0.1.0";
 function PlayerShell() {
   return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("main", { id: "player-shell", className: "shell wb-shell", children: [
     /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("header", { className: "toolbar card", role: "banner", children: [
@@ -30427,13 +30428,27 @@ function PlayerShell() {
           /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "brand", children: "WebBlackbox" })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "toolbar-separator", "aria-hidden": "true" }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "toolbar-title", children: "Player" })
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "toolbar-title", children: "Player" }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { className: "toolbar-version", "aria-label": "Player version", children: [
+          "v",
+          playerVersion
+        ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "toolbar-loaders", children: [
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("label", { className: "upload", htmlFor: "archive-input", children: "Load Archive" }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(Input, { id: "archive-input", type: "file", accept: ".webblackbox,.zip" }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("label", { className: "upload secondary", htmlFor: "compare-input", children: "Load Compare" }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(Input, { id: "compare-input", type: "file", accept: ".webblackbox,.zip" })
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(Input, { id: "compare-input", type: "file", accept: ".webblackbox,.zip" }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+          "a",
+          {
+            className: "upload secondary upload-link",
+            href: "https://github.com/webllm/webblackbox",
+            target: "_blank",
+            rel: "noreferrer",
+            children: "GitHub Repo"
+          }
+        )
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("section", { className: "status-bar card", "aria-live": "polite", children: [

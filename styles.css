@@ -331,6 +331,21 @@ input[type="file"],
   font-size: 11px;
 }
 
+.toolbar-version {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--sys-color-divider);
+  border-radius: 999px;
+  background: var(--sys-color-surface1);
+  color: var(--sys-color-on-surface-subtle);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
 .toolbar-loaders {
   display: inline-flex;
   align-items: center;
@@ -360,6 +375,10 @@ input[type="file"],
 
 .upload.secondary {
   color: var(--sys-color-on-surface-subtle);
+}
+
+.upload-link {
+  text-decoration: none;
 }
 
 .status-bar {
