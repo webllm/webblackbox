@@ -13,6 +13,7 @@ WebBlackbox sessions can run for long periods and produce large archives. We tra
 
 In addition, runtime capture now prefers lower page-thread overhead:
 
+- supported runtime profiles in the extension are `lite` and `full`; there is no shipped `balanced` profile
 - extension `lite` disables page-side response-body sampling by default; opt in only when network body payloads are required
 - extension `lite` defers heavy start-of-recording DOM/storage/screenshot capture to avoid foreground-tab activation jank
 - extension `full` mode keeps heavy screenshot/DOM/storage capture on the SW/CDP side

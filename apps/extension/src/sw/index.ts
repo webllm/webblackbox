@@ -33,6 +33,7 @@ import {
   normalizePerformanceBudget,
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
+import { applyModeProductBoundary } from "../shared/mode-profile.js";
 import {
   isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
   isMimeAllowed as isMimeAllowedUtil,
@@ -3462,7 +3463,7 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
       : baseConfig.sitePolicies
   };
 
-  return applyModeRuntimeConfig(mode, mergedConfig);
+  return applyModeProductBoundary(mode, mergedConfig);
 }
 
 async function loadPerformanceBudgetConfig(): Promise<PerformanceBudgetConfig> {
@@ -3513,21 +3514,6 @@ function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFI
       bodyCaptureMaxBytes: 0
     }
   };
-}
-
-function applyModeRuntimeConfig(
-  mode: CaptureMode,
-  config: typeof DEFAULT_RECORDER_CONFIG
-): typeof DEFAULT_RECORDER_CONFIG {
-  if (mode === "full" || mode === "lite") {
-    return {
-      ...config,
-      freezeOnNetworkFailure: false,
-      freezeOnLongTaskSpike: false
-    };
-  }
-
-  return config;
 }
 
 async function updateSessionAnnotation(

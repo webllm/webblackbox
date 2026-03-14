@@ -179,8 +179,11 @@ When a freeze condition is detected (uncaught JS error / unhandled rejection, or
 
 The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. Default values are defined in `DEFAULT_RECORDER_CONFIG`, then mode-specific runtime safety tuning is applied:
 
+- Supported runtime profiles: `lite`, `full`
+- `balanced` is not currently a shipped capture mode in this repo
+
 - `lite`: lower sampling pressure + perf-trigger freeze disabled (`freezeOnNetworkFailure=false`, `freezeOnLongTaskSpike=false`)
-  - page-side response-body sampling is disabled by default (`bodyCaptureMaxBytes=0`) to avoid fetch/xhr main-thread jank
+  - page-side response-body sampling is disabled and runtime screenshot cadence is clamped off (`bodyCaptureMaxBytes=0`, `screenshotIdleMs=0`)
   - initial DOM/storage/screenshot capture is deferred briefly after start so the tab does not stall at record activation
 - `full`: same perf-freeze disable + stricter sampling/body-capture limits
   - page-side heavy capture loops (SnapDOM screenshots, outerHTML snapshots, storage snapshots) are skipped to reduce main-thread impact
@@ -190,9 +193,9 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
 Body capture sizing note:
 
 - Protocol baseline (`DEFAULT_RECORDER_CONFIG`) sets `bodyCaptureMaxBytes=256 KiB`.
-- Extension `lite` defaults set `bodyCaptureMaxBytes=0` so page-side response-body sampling stays off unless you opt in.
+- Extension `lite` forces `bodyCaptureMaxBytes=0` and `screenshotIdleMs=0` to keep page-thread capture lightweight.
 - Extension `full` defaults clamp CDP-side body capture to `128 KiB` for safer long-session behavior.
-- Options can still override this cap per profile.
+- Options can still override the full-mode cap per profile.
 
 The SW ↔ offscreen pipeline path also uses ingest batching with chunked drain to reduce message round-trips and avoid giant postMessage payloads under high event volume.
 

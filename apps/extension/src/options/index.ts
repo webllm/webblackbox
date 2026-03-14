@@ -1,6 +1,7 @@
 import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
+import { MODE_PRODUCT_PROFILES } from "../shared/mode-profile.js";
 import {
   DEFAULT_PERFORMANCE_BUDGET,
   normalizePerformanceBudget,
@@ -34,6 +35,13 @@ function render(container: HTMLElement, options: OptionsState): void {
     <section class="card" style="max-width:760px;">
       <h1>Capture Settings</h1>
       <p>Configure redaction and sampling defaults per browser profile.</p>
+      <section style="margin-top:14px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:rgba(20,33,61,0.02);display:grid;gap:10px;">
+        <h2 style="margin:0;font-size:14px;">Runtime Profiles</h2>
+        <p style="margin:0;font-size:12px;opacity:0.78;">
+          WebBlackbox currently exposes two runtime profiles only: <code>lite</code> and <code>full</code>. There is no <code>balanced</code> mode in the shipped extension build.
+        </p>
+        ${renderModeProfileMarkup()}
+      </section>
 
       <label style="display:block;margin:12px 0 6px;">Ring Buffer (minutes)</label>
       <input id="ringBufferMinutes" type="number" min="1" max="120" value="${config.ringBufferMinutes}" />
@@ -56,13 +64,13 @@ function render(container: HTMLElement, options: OptionsState): void {
       <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
       <input id="screenshotIdleMs" type="number" min="0" max="120000" value="${config.sampling.screenshotIdleMs}" />
       <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
-        Set to <code>0</code> to disable record-time screenshots for lite/full mode.
+        Lite ignores record-time screenshots and keeps this at <code>0</code>. Full mode uses this for browser-side screenshot cadence.
       </p>
 
       <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
       <input id="bodyCaptureMaxBytes" type="number" min="0" max="1048576" value="${config.sampling.bodyCaptureMaxBytes}" />
       <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
-        Set to <code>0</code> to disable page-side response-body sampling in lite mode.
+        Lite keeps page-side response-body capture disabled. In the extension, this knob only affects the capped browser-side body capture path used by full mode.
       </p>
 
       <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
@@ -143,6 +151,21 @@ function render(container: HTMLElement, options: OptionsState): void {
       performanceBudget: { ...DEFAULT_PERFORMANCE_BUDGET }
     });
   });
+}
+
+function renderModeProfileMarkup(): string {
+  return Object.entries(MODE_PRODUCT_PROFILES)
+    .map(([mode, profile]) => {
+      return `
+        <article style="padding:10px;border:1px solid rgba(0,0,0,0.08);border-radius:8px;background:rgba(255,255,255,0.72);display:grid;gap:4px;">
+          <strong>${profile.label} <code>${mode}</code></strong>
+          <span style="font-size:12px;opacity:0.84;">${profile.summary}</span>
+          <span style="font-size:12px;opacity:0.78;">Signals: ${profile.signals}</span>
+          <span style="font-size:12px;opacity:0.78;">Heavy capture: ${profile.heavyCapture}</span>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 async function loadOptionsState(): Promise<OptionsState> {
