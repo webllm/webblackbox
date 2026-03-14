@@ -20,6 +20,7 @@ describe("PlayerShell", () => {
     const repoLink = screen.getByRole("link", { name: "GitHub Repo" });
     const playbackRate = screen.getByLabelText("Speed");
     const playerVersion = screen.getByLabelText("Player version");
+    const stagePlaceholder = document.querySelector("#stage-placeholder");
 
     expect(archiveInput).toHaveAttribute("type", "file");
     expect(archiveInput).toHaveAttribute("accept", ".webblackbox,.zip");
@@ -27,6 +28,8 @@ describe("PlayerShell", () => {
     expect(compareInput).toHaveAttribute("accept", ".webblackbox,.zip");
     expect(repoLink).toHaveAttribute("href", "https://github.com/webllm/webblackbox");
     expect(playerVersion).toHaveTextContent("v0.1.0");
+    expect(stagePlaceholder?.tagName).toBe("LABEL");
+    expect(stagePlaceholder).toHaveAttribute("for", "archive-input");
 
     expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "-1s" })).toBeInTheDocument();

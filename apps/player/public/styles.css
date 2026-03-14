@@ -680,7 +680,7 @@ input[type="file"],
   text-align: center;
   font-size: 12px;
   background: rgba(23, 26, 34, 0.52);
-  pointer-events: none;
+  cursor: pointer;
 }
 
 .stage-placeholder__content {
@@ -700,6 +700,11 @@ input[type="file"],
 
 .stage-placeholder__text {
   margin: 0;
+}
+
+.stage-placeholder:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.9);
+  outline-offset: -6px;
 }
 
 .transport-row {

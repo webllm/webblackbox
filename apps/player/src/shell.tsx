@@ -182,7 +182,7 @@ export function PlayerShell(): React.JSX.Element {
           <img id="filmstrip-preview" alt="Screenshot playback" className="preview" hidden />
           <svg id="filmstrip-trail-svg" className="preview-trail" aria-hidden="true"></svg>
           <div id="filmstrip-cursor" className="preview-cursor" hidden></div>
-          <div id="stage-placeholder" className="stage-placeholder">
+          <label id="stage-placeholder" className="stage-placeholder" htmlFor="archive-input">
             <div className="stage-placeholder__content">
               <img
                 className="stage-placeholder__logo"
@@ -193,7 +193,7 @@ export function PlayerShell(): React.JSX.Element {
               />
               <p className="stage-placeholder__text">Load an archive to start playback.</p>
             </div>
-          </div>
+          </label>
         </div>
 
         <div className="transport-row">
