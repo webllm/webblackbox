@@ -1,24 +1,60 @@
 {
   "name": "@webblackbox/mcp-server",
   "version": "0.1.0",
+  "description": "MCP stdio server for inspecting and analyzing WebBlackbox archives.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "webblackbox-mcp-server": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webllm/webblackbox.git",
+    "directory": "apps/mcp-server"
+  },
+  "homepage": "https://github.com/webllm/webblackbox/tree/main/apps/mcp-server",
+  "bugs": {
+    "url": "https://github.com/webllm/webblackbox/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "webblackbox",
+    "session-replay",
+    "debugging"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "prebuild": "pnpm --filter @webblackbox/player-sdk build",
-    "build": "tsup src/index.ts --format esm --clean",
+    "dev": "tsx watch src/cli.ts",
+    "prebuild": "pnpm --filter @webblackbox/protocol build && pnpm --filter @webblackbox/player-sdk build",
+    "build": "tsup --config tsup.config.ts --clean",
+    "prepack": "pnpm run build",
     "prestart": "pnpm run build",
-    "start": "node dist/index.js",
-    "inspect": "pnpm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+    "start": "node dist/cli.js",
+    "inspect": "pnpm run build && npx @modelcontextprotocol/inspector node dist/cli.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.1",
-    "@webblackbox/mcp-core": "workspace:*",
     "@webblackbox/player-sdk": "workspace:*",
     "jszip": "^3.10.1",
     "zod": "^4.1.11"

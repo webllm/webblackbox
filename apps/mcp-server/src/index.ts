@@ -1,7 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { pathToFileURL } from "node:url";
-import { nowUtcInput, nowUtcIsoString } from "@webblackbox/mcp-core";
 import {
   compareSessions,
   compareSessionsInput,
@@ -25,10 +23,19 @@ import {
   summarizeSession
 } from "./session-tools.js";
 
+export const SERVER_NAME = "webblackbox-mcp-server";
+export const SERVER_VERSION =
+  typeof __MCP_SERVER_VERSION__ !== "undefined" ? __MCP_SERVER_VERSION__ : "0.1.0";
+export const nowUtcInput = {};
+
+export function nowUtcIsoString(): string {
+  return new Date().toISOString();
+}
+
 export function createServer(): McpServer {
   const server = new McpServer({
-    name: "webblackbox-mcp-server",
-    version: "0.1.0"
+    name: SERVER_NAME,
+    version: SERVER_VERSION
   });
 
   server.tool("health", "Health check", {}, async () => {
@@ -286,13 +293,6 @@ export async function startServer(): Promise<void> {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  startServer().catch((error: unknown) => {
-    console.error("Failed to start MCP server:", error);
-    process.exit(1);
-  });
 }
 
 function toTextPayload(value: unknown): { content: Array<{ type: "text"; text: string }> } {

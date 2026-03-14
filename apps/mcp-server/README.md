@@ -6,11 +6,29 @@ Model Context Protocol (MCP) server for AI-assisted web session analysis.
 
 This server exposes WebBlackbox session data and analysis tools via the [Model Context Protocol](https://modelcontextprotocol.io/), enabling AI assistants to inspect, query, and reason about recorded web sessions.
 
+## Run With npx
+
+```bash
+npx @webblackbox/mcp-server --help
+npx @webblackbox/mcp-server
+```
+
+The package starts over stdio by default, which is the mode expected by MCP clients.
+
+Example MCP client entry:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "@webblackbox/mcp-server"]
+}
+```
+
 ## Technology Stack
 
 - **Node.js / TypeScript**
 - **@modelcontextprotocol/sdk** — MCP server framework
-- **@webblackbox/mcp-core** — Core utility tools
+- **@webblackbox/player-sdk** — Archive loading and analysis
 
 ## Development
 
@@ -24,6 +42,14 @@ pnpm dev
 ```bash
 cd apps/mcp-server
 pnpm build
+```
+
+To inspect the packaged CLI locally:
+
+```bash
+cd apps/mcp-server
+node dist/cli.js --help
+node dist/cli.js --version
 ```
 
 ## Available Tools

@@ -5,11 +5,10 @@
     "lib": ["ES2023", "DOM"],
     "baseUrl": ".",
     "paths": {
-      "@webblackbox/mcp-core": ["../../packages/mcp-core/src/index.ts"],
       "@webblackbox/player-sdk": ["../../packages/player-sdk/src/index.ts"],
       "@webblackbox/protocol": ["../../packages/protocol/src/index.ts"]
     },
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "tsup.config.ts"]
 }
