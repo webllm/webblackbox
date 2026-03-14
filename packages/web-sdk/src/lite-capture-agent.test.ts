@@ -204,7 +204,7 @@ describe("LiteCaptureAgent", () => {
     document.body.innerHTML = "";
   });
 
-  it("does not capture runtime screenshots for click-driven actions by default", async () => {
+  it("does not capture click-driven action screenshots by default", async () => {
     const { agent, emitBatch } = createAgent();
 
     clickTarget();
@@ -221,9 +221,19 @@ describe("LiteCaptureAgent", () => {
     expect(snapdomToBlobMock).not.toHaveBeenCalled();
     expect(emitBatch).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(snapdomToBlobMock).not.toHaveBeenCalled();
+
+    agent.dispose();
+  });
+
+  it("captures a deferred start screenshot under the default lite sampling profile", async () => {
+    const { agent } = createAgent();
+
+    await vi.advanceTimersByTimeAsync(3_500);
+
+    expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
 
     agent.dispose();
   });

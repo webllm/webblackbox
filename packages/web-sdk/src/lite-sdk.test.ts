@@ -307,7 +307,7 @@ describe("WebBlackboxLiteSdk", () => {
       scrollHz: 10,
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
-      screenshotIdleMs: 0,
+      screenshotIdleMs: 8_000,
       bodyCaptureMaxBytes: 0
     });
 

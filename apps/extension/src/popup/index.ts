@@ -147,7 +147,7 @@ function render(container: HTMLElement): void {
         <p class="wb-popup__policy-title">Archive Policy</p>
         <label class="wb-toggle">
           <input id="export-include-screenshots" type="checkbox" />
-          <span>Include screenshots</span>
+          <span>Include screenshots in export</span>
         </label>
         <label class="wb-field-label" for="export-max-size-mb">Max archive size (MB)</label>
         <input id="export-max-size-mb" type="number" min="1" max="4096" step="1" class="wb-input" />

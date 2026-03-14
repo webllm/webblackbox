@@ -3510,7 +3510,7 @@ function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFI
       scrollHz: 10,
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
-      screenshotIdleMs: 0,
+      screenshotIdleMs: base.sampling.screenshotIdleMs,
       bodyCaptureMaxBytes: 0
     }
   };

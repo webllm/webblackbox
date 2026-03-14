@@ -14,7 +14,7 @@ export const MODE_PRODUCT_PROFILES: Record<CaptureMode, ModeProductProfile> = {
     signals:
       "click / input / scroll / pointer samples / mutation summary / browser-side network baseline",
     heavyCapture:
-      "runtime screenshots disabled, runtime DOM snapshots stay summary-only, page-side response-body capture disabled"
+      "idle screenshots enabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled"
   },
   full: {
     label: "Full",
@@ -40,7 +40,6 @@ export function applyModeProductBoundary(
   };
 
   if (mode === "lite") {
-    next.sampling.screenshotIdleMs = 0;
     next.sampling.bodyCaptureMaxBytes = 0;
   }
 

@@ -16,6 +16,7 @@ In addition, runtime capture now prefers lower page-thread overhead:
 - supported runtime profiles in the extension are `lite` and `full`; there is no shipped `balanced` profile
 - extension `lite` disables page-side response-body sampling by default; opt in only when network body payloads are required
 - extension `lite` defers heavy start-of-recording DOM/storage/screenshot capture to avoid foreground-tab activation jank
+- extension `lite` still keeps idle screenshots enabled by default; set `screenshotIdleMs=0` when a site needs a stricter no-screenshot profile
 - extension `content.js` is present at `document_start`, but its hot listeners and observers stay dormant until recording becomes active
 - extension `full` mode keeps heavy screenshot/DOM/storage capture on the SW/CDP side
 - content-script side in `full` mode skips page-thread SnapDOM/outerHTML/storage snapshot loops

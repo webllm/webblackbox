@@ -184,7 +184,8 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
 - `balanced` is not currently a shipped capture mode in this repo
 
 - `lite`: lower sampling pressure + perf-trigger freeze disabled (`freezeOnNetworkFailure=false`, `freezeOnLongTaskSpike=false`)
-  - page-side response-body sampling is disabled and runtime screenshot cadence is clamped off (`bodyCaptureMaxBytes=0`, `screenshotIdleMs=0`)
+  - page-side response-body sampling is disabled (`bodyCaptureMaxBytes=0`)
+  - idle screenshots stay enabled by default; set `screenshotIdleMs=0` in Options to disable them explicitly
   - initial DOM/storage/screenshot capture is deferred briefly after start so the tab does not stall at record activation
   - hot listeners, observers, and page-side capture loops stay inactive until recording is enabled, even though `content.js` is loaded at `document_start`
 - `full`: same perf-freeze disable + stricter sampling/body-capture limits
@@ -195,7 +196,7 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
 Body capture sizing note:
 
 - Protocol baseline (`DEFAULT_RECORDER_CONFIG`) sets `bodyCaptureMaxBytes=256 KiB`.
-- Extension `lite` forces `bodyCaptureMaxBytes=0` and `screenshotIdleMs=0` to keep page-thread capture lightweight.
+- Extension `lite` forces `bodyCaptureMaxBytes=0` but preserves configurable screenshot cadence; set `screenshotIdleMs=0` to disable runtime screenshots.
 - Extension `full` defaults clamp CDP-side body capture to `128 KiB` for safer long-session behavior.
 - Options can still override the full-mode cap per profile.
 

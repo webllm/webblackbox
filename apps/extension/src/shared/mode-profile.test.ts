@@ -19,7 +19,7 @@ describe("mode-profile", () => {
 
     expect(next.freezeOnNetworkFailure).toBe(false);
     expect(next.freezeOnLongTaskSpike).toBe(false);
-    expect(next.sampling.screenshotIdleMs).toBe(0);
+    expect(next.sampling.screenshotIdleMs).toBe(12_000);
     expect(next.sampling.bodyCaptureMaxBytes).toBe(0);
   });
 

@@ -64,7 +64,7 @@ function render(container: HTMLElement, options: OptionsState): void {
       <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
       <input id="screenshotIdleMs" type="number" min="0" max="120000" value="${config.sampling.screenshotIdleMs}" />
       <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
-        Lite ignores record-time screenshots and keeps this at <code>0</code>. Full mode uses this for browser-side screenshot cadence.
+        Lite captures idle screenshots by default. Set this to <code>0</code> to disable runtime screenshots. Full mode uses this for browser-side screenshot cadence.
       </p>
 
       <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
