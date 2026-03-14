@@ -1,25 +1,31 @@
 # @webblackbox/recorder
 
+## 0.2.0
+
+### Changed
+
+- No package-specific runtime changes in this release. The version bump keeps the recorder package aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/protocol@0.1.3
+- No package-specific runtime changes in this release. The version bump keeps the recorder package aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/protocol@0.1.2
+- Refreshed the package README to better document recorder configuration, freeze policy, and export responsibilities.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- No recorder API changes in this patch; the release aligns the package with the updated protocol dependency and public npm metadata.
-- Updated dependencies
-  - @webblackbox/protocol@0.1.1
+- No package-specific source changes in this release. The version bump kept the recorder package aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial recorder package with ring-buffer capture management, freeze-policy evaluation, redaction helpers, and export orchestration.

@@ -1,26 +1,31 @@
 # @webblackbox/pipeline
 
+## 0.2.0
+
+### Changed
+
+- No package-specific runtime changes in this release. The version bump keeps the pipeline package aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/protocol@0.1.3
+- No package-specific runtime changes in this release. The version bump keeps the pipeline package aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/protocol@0.1.2
+- Refreshed the package README to better document archive export, persistence, and storage responsibilities.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- Reduced full-mode memory retention by rebuilding export indexes from persisted chunks instead of keeping the full session index resident in memory during recording.
-- Made blob deduplication idempotent across storage backends so recovery, purge, and export flows handle repeated blob writes consistently.
-- Updated dependencies
-  - @webblackbox/protocol@0.1.1
+- No package-specific source changes in this release. The version bump kept the pipeline package aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial archive pipeline with chunk/blob storage, encrypted export support, and pluggable persistence backends.

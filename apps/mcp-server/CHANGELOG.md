@@ -1,26 +1,32 @@
 # @webblackbox/mcp-server
 
+## 0.2.0
+
+### Changed
+
+- No package-specific runtime or CLI changes in this release. The version bump keeps the MCP server aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.3
+- No package-specific runtime or CLI changes in this release. The version bump keeps the MCP server aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.2
+- Expanded the package README with direct stdio invocation examples and local inspection commands.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- Converted the MCP server into a publishable CLI with a `webblackbox-mcp-server` bin, `npx`-friendly entrypoint, packaged build output, and npm publishing metadata.
-- Simplified the CLI runtime surface by inlining lightweight time helpers and documenting direct stdio usage and inspection commands.
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.1
+- No package-specific source changes in this release. The version bump kept the CLI aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial MCP server CLI release for inspecting WebBlackbox archives over stdio.
+- Included tools for session summaries, network/error triage, bug report generation, and Playwright script generation.

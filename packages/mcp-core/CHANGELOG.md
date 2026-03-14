@@ -1,19 +1,31 @@
 # @webblackbox/mcp-core
 
+## 0.2.0
+
+### Changed
+
+- No package-specific changes in this release. The version bump keeps MCP core aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
+- No package-specific changes in this release. The version bump keeps MCP core aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
+- Expanded the package README to document the shared MCP analysis helpers and internal composition points.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- No runtime API changes in this patch; package metadata was aligned for public npm publishing and release tracking.
+- No package-specific source changes in this release. The version bump kept the package aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial shared MCP analysis utilities used by the WebBlackbox MCP server for session summarization and issue extraction.

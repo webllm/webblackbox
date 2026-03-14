@@ -1,32 +1,32 @@
 # webblackbox
 
+## 0.2.0
+
+### Changed
+
+- No browser SDK runtime changes in this release. The version bump keeps the package aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/pipeline@0.1.3
-  - @webblackbox/protocol@0.1.3
-  - @webblackbox/recorder@0.1.3
+- No browser SDK runtime changes in this release. The version bump keeps the package aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/pipeline@0.1.2
-  - @webblackbox/protocol@0.1.2
-  - @webblackbox/recorder@0.1.2
+- Refreshed the package README and public package docs for the renamed `webblackbox` browser SDK.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- Substantially improved lite-mode responsiveness by deferring heavy capture work, reducing mutation and network pressure, coalescing scroll and input churn, and restoring controlled runtime screenshots with stop-time drain.
-- Renamed the workspace directory from `packages/web-sdk` to `packages/webblackbox` while keeping the published package name `webblackbox`.
-- Updated dependencies
-  - @webblackbox/pipeline@0.1.1
-  - @webblackbox/protocol@0.1.1
-  - @webblackbox/recorder@0.1.1
+- No browser SDK source changes in this release. The version bump kept the package aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial browser-side lite capture SDK release with event capture, DOM/materializer helpers, and injected page hooks.
+- Published the package under the `webblackbox` name after the workspace directory rename from `packages/web-sdk`.

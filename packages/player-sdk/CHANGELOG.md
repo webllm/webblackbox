@@ -1,25 +1,31 @@
 # @webblackbox/player-sdk
 
+## 0.2.0
+
+### Changed
+
+- No package-specific runtime changes in this release. The version bump keeps the Player SDK aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/protocol@0.1.3
+- No package-specific runtime changes in this release. The version bump keeps the Player SDK aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/protocol@0.1.2
+- Refreshed the package README to better describe archive loading, comparison, and analysis helpers for downstream consumers.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- Refreshed the SDK release packaging and npm metadata used by the hosted player and MCP server distribution flows.
-- Updated dependencies
-  - @webblackbox/protocol@0.1.1
+- No package-specific source changes in this release. The version bump kept the Player SDK aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial Player SDK release with archive loading, indexing, triage, comparison, and playback helper APIs.

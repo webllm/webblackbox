@@ -1,25 +1,32 @@
 # @webblackbox/share-server
 
+## 0.2.0
+
+### Changed
+
+- No package-specific runtime changes in this release. The version bump keeps the share server aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.3
+- No package-specific runtime changes in this release. The version bump keeps the share server aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.2
+- No package-specific runtime changes in this release. The version bump kept the share server aligned with the rest of the workspace.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- No share-server runtime API changes in this patch; the release aligns with the latest player SDK and monorepo publishing flow.
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.1
+- No package-specific runtime changes in this release. The version bump kept the share server aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial share-server release with archive upload, listing, metadata, download, and browser share-link endpoints.
+- Included configurable API-key, origin, retention, and upload-limit hooks for self-hosted collaboration workflows.

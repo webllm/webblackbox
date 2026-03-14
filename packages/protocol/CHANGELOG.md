@@ -1,20 +1,31 @@
 # @webblackbox/protocol
 
+## 0.2.0
+
+### Changed
+
+- No schema or default changes in this release. The version bump keeps the protocol package aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
+- No schema or default changes in this release. The version bump keeps the protocol package aligned with the 0.1.3 workspace release.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
+- Refreshed the package README to better document the shared event schema, defaults, and export policy types.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- Updated shared lite-capture defaults and schema behavior to match the current runtime screenshot and capture-policy handling used by the extension and browser SDK.
-- Added complete npm publishing metadata so downstream packages can reference the protocol package as a public release artifact.
+- No schema or default changes in this release. The version bump kept the protocol package aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial shared protocol release with archive manifests, event types, recorder defaults, and export/redaction policy definitions.

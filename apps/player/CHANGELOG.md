@@ -1,29 +1,32 @@
 # @webblackbox/player
 
+## 0.2.0
+
+### Changed
+
+- No package-specific UI or runtime changes in this release. The version bump keeps the hosted player aligned with the 0.2.0 workspace release.
+
 ## 0.1.3
 
-### Patch Changes
+### Changed
 
-- fix chrome ext
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.3
-  - @webblackbox/protocol@0.1.3
+- Fixed GitHub Pages deployment authentication so release automation can push the `gh-pages` branch reliably from CI.
 
 ## 0.1.2
 
-### Patch Changes
+### Changed
 
-- fix player
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.2
-  - @webblackbox/protocol@0.1.2
+- Made the empty playback stage clickable and keyboard-focusable as a shortcut to the archive file picker.
 
 ## 0.1.1
 
-### Patch Changes
+### Changed
 
-- Added player branding polish with logo and favicon integration, toolbar version display, and a GitHub repository shortcut beside archive loading actions.
-- Added GitHub Pages build and deploy support so the hosted player can be published and verified directly from automation.
-- Updated dependencies
-  - @webblackbox/player-sdk@0.1.1
-  - @webblackbox/protocol@0.1.1
+- No package-specific source changes in this release. The version bump kept the Player aligned with the post-0.1.0 workspace release.
+
+## 0.1.0
+
+### Added
+
+- Initial WebBlackbox archive player release with timeline, screenshots, network waterfall, console/error inspection, and archive comparison views.
+- Included hosted-player deployment support, share flow integration, and player branding assets for the web UI.
