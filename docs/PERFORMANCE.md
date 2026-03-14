@@ -21,7 +21,7 @@ In addition, runtime capture now prefers lower page-thread overhead:
 - extension `full` mode keeps heavy screenshot/DOM/storage capture on the SW/CDP side
 - content-script side in `full` mode skips page-thread SnapDOM/outerHTML/storage snapshot loops
 - extension `full` mode does not inject fetch/xhr/console hooks into the page
-- pipeline ingest is batched across SW ↔ offscreen and web-sdk recorder ↔ pipeline boundaries
+- pipeline ingest is batched across SW ↔ offscreen and webblackbox recorder ↔ pipeline boundaries
 - pipeline drain is chunked to avoid giant `postMessage` payloads during stop/export
 - injected network body capture is rate-limited and gated by runtime config to reduce page jank
 - extension `e2e:perf:lite` now gates not only request/hover pressure but also real document navigation, iframe-heavy pages, and contenteditable typing
@@ -84,7 +84,7 @@ It measures:
 
 - long-session ingest throughput and chunk count
 - full export latency/size
-- filtered export latency/size using the same defaults as extension/web-sdk policy:
+- filtered export latency/size using the same defaults as extension/webblackbox policy:
   - screenshots disabled
   - archive cap `100 MB`
   - recent window `20 minutes`

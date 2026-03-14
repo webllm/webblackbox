@@ -40,7 +40,7 @@
     "provenance": true
   },
   "keywords": [
-    "web-sdk",
+    "webblackbox-sdk",
     "browser-sdk",
     "lite-capture",
     "session-replay",
@@ -50,9 +50,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/webllm/webblackbox.git",
-    "directory": "packages/web-sdk"
+    "directory": "packages/webblackbox"
   },
-  "homepage": "https://github.com/webllm/webblackbox/tree/main/packages/web-sdk",
+  "homepage": "https://github.com/webllm/webblackbox/tree/main/packages/webblackbox",
   "bugs": {
     "url": "https://github.com/webllm/webblackbox/issues"
   },

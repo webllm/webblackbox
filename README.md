@@ -436,7 +436,7 @@ webblackbox/
 │   ├── protocol/           # Event types, schemas, validation (Zod)
 │   ├── recorder/           # Event recording, normalization, ring buffer
 │   ├── pipeline/           # Chunking, indexing, export
-│   ├── web-sdk/            # Browser lite capture SDK (published as `webblackbox`)
+│   ├── webblackbox/        # Browser lite capture SDK (published as `webblackbox`)
 │   ├── player-sdk/         # Playback, querying, analysis APIs
 │   ├── cdp-router/         # Chrome DevTools Protocol routing
 │   └── mcp-core/           # MCP utility functions

@@ -82,7 +82,7 @@ importers:
         version: 2.0.2
       webblackbox:
         specifier: workspace:*
-        version: link:../../packages/web-sdk
+        version: link:../../packages/webblackbox
 
   apps/mcp-server:
     dependencies:
@@ -194,7 +194,7 @@ importers:
         specifier: workspace:*
         version: link:../protocol
 
-  packages/web-sdk:
+  packages/webblackbox:
     dependencies:
       '@webblackbox/pipeline':
         specifier: workspace:*

@@ -127,7 +127,7 @@ The `DefaultEventNormalizer` handles mapping from raw source events to `WebBlack
 | `cookieSnapshot`                                     | `storage.cookie.snapshot`                                         |
 | `longtask` / `vitals`                                | `perf.longtask` / `perf.vitals`                                   |
 
-`dom.rrweb.event` is emitted when raw `rrweb` payloads are ingested (for example, lite mutation-summary events produced by the web-sdk capture agent).
+`dom.rrweb.event` is emitted when raw `rrweb` payloads are ingested (for example, lite mutation-summary events produced by the webblackbox capture agent).
 
 ## Action Span Tracking
 
