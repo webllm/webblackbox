@@ -10,7 +10,7 @@ export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
     mousemoveHz: 20,
     scrollHz: 15,
     domFlushMs: 100,
-    screenshotIdleMs: 8000,
+    screenshotIdleMs: 0,
     snapshotIntervalMs: 20000,
     actionWindowMs: 1500,
     bodyCaptureMaxBytes: 262144

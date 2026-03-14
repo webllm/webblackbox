@@ -2914,7 +2914,10 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
     scrollHz: Math.max(1, Math.round(asFiniteNumber(sampling.scrollHz) ?? 15)),
     domFlushMs: normalizeSamplingInterval(sampling.domFlushMs, 100),
     snapshotIntervalMs: normalizeSamplingInterval(sampling.snapshotIntervalMs, 20_000),
-    screenshotIdleMs: normalizeOptionalSamplingInterval(sampling.screenshotIdleMs, 8_000),
+    screenshotIdleMs: normalizeOptionalSamplingInterval(
+      sampling.screenshotIdleMs,
+      DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
+    ),
     bodyCaptureMaxBytes: normalizeBodyCaptureMaxBytesUtil(sampling.bodyCaptureMaxBytes, 0)
   };
 }
@@ -3361,7 +3364,7 @@ function resolveModeBaseConfig(mode: CaptureMode): typeof DEFAULT_RECORDER_CONFI
       scrollHz: 10,
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
-      screenshotIdleMs: 12_000,
+      screenshotIdleMs: 0,
       bodyCaptureMaxBytes: 0
     }
   };

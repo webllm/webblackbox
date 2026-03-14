@@ -186,23 +186,36 @@ describe("LiteCaptureAgent", () => {
     document.body.innerHTML = "";
   });
 
-  it("defers action screenshots off the click task", async () => {
+  it("does not capture runtime screenshots for click-driven actions by default", async () => {
     const { agent, emitBatch } = createAgent();
 
     clickTarget();
+    document
+      .querySelector<HTMLButtonElement>("#target")
+      ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    document.querySelector<HTMLFormElement>("#capture-form")?.dispatchEvent(
+      new Event("submit", {
+        bubbles: true,
+        cancelable: true
+      })
+    );
 
     expect(snapdomToBlobMock).not.toHaveBeenCalled();
     expect(emitBatch).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
+    expect(snapdomToBlobMock).not.toHaveBeenCalled();
 
     agent.dispose();
   });
 
   it("defers start capture until the page is idle", async () => {
-    const { agent } = createAgent();
+    const { agent } = createAgent({
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
 
     await vi.advanceTimersByTimeAsync(1_900);
 
