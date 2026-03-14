@@ -114,9 +114,12 @@ User markers are `user.marker` events that serve as bookmarks in the recording t
 ```bash
 cd apps/extension
 pnpm build
+pnpm package:chrome
 ```
 
-The build output is in the `build/` directory. Build entries:
+The build output is in the `build/` directory. `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` (excluding sourcemaps and `.DS_Store` files by default). You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
+
+Build entries:
 
 | Entry          | Output               | Description          |
 | -------------- | -------------------- | -------------------- |
