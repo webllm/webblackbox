@@ -6,6 +6,8 @@ import { Checkbox } from "./components/ui/checkbox.js";
 import { Input } from "./components/ui/input.js";
 import { Select } from "./components/ui/select.js";
 
+const playerVersion = typeof __PLAYER_VERSION__ !== "undefined" ? __PLAYER_VERSION__ : "0.1.0";
+
 export function PlayerShell(): React.JSX.Element {
   return (
     <main id="player-shell" className="shell wb-shell">
@@ -17,6 +19,9 @@ export function PlayerShell(): React.JSX.Element {
           </span>
           <span className="toolbar-separator" aria-hidden="true"></span>
           <span className="toolbar-title">Player</span>
+          <span className="toolbar-version" aria-label="Player version">
+            v{playerVersion}
+          </span>
         </div>
         <div className="toolbar-loaders">
           <label className="upload" htmlFor="archive-input">
@@ -27,6 +32,14 @@ export function PlayerShell(): React.JSX.Element {
             Load Compare
           </label>
           <Input id="compare-input" type="file" accept=".webblackbox,.zip" />
+          <a
+            className="upload secondary upload-link"
+            href="https://github.com/webllm/webblackbox"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub Repo
+          </a>
         </div>
       </header>
 

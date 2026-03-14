@@ -16,6 +16,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/npm/l/webblackbox?color=374151" alt="License" /></a>
   <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/github/v/release/webllm/webblackbox.svg" alt="Release" /></a>
   <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/badge/Chrome-Extension-4285F4?logo=googlechrome&logoColor=white" alt="Chrome Extension" /></a>
+  <a href="https://webllm.github.io/webblackbox/"><img src="https://img.shields.io/badge/Hosted-Player-f97316" alt="Hosted Player" /></a>
 </p>
 
 ---
@@ -24,7 +25,7 @@ WebBlackbox is a Chrome extension that continuously captures comprehensive sessi
 
 Think of it as a **black box for your web app**: always recording in the background, so when something goes wrong, you have the full context to debug, reproduce, and fix it.
 
-The hosted Player is published to GitHub Pages at `https://webllm.github.io/webblackbox/`.
+The hosted Player is available at: https://webllm.github.io/webblackbox/
 
 ### Why WebBlackbox?
 
@@ -73,7 +74,7 @@ pnpm build
 | **Browse** | Navigate your app normally — events are captured in the background via a ring buffer |
 | **Mark**   | Press `Ctrl+Shift+M` (`Cmd+Shift+M` on Mac) to create user markers at key moments    |
 | **Export** | Click the icon again and export to download a `.webblackbox` archive                 |
-| **Replay** | Open the archive in the Player app for full session analysis                         |
+| **Replay** | Open the archive in the hosted Player: https://webllm.github.io/webblackbox/         |
 
 <br />
 
