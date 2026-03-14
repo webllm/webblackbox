@@ -1,7 +1,7 @@
 {
   "name": "@webblackbox/pipeline",
+  "description": "Chunking, indexing, blob storage, and archive export pipeline for WebBlackbox recording sessions.",
   "version": "0.1.0",
-  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,6 +14,29 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "pipeline",
+    "chunking",
+    "indexing",
+    "archive-export",
+    "webblackbox",
+    "session-replay"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webllm/webblackbox.git",
+    "directory": "packages/pipeline"
+  },
+  "homepage": "https://github.com/webllm/webblackbox/tree/main/packages/pipeline",
+  "bugs": {
+    "url": "https://github.com/webllm/webblackbox/issues"
+  },
+  "author": "unadlib",
+  "license": "MIT",
   "scripts": {
     "dev": "tsup src/index.ts --format esm --dts --watch --clean",
     "build": "tsup src/index.ts --format esm --dts --clean",

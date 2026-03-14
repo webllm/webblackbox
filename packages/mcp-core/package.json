@@ -1,7 +1,7 @@
 {
   "name": "@webblackbox/mcp-core",
+  "description": "Small utility helpers and shared input schemas for WebBlackbox MCP integrations.",
   "version": "0.1.0",
-  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,6 +14,28 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "mcp",
+    "utilities",
+    "zod",
+    "webblackbox",
+    "tooling"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webllm/webblackbox.git",
+    "directory": "packages/mcp-core"
+  },
+  "homepage": "https://github.com/webllm/webblackbox/tree/main/packages/mcp-core",
+  "bugs": {
+    "url": "https://github.com/webllm/webblackbox/issues"
+  },
+  "author": "unadlib",
+  "license": "MIT",
   "scripts": {
     "dev": "tsup src/index.ts --format esm --dts --watch --clean",
     "build": "tsup src/index.ts --format esm --dts --clean",

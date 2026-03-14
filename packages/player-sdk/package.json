@@ -1,7 +1,7 @@
 {
   "name": "@webblackbox/player-sdk",
+  "description": "Archive playback, querying, analysis, and code-generation SDK for WebBlackbox sessions.",
   "version": "0.1.0",
-  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,6 +14,29 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "player-sdk",
+    "session-replay",
+    "archive-analysis",
+    "webblackbox",
+    "playwright",
+    "har"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webllm/webblackbox.git",
+    "directory": "packages/player-sdk"
+  },
+  "homepage": "https://github.com/webllm/webblackbox/tree/main/packages/player-sdk",
+  "bugs": {
+    "url": "https://github.com/webllm/webblackbox/issues"
+  },
+  "author": "unadlib",
+  "license": "MIT",
   "scripts": {
     "dev": "tsup src/index.ts --format esm --dts --watch --clean",
     "build": "tsup src/index.ts --format esm --dts --clean",

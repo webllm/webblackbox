@@ -1,7 +1,7 @@
 {
   "name": "@webblackbox/cdp-router",
+  "description": "Chrome DevTools Protocol router for managing debugger targets and CDP sessions across tabs, iframes, and workers.",
   "version": "0.1.0",
-  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,6 +14,29 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "cdp",
+    "chrome-devtools-protocol",
+    "chrome-debugger",
+    "webblackbox",
+    "browser-debugging",
+    "iframe"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webllm/webblackbox.git",
+    "directory": "packages/cdp-router"
+  },
+  "homepage": "https://github.com/webllm/webblackbox/tree/main/packages/cdp-router",
+  "bugs": {
+    "url": "https://github.com/webllm/webblackbox/issues"
+  },
+  "author": "unadlib",
+  "license": "MIT",
   "scripts": {
     "dev": "tsup src/index.ts --format esm --dts --watch --clean",
     "build": "tsup src/index.ts --format esm --dts --clean",
