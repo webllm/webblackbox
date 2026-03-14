@@ -96,6 +96,8 @@ type MutationBatchSummary = {
   attributeNames: string[];
 };
 
+type TargetPayloadDetail = "action" | "input" | "fast";
+
 /**
  * Browser-side event capture agent used by `WebBlackboxLiteSdk`.
  * It collects DOM/input/network/error/perf signals and emits buffered raw events.
@@ -327,7 +329,7 @@ export class LiteCaptureAgent {
       (event: MouseEvent) => {
         this.markUserActivity();
         this.trackPointer(event.clientX, event.clientY);
-        this.queueEvent("click", clickPayload(event, this.mode));
+        this.queueEvent("click", this.createClickPayload(event));
         this.scheduleDeferredActionCapture("action:click");
       },
       INPUT_OPTIONS_TRUE
@@ -339,7 +341,7 @@ export class LiteCaptureAgent {
       (event: MouseEvent) => {
         this.markUserActivity();
         this.trackPointer(event.clientX, event.clientY);
-        this.queueEvent("dblclick", clickPayload(event, this.mode));
+        this.queueEvent("dblclick", this.createClickPayload(event));
         this.scheduleDeferredActionCapture("action:dblclick");
       },
       INPUT_OPTIONS_TRUE
@@ -362,7 +364,7 @@ export class LiteCaptureAgent {
           ctrlKey: event.ctrlKey,
           shiftKey: event.shiftKey,
           metaKey: event.metaKey,
-          target: this.resolveTargetPayload(event.target)
+          target: this.resolveTargetPayload(event.target, "fast")
         });
       },
       INPUT_OPTIONS_TRUE
@@ -389,7 +391,7 @@ export class LiteCaptureAgent {
           inputType: target.type,
           length: target.value.length,
           value: isSensitive ? "[MASKED]" : target.value.slice(0, 256),
-          target: this.resolveTargetPayload(target)
+          target: this.resolveTargetPayload(target, "input")
         });
       },
       INPUT_OPTIONS_TRUE
@@ -402,7 +404,7 @@ export class LiteCaptureAgent {
         this.markUserActivity();
         this.queueEvent("input", {
           kind: "change",
-          target: this.resolveTargetPayload(event.target)
+          target: this.resolveTargetPayload(event.target, "fast")
         });
       },
       INPUT_OPTIONS_TRUE
@@ -414,7 +416,7 @@ export class LiteCaptureAgent {
       (event: FocusEvent) => {
         this.markUserActivity();
         this.queueEvent("focus", {
-          target: this.resolveTargetPayload(event.target)
+          target: this.resolveTargetPayload(event.target, "fast")
         });
       },
       INPUT_OPTIONS_TRUE
@@ -426,7 +428,7 @@ export class LiteCaptureAgent {
       (event: FocusEvent) => {
         this.markUserActivity();
         this.queueEvent("blur", {
-          target: this.resolveTargetPayload(event.target)
+          target: this.resolveTargetPayload(event.target, "fast")
         });
       },
       INPUT_OPTIONS_TRUE
@@ -438,7 +440,7 @@ export class LiteCaptureAgent {
       (event: Event) => {
         this.markUserActivity();
         this.queueEvent("submit", {
-          target: this.resolveTargetPayload(event.target)
+          target: this.resolveTargetPayload(event.target, "fast")
         });
         this.scheduleDeferredActionCapture("action:submit");
       },
@@ -1292,8 +1294,31 @@ export class LiteCaptureAgent {
     );
   }
 
-  private resolveTargetPayload(target: EventTarget | null): Record<string, unknown> {
-    return this.mode === "full" ? toFastTargetPayload(target) : toTargetPayload(target);
+  private createClickPayload(event: MouseEvent): Record<string, unknown> {
+    return {
+      x: event.clientX,
+      y: event.clientY,
+      button: event.button,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      target: this.resolveTargetPayload(event.target, "action")
+    };
+  }
+
+  private resolveTargetPayload(
+    target: EventTarget | null,
+    detail: TargetPayloadDetail
+  ): Record<string, unknown> {
+    if (this.mode === "full" || detail === "fast") {
+      return toFastTargetPayload(target);
+    }
+
+    return toLiteTargetPayload(target, {
+      selector: this.readCachedSelector(target),
+      includeText: detail === "action"
+    });
   }
 
   private flushPreRecordingBuffer(): void {
@@ -1533,30 +1558,23 @@ function resolveContentFrameMarker(): string | undefined {
   }
 }
 
-function clickPayload(event: MouseEvent, mode: LiteCaptureState["mode"]): Record<string, unknown> {
-  return {
-    x: event.clientX,
-    y: event.clientY,
-    button: event.button,
-    altKey: event.altKey,
-    ctrlKey: event.ctrlKey,
-    shiftKey: event.shiftKey,
-    metaKey: event.metaKey,
-    target: mode === "full" ? toFastTargetPayload(event.target) : toTargetPayload(event.target)
-  };
-}
-
-function toTargetPayload(target: EventTarget | null): Record<string, unknown> {
+function toLiteTargetPayload(
+  target: EventTarget | null,
+  options: {
+    selector: string;
+    includeText: boolean;
+  }
+): Record<string, unknown> {
   if (!(target instanceof Element)) {
     return {};
   }
 
   return {
-    selector: safeSelector(target),
+    selector: options.selector,
     tag: target.tagName,
     id: target.id || undefined,
-    className: target.className || undefined,
-    text: target.textContent?.trim().slice(0, 80)
+    className: readClassName(target),
+    text: options.includeText ? target.textContent?.trim().slice(0, 80) : undefined
   };
 }
 
@@ -1568,11 +1586,14 @@ function toFastTargetPayload(target: EventTarget | null): Record<string, unknown
   return {
     tag: target.tagName,
     id: target.id || undefined,
-    className:
-      typeof target.className === "string" && target.className.length > 0
-        ? target.className.slice(0, 80)
-        : undefined
+    className: readClassName(target)
   };
+}
+
+function readClassName(target: Element): string | undefined {
+  return typeof target.className === "string" && target.className.length > 0
+    ? target.className.slice(0, 80)
+    : undefined;
 }
 
 function safeSelector(target: EventTarget | null): string {

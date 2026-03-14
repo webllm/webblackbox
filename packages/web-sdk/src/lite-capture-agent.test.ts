@@ -84,6 +84,16 @@ function clickTarget(): void {
   );
 }
 
+function inputTarget(): HTMLInputElement {
+  const target = document.querySelector<HTMLInputElement>("#field");
+
+  if (!target) {
+    throw new Error("missing input target");
+  }
+
+  return target;
+}
+
 function movePointer(): void {
   document.dispatchEvent(
     new MouseEvent("pointermove", {
@@ -123,7 +133,13 @@ function emittedRawTypes(emitBatch: ReturnType<typeof vi.fn>): string[] {
 describe("LiteCaptureAgent", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    document.body.innerHTML = `<button id="target" type="button">Open</button>`;
+    document.body.innerHTML = `
+      <form id="capture-form">
+        <label for="field">Name</label>
+        <input id="field" type="text" />
+        <button id="target" type="button">Open</button>
+      </form>
+    `;
     snapdomToBlobMock.mockImplementation(() => new Promise(() => undefined));
     Object.defineProperty(window, "scrollX", {
       configurable: true,
@@ -227,6 +243,72 @@ describe("LiteCaptureAgent", () => {
     });
 
     expect(emittedRawTypes).toContain("localStorageSnapshot");
+
+    agent.dispose();
+  });
+
+  it("uses lightweight targets for keydown, focus, blur, change, and submit", () => {
+    const { agent, emitBatch } = createAgent();
+    const field = inputTarget();
+    const form = document.querySelector<HTMLFormElement>("#capture-form");
+
+    if (!form) {
+      throw new Error("missing form target");
+    }
+
+    field.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "A",
+        code: "KeyA",
+        bubbles: true
+      })
+    );
+    field.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+    field.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    agent.flush();
+
+    const events = emitBatch.mock.calls.flatMap((call) => {
+      const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+      return batch;
+    });
+
+    for (const rawType of ["keydown", "focus", "blur", "input", "submit"]) {
+      const event = events.find((entry) => entry.rawType === rawType);
+      const target = event?.payload?.target as Record<string, unknown> | undefined;
+
+      expect(event).toBeDefined();
+      expect(target).toMatchObject({
+        tag: rawType === "submit" ? "FORM" : "INPUT"
+      });
+      expect(target).not.toHaveProperty("selector");
+      expect(target).not.toHaveProperty("text");
+    }
+
+    agent.dispose();
+  });
+
+  it("keeps selectors on input events so replay can still target the field", () => {
+    const { agent, emitBatch } = createAgent();
+    const field = inputTarget();
+
+    field.value = "Alice";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    agent.flush();
+
+    const inputEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "input");
+
+    expect(inputEvent?.payload?.target).toMatchObject({
+      selector: "input#field",
+      tag: "INPUT",
+      id: "field"
+    });
 
     agent.dispose();
   });
