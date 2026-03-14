@@ -38,6 +38,38 @@ cd apps/player
 pnpm build
 ```
 
+## GitHub Pages
+
+Build a Pages-ready artifact:
+
+```bash
+cd apps/player
+pnpm pages:build
+```
+
+This prepares `build/` for GitHub Pages by adding `.nojekyll` and `404.html`.
+
+Deploy the Player to the repository Pages site:
+
+```bash
+cd apps/player
+pnpm pages:deploy
+```
+
+The deploy script will:
+
+- build the Player
+- prepare the Pages artifact
+- publish `apps/player/build` to the `gh-pages` branch
+- verify `https://webllm.github.io/webblackbox/` is serving the Player
+
+From the repo root you can also run:
+
+```bash
+pnpm player:pages:build
+pnpm player:pages:deploy
+```
+
 ## Usage
 
 1. Open the Player application

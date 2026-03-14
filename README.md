@@ -24,6 +24,8 @@ WebBlackbox is a Chrome extension that continuously captures comprehensive sessi
 
 Think of it as a **black box for your web app**: always recording in the background, so when something goes wrong, you have the full context to debug, reproduce, and fix it.
 
+The hosted Player is published to GitHub Pages at `https://webllm.github.io/webblackbox/`.
+
 ### Why WebBlackbox?
 
 - 📊 **Record everything** — 57 event types across 13 categories, captured silently via CDP and content scripts
