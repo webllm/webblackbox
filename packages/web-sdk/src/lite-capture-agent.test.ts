@@ -84,6 +84,23 @@ function clickTarget(): void {
   );
 }
 
+function clickLinkTarget(): void {
+  const target = document.querySelector<HTMLElement>("#nav-label");
+
+  if (!target) {
+    throw new Error("missing link target");
+  }
+
+  target.dispatchEvent(
+    new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 72,
+      clientY: 28
+    })
+  );
+}
+
 function inputTarget(): HTMLInputElement {
   const target = document.querySelector<HTMLInputElement>("#field");
 
@@ -147,7 +164,9 @@ describe("LiteCaptureAgent", () => {
         <label for="field">Name</label>
         <input id="field" type="text" />
         <button id="target" type="button">Open</button>
+        <a id="nav-link" href="#action-target"><span id="nav-label">Jump</span></a>
       </form>
+      <section id="action-target">Target</section>
     `;
     snapdomToBlobMock.mockImplementation(() => new Promise(() => undefined));
     Object.defineProperty(window, "scrollX", {
@@ -811,6 +830,52 @@ describe("LiteCaptureAgent", () => {
       selector: "input#field",
       tag: "INPUT",
       id: "field"
+    });
+
+    agent.dispose();
+  });
+
+  it("uses lightweight navigation payloads for link clicks so navigation is not blocked", () => {
+    const { agent, emitBatch } = createAgent();
+
+    clickLinkTarget();
+    agent.flush();
+
+    const clickEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "click");
+
+    expect(clickEvent?.payload?.target).toMatchObject({
+      selector: "a#nav-link",
+      tag: "A",
+      id: "nav-link",
+      href: "#action-target",
+      hash: "#action-target"
+    });
+    expect(clickEvent?.payload?.target).not.toHaveProperty("text");
+
+    agent.dispose();
+  });
+
+  it("keeps full action selectors for non-navigation clicks", () => {
+    const { agent, emitBatch } = createAgent();
+
+    clickTarget();
+    agent.flush();
+
+    const clickEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "click");
+
+    expect(clickEvent?.payload?.target).toMatchObject({
+      selector: "button#target",
+      tag: "BUTTON"
     });
 
     agent.dispose();

@@ -122,7 +122,7 @@ type MutationBatchSummary = {
   attributeNames: string[];
 };
 
-type TargetPayloadDetail = "action" | "input" | "fast";
+type TargetPayloadDetail = "action" | "input" | "fast" | "navigation";
 
 /**
  * Browser-side event capture agent used by `WebBlackboxLiteSdk`.
@@ -1659,6 +1659,8 @@ export class LiteCaptureAgent {
   }
 
   private createClickPayload(event: MouseEvent): Record<string, unknown> {
+    const navigationTarget = resolveNavigationTarget(event.target);
+
     return {
       x: event.clientX,
       y: event.clientY,
@@ -1667,7 +1669,9 @@ export class LiteCaptureAgent {
       ctrlKey: event.ctrlKey,
       shiftKey: event.shiftKey,
       metaKey: event.metaKey,
-      target: this.resolveTargetPayload(event.target, "action")
+      target: navigationTarget
+        ? this.resolveTargetPayload(navigationTarget, "navigation")
+        : this.resolveTargetPayload(event.target, "action")
     };
   }
 
@@ -1677,6 +1681,10 @@ export class LiteCaptureAgent {
   ): Record<string, unknown> {
     if (this.mode === "full" || detail === "fast") {
       return toFastTargetPayload(target);
+    }
+
+    if (detail === "navigation") {
+      return toNavigationTargetPayload(target);
     }
 
     return toLiteTargetPayload(target, {
@@ -1954,6 +1962,29 @@ function toFastTargetPayload(target: EventTarget | null): Record<string, unknown
   };
 }
 
+function toNavigationTargetPayload(target: EventTarget | null): Record<string, unknown> {
+  const navigationTarget = resolveNavigationTarget(target);
+
+  if (!navigationTarget) {
+    return toFastTargetPayload(target);
+  }
+
+  const href = navigationTarget.getAttribute("href") ?? navigationTarget.href ?? undefined;
+  const selector = buildNavigationSelector(navigationTarget, href);
+
+  return {
+    selector,
+    tag: navigationTarget.tagName,
+    id: navigationTarget.id || undefined,
+    className: readClassName(navigationTarget),
+    href,
+    hash:
+      typeof navigationTarget.hash === "string" && navigationTarget.hash.length > 0
+        ? navigationTarget.hash
+        : undefined
+  };
+}
+
 function readClassName(target: Element): string | undefined {
   return typeof target.className === "string" && target.className.length > 0
     ? target.className.slice(0, 80)
@@ -1998,6 +2029,51 @@ function isEditableInteractionTarget(target: EventTarget | null): boolean {
   }
 
   return isRichTextEditableTarget(target);
+}
+
+function resolveNavigationTarget(target: EventTarget | null): HTMLAnchorElement | null {
+  if (target instanceof HTMLAnchorElement && hasNavigableHref(target)) {
+    return target;
+  }
+
+  if (!(target instanceof Element)) {
+    return null;
+  }
+
+  const anchor = target.closest("a[href]");
+  return anchor instanceof HTMLAnchorElement && hasNavigableHref(anchor) ? anchor : null;
+}
+
+function hasNavigableHref(anchor: HTMLAnchorElement): boolean {
+  const href = anchor.getAttribute("href");
+  return typeof href === "string" && href.length > 0;
+}
+
+function buildNavigationSelector(anchor: HTMLAnchorElement, href?: string): string | undefined {
+  if (anchor.id) {
+    return `a#${cssEscape(anchor.id)}`;
+  }
+
+  if (typeof href === "string" && href.length > 0) {
+    return `a[href="${cssStringEscape(href)}"]`;
+  }
+
+  const className = readClassName(anchor);
+
+  if (className) {
+    const classTokens = className
+      .split(/\s+/)
+      .filter((token) => token.length > 0)
+      .slice(0, 2)
+      .map((token) => `.${cssEscape(token)}`)
+      .join("");
+
+    if (classTokens.length > 0) {
+      return `a${classTokens}`;
+    }
+  }
+
+  return "a";
 }
 
 function isRichTextEditableTarget(target: EventTarget | null): boolean {
@@ -2083,6 +2159,10 @@ function cssEscape(value: string): string {
   }
 
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function cssStringEscape(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function escapeHtml(value: string): string {
