@@ -1,4 +1,11 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "tsup";
+
+const appRoot = dirname(fileURLToPath(import.meta.url));
+const extensionNodeModulesDir = resolve(appRoot, "node_modules");
+const workspaceNodeModulesDir = resolve(appRoot, "..", "..", "node_modules");
 
 export default defineConfig({
   entry: {
@@ -23,5 +30,6 @@ export default defineConfig({
   dts: false,
   esbuildOptions(options) {
     options.external = [];
+    options.nodePaths = [extensionNodeModulesDir, workspaceNodeModulesDir];
   }
 });

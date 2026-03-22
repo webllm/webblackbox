@@ -15,7 +15,8 @@
       "webblackbox/lite-capture-agent": ["../../packages/webblackbox/src/lite-capture-agent.ts"],
       "webblackbox/lite-materializer": ["../../packages/webblackbox/src/lite-materializer.ts"],
       "webblackbox/lite-sdk": ["../../packages/webblackbox/src/lite-sdk.ts"],
-      "webblackbox/types": ["../../packages/webblackbox/src/types.ts"]
+      "webblackbox/types": ["../../packages/webblackbox/src/types.ts"],
+      "@zumer/snapdom": ["./node_modules/@zumer/snapdom/types/snapdom.d.ts"]
     }
   },
   "include": ["src/**/*.ts", "tsup.config.ts", "scripts/**/*.mjs"]
