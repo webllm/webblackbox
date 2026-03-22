@@ -1,5 +1,4 @@
 import { getChromeApi } from "../shared/chrome-api.js";
-import { escapeHtml } from "../shared/html.js";
 import {
   PORT_NAMES,
   type ExtensionInboundMessage,
@@ -43,33 +42,44 @@ function render(container: HTMLElement): void {
     return right.startedAt - left.startedAt;
   });
   const now = Date.now();
-  const sessionRows =
-    ordered.length === 0
-      ? '<p class="wb-sessions-empty">No sessions captured yet.</p>'
-      : ordered.map((session) => renderSessionCard(session, now)).join("");
   const activeCount = ordered.filter((session) => session.active).length;
 
-  container.innerHTML = `
-    <section class="card wb-sessions-card">
-      <header class="wb-sessions-header">
-        <div class="wb-brand-lockup">
-          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
-          <div class="wb-brand-lockup__copy">
-            <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
-            <h1 class="wb-sessions-title">Sessions</h1>
-          </div>
-        </div>
-        <span class="wb-sessions-count">${ordered.length} total · ${activeCount} active</span>
-      </header>
-      <p class="wb-sessions-subtitle">Recent recordings with source context and quick actions.</p>
-      <div class="wb-sessions-list">${sessionRows}</div>
-    </section>
-  `;
+  const section = document.createElement("section");
+  section.className = "card wb-sessions-card";
 
+  const header = document.createElement("header");
+  header.className = "wb-sessions-header";
+  header.append(createBrandLockup());
+
+  const count = document.createElement("span");
+  count.className = "wb-sessions-count";
+  count.textContent = `${ordered.length} total · ${activeCount} active`;
+  header.append(count);
+  section.append(header);
+
+  const subtitle = document.createElement("p");
+  subtitle.className = "wb-sessions-subtitle";
+  subtitle.textContent = "Recent recordings with source context and quick actions.";
+  section.append(subtitle);
+
+  const list = document.createElement("div");
+  list.className = "wb-sessions-list";
+
+  if (ordered.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "wb-sessions-empty";
+    empty.textContent = "No sessions captured yet.";
+    list.append(empty);
+  } else {
+    list.append(...ordered.map((session) => renderSessionCard(session, now)));
+  }
+
+  section.append(list);
+  container.replaceChildren(section);
   bindActions(container);
 }
 
-function renderSessionCard(session: SessionListItem, now: number): string {
+function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
   const page = describeSessionPage(session);
   const startedAt = formatAbsoluteTime(session.startedAt);
   const startedRelative = formatRelativeTime(session.startedAt, now);
@@ -83,59 +93,128 @@ function renderSessionCard(session: SessionListItem, now: number): string {
   const tags = session.tags ?? [];
   const note = typeof session.note === "string" ? session.note : "";
   const tagsValue = formatTagInputValue(tags);
-  const tagChips = tags
-    .map((tag) => `<span class="wb-chip wb-chip--tag">#${escapeHtml(tag)}</span>`)
-    .join("");
   const sidShort = shortenSessionId(session.sid);
   const statusLabel = session.active ? "LIVE" : "Stopped";
   const statusClass = session.active ? "wb-session-status--live" : "wb-session-status--stopped";
-  const stopDisabledAttr = session.active ? "" : "disabled";
 
-  return `
-    <article class="wb-session-card">
-      <header class="wb-session-card__header">
-        <div class="wb-session-card__title-wrap">
-          <h2 class="wb-session-card__title" title="${escapeHtml(page.secondary)}">${escapeHtml(page.primary)}</h2>
-          <p class="wb-session-card__url mono" title="${escapeHtml(page.secondary)}">${escapeHtml(page.secondary)}</p>
-        </div>
-        <span class="wb-session-status ${statusClass}">${statusLabel}</span>
-      </header>
-      <div class="wb-session-card__meta">
-        <span class="wb-chip">mode ${escapeHtml(session.mode.toUpperCase())}</span>
-        <span class="wb-chip">tab ${session.tabId}</span>
-        <span class="wb-chip" title="${escapeHtml(startedAt)}">started ${escapeHtml(startedRelative)}</span>
-        <span class="wb-chip">events ${eventCount}</span>
-        <span class="wb-chip">errors ${errorCount}</span>
-        <span class="wb-chip">budget alerts ${budgetAlertCount}</span>
-        <span class="wb-chip">size ${escapeHtml(formatByteSize(sizeBytes))}</span>
-        <span class="wb-chip">duration ${escapeHtml(elapsed)}</span>
-        ${endedAt ? `<span class="wb-chip" title="${escapeHtml(endedAt)}">ended</span>` : ""}
-      </div>
-      <p class="wb-session-card__sid mono" title="${escapeHtml(session.sid)}">sid ${escapeHtml(sidShort)}</p>
-      ${
-        note
-          ? `<p class="wb-session-card__note" title="${escapeHtml(note)}">${escapeHtml(note)}</p>`
-          : ""
-      }
-      ${tagChips ? `<div class="wb-session-card__tags">${tagChips}</div>` : ""}
-      <div class="wb-session-card__actions">
-        <button class="wb-btn wb-btn--brand" data-export="${escapeHtml(session.sid)}">Export</button>
-        <button class="wb-btn wb-btn--muted" data-stop="${session.tabId}" ${stopDisabledAttr}>Stop</button>
-        <button class="wb-btn wb-btn--muted" data-delete="${escapeHtml(session.sid)}">Delete</button>
-      </div>
-      <form class="wb-session-annotation" data-annotate="${escapeHtml(session.sid)}">
-        <label class="wb-field-label">
-          Tags (comma-separated)
-          <input class="wb-input" data-annotate-tags value="${escapeHtml(tagsValue)}" />
-        </label>
-        <label class="wb-field-label">
-          Notes
-          <textarea class="wb-session-note-input" data-annotate-note rows="2">${escapeHtml(note)}</textarea>
-        </label>
-        <button class="wb-btn wb-btn--muted" type="submit">Save Context</button>
-      </form>
-    </article>
-  `;
+  const article = document.createElement("article");
+  article.className = "wb-session-card";
+
+  const header = document.createElement("header");
+  header.className = "wb-session-card__header";
+
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "wb-session-card__title-wrap";
+
+  const title = document.createElement("h2");
+  title.className = "wb-session-card__title";
+  title.title = page.secondary;
+  title.textContent = page.primary;
+
+  const url = document.createElement("p");
+  url.className = "wb-session-card__url mono";
+  url.title = page.secondary;
+  url.textContent = page.secondary;
+
+  titleWrap.append(title, url);
+
+  const status = document.createElement("span");
+  status.className = `wb-session-status ${statusClass}`;
+  status.textContent = statusLabel;
+
+  header.append(titleWrap, status);
+  article.append(header);
+
+  const meta = document.createElement("div");
+  meta.className = "wb-session-card__meta";
+  meta.append(
+    createChip(`mode ${session.mode.toUpperCase()}`),
+    createChip(`tab ${session.tabId}`),
+    createChip(`started ${startedRelative}`, startedAt),
+    createChip(`events ${eventCount}`),
+    createChip(`errors ${errorCount}`),
+    createChip(`budget alerts ${budgetAlertCount}`),
+    createChip(`size ${formatByteSize(sizeBytes)}`),
+    createChip(`duration ${elapsed}`)
+  );
+
+  if (endedAt) {
+    meta.append(createChip("ended", endedAt));
+  }
+
+  article.append(meta);
+
+  const sid = document.createElement("p");
+  sid.className = "wb-session-card__sid mono";
+  sid.title = session.sid;
+  sid.textContent = `sid ${sidShort}`;
+  article.append(sid);
+
+  if (note) {
+    const noteText = document.createElement("p");
+    noteText.className = "wb-session-card__note";
+    noteText.title = note;
+    noteText.textContent = note;
+    article.append(noteText);
+  }
+
+  if (tags.length > 0) {
+    const tagsContainer = document.createElement("div");
+    tagsContainer.className = "wb-session-card__tags";
+    tagsContainer.append(
+      ...tags.map((tag) => createChip(`#${tag}`, undefined, "wb-chip wb-chip--tag"))
+    );
+    article.append(tagsContainer);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "wb-session-card__actions";
+  actions.append(
+    createActionButton("Export", "wb-btn wb-btn--brand", { export: session.sid }),
+    createActionButton(
+      "Stop",
+      "wb-btn wb-btn--muted",
+      { stop: String(session.tabId) },
+      !session.active
+    ),
+    createActionButton("Delete", "wb-btn wb-btn--muted", { delete: session.sid })
+  );
+  article.append(actions);
+
+  const form = document.createElement("form");
+  form.className = "wb-session-annotation";
+  form.dataset.annotate = session.sid;
+
+  const tagsLabel = document.createElement("label");
+  tagsLabel.className = "wb-field-label";
+  tagsLabel.append("Tags (comma-separated)");
+
+  const tagsInput = document.createElement("input");
+  tagsInput.className = "wb-input";
+  tagsInput.dataset.annotateTags = "";
+  tagsInput.value = tagsValue;
+  tagsLabel.append(tagsInput);
+
+  const noteLabel = document.createElement("label");
+  noteLabel.className = "wb-field-label";
+  noteLabel.append("Notes");
+
+  const noteInput = document.createElement("textarea");
+  noteInput.className = "wb-session-note-input";
+  noteInput.dataset.annotateNote = "";
+  noteInput.rows = 2;
+  noteInput.value = note;
+  noteLabel.append(noteInput);
+
+  const saveButton = document.createElement("button");
+  saveButton.className = "wb-btn wb-btn--muted";
+  saveButton.type = "submit";
+  saveButton.textContent = "Save Context";
+
+  form.append(tagsLabel, noteLabel, saveButton);
+  article.append(form);
+
+  return article;
 }
 
 function describeSessionPage(session: SessionListItem): { primary: string; secondary: string } {
@@ -273,7 +352,7 @@ function formatTagInputValue(tags: string[]): string {
 function bindActions(container: HTMLElement): void {
   container.querySelectorAll<HTMLButtonElement>("button[data-export]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const sid = button.getAttribute("data-export");
+      const sid = button.dataset.export;
 
       if (!sid) {
         return;
@@ -295,7 +374,7 @@ function bindActions(container: HTMLElement): void {
 
   container.querySelectorAll<HTMLButtonElement>("button[data-stop]").forEach((button) => {
     button.addEventListener("click", () => {
-      const tabId = Number(button.getAttribute("data-stop"));
+      const tabId = Number(button.dataset.stop);
 
       if (!Number.isFinite(tabId)) {
         return;
@@ -310,7 +389,7 @@ function bindActions(container: HTMLElement): void {
 
   container.querySelectorAll<HTMLButtonElement>("button[data-delete]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const sid = button.getAttribute("data-delete");
+      const sid = button.dataset.delete;
 
       if (!sid) {
         return;
@@ -334,7 +413,7 @@ function bindActions(container: HTMLElement): void {
   container.querySelectorAll<HTMLFormElement>("form[data-annotate]").forEach((form) => {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      const sid = form.getAttribute("data-annotate");
+      const sid = form.dataset.annotate;
 
       if (!sid) {
         return;
@@ -357,23 +436,52 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "wb-confirm-overlay";
-    overlay.innerHTML = `
-      <form class="wb-confirm-card wb-prompt-card" aria-labelledby="wb-passphrase-title">
-        <h2 id="wb-passphrase-title" class="wb-confirm-title">Export Session</h2>
-        <p class="wb-confirm-body mono">${escapeHtml(shortenSessionId(sid))}</p>
-        <p class="wb-confirm-body">Optional AES-GCM passphrase. Leave blank for unencrypted export.</p>
-        <label class="wb-field-label" for="wb-passphrase-input">Passphrase</label>
-        <input id="wb-passphrase-input" type="password" class="wb-input wb-prompt-field" autocomplete="off" />
-        <div class="wb-confirm-actions">
-          <button type="button" class="wb-btn wb-btn--muted" data-passphrase-cancel>Cancel</button>
-          <button type="submit" class="wb-btn wb-btn--accent">Export</button>
-        </div>
-      </form>
-    `;
 
-    const form = overlay.querySelector<HTMLFormElement>("form");
-    const input = overlay.querySelector<HTMLInputElement>("#wb-passphrase-input");
-    const cancelButton = overlay.querySelector<HTMLButtonElement>("button[data-passphrase-cancel]");
+    const form = document.createElement("form");
+    form.className = "wb-confirm-card wb-prompt-card";
+    form.setAttribute("aria-labelledby", "wb-passphrase-title");
+
+    const title = document.createElement("h2");
+    title.id = "wb-passphrase-title";
+    title.className = "wb-confirm-title";
+    title.textContent = "Export Session";
+
+    const sidText = document.createElement("p");
+    sidText.className = "wb-confirm-body mono";
+    sidText.textContent = shortenSessionId(sid);
+
+    const body = document.createElement("p");
+    body.className = "wb-confirm-body";
+    body.textContent = "Optional AES-GCM passphrase. Leave blank for unencrypted export.";
+
+    const label = document.createElement("label");
+    label.className = "wb-field-label";
+    label.htmlFor = "wb-passphrase-input";
+    label.textContent = "Passphrase";
+
+    const input = document.createElement("input");
+    input.id = "wb-passphrase-input";
+    input.type = "password";
+    input.className = "wb-input wb-prompt-field";
+    input.autocomplete = "off";
+
+    const actions = document.createElement("div");
+    actions.className = "wb-confirm-actions";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "wb-btn wb-btn--muted";
+    cancelButton.dataset.passphraseCancel = "";
+    cancelButton.textContent = "Cancel";
+
+    const submitButton = document.createElement("button");
+    submitButton.type = "submit";
+    submitButton.className = "wb-btn wb-btn--accent";
+    submitButton.textContent = "Export";
+
+    actions.append(cancelButton, submitButton);
+    form.append(title, sidText, body, label, input, actions);
+    overlay.append(form);
 
     const finish = (value: string | null): void => {
       overlay.remove();
@@ -388,10 +496,10 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
       }
     };
 
-    cancelButton?.addEventListener("click", () => finish(null));
-    form?.addEventListener("submit", (event) => {
+    cancelButton.addEventListener("click", () => finish(null));
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
-      finish(input?.value ?? "");
+      finish(input.value ?? "");
     });
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) {
@@ -401,7 +509,7 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
 
     document.addEventListener("keydown", onKeydown);
     document.body.append(overlay);
-    input?.focus();
+    input.focus();
   });
 }
 
@@ -409,19 +517,40 @@ function openConfirmDialog(message: string): Promise<boolean> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "wb-confirm-overlay";
-    overlay.innerHTML = `
-      <section class="wb-confirm-card" role="dialog" aria-modal="true" aria-labelledby="wb-confirm-title">
-        <h2 id="wb-confirm-title" class="wb-confirm-title">Confirm Delete</h2>
-        <p class="wb-confirm-body">${escapeHtml(message)}</p>
-        <div class="wb-confirm-actions">
-          <button type="button" class="wb-btn wb-btn--muted" data-confirm-cancel>Cancel</button>
-          <button type="button" class="wb-btn wb-btn--brand" data-confirm-accept>Delete</button>
-        </div>
-      </section>
-    `;
 
-    const cancelButton = overlay.querySelector<HTMLButtonElement>("button[data-confirm-cancel]");
-    const acceptButton = overlay.querySelector<HTMLButtonElement>("button[data-confirm-accept]");
+    const dialog = document.createElement("section");
+    dialog.className = "wb-confirm-card";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "wb-confirm-title");
+
+    const title = document.createElement("h2");
+    title.id = "wb-confirm-title";
+    title.className = "wb-confirm-title";
+    title.textContent = "Confirm Delete";
+
+    const body = document.createElement("p");
+    body.className = "wb-confirm-body";
+    body.textContent = message;
+
+    const actions = document.createElement("div");
+    actions.className = "wb-confirm-actions";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "wb-btn wb-btn--muted";
+    cancelButton.dataset.confirmCancel = "";
+    cancelButton.textContent = "Cancel";
+
+    const acceptButton = document.createElement("button");
+    acceptButton.type = "button";
+    acceptButton.className = "wb-btn wb-btn--brand";
+    acceptButton.dataset.confirmAccept = "";
+    acceptButton.textContent = "Delete";
+
+    actions.append(cancelButton, acceptButton);
+    dialog.append(title, body, actions);
+    overlay.append(dialog);
 
     const finish = (accepted: boolean): void => {
       overlay.remove();
@@ -436,8 +565,8 @@ function openConfirmDialog(message: string): Promise<boolean> {
       }
     };
 
-    cancelButton?.addEventListener("click", () => finish(false));
-    acceptButton?.addEventListener("click", () => finish(true));
+    cancelButton.addEventListener("click", () => finish(false));
+    acceptButton.addEventListener("click", () => finish(true));
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) {
         finish(false);
@@ -446,6 +575,60 @@ function openConfirmDialog(message: string): Promise<boolean> {
 
     document.addEventListener("keydown", onKeydown);
     document.body.append(overlay);
-    cancelButton?.focus();
+    cancelButton.focus();
   });
+}
+
+function createBrandLockup(): HTMLElement {
+  const lockup = document.createElement("div");
+  lockup.className = "wb-brand-lockup";
+
+  const icon = document.createElement("img");
+  icon.className = "wb-brand-lockup__icon";
+  icon.src = "./icon/32.png";
+  icon.alt = "";
+  icon.width = 32;
+  icon.height = 32;
+
+  const copy = document.createElement("div");
+  copy.className = "wb-brand-lockup__copy";
+
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "wb-brand-lockup__eyebrow";
+  eyebrow.textContent = "Chrome Extension";
+
+  const title = document.createElement("h1");
+  title.className = "wb-sessions-title";
+  title.textContent = "Sessions";
+
+  copy.append(eyebrow, title);
+  lockup.append(icon, copy);
+  return lockup;
+}
+
+function createChip(text: string, title?: string, className = "wb-chip"): HTMLElement {
+  const chip = document.createElement("span");
+  chip.className = className;
+  chip.textContent = text;
+
+  if (title) {
+    chip.title = title;
+  }
+
+  return chip;
+}
+
+function createActionButton(
+  label: string,
+  className: string,
+  dataset: Record<string, string>,
+  disabled = false
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.disabled = disabled;
+  button.textContent = label;
+  Object.assign(button.dataset, dataset);
+  return button;
 }
