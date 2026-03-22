@@ -1,7 +1,7 @@
-import { cp, mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { dirname, relative, resolve, sep } from "node:path";
+import JSZip from "jszip";
 
 import {
   assertExtensionBuild,
@@ -12,6 +12,9 @@ import {
   readJson,
   writeJson
 } from "./lib/extension-build.mjs";
+
+const ARCHIVE_FIXED_DATE = new Date("1980-01-01T00:00:00.000Z");
+const ARCHIVE_EXCLUDED_FILE_NAMES = new Set([".DS_Store"]);
 
 const args = process.argv.slice(2);
 const outputArg = readFlagValue(args, "--output");
@@ -44,11 +47,7 @@ const uploadDir = await prepareUploadDirectory(buildDir, {
 });
 
 try {
-  await runCommand(
-    "zip",
-    ["-q", "-r", outputPath, ".", "-x", "*.map", ".DS_Store", "*/.DS_Store"],
-    uploadDir.path
-  );
+  await createArchiveFromDirectory(uploadDir.path, outputPath);
 } finally {
   await rm(uploadDir.path, { recursive: true, force: true });
 }
@@ -139,28 +138,52 @@ function slugify(value) {
     .replace(/-{2,}/g, "-");
 }
 
-function runCommand(command, args, cwd) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, {
-      cwd,
-      stdio: "inherit"
-    });
+async function createArchiveFromDirectory(sourceDir, outputPath) {
+  const zip = new JSZip();
+  const files = await listPackagedFiles(sourceDir);
 
-    child.on("error", (error) => {
-      rejectPromise(
-        new Error(
-          `Failed to launch '${command}'. Make sure it is installed and available in PATH. ${error.message}`
-        )
-      );
+  for (const relativePath of files) {
+    const bytes = await readFile(resolve(sourceDir, relativePath));
+    zip.file(relativePath, bytes, {
+      binary: true,
+      date: ARCHIVE_FIXED_DATE
     });
+  }
 
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolvePromise();
-        return;
-      }
-
-      rejectPromise(new Error(`'${command}' exited with code ${code ?? "unknown"}.`));
-    });
+  const bytes = await zip.generateAsync({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+    compressionOptions: {
+      level: 6
+    },
+    platform: "UNIX"
   });
+
+  await writeFile(outputPath, bytes);
+}
+
+async function listPackagedFiles(rootDir, currentDir = rootDir) {
+  const entries = await readdir(currentDir, { withFileTypes: true });
+  const files = [];
+
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const absolutePath = resolve(currentDir, entry.name);
+
+    if (entry.isDirectory()) {
+      files.push(...(await listPackagedFiles(rootDir, absolutePath)));
+      continue;
+    }
+
+    if (!entry.isFile() || shouldSkipPackagedFile(entry.name)) {
+      continue;
+    }
+
+    files.push(relative(rootDir, absolutePath).split(sep).join("/"));
+  }
+
+  return files;
+}
+
+function shouldSkipPackagedFile(fileName) {
+  return ARCHIVE_EXCLUDED_FILE_NAMES.has(fileName) || fileName.endsWith(".map");
 }

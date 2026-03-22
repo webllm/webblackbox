@@ -27,5 +27,8 @@
     "@webblackbox/recorder": "workspace:*",
     "@zumer/snapdom": "^2.0.2",
     "webblackbox": "workspace:*"
+  },
+  "devDependencies": {
+    "jszip": "^3.10.1"
   }
 }

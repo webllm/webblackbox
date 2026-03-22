@@ -117,7 +117,7 @@ pnpm build
 pnpm package:chrome
 ```
 
-The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local builds keep the stable development `key`, while `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` with a release manifest that omits the `key` field. You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
+The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local builds keep the stable development `key`, while `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` with a release manifest that omits the `key` field. Packaging is now pure Node.js, so it no longer depends on a system `zip` binary being installed. You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
 
 Build entries:
 

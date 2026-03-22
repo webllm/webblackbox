@@ -83,6 +83,10 @@ importers:
       webblackbox:
         specifier: workspace:*
         version: link:../../packages/webblackbox
+    devDependencies:
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
 
   apps/mcp-server:
     dependencies:
