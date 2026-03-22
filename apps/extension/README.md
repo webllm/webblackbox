@@ -63,16 +63,17 @@ The extension consists of multiple main components:
 
 - Quick controls for starting/stopping recording sessions
 - Session status display
-- Export trigger
+- Archive policy controls and export trigger
 
 #### Options Page (`options.html`)
 
 - Full recorder configuration UI
-- Sampling rate configuration
-- Freeze trigger toggles (error / network failure / long task)
+- Runtime profile overview for shipped `lite` / `full` modes
+- Sampling cadence and ring-buffer configuration
+- Freeze-on-error and performance budget controls
 - Network body capture byte cap
 - Redaction rule management
-- Site-specific capture policies
+- Screenshot cadence tuning
 
 #### Sessions Page (`sessions.html`)
 
@@ -114,10 +115,12 @@ User markers are `user.marker` events that serve as bookmarks in the recording t
 ```bash
 cd apps/extension
 pnpm build
+pnpm build:release
 pnpm package:chrome
+pnpm verify
 ```
 
-The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local builds keep the stable development `key`, while `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` with a release manifest that omits the `key` field. Packaging is now pure Node.js, so it no longer depends on a system `zip` binary being installed. You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
+The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local `pnpm build` runs keep the stable development `key`, while `pnpm build:release` generates an unpacked release build without that `key` so you can do store-parity checks before upload. `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` with the release manifest. Packaging is pure Node.js, so it does not depend on a system `zip` binary being installed. `pnpm verify` runs the extension's lint, typecheck, test, and packaging pipeline in one command. You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
 
 Build entries:
 

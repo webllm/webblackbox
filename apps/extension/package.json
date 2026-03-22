@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "tsup --config tsup.config.ts --watch src --watch public --watch scripts --onSuccess \"node scripts/prepare-build-output.mjs\"",
     "build": "tsup --config tsup.config.ts --clean && node scripts/prepare-build-output.mjs",
+    "build:release": "tsup --config tsup.config.ts --clean && node scripts/prepare-build-output.mjs --release",
     "package:chrome": "pnpm run build && node scripts/package-extension.mjs",
+    "verify": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run package:chrome",
     "e2e:check": "node scripts/e2e-extension-check.mjs",
     "e2e:fullchain": "node scripts/e2e-fullchain-demo.mjs",
     "e2e:fullchain:lite": "WB_E2E_MODE=lite node scripts/e2e-fullchain-demo.mjs",
