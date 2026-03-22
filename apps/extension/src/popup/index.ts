@@ -1,6 +1,7 @@
 import { DEFAULT_EXPORT_POLICY, type ExportPolicy, type FreezeReason } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
+import { escapeHtml } from "../shared/html.js";
 import {
   PORT_NAMES,
   type ExtensionInboundMessage,
@@ -45,10 +46,10 @@ if (root) {
           <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
           <div class="wb-brand-lockup__copy">
             <h1 class="wb-popup__title">WebBlackbox</h1>
-            <p class="wb-popup__version">v${extensionVersion}</p>
+            <p class="wb-popup__version">v${escapeHtml(extensionVersion)}</p>
           </div>
         </div>
-        <p>${String(error)}</p>
+        <p>${escapeHtml(String(error))}</p>
       </section>
     `;
   });
@@ -118,6 +119,17 @@ function render(container: HTMLElement): void {
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
   const startDisabled = Boolean(activeOnCurrentTab);
+  const safeExtensionVersion = escapeHtml(extensionVersion);
+  const safeTabLabel = escapeHtml(String(state.tabId ?? "n/a"));
+  const safeStatus = escapeHtml(status);
+  const safeCaptureSummary = escapeHtml(captureSummary);
+  const safeIncidentText = escapeHtml(incidentText);
+  const safeBadgeText = escapeHtml(badgeText);
+  const safeExportStatus = escapeHtml(state.exportStatus ?? "");
+  const safeRingWindowLabel = ringUsage ? escapeHtml(ringUsage.windowLabel) : "";
+  const ringUsageRatioPercent = ringUsage
+    ? Math.max(0, Math.min(100, ringUsage.ratioPercent)).toFixed(1)
+    : "0.0";
 
   container.innerHTML = `
     <section class="card wb-popup">
@@ -126,16 +138,16 @@ function render(container: HTMLElement): void {
           <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
           <div class="wb-brand-lockup__copy">
             <h1 class="wb-popup__title">WebBlackbox</h1>
-            <p class="wb-popup__version">v${extensionVersion}</p>
+            <p class="wb-popup__version">v${safeExtensionVersion}</p>
           </div>
         </div>
-        <span class="${badgeClass}">${badgeText}</span>
+        <span class="${badgeClass}">${safeBadgeText}</span>
       </header>
       <div class="wb-popup__meta">
-        <p class="wb-popup__meta-line"><span>Tab</span><strong>${state.tabId ?? "n/a"}</strong></p>
-        <p class="wb-popup__meta-line"><span>Status</span><strong>${status}</strong></p>
-        <p class="wb-popup__meta-line"><span>Capture</span><strong>${captureSummary}</strong></p>
-        <p class="wb-popup__meta-line"><span>Incident</span><strong>${incidentText}</strong></p>
+        <p class="wb-popup__meta-line"><span>Tab</span><strong>${safeTabLabel}</strong></p>
+        <p class="wb-popup__meta-line"><span>Status</span><strong>${safeStatus}</strong></p>
+        <p class="wb-popup__meta-line"><span>Capture</span><strong>${safeCaptureSummary}</strong></p>
+        <p class="wb-popup__meta-line"><span>Incident</span><strong>${safeIncidentText}</strong></p>
       </div>
       ${
         ringUsage
@@ -143,12 +155,12 @@ function render(container: HTMLElement): void {
       <section class="wb-popup__buffer">
         <p class="wb-popup__buffer-label">
           <span>Ring buffer</span>
-          <strong>${ringUsage.windowLabel}</strong>
+          <strong>${safeRingWindowLabel}</strong>
         </p>
         <div class="wb-popup__buffer-track" role="progressbar" aria-valuemin="0" aria-valuemax="${Math.round(
           ringUsage.capacityMinutes * 100
-        )}" aria-valuenow="${Math.round(ringUsage.usedMinutes * 100)}" aria-valuetext="${ringUsage.windowLabel}">
-          <span class="wb-popup__buffer-fill" style="width:${ringUsage.ratioPercent.toFixed(1)}%"></span>
+        )}" aria-valuenow="${Math.round(ringUsage.usedMinutes * 100)}" aria-valuetext="${safeRingWindowLabel}">
+          <span class="wb-popup__buffer-fill" style="width:${ringUsageRatioPercent}%"></span>
         </div>
       </section>
       `
@@ -177,7 +189,7 @@ function render(container: HTMLElement): void {
         <label class="wb-field-label" for="export-recent-minutes">Recent window (minutes)</label>
         <input id="export-recent-minutes" type="number" min="1" max="43200" step="1" class="wb-input" />
       </section>
-      <p class="${exportStatusClass}">${state.exportStatus ?? ""}</p>
+      <p class="${exportStatusClass}">${safeExportStatus}</p>
       <p class="wb-popup__hint">Marker: Ctrl/Cmd + Shift + M</p>
     </section>
   `;

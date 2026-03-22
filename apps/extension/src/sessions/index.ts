@@ -1,4 +1,5 @@
 import { getChromeApi } from "../shared/chrome-api.js";
+import { escapeHtml } from "../shared/html.js";
 import {
   PORT_NAMES,
   type ExtensionInboundMessage,
@@ -267,15 +268,6 @@ function normalizeNoteInput(value: string): string | undefined {
 
 function formatTagInputValue(tags: string[]): string {
   return tags.join(", ");
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
 
 function bindActions(container: HTMLElement): void {

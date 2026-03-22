@@ -1,6 +1,7 @@
 import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
+import { escapeHtml } from "../shared/html.js";
 import { MODE_PRODUCT_PROFILES } from "../shared/mode-profile.js";
 import { migrateStoredRecorderConfig, OPTIONS_STORAGE_VERSION } from "../shared/options-storage.js";
 import {
@@ -32,7 +33,7 @@ if (root) {
             </div>
           </div>
         </header>
-        <p>${String(error)}</p>
+        <p>${escapeHtml(String(error))}</p>
       </section>
     `;
   });
@@ -45,6 +46,21 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 
 function render(container: HTMLElement, options: OptionsState): void {
   const { recorderConfig: config, performanceBudget } = options;
+  const ringBufferMinutes = escapeHtml(String(config.ringBufferMinutes));
+  const actionWindowMs = escapeHtml(String(config.sampling.actionWindowMs));
+  const mousemoveHz = escapeHtml(String(config.sampling.mousemoveHz));
+  const scrollHz = escapeHtml(String(config.sampling.scrollHz));
+  const domFlushMs = escapeHtml(String(config.sampling.domFlushMs));
+  const snapshotIntervalMs = escapeHtml(String(config.sampling.snapshotIntervalMs));
+  const screenshotIdleMs = escapeHtml(String(config.sampling.screenshotIdleMs));
+  const bodyCaptureMaxBytes = escapeHtml(String(config.sampling.bodyCaptureMaxBytes));
+  const budgetLcpWarnMs = escapeHtml(String(performanceBudget.lcpWarnMs));
+  const budgetRequestWarnMs = escapeHtml(String(performanceBudget.requestWarnMs));
+  const budgetErrorRateWarnPct = escapeHtml(String(performanceBudget.errorRateWarnPct));
+  const blockedSelectors = escapeHtml(config.redaction.blockedSelectors.join("\n"));
+  const redactHeaders = escapeHtml(config.redaction.redactHeaders.join("\n"));
+  const redactBodyPatterns = escapeHtml(config.redaction.redactBodyPatterns.join("\n"));
+
   container.innerHTML = `
     <section class="card" style="max-width:760px;">
       <header class="wb-page-header">
@@ -66,31 +82,31 @@ function render(container: HTMLElement, options: OptionsState): void {
       </section>
 
       <label style="display:block;margin:12px 0 6px;">Ring Buffer (minutes)</label>
-      <input id="ringBufferMinutes" type="number" min="1" max="120" value="${config.ringBufferMinutes}" />
+      <input id="ringBufferMinutes" type="number" min="1" max="120" value="${ringBufferMinutes}" />
 
       <label style="display:block;margin:12px 0 6px;">Action Window (ms)</label>
-      <input id="actionWindowMs" type="number" min="100" max="10000" value="${config.sampling.actionWindowMs}" />
+      <input id="actionWindowMs" type="number" min="100" max="10000" value="${actionWindowMs}" />
 
       <label style="display:block;margin:12px 0 6px;">Mousemove Sampling (Hz)</label>
-      <input id="mousemoveHz" type="number" min="1" max="240" value="${config.sampling.mousemoveHz}" />
+      <input id="mousemoveHz" type="number" min="1" max="240" value="${mousemoveHz}" />
 
       <label style="display:block;margin:12px 0 6px;">Scroll Sampling (Hz)</label>
-      <input id="scrollHz" type="number" min="1" max="120" value="${config.sampling.scrollHz}" />
+      <input id="scrollHz" type="number" min="1" max="120" value="${scrollHz}" />
 
       <label style="display:block;margin:12px 0 6px;">DOM Flush Interval (ms)</label>
-      <input id="domFlushMs" type="number" min="25" max="10000" value="${config.sampling.domFlushMs}" />
+      <input id="domFlushMs" type="number" min="25" max="10000" value="${domFlushMs}" />
 
       <label style="display:block;margin:12px 0 6px;">DOM Snapshot Interval (ms)</label>
-      <input id="snapshotIntervalMs" type="number" min="500" max="120000" value="${config.sampling.snapshotIntervalMs}" />
+      <input id="snapshotIntervalMs" type="number" min="500" max="120000" value="${snapshotIntervalMs}" />
 
       <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
-      <input id="screenshotIdleMs" type="number" min="0" max="120000" value="${config.sampling.screenshotIdleMs}" />
+      <input id="screenshotIdleMs" type="number" min="0" max="120000" value="${screenshotIdleMs}" />
       <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
         Lite captures idle screenshots by default. Set this to <code>0</code> to disable runtime screenshots. Full mode uses this for browser-side screenshot cadence.
       </p>
 
       <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
-      <input id="bodyCaptureMaxBytes" type="number" min="0" max="1048576" value="${config.sampling.bodyCaptureMaxBytes}" />
+      <input id="bodyCaptureMaxBytes" type="number" min="0" max="1048576" value="${bodyCaptureMaxBytes}" />
       <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
         Lite keeps page-side response-body capture disabled. In the extension, this knob only affects the capped browser-side body capture path used by full mode.
       </p>
@@ -107,13 +123,13 @@ function render(container: HTMLElement, options: OptionsState): void {
       <section style="margin-top:14px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:rgba(20,33,61,0.02);display:grid;gap:8px;">
         <h2 style="margin:0;font-size:14px;">Performance Budget Alerts</h2>
         <label style="display:block;margin:4px 0 4px;">LCP warn threshold (ms)</label>
-        <input id="budgetLcpWarnMs" type="number" min="500" max="30000" step="100" value="${performanceBudget.lcpWarnMs}" />
+        <input id="budgetLcpWarnMs" type="number" min="500" max="30000" step="100" value="${budgetLcpWarnMs}" />
 
         <label style="display:block;margin:4px 0 4px;">Slow request threshold (ms)</label>
-        <input id="budgetRequestWarnMs" type="number" min="100" max="60000" step="100" value="${performanceBudget.requestWarnMs}" />
+        <input id="budgetRequestWarnMs" type="number" min="100" max="60000" step="100" value="${budgetRequestWarnMs}" />
 
         <label style="display:block;margin:4px 0 4px;">Error-rate warn threshold (%)</label>
-        <input id="budgetErrorRateWarnPct" type="number" min="1" max="100" step="1" value="${performanceBudget.errorRateWarnPct}" />
+        <input id="budgetErrorRateWarnPct" type="number" min="1" max="100" step="1" value="${budgetErrorRateWarnPct}" />
 
         <div style="display:flex;align-items:center;gap:8px;">
           <input id="budgetAutoFreezeOnBreach" type="checkbox" ${
@@ -124,13 +140,13 @@ function render(container: HTMLElement, options: OptionsState): void {
       </section>
 
       <label style="display:block;margin:12px 0 6px;">Blocked Selectors (one per line)</label>
-      <textarea id="blockedSelectors" rows="6" style="width:100%;">${config.redaction.blockedSelectors.join("\n")}</textarea>
+      <textarea id="blockedSelectors" rows="6" style="width:100%;">${blockedSelectors}</textarea>
 
       <label style="display:block;margin:12px 0 6px;">Redacted Header Names (one per line)</label>
-      <textarea id="redactHeaders" rows="6" style="width:100%;">${config.redaction.redactHeaders.join("\n")}</textarea>
+      <textarea id="redactHeaders" rows="6" style="width:100%;">${redactHeaders}</textarea>
 
       <label style="display:block;margin:12px 0 6px;">Body Sensitive Patterns (one per line)</label>
-      <textarea id="redactBodyPatterns" rows="6" style="width:100%;">${config.redaction.redactBodyPatterns.join("\n")}</textarea>
+      <textarea id="redactBodyPatterns" rows="6" style="width:100%;">${redactBodyPatterns}</textarea>
 
       <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
         <input id="hashSensitiveValues" type="checkbox" ${config.redaction.hashSensitiveValues ? "checked" : ""} />
@@ -180,10 +196,10 @@ function renderModeProfileMarkup(): string {
     .map(([mode, profile]) => {
       return `
         <article style="padding:10px;border:1px solid rgba(0,0,0,0.08);border-radius:8px;background:rgba(255,255,255,0.72);display:grid;gap:4px;">
-          <strong>${profile.label} <code>${mode}</code></strong>
-          <span style="font-size:12px;opacity:0.84;">${profile.summary}</span>
-          <span style="font-size:12px;opacity:0.78;">Signals: ${profile.signals}</span>
-          <span style="font-size:12px;opacity:0.78;">Heavy capture: ${profile.heavyCapture}</span>
+          <strong>${escapeHtml(profile.label)} <code>${escapeHtml(mode)}</code></strong>
+          <span style="font-size:12px;opacity:0.84;">${escapeHtml(profile.summary)}</span>
+          <span style="font-size:12px;opacity:0.78;">Signals: ${escapeHtml(profile.signals)}</span>
+          <span style="font-size:12px;opacity:0.78;">Heavy capture: ${escapeHtml(profile.heavyCapture)}</span>
         </article>
       `;
     })
