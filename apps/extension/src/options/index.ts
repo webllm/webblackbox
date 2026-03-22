@@ -1,7 +1,6 @@
 import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
-import { escapeHtml } from "../shared/html.js";
 import { MODE_PRODUCT_PROFILES } from "../shared/mode-profile.js";
 import { migrateStoredRecorderConfig, OPTIONS_STORAGE_VERSION } from "../shared/options-storage.js";
 import {
@@ -22,20 +21,7 @@ type OptionsState = {
 
 if (root) {
   bootstrap(root).catch((error) => {
-    root.innerHTML = `
-      <section class="card" style="max-width:760px;">
-        <header class="wb-page-header">
-          <div class="wb-brand-lockup">
-            <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
-            <div class="wb-brand-lockup__copy">
-              <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
-              <h1 style="margin:0;">Capture Settings</h1>
-            </div>
-          </div>
-        </header>
-        <p>${escapeHtml(String(error))}</p>
-      </section>
-    `;
+    renderError(root, error);
   });
 }
 
@@ -46,121 +32,155 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 
 function render(container: HTMLElement, options: OptionsState): void {
   const { recorderConfig: config, performanceBudget } = options;
-  const ringBufferMinutes = escapeHtml(String(config.ringBufferMinutes));
-  const actionWindowMs = escapeHtml(String(config.sampling.actionWindowMs));
-  const mousemoveHz = escapeHtml(String(config.sampling.mousemoveHz));
-  const scrollHz = escapeHtml(String(config.sampling.scrollHz));
-  const domFlushMs = escapeHtml(String(config.sampling.domFlushMs));
-  const snapshotIntervalMs = escapeHtml(String(config.sampling.snapshotIntervalMs));
-  const screenshotIdleMs = escapeHtml(String(config.sampling.screenshotIdleMs));
-  const bodyCaptureMaxBytes = escapeHtml(String(config.sampling.bodyCaptureMaxBytes));
-  const budgetLcpWarnMs = escapeHtml(String(performanceBudget.lcpWarnMs));
-  const budgetRequestWarnMs = escapeHtml(String(performanceBudget.requestWarnMs));
-  const budgetErrorRateWarnPct = escapeHtml(String(performanceBudget.errorRateWarnPct));
-  const blockedSelectors = escapeHtml(config.redaction.blockedSelectors.join("\n"));
-  const redactHeaders = escapeHtml(config.redaction.redactHeaders.join("\n"));
-  const redactBodyPatterns = escapeHtml(config.redaction.redactBodyPatterns.join("\n"));
+  const section = document.createElement("section");
+  section.className = "card";
+  section.style.maxWidth = "760px";
 
-  container.innerHTML = `
-    <section class="card" style="max-width:760px;">
-      <header class="wb-page-header">
-        <div class="wb-brand-lockup">
-          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
-          <div class="wb-brand-lockup__copy">
-            <p class="wb-brand-lockup__eyebrow">Chrome Extension</p>
-            <h1 style="margin:0;">Capture Settings</h1>
-          </div>
-        </div>
-        <p class="wb-page-header__subtitle">Configure redaction and sampling defaults per browser profile.</p>
-      </header>
-      <section style="margin-top:14px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:rgba(20,33,61,0.02);display:grid;gap:10px;">
-        <h2 style="margin:0;font-size:14px;">Runtime Profiles</h2>
-        <p style="margin:0;font-size:12px;opacity:0.78;">
-          WebBlackbox currently exposes two runtime profiles only: <code>lite</code> and <code>full</code>. There is no <code>balanced</code> mode in the shipped extension build.
-        </p>
-        ${renderModeProfileMarkup()}
-      </section>
+  const header = document.createElement("header");
+  header.className = "wb-page-header";
+  header.append(createBrandLockup());
 
-      <label style="display:block;margin:12px 0 6px;">Ring Buffer (minutes)</label>
-      <input id="ringBufferMinutes" type="number" min="1" max="120" value="${ringBufferMinutes}" />
+  const subtitle = document.createElement("p");
+  subtitle.className = "wb-page-header__subtitle";
+  subtitle.textContent = "Configure redaction and sampling defaults per browser profile.";
+  header.append(subtitle);
+  section.append(header);
 
-      <label style="display:block;margin:12px 0 6px;">Action Window (ms)</label>
-      <input id="actionWindowMs" type="number" min="100" max="10000" value="${actionWindowMs}" />
+  section.append(createRuntimeProfilesSection());
+  section.append(
+    ...createNumberField("Ring Buffer (minutes)", "ringBufferMinutes", config.ringBufferMinutes, {
+      min: 1,
+      max: 120
+    })
+  );
+  section.append(
+    ...createNumberField("Action Window (ms)", "actionWindowMs", config.sampling.actionWindowMs, {
+      min: 100,
+      max: 10_000
+    })
+  );
+  section.append(
+    ...createNumberField("Mousemove Sampling (Hz)", "mousemoveHz", config.sampling.mousemoveHz, {
+      min: 1,
+      max: 240
+    })
+  );
+  section.append(
+    ...createNumberField("Scroll Sampling (Hz)", "scrollHz", config.sampling.scrollHz, {
+      min: 1,
+      max: 120
+    })
+  );
+  section.append(
+    ...createNumberField("DOM Flush Interval (ms)", "domFlushMs", config.sampling.domFlushMs, {
+      min: 25,
+      max: 10_000
+    })
+  );
+  section.append(
+    ...createNumberField(
+      "DOM Snapshot Interval (ms)",
+      "snapshotIntervalMs",
+      config.sampling.snapshotIntervalMs,
+      { min: 500, max: 120_000 }
+    )
+  );
+  section.append(
+    ...createNumberField(
+      "Screenshot Idle Interval (ms)",
+      "screenshotIdleMs",
+      config.sampling.screenshotIdleMs,
+      { min: 0, max: 120_000 }
+    )
+  );
+  section.append(
+    createHelpText([
+      "Lite captures idle screenshots by default. Set this to ",
+      createCode("0"),
+      " to disable runtime screenshots. Full mode uses this for browser-side screenshot cadence."
+    ])
+  );
+  section.append(
+    ...createNumberField(
+      "Network Body Capture Max Bytes",
+      "bodyCaptureMaxBytes",
+      config.sampling.bodyCaptureMaxBytes,
+      { min: 0, max: 1_048_576 }
+    )
+  );
+  section.append(
+    createHelpText([
+      "Lite keeps page-side response-body capture disabled. In the extension, this knob only affects the capped browser-side body capture path used by full mode."
+    ])
+  );
+  section.append(
+    createCheckboxRow("freezeOnError", "Freeze on uncaught errors", config.freezeOnError, {
+      marginTop: "12px"
+    })
+  );
+  section.append(
+    createHelpText(
+      ["Runtime safety mode keeps performance-trigger freeze disabled for lite/full recording."],
+      { marginTop: "8px" }
+    )
+  );
+  section.append(createPerformanceBudgetSection(performanceBudget));
+  section.append(
+    ...createTextareaField(
+      "Blocked Selectors (one per line)",
+      "blockedSelectors",
+      config.redaction.blockedSelectors.join("\n")
+    )
+  );
+  section.append(
+    ...createTextareaField(
+      "Redacted Header Names (one per line)",
+      "redactHeaders",
+      config.redaction.redactHeaders.join("\n")
+    )
+  );
+  section.append(
+    ...createTextareaField(
+      "Body Sensitive Patterns (one per line)",
+      "redactBodyPatterns",
+      config.redaction.redactBodyPatterns.join("\n")
+    )
+  );
+  section.append(
+    createCheckboxRow(
+      "hashSensitiveValues",
+      "Hash sensitive values",
+      config.redaction.hashSensitiveValues,
+      { marginTop: "12px" }
+    )
+  );
 
-      <label style="display:block;margin:12px 0 6px;">Mousemove Sampling (Hz)</label>
-      <input id="mousemoveHz" type="number" min="1" max="240" value="${mousemoveHz}" />
+  const actions = document.createElement("div");
+  actions.style.display = "flex";
+  actions.style.gap = "8px";
+  actions.style.marginTop = "14px";
 
-      <label style="display:block;margin:12px 0 6px;">Scroll Sampling (Hz)</label>
-      <input id="scrollHz" type="number" min="1" max="120" value="${scrollHz}" />
+  const saveConfigButton = document.createElement("button");
+  saveConfigButton.id = "saveConfig";
+  saveConfigButton.type = "button";
+  saveConfigButton.textContent = "Save";
 
-      <label style="display:block;margin:12px 0 6px;">DOM Flush Interval (ms)</label>
-      <input id="domFlushMs" type="number" min="25" max="10000" value="${domFlushMs}" />
+  const resetConfigButton = document.createElement("button");
+  resetConfigButton.id = "resetConfig";
+  resetConfigButton.type = "button";
+  resetConfigButton.textContent = "Reset Defaults";
 
-      <label style="display:block;margin:12px 0 6px;">DOM Snapshot Interval (ms)</label>
-      <input id="snapshotIntervalMs" type="number" min="500" max="120000" value="${snapshotIntervalMs}" />
+  actions.append(saveConfigButton, resetConfigButton);
+  section.append(actions);
 
-      <label style="display:block;margin:12px 0 6px;">Screenshot Idle Interval (ms)</label>
-      <input id="screenshotIdleMs" type="number" min="0" max="120000" value="${screenshotIdleMs}" />
-      <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
-        Lite captures idle screenshots by default. Set this to <code>0</code> to disable runtime screenshots. Full mode uses this for browser-side screenshot cadence.
-      </p>
+  const statusText = document.createElement("p");
+  statusText.id = "statusText";
+  statusText.style.marginTop = "10px";
+  statusText.style.fontSize = "12px";
+  statusText.style.opacity = "0.8";
+  section.append(statusText);
 
-      <label style="display:block;margin:12px 0 6px;">Network Body Capture Max Bytes</label>
-      <input id="bodyCaptureMaxBytes" type="number" min="0" max="1048576" value="${bodyCaptureMaxBytes}" />
-      <p style="margin:6px 0 0;font-size:12px;opacity:0.78;">
-        Lite keeps page-side response-body capture disabled. In the extension, this knob only affects the capped browser-side body capture path used by full mode.
-      </p>
-
-      <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
-        <input id="freezeOnError" type="checkbox" ${config.freezeOnError ? "checked" : ""} />
-        <label for="freezeOnError">Freeze on uncaught errors</label>
-      </div>
-
-      <p style="margin:8px 0 0;font-size:12px;opacity:0.78;">
-        Runtime safety mode keeps performance-trigger freeze disabled for lite/full recording.
-      </p>
-
-      <section style="margin-top:14px;padding:10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:rgba(20,33,61,0.02);display:grid;gap:8px;">
-        <h2 style="margin:0;font-size:14px;">Performance Budget Alerts</h2>
-        <label style="display:block;margin:4px 0 4px;">LCP warn threshold (ms)</label>
-        <input id="budgetLcpWarnMs" type="number" min="500" max="30000" step="100" value="${budgetLcpWarnMs}" />
-
-        <label style="display:block;margin:4px 0 4px;">Slow request threshold (ms)</label>
-        <input id="budgetRequestWarnMs" type="number" min="100" max="60000" step="100" value="${budgetRequestWarnMs}" />
-
-        <label style="display:block;margin:4px 0 4px;">Error-rate warn threshold (%)</label>
-        <input id="budgetErrorRateWarnPct" type="number" min="1" max="100" step="1" value="${budgetErrorRateWarnPct}" />
-
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input id="budgetAutoFreezeOnBreach" type="checkbox" ${
-            performanceBudget.autoFreezeOnBreach ? "checked" : ""
-          } />
-          <label for="budgetAutoFreezeOnBreach">Auto-freeze on budget breach</label>
-        </div>
-      </section>
-
-      <label style="display:block;margin:12px 0 6px;">Blocked Selectors (one per line)</label>
-      <textarea id="blockedSelectors" rows="6" style="width:100%;">${blockedSelectors}</textarea>
-
-      <label style="display:block;margin:12px 0 6px;">Redacted Header Names (one per line)</label>
-      <textarea id="redactHeaders" rows="6" style="width:100%;">${redactHeaders}</textarea>
-
-      <label style="display:block;margin:12px 0 6px;">Body Sensitive Patterns (one per line)</label>
-      <textarea id="redactBodyPatterns" rows="6" style="width:100%;">${redactBodyPatterns}</textarea>
-
-      <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
-        <input id="hashSensitiveValues" type="checkbox" ${config.redaction.hashSensitiveValues ? "checked" : ""} />
-        <label for="hashSensitiveValues">Hash sensitive values</label>
-      </div>
-
-      <div style="display:flex;gap:8px;margin-top:14px;">
-        <button id="saveConfig">Save</button>
-        <button id="resetConfig">Reset Defaults</button>
-      </div>
-
-      <p id="statusText" style="margin-top:10px;font-size:12px;opacity:0.8;"></p>
-    </section>
-  `;
+  container.replaceChildren(section);
 
   const saveButton = container.querySelector<HTMLButtonElement>("#saveConfig");
   const resetButton = container.querySelector<HTMLButtonElement>("#resetConfig");
@@ -189,21 +209,6 @@ function render(container: HTMLElement, options: OptionsState): void {
       performanceBudget: { ...DEFAULT_PERFORMANCE_BUDGET }
     });
   });
-}
-
-function renderModeProfileMarkup(): string {
-  return Object.entries(MODE_PRODUCT_PROFILES)
-    .map(([mode, profile]) => {
-      return `
-        <article style="padding:10px;border:1px solid rgba(0,0,0,0.08);border-radius:8px;background:rgba(255,255,255,0.72);display:grid;gap:4px;">
-          <strong>${escapeHtml(profile.label)} <code>${escapeHtml(mode)}</code></strong>
-          <span style="font-size:12px;opacity:0.84;">${escapeHtml(profile.summary)}</span>
-          <span style="font-size:12px;opacity:0.78;">Signals: ${escapeHtml(profile.signals)}</span>
-          <span style="font-size:12px;opacity:0.78;">Heavy capture: ${escapeHtml(profile.heavyCapture)}</span>
-        </article>
-      `;
-    })
-    .join("");
 }
 
 async function loadOptionsState(): Promise<OptionsState> {
@@ -383,4 +388,261 @@ function splitLines(value: string | undefined): string[] {
     .split("\n")
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function renderError(container: HTMLElement, error: unknown): void {
+  const section = document.createElement("section");
+  section.className = "card";
+  section.style.maxWidth = "760px";
+  section.append(createBrandLockup());
+
+  const message = document.createElement("p");
+  message.textContent = String(error);
+  section.append(message);
+
+  container.replaceChildren(section);
+}
+
+function createBrandLockup(): HTMLElement {
+  const lockup = document.createElement("div");
+  lockup.className = "wb-brand-lockup";
+
+  const icon = document.createElement("img");
+  icon.className = "wb-brand-lockup__icon";
+  icon.src = "./icon/32.png";
+  icon.alt = "";
+  icon.width = 32;
+  icon.height = 32;
+
+  const copy = document.createElement("div");
+  copy.className = "wb-brand-lockup__copy";
+
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "wb-brand-lockup__eyebrow";
+  eyebrow.textContent = "Chrome Extension";
+
+  const title = document.createElement("h1");
+  title.style.margin = "0";
+  title.textContent = "Capture Settings";
+
+  copy.append(eyebrow, title);
+  lockup.append(icon, copy);
+  return lockup;
+}
+
+function createRuntimeProfilesSection(): HTMLElement {
+  const section = createInsetSection({ gap: "10px" });
+
+  const title = document.createElement("h2");
+  title.style.margin = "0";
+  title.style.fontSize = "14px";
+  title.textContent = "Runtime Profiles";
+
+  const summary = createHelpText([
+    "WebBlackbox currently exposes two runtime profiles only: ",
+    createCode("lite"),
+    " and ",
+    createCode("full"),
+    ". There is no ",
+    createCode("balanced"),
+    " mode in the shipped extension build."
+  ]);
+  summary.style.marginTop = "0";
+
+  section.append(title, summary, ...createModeProfileCards());
+  return section;
+}
+
+function createModeProfileCards(): HTMLElement[] {
+  return Object.entries(MODE_PRODUCT_PROFILES).map(([mode, profile]) => {
+    const card = document.createElement("article");
+    card.style.padding = "10px";
+    card.style.border = "1px solid rgba(0,0,0,0.08)";
+    card.style.borderRadius = "8px";
+    card.style.background = "rgba(255,255,255,0.72)";
+    card.style.display = "grid";
+    card.style.gap = "4px";
+
+    const title = document.createElement("strong");
+    title.append(profile.label, " ", createCode(mode));
+
+    const summary = document.createElement("span");
+    summary.style.fontSize = "12px";
+    summary.style.opacity = "0.84";
+    summary.textContent = profile.summary;
+
+    const signals = document.createElement("span");
+    signals.style.fontSize = "12px";
+    signals.style.opacity = "0.78";
+    signals.textContent = `Signals: ${profile.signals}`;
+
+    const heavyCapture = document.createElement("span");
+    heavyCapture.style.fontSize = "12px";
+    heavyCapture.style.opacity = "0.78";
+    heavyCapture.textContent = `Heavy capture: ${profile.heavyCapture}`;
+
+    card.append(title, summary, signals, heavyCapture);
+    return card;
+  });
+}
+
+function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConfig): HTMLElement {
+  const section = createInsetSection({ gap: "8px", marginTop: "14px" });
+
+  const title = document.createElement("h2");
+  title.style.margin = "0";
+  title.style.fontSize = "14px";
+  title.textContent = "Performance Budget Alerts";
+
+  section.append(
+    title,
+    ...createNumberField(
+      "LCP warn threshold (ms)",
+      "budgetLcpWarnMs",
+      performanceBudget.lcpWarnMs,
+      {
+        min: 500,
+        max: 30_000,
+        step: 100,
+        marginTop: "4px"
+      }
+    ),
+    ...createNumberField(
+      "Slow request threshold (ms)",
+      "budgetRequestWarnMs",
+      performanceBudget.requestWarnMs,
+      {
+        min: 100,
+        max: 60_000,
+        step: 100,
+        marginTop: "4px"
+      }
+    ),
+    ...createNumberField(
+      "Error-rate warn threshold (%)",
+      "budgetErrorRateWarnPct",
+      performanceBudget.errorRateWarnPct,
+      {
+        min: 1,
+        max: 100,
+        step: 1,
+        marginTop: "4px"
+      }
+    ),
+    createCheckboxRow(
+      "budgetAutoFreezeOnBreach",
+      "Auto-freeze on budget breach",
+      performanceBudget.autoFreezeOnBreach
+    )
+  );
+
+  return section;
+}
+
+function createInsetSection(styles: { gap: string; marginTop?: string }): HTMLElement {
+  const section = document.createElement("section");
+  section.style.marginTop = styles.marginTop ?? "14px";
+  section.style.padding = "10px";
+  section.style.border = "1px solid rgba(0,0,0,0.12)";
+  section.style.borderRadius = "10px";
+  section.style.background = "rgba(20,33,61,0.02)";
+  section.style.display = "grid";
+  section.style.gap = styles.gap;
+  return section;
+}
+
+function createNumberField(
+  labelText: string,
+  id: string,
+  value: number,
+  options: { min: number; max: number; step?: number; marginTop?: string }
+): [HTMLLabelElement, HTMLInputElement] {
+  const label = document.createElement("label");
+  label.style.display = "block";
+  label.style.margin = `${options.marginTop ?? "12px"} 0 6px`;
+  label.textContent = labelText;
+
+  const input = document.createElement("input");
+  input.id = id;
+  input.type = "number";
+  input.min = String(options.min);
+  input.max = String(options.max);
+  input.value = String(value);
+
+  if (typeof options.step === "number") {
+    input.step = String(options.step);
+  }
+
+  return [label, input];
+}
+
+function createTextareaField(
+  labelText: string,
+  id: string,
+  value: string
+): [HTMLLabelElement, HTMLTextAreaElement] {
+  const label = document.createElement("label");
+  label.style.display = "block";
+  label.style.margin = "12px 0 6px";
+  label.textContent = labelText;
+
+  const textarea = document.createElement("textarea");
+  textarea.id = id;
+  textarea.rows = 6;
+  textarea.style.width = "100%";
+  textarea.value = value;
+
+  return [label, textarea];
+}
+
+function createCheckboxRow(
+  id: string,
+  labelText: string,
+  checked: boolean,
+  options: { marginTop?: string } = {}
+): HTMLElement {
+  const row = document.createElement("div");
+  row.style.display = "flex";
+  row.style.alignItems = "center";
+  row.style.gap = "8px";
+  row.style.marginTop = options.marginTop ?? "0";
+
+  const input = document.createElement("input");
+  input.id = id;
+  input.type = "checkbox";
+  input.checked = checked;
+
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.textContent = labelText;
+
+  row.append(input, label);
+  return row;
+}
+
+function createHelpText(
+  parts: Array<string | HTMLElement>,
+  options: { marginTop?: string } = {}
+): HTMLParagraphElement {
+  const paragraph = document.createElement("p");
+  paragraph.style.margin = `${options.marginTop ?? "6px"} 0 0`;
+  paragraph.style.fontSize = "12px";
+  paragraph.style.opacity = "0.78";
+
+  for (const part of parts) {
+    if (typeof part === "string") {
+      paragraph.append(part);
+      continue;
+    }
+
+    paragraph.append(part);
+  }
+
+  return paragraph;
+}
+
+function createCode(text: string): HTMLElement {
+  const code = document.createElement("code");
+  code.textContent = text;
+  return code;
 }
