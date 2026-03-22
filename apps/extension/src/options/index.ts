@@ -33,8 +33,7 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 function render(container: HTMLElement, options: OptionsState): void {
   const { recorderConfig: config, performanceBudget } = options;
   const section = document.createElement("section");
-  section.className = "card";
-  section.style.maxWidth = "760px";
+  section.className = "card wb-options-card";
 
   const header = document.createElement("header");
   header.className = "wb-page-header";
@@ -115,13 +114,13 @@ function render(container: HTMLElement, options: OptionsState): void {
   );
   section.append(
     createCheckboxRow("freezeOnError", "Freeze on uncaught errors", config.freezeOnError, {
-      marginTop: "12px"
+      spacious: true
     })
   );
   section.append(
     createHelpText(
       ["Runtime safety mode keeps performance-trigger freeze disabled for lite/full recording."],
-      { marginTop: "8px" }
+      { variant: "spacious" }
     )
   );
   section.append(createPerformanceBudgetSection(performanceBudget));
@@ -151,23 +150,23 @@ function render(container: HTMLElement, options: OptionsState): void {
       "hashSensitiveValues",
       "Hash sensitive values",
       config.redaction.hashSensitiveValues,
-      { marginTop: "12px" }
+      { spacious: true }
     )
   );
 
   const actions = document.createElement("div");
-  actions.style.display = "flex";
-  actions.style.gap = "8px";
-  actions.style.marginTop = "14px";
+  actions.className = "wb-options-actions";
 
   const saveConfigButton = document.createElement("button");
   saveConfigButton.id = "saveConfig";
   saveConfigButton.type = "button";
+  saveConfigButton.className = "wb-btn wb-btn--brand";
   saveConfigButton.textContent = "Save";
 
   const resetConfigButton = document.createElement("button");
   resetConfigButton.id = "resetConfig";
   resetConfigButton.type = "button";
+  resetConfigButton.className = "wb-btn wb-btn--muted";
   resetConfigButton.textContent = "Reset Defaults";
 
   actions.append(saveConfigButton, resetConfigButton);
@@ -175,9 +174,7 @@ function render(container: HTMLElement, options: OptionsState): void {
 
   const statusText = document.createElement("p");
   statusText.id = "statusText";
-  statusText.style.marginTop = "10px";
-  statusText.style.fontSize = "12px";
-  statusText.style.opacity = "0.8";
+  statusText.className = "wb-options-status";
   section.append(statusText);
 
   container.replaceChildren(section);
@@ -392,8 +389,7 @@ function splitLines(value: string | undefined): string[] {
 
 function renderError(container: HTMLElement, error: unknown): void {
   const section = document.createElement("section");
-  section.className = "card";
-  section.style.maxWidth = "760px";
+  section.className = "card wb-options-card";
   section.append(createBrandLockup());
 
   const message = document.createElement("p");
@@ -422,7 +418,7 @@ function createBrandLockup(): HTMLElement {
   eyebrow.textContent = "Chrome Extension";
 
   const title = document.createElement("h1");
-  title.style.margin = "0";
+  title.className = "wb-options-title";
   title.textContent = "Capture Settings";
 
   copy.append(eyebrow, title);
@@ -431,23 +427,24 @@ function createBrandLockup(): HTMLElement {
 }
 
 function createRuntimeProfilesSection(): HTMLElement {
-  const section = createInsetSection({ gap: "10px" });
+  const section = createInsetSection();
 
   const title = document.createElement("h2");
-  title.style.margin = "0";
-  title.style.fontSize = "14px";
+  title.className = "wb-options-section-title";
   title.textContent = "Runtime Profiles";
 
-  const summary = createHelpText([
-    "WebBlackbox currently exposes two runtime profiles only: ",
-    createCode("lite"),
-    " and ",
-    createCode("full"),
-    ". There is no ",
-    createCode("balanced"),
-    " mode in the shipped extension build."
-  ]);
-  summary.style.marginTop = "0";
+  const summary = createHelpText(
+    [
+      "WebBlackbox currently exposes two runtime profiles only: ",
+      createCode("lite"),
+      " and ",
+      createCode("full"),
+      ". There is no ",
+      createCode("balanced"),
+      " mode in the shipped extension build."
+    ],
+    { variant: "flush" }
+  );
 
   section.append(title, summary, ...createModeProfileCards());
   return section;
@@ -456,29 +453,21 @@ function createRuntimeProfilesSection(): HTMLElement {
 function createModeProfileCards(): HTMLElement[] {
   return Object.entries(MODE_PRODUCT_PROFILES).map(([mode, profile]) => {
     const card = document.createElement("article");
-    card.style.padding = "10px";
-    card.style.border = "1px solid rgba(0,0,0,0.08)";
-    card.style.borderRadius = "8px";
-    card.style.background = "rgba(255,255,255,0.72)";
-    card.style.display = "grid";
-    card.style.gap = "4px";
+    card.className = "wb-options-profile-card";
 
     const title = document.createElement("strong");
     title.append(profile.label, " ", createCode(mode));
 
     const summary = document.createElement("span");
-    summary.style.fontSize = "12px";
-    summary.style.opacity = "0.84";
+    summary.className = "wb-options-profile-summary";
     summary.textContent = profile.summary;
 
     const signals = document.createElement("span");
-    signals.style.fontSize = "12px";
-    signals.style.opacity = "0.78";
+    signals.className = "wb-options-profile-meta";
     signals.textContent = `Signals: ${profile.signals}`;
 
     const heavyCapture = document.createElement("span");
-    heavyCapture.style.fontSize = "12px";
-    heavyCapture.style.opacity = "0.78";
+    heavyCapture.className = "wb-options-profile-meta";
     heavyCapture.textContent = `Heavy capture: ${profile.heavyCapture}`;
 
     card.append(title, summary, signals, heavyCapture);
@@ -487,11 +476,10 @@ function createModeProfileCards(): HTMLElement[] {
 }
 
 function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConfig): HTMLElement {
-  const section = createInsetSection({ gap: "8px", marginTop: "14px" });
+  const section = createInsetSection("dense");
 
   const title = document.createElement("h2");
-  title.style.margin = "0";
-  title.style.fontSize = "14px";
+  title.className = "wb-options-section-title";
   title.textContent = "Performance Budget Alerts";
 
   section.append(
@@ -504,7 +492,7 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
         min: 500,
         max: 30_000,
         step: 100,
-        marginTop: "4px"
+        compact: true
       }
     ),
     ...createNumberField(
@@ -515,7 +503,7 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
         min: 100,
         max: 60_000,
         step: 100,
-        marginTop: "4px"
+        compact: true
       }
     ),
     ...createNumberField(
@@ -526,7 +514,7 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
         min: 1,
         max: 100,
         step: 1,
-        marginTop: "4px"
+        compact: true
       }
     ),
     createCheckboxRow(
@@ -539,15 +527,10 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
   return section;
 }
 
-function createInsetSection(styles: { gap: string; marginTop?: string }): HTMLElement {
+function createInsetSection(variant: "default" | "dense" = "default"): HTMLElement {
   const section = document.createElement("section");
-  section.style.marginTop = styles.marginTop ?? "14px";
-  section.style.padding = "10px";
-  section.style.border = "1px solid rgba(0,0,0,0.12)";
-  section.style.borderRadius = "10px";
-  section.style.background = "rgba(20,33,61,0.02)";
-  section.style.display = "grid";
-  section.style.gap = styles.gap;
+  section.className =
+    variant === "dense" ? "wb-options-inset wb-options-inset--dense" : "wb-options-inset";
   return section;
 }
 
@@ -555,16 +538,18 @@ function createNumberField(
   labelText: string,
   id: string,
   value: number,
-  options: { min: number; max: number; step?: number; marginTop?: string }
+  options: { min: number; max: number; step?: number; compact?: boolean }
 ): [HTMLLabelElement, HTMLInputElement] {
   const label = document.createElement("label");
-  label.style.display = "block";
-  label.style.margin = `${options.marginTop ?? "12px"} 0 6px`;
+  label.className = options.compact
+    ? "wb-options-field-label wb-options-field-label--compact"
+    : "wb-options-field-label";
   label.textContent = labelText;
 
   const input = document.createElement("input");
   input.id = id;
   input.type = "number";
+  input.className = "wb-input";
   input.min = String(options.min);
   input.max = String(options.max);
   input.value = String(value);
@@ -582,14 +567,13 @@ function createTextareaField(
   value: string
 ): [HTMLLabelElement, HTMLTextAreaElement] {
   const label = document.createElement("label");
-  label.style.display = "block";
-  label.style.margin = "12px 0 6px";
+  label.className = "wb-options-field-label";
   label.textContent = labelText;
 
   const textarea = document.createElement("textarea");
   textarea.id = id;
   textarea.rows = 6;
-  textarea.style.width = "100%";
+  textarea.className = "wb-options-textarea";
   textarea.value = value;
 
   return [label, textarea];
@@ -599,13 +583,12 @@ function createCheckboxRow(
   id: string,
   labelText: string,
   checked: boolean,
-  options: { marginTop?: string } = {}
+  options: { spacious?: boolean } = {}
 ): HTMLElement {
   const row = document.createElement("div");
-  row.style.display = "flex";
-  row.style.alignItems = "center";
-  row.style.gap = "8px";
-  row.style.marginTop = options.marginTop ?? "0";
+  row.className = options.spacious
+    ? "wb-options-checkbox-row wb-options-checkbox-row--spacious"
+    : "wb-options-checkbox-row";
 
   const input = document.createElement("input");
   input.id = id;
@@ -622,12 +605,15 @@ function createCheckboxRow(
 
 function createHelpText(
   parts: Array<string | HTMLElement>,
-  options: { marginTop?: string } = {}
+  options: { variant?: "default" | "flush" | "spacious" } = {}
 ): HTMLParagraphElement {
   const paragraph = document.createElement("p");
-  paragraph.style.margin = `${options.marginTop ?? "6px"} 0 0`;
-  paragraph.style.fontSize = "12px";
-  paragraph.style.opacity = "0.78";
+  paragraph.className =
+    options.variant === "flush"
+      ? "wb-options-help wb-options-help--flush"
+      : options.variant === "spacious"
+        ? "wb-options-help wb-options-help--spacious"
+        : "wb-options-help";
 
   for (const part of parts) {
     if (typeof part === "string") {

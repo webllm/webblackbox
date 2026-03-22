@@ -78,4 +78,12 @@ describe("options page rendering", () => {
     expect(getTextarea("redactBodyPatterns").value).toBe(injectedValue);
     expect(document.getElementById("pwned")).toBeNull();
   });
+
+  it("renders without inline style attributes", async () => {
+    installChromeStub(undefined);
+
+    await importOptionsModule();
+
+    expect(document.querySelector("[style]")).toBeNull();
+  });
 });

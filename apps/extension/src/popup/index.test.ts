@@ -340,4 +340,32 @@ describe("popup export policy form", () => {
     expect(getStartLiteButton().disabled).toBe(false);
     expect(getStartFullButton().disabled).toBe(false);
   });
+
+  it("renders the ring buffer meter without inline styles", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-current",
+          tabId: 17,
+          mode: "lite",
+          startedAt: Date.now() - 3 * 60 * 1000,
+          ringBufferMinutes: 10,
+          active: true
+        }
+      ]
+    });
+    await flushPopup();
+
+    const meter = document.querySelector<HTMLProgressElement>("progress.wb-popup__buffer-meter");
+
+    expect(meter).not.toBeNull();
+    expect(meter?.value).toBeGreaterThan(0);
+    expect(document.querySelector("[style]")).toBeNull();
+  });
 });

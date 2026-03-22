@@ -12,6 +12,7 @@ describe("extension build manifest", () => {
     expect(manifest.version).toBe("1.2.3");
     expect(manifest.key).toBeTypeOf("string");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
+    expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
     expect(validateExtensionManifest(manifest, { version: "1.2.3" })).toEqual([]);
   });
 
@@ -29,6 +30,16 @@ describe("extension build manifest", () => {
 
     expect(validateExtensionManifest(manifest, { version: "1.2.3", release: true })).toContain(
       "Manifest must declare an explicit content_security_policy.extension_pages."
+    );
+  });
+
+  it("fails validation when inline styles are re-enabled in the CSP", () => {
+    const manifest = createExtensionManifest({ version: "1.2.3", release: true });
+    manifest.content_security_policy.extension_pages =
+      "script-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;";
+
+    expect(validateExtensionManifest(manifest, { version: "1.2.3", release: true })).toContain(
+      "Manifest content_security_policy.extension_pages must not include 'unsafe-inline'."
     );
   });
 });

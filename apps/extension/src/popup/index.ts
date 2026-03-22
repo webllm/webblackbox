@@ -645,7 +645,6 @@ function describeRingBufferUsage(
 ): {
   usedMinutes: number;
   capacityMinutes: number;
-  ratioPercent: number;
   windowLabel: string;
 } {
   const capacityMinutes = Math.max(
@@ -655,13 +654,11 @@ function describeRingBufferUsage(
   const endedAt = typeof session.stoppedAt === "number" ? session.stoppedAt : now;
   const elapsedMinutes = Math.max(0, (endedAt - session.startedAt) / 60_000);
   const usedMinutes = Math.min(capacityMinutes, elapsedMinutes);
-  const ratioPercent = Math.max(0, Math.min(100, (usedMinutes / capacityMinutes) * 100));
   const windowLabel = `${usedMinutes.toFixed(1)}m / ${capacityMinutes.toFixed(1)}m`;
 
   return {
     usedMinutes,
     capacityMinutes,
-    ratioPercent,
     windowLabel
   };
 }
@@ -722,7 +719,6 @@ function createMetaLine(label: string, value: string): HTMLElement {
 function createRingUsageSection(ringUsage: {
   usedMinutes: number;
   capacityMinutes: number;
-  ratioPercent: number;
   windowLabel: string;
 }): HTMLElement {
   const section = document.createElement("section");
@@ -739,20 +735,13 @@ function createRingUsageSection(ringUsage: {
 
   label.append(labelText, labelValue);
 
-  const track = document.createElement("div");
-  track.className = "wb-popup__buffer-track";
-  track.setAttribute("role", "progressbar");
-  track.setAttribute("aria-valuemin", "0");
-  track.setAttribute("aria-valuemax", String(Math.round(ringUsage.capacityMinutes * 100)));
-  track.setAttribute("aria-valuenow", String(Math.round(ringUsage.usedMinutes * 100)));
-  track.setAttribute("aria-valuetext", ringUsage.windowLabel);
+  const meter = document.createElement("progress");
+  meter.className = "wb-popup__buffer-meter";
+  meter.max = Math.round(ringUsage.capacityMinutes * 100);
+  meter.value = Math.round(ringUsage.usedMinutes * 100);
+  meter.setAttribute("aria-valuetext", ringUsage.windowLabel);
 
-  const fill = document.createElement("span");
-  fill.className = "wb-popup__buffer-fill";
-  fill.style.width = `${Math.max(0, Math.min(100, ringUsage.ratioPercent)).toFixed(1)}%`;
-  track.append(fill);
-
-  section.append(label, track);
+  section.append(label, meter);
   return section;
 }
 

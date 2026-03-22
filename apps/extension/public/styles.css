@@ -184,19 +184,29 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-.wb-popup__buffer-track {
-  height: 8px;
+.wb-popup__buffer-meter {
+  display: block;
   width: 100%;
+  height: 8px;
+  appearance: none;
+  border: 0;
   border-radius: 999px;
   background: rgba(20, 33, 61, 0.12);
   overflow: hidden;
 }
 
-.wb-popup__buffer-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  border-radius: inherit;
+.wb-popup__buffer-meter::-webkit-progress-bar {
+  background: rgba(20, 33, 61, 0.12);
+  border-radius: 999px;
+}
+
+.wb-popup__buffer-meter::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #1f8fdb, #16a085);
+}
+
+.wb-popup__buffer-meter::-moz-progress-bar {
+  border-radius: 999px;
   background: linear-gradient(90deg, #1f8fdb, #16a085);
 }
 
@@ -351,6 +361,133 @@ main {
   margin: 0;
   font-size: 12px;
   color: rgba(20, 33, 61, 0.66);
+}
+
+.wb-options-card {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.wb-options-title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.wb-options-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.wb-options-actions .wb-btn {
+  min-width: 120px;
+}
+
+.wb-options-status {
+  margin: 10px 0 0;
+  min-height: 1.2em;
+  font-size: 12px;
+  color: var(--wb-muted-ink);
+}
+
+.wb-options-inset {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  background: rgba(20, 33, 61, 0.02);
+  display: grid;
+  gap: 10px;
+}
+
+.wb-options-inset--dense {
+  gap: 8px;
+}
+
+.wb-options-section-title {
+  margin: 0;
+  font-size: 14px;
+  color: var(--wb-ink);
+}
+
+.wb-options-profile-card {
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 4px;
+}
+
+.wb-options-profile-summary,
+.wb-options-profile-meta {
+  font-size: 12px;
+  color: var(--wb-muted-ink);
+}
+
+.wb-options-field-label {
+  display: block;
+  margin: 12px 0 6px;
+  font-size: 13px;
+  color: var(--wb-ink);
+}
+
+.wb-options-field-label--compact {
+  margin-top: 4px;
+}
+
+.wb-options-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  border-radius: 8px;
+  border: 1px solid var(--wb-border);
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--wb-ink);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+}
+
+.wb-options-textarea:focus-visible {
+  outline: none;
+  border-color: var(--wb-border-strong);
+  box-shadow: 0 0 0 3px rgba(27, 134, 217, 0.2);
+}
+
+.wb-options-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wb-options-checkbox-row--spacious {
+  margin-top: 12px;
+}
+
+.wb-options-checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--wb-brand);
+}
+
+.wb-options-help {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--wb-muted-ink);
+}
+
+.wb-options-help--flush {
+  margin-top: 0;
+}
+
+.wb-options-help--spacious {
+  margin-top: 8px;
 }
 
 .mono {
