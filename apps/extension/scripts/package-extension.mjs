@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -28,16 +29,23 @@ const outputPath = outputArg
   : resolve(distDir, `${archiveSlug}-${archiveVersion}-chrome.zip`);
 
 await mkdir(dirname(outputPath), { recursive: true });
+await mkdir(distDir, { recursive: true });
 if (!outputArg) {
   await removeStaleArchives(distDir, archiveSlug, outputPath);
 }
 await rm(outputPath, { force: true });
 
-await runCommand(
-  "zip",
-  ["-q", "-r", outputPath, ".", "-x", "*.map", ".DS_Store", "*/.DS_Store"],
-  buildDir
-);
+const uploadDir = await prepareUploadDirectory(buildDir);
+
+try {
+  await runCommand(
+    "zip",
+    ["-q", "-r", outputPath, ".", "-x", "*.map", ".DS_Store", "*/.DS_Store"],
+    uploadDir.path
+  );
+} finally {
+  await rm(uploadDir.path, { recursive: true, force: true });
+}
 
 const archive = await stat(outputPath);
 
@@ -50,6 +58,9 @@ console.info(
       manifest: {
         name: manifest.name,
         version: manifest.version
+      },
+      uploadManifest: {
+        strippedKeys: uploadDir.strippedKeys
       },
       package: {
         version: packageVersion
@@ -97,6 +108,30 @@ async function removeStaleArchives(directory, slug, keepPath) {
         await rm(candidatePath, { force: true });
       })
   );
+}
+
+async function prepareUploadDirectory(sourceDir) {
+  const stagingDir = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-upload-"));
+
+  await cp(sourceDir, stagingDir, { recursive: true });
+
+  const manifestPath = resolve(stagingDir, "manifest.json");
+  const manifest = await readJson(manifestPath);
+  const strippedKeys = [];
+
+  if (Object.hasOwn(manifest, "key")) {
+    delete manifest.key;
+    strippedKeys.push("key");
+  }
+
+  if (strippedKeys.length > 0) {
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  }
+
+  return {
+    path: stagingDir,
+    strippedKeys
+  };
 }
 
 function slugify(value) {

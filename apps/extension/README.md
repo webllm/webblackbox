@@ -117,7 +117,7 @@ pnpm build
 pnpm package:chrome
 ```
 
-The build output is in the `build/` directory. `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` (excluding sourcemaps and `.DS_Store` files by default). You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
+The build output is in the `build/` directory. `pnpm package:chrome` rebuilds the extension and creates a Chrome Web Store upload ZIP in `dist/` (excluding sourcemaps and `.DS_Store` files by default). During packaging, the upload archive is sanitized for Chrome Web Store requirements and strips the manifest `key` field while leaving the local `build/` directory unchanged. You can override the ZIP path with `node scripts/package-extension.mjs --output ./dist/custom-name.zip`.
 
 Build entries:
 
