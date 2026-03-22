@@ -1,19 +1,22 @@
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const scriptDir = dirname(fileURLToPath(import.meta.url));
-const appRoot = resolve(scriptDir, "..");
-const buildDir = resolve(appRoot, "build");
-const distDir = resolve(appRoot, "dist");
-const packageJsonPath = resolve(appRoot, "package.json");
+import {
+  assertExtensionBuild,
+  buildDir,
+  createExtensionManifest,
+  distDir,
+  readAppPackage,
+  readJson,
+  writeJson
+} from "./lib/extension-build.mjs";
 
 const args = process.argv.slice(2);
 const outputArg = readFlagValue(args, "--output");
 
-const appPackage = await readJson(packageJsonPath);
+const appPackage = await readAppPackage();
 const manifest = await readJson(resolve(buildDir, "manifest.json"));
 await stat(buildDir);
 const packageVersion =
@@ -35,7 +38,10 @@ if (!outputArg) {
 }
 await rm(outputPath, { force: true });
 
-const uploadDir = await prepareUploadDirectory(buildDir);
+const uploadDir = await prepareUploadDirectory(buildDir, {
+  version: archiveVersion,
+  strippedKeys: Object.hasOwn(manifest, "key") ? ["key"] : []
+});
 
 try {
   await runCommand(
@@ -87,11 +93,6 @@ function readFlagValue(argv, flagName) {
   return argv[index + 1] ?? null;
 }
 
-async function readJson(path) {
-  const text = await readFile(path, "utf8");
-  return JSON.parse(text);
-}
-
 async function removeStaleArchives(directory, slug, keepPath) {
   const entries = await readdir(directory).catch(() => []);
 
@@ -110,23 +111,19 @@ async function removeStaleArchives(directory, slug, keepPath) {
   );
 }
 
-async function prepareUploadDirectory(sourceDir) {
+async function prepareUploadDirectory(sourceDir, { version, strippedKeys }) {
   const stagingDir = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-upload-"));
 
   await cp(sourceDir, stagingDir, { recursive: true });
 
-  const manifestPath = resolve(stagingDir, "manifest.json");
-  const manifest = await readJson(manifestPath);
-  const strippedKeys = [];
-
-  if (Object.hasOwn(manifest, "key")) {
-    delete manifest.key;
-    strippedKeys.push("key");
-  }
-
-  if (strippedKeys.length > 0) {
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  }
+  await writeJson(
+    resolve(stagingDir, "manifest.json"),
+    createExtensionManifest({
+      version,
+      release: true
+    })
+  );
+  await assertExtensionBuild(stagingDir, { version, release: true });
 
   return {
     path: stagingDir,
