@@ -1,7 +1,6 @@
 import { DEFAULT_EXPORT_POLICY, type ExportPolicy, type FreezeReason } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
-import { escapeHtml } from "../shared/html.js";
 import {
   PORT_NAMES,
   type ExtensionInboundMessage,
@@ -40,18 +39,7 @@ const state: {
 
 if (root) {
   bootstrap(root).catch((error) => {
-    root.innerHTML = `
-      <section class="card">
-        <div class="wb-brand-lockup wb-brand-lockup--tight">
-          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
-          <div class="wb-brand-lockup__copy">
-            <h1 class="wb-popup__title">WebBlackbox</h1>
-            <p class="wb-popup__version">v${escapeHtml(extensionVersion)}</p>
-          </div>
-        </div>
-        <p>${escapeHtml(String(error))}</p>
-      </section>
-    `;
+    renderError(root, error);
   });
 }
 
@@ -119,80 +107,64 @@ function render(container: HTMLElement): void {
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
   const startDisabled = Boolean(activeOnCurrentTab);
-  const safeExtensionVersion = escapeHtml(extensionVersion);
-  const safeTabLabel = escapeHtml(String(state.tabId ?? "n/a"));
-  const safeStatus = escapeHtml(status);
-  const safeCaptureSummary = escapeHtml(captureSummary);
-  const safeIncidentText = escapeHtml(incidentText);
-  const safeBadgeText = escapeHtml(badgeText);
-  const safeExportStatus = escapeHtml(state.exportStatus ?? "");
-  const safeRingWindowLabel = ringUsage ? escapeHtml(ringUsage.windowLabel) : "";
-  const ringUsageRatioPercent = ringUsage
-    ? Math.max(0, Math.min(100, ringUsage.ratioPercent)).toFixed(1)
-    : "0.0";
+  const section = document.createElement("section");
+  section.className = "card wb-popup";
 
-  container.innerHTML = `
-    <section class="card wb-popup">
-      <header class="wb-popup__header">
-        <div class="wb-brand-lockup wb-brand-lockup--tight">
-          <img class="wb-brand-lockup__icon" src="./icon/32.png" alt="" width="32" height="32" />
-          <div class="wb-brand-lockup__copy">
-            <h1 class="wb-popup__title">WebBlackbox</h1>
-            <p class="wb-popup__version">v${safeExtensionVersion}</p>
-          </div>
-        </div>
-        <span class="${badgeClass}">${safeBadgeText}</span>
-      </header>
-      <div class="wb-popup__meta">
-        <p class="wb-popup__meta-line"><span>Tab</span><strong>${safeTabLabel}</strong></p>
-        <p class="wb-popup__meta-line"><span>Status</span><strong>${safeStatus}</strong></p>
-        <p class="wb-popup__meta-line"><span>Capture</span><strong>${safeCaptureSummary}</strong></p>
-        <p class="wb-popup__meta-line"><span>Incident</span><strong>${safeIncidentText}</strong></p>
-      </div>
-      ${
-        ringUsage
-          ? `
-      <section class="wb-popup__buffer">
-        <p class="wb-popup__buffer-label">
-          <span>Ring buffer</span>
-          <strong>${safeRingWindowLabel}</strong>
-        </p>
-        <div class="wb-popup__buffer-track" role="progressbar" aria-valuemin="0" aria-valuemax="${Math.round(
-          ringUsage.capacityMinutes * 100
-        )}" aria-valuenow="${Math.round(ringUsage.usedMinutes * 100)}" aria-valuetext="${safeRingWindowLabel}">
-          <span class="wb-popup__buffer-fill" style="width:${ringUsageRatioPercent}%"></span>
-        </div>
-      </section>
-      `
-          : ""
-      }
-      <div class="wb-popup__actions">
-        <button class="wb-btn wb-btn--brand" data-action="start-lite" ${startDisabled ? "disabled" : ""}>Start Lite</button>
-        <button class="wb-btn wb-btn--brand-alt" data-action="start-full" ${startDisabled ? "disabled" : ""}>Start Full</button>
-        <button class="wb-btn wb-btn--muted" data-action="stop" ${activeSession ? "" : "disabled"}>Stop</button>
-        <button class="wb-btn wb-btn--accent" data-action="export" ${
-          exportSession ? "" : "disabled"
-        }>Export</button>
-      </div>
-      <div class="wb-popup__nav">
-        <button class="wb-btn wb-btn--surface" data-action="open-sessions">Sessions</button>
-        <button class="wb-btn wb-btn--surface" data-action="open-options">Options</button>
-      </div>
-      <section class="wb-popup__policy">
-        <p class="wb-popup__policy-title">Archive Policy</p>
-        <label class="wb-toggle">
-          <input id="export-include-screenshots" type="checkbox" />
-          <span>Include screenshots in export</span>
-        </label>
-        <label class="wb-field-label" for="export-max-size-mb">Max archive size (MB)</label>
-        <input id="export-max-size-mb" type="number" min="1" max="4096" step="1" class="wb-input" />
-        <label class="wb-field-label" for="export-recent-minutes">Recent window (minutes)</label>
-        <input id="export-recent-minutes" type="number" min="1" max="43200" step="1" class="wb-input" />
-      </section>
-      <p class="${exportStatusClass}">${safeExportStatus}</p>
-      <p class="wb-popup__hint">Marker: Ctrl/Cmd + Shift + M</p>
-    </section>
-  `;
+  const header = document.createElement("header");
+  header.className = "wb-popup__header";
+  header.append(createBrandLockup({ tight: true }));
+
+  const badge = document.createElement("span");
+  badge.className = badgeClass;
+  badge.textContent = badgeText;
+  header.append(badge);
+  section.append(header);
+
+  const meta = document.createElement("div");
+  meta.className = "wb-popup__meta";
+  meta.append(
+    createMetaLine("Tab", String(state.tabId ?? "n/a")),
+    createMetaLine("Status", status),
+    createMetaLine("Capture", captureSummary),
+    createMetaLine("Incident", incidentText)
+  );
+  section.append(meta);
+
+  if (ringUsage) {
+    section.append(createRingUsageSection(ringUsage));
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "wb-popup__actions";
+  actions.append(
+    createActionButton("Start Lite", "wb-btn wb-btn--brand", "start-lite", startDisabled),
+    createActionButton("Start Full", "wb-btn wb-btn--brand-alt", "start-full", startDisabled),
+    createActionButton("Stop", "wb-btn wb-btn--muted", "stop", !activeSession),
+    createActionButton("Export", "wb-btn wb-btn--accent", "export", !exportSession)
+  );
+  section.append(actions);
+
+  const nav = document.createElement("div");
+  nav.className = "wb-popup__nav";
+  nav.append(
+    createActionButton("Sessions", "wb-btn wb-btn--surface", "open-sessions"),
+    createActionButton("Options", "wb-btn wb-btn--surface", "open-options")
+  );
+  section.append(nav);
+
+  section.append(createArchivePolicySection());
+
+  const exportStatus = document.createElement("p");
+  exportStatus.className = exportStatusClass;
+  exportStatus.textContent = state.exportStatus ?? "";
+  section.append(exportStatus);
+
+  const hint = document.createElement("p");
+  hint.className = "wb-popup__hint";
+  hint.textContent = "Marker: Ctrl/Cmd + Shift + M";
+  section.append(hint);
+
+  container.replaceChildren(section);
 
   writeExportPolicyFormToContainer(container, state.exportPolicyForm);
   bindActions(container, activeSession, exportSession);
@@ -317,22 +289,47 @@ function openPassphraseDialog(): Promise<string | null> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "wb-confirm-overlay";
-    overlay.innerHTML = `
-      <form class="wb-confirm-card wb-prompt-card" aria-labelledby="wb-passphrase-title">
-        <h2 id="wb-passphrase-title" class="wb-confirm-title">Export Passphrase</h2>
-        <p class="wb-confirm-body">Optional AES-GCM passphrase. Leave blank for unencrypted export.</p>
-        <label class="wb-field-label" for="wb-passphrase-input">Passphrase</label>
-        <input id="wb-passphrase-input" type="password" class="wb-input wb-prompt-field" autocomplete="off" />
-        <div class="wb-confirm-actions">
-          <button type="button" class="wb-btn wb-btn--muted" data-passphrase-cancel>Cancel</button>
-          <button type="submit" class="wb-btn wb-btn--accent">Export</button>
-        </div>
-      </form>
-    `;
+    const form = document.createElement("form");
+    form.className = "wb-confirm-card wb-prompt-card";
+    form.setAttribute("aria-labelledby", "wb-passphrase-title");
 
-    const form = overlay.querySelector<HTMLFormElement>("form");
-    const input = overlay.querySelector<HTMLInputElement>("#wb-passphrase-input");
-    const cancelButton = overlay.querySelector<HTMLButtonElement>("button[data-passphrase-cancel]");
+    const title = document.createElement("h2");
+    title.id = "wb-passphrase-title";
+    title.className = "wb-confirm-title";
+    title.textContent = "Export Passphrase";
+
+    const body = document.createElement("p");
+    body.className = "wb-confirm-body";
+    body.textContent = "Optional AES-GCM passphrase. Leave blank for unencrypted export.";
+
+    const label = document.createElement("label");
+    label.className = "wb-field-label";
+    label.htmlFor = "wb-passphrase-input";
+    label.textContent = "Passphrase";
+
+    const input = document.createElement("input");
+    input.id = "wb-passphrase-input";
+    input.type = "password";
+    input.className = "wb-input wb-prompt-field";
+    input.autocomplete = "off";
+
+    const actions = document.createElement("div");
+    actions.className = "wb-confirm-actions";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "wb-btn wb-btn--muted";
+    cancelButton.setAttribute("data-passphrase-cancel", "");
+    cancelButton.textContent = "Cancel";
+
+    const submitButton = document.createElement("button");
+    submitButton.type = "submit";
+    submitButton.className = "wb-btn wb-btn--accent";
+    submitButton.textContent = "Export";
+
+    actions.append(cancelButton, submitButton);
+    form.append(title, body, label, input, actions);
+    overlay.append(form);
 
     const finish = (value: string | null): void => {
       overlay.remove();
@@ -667,4 +664,158 @@ function describeRingBufferUsage(
     ratioPercent,
     windowLabel
   };
+}
+
+function renderError(container: HTMLElement, error: unknown): void {
+  const section = document.createElement("section");
+  section.className = "card";
+  section.append(createBrandLockup({ tight: true }));
+
+  const message = document.createElement("p");
+  message.textContent = String(error);
+  section.append(message);
+
+  container.replaceChildren(section);
+}
+
+function createBrandLockup({ tight = false }: { tight?: boolean } = {}): HTMLElement {
+  const lockup = document.createElement("div");
+  lockup.className = tight ? "wb-brand-lockup wb-brand-lockup--tight" : "wb-brand-lockup";
+
+  const icon = document.createElement("img");
+  icon.className = "wb-brand-lockup__icon";
+  icon.src = "./icon/32.png";
+  icon.alt = "";
+  icon.width = 32;
+  icon.height = 32;
+
+  const copy = document.createElement("div");
+  copy.className = "wb-brand-lockup__copy";
+
+  const title = document.createElement("h1");
+  title.className = "wb-popup__title";
+  title.textContent = "WebBlackbox";
+
+  const version = document.createElement("p");
+  version.className = "wb-popup__version";
+  version.textContent = `v${extensionVersion}`;
+
+  copy.append(title, version);
+  lockup.append(icon, copy);
+  return lockup;
+}
+
+function createMetaLine(label: string, value: string): HTMLElement {
+  const line = document.createElement("p");
+  line.className = "wb-popup__meta-line";
+
+  const labelNode = document.createElement("span");
+  labelNode.textContent = label;
+
+  const valueNode = document.createElement("strong");
+  valueNode.textContent = value;
+
+  line.append(labelNode, valueNode);
+  return line;
+}
+
+function createRingUsageSection(ringUsage: {
+  usedMinutes: number;
+  capacityMinutes: number;
+  ratioPercent: number;
+  windowLabel: string;
+}): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "wb-popup__buffer";
+
+  const label = document.createElement("p");
+  label.className = "wb-popup__buffer-label";
+
+  const labelText = document.createElement("span");
+  labelText.textContent = "Ring buffer";
+
+  const labelValue = document.createElement("strong");
+  labelValue.textContent = ringUsage.windowLabel;
+
+  label.append(labelText, labelValue);
+
+  const track = document.createElement("div");
+  track.className = "wb-popup__buffer-track";
+  track.setAttribute("role", "progressbar");
+  track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", String(Math.round(ringUsage.capacityMinutes * 100)));
+  track.setAttribute("aria-valuenow", String(Math.round(ringUsage.usedMinutes * 100)));
+  track.setAttribute("aria-valuetext", ringUsage.windowLabel);
+
+  const fill = document.createElement("span");
+  fill.className = "wb-popup__buffer-fill";
+  fill.style.width = `${Math.max(0, Math.min(100, ringUsage.ratioPercent)).toFixed(1)}%`;
+  track.append(fill);
+
+  section.append(label, track);
+  return section;
+}
+
+function createActionButton(
+  label: string,
+  className: string,
+  action: string,
+  disabled = false
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.dataset.action = action;
+  button.disabled = disabled;
+  button.textContent = label;
+  return button;
+}
+
+function createArchivePolicySection(): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "wb-popup__policy";
+
+  const title = document.createElement("p");
+  title.className = "wb-popup__policy-title";
+  title.textContent = "Archive Policy";
+
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "wb-toggle";
+
+  const includeScreenshots = document.createElement("input");
+  includeScreenshots.id = "export-include-screenshots";
+  includeScreenshots.type = "checkbox";
+
+  const toggleText = document.createElement("span");
+  toggleText.textContent = "Include screenshots in export";
+  toggleLabel.append(includeScreenshots, toggleText);
+
+  const sizeLabel = document.createElement("label");
+  sizeLabel.className = "wb-field-label";
+  sizeLabel.htmlFor = "export-max-size-mb";
+  sizeLabel.textContent = "Max archive size (MB)";
+
+  const sizeInput = document.createElement("input");
+  sizeInput.id = "export-max-size-mb";
+  sizeInput.type = "number";
+  sizeInput.min = "1";
+  sizeInput.max = "4096";
+  sizeInput.step = "1";
+  sizeInput.className = "wb-input";
+
+  const recentLabel = document.createElement("label");
+  recentLabel.className = "wb-field-label";
+  recentLabel.htmlFor = "export-recent-minutes";
+  recentLabel.textContent = "Recent window (minutes)";
+
+  const recentInput = document.createElement("input");
+  recentInput.id = "export-recent-minutes";
+  recentInput.type = "number";
+  recentInput.min = "1";
+  recentInput.max = "43200";
+  recentInput.step = "1";
+  recentInput.className = "wb-input";
+
+  section.append(title, toggleLabel, sizeLabel, sizeInput, recentLabel, recentInput);
+  return section;
 }
