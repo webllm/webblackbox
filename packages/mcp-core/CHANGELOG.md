@@ -2,9 +2,9 @@
 
 ## 0.3.0
 
-### Minor Changes
+### Changed
 
-- fix ext
+- No package-specific source changes shipped in this release. The version bump keeps MCP core aligned with the extension-focused 0.3.0 workspace release.
 
 ## 0.2.0
 

@@ -2,16 +2,9 @@
 
 ## 0.3.0
 
-### Minor Changes
+### Changed
 
-- fix ext
-
-### Patch Changes
-
-- Updated dependencies
-  - @webblackbox/pipeline@0.3.0
-  - @webblackbox/protocol@0.3.0
-  - @webblackbox/recorder@0.3.0
+- No browser SDK source or runtime changes shipped in this release. The version bump keeps the package aligned with the extension-focused 0.3.0 workspace release.
 
 ## 0.2.0
 

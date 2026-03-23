@@ -2,15 +2,9 @@
 
 ## 0.3.0
 
-### Minor Changes
+### Changed
 
-- fix ext
-
-### Patch Changes
-
-- Updated dependencies
-  - @webblackbox/player-sdk@0.3.0
-  - @webblackbox/protocol@0.3.0
+- Refreshed the hosted Player logo assets to match the updated WebBlackbox branding. No Player UI or runtime behavior changed in this release.
 
 ## 0.2.0
 

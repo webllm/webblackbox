@@ -2,9 +2,9 @@
 
 ## 0.3.0
 
-### Minor Changes
+### Changed
 
-- fix ext
+- No schema or default changes shipped in this release. The version bump keeps the protocol package aligned with the extension-focused 0.3.0 workspace release.
 
 ## 0.2.0
 

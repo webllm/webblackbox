@@ -2,14 +2,9 @@
 
 ## 0.3.0
 
-### Minor Changes
+### Changed
 
-- fix ext
-
-### Patch Changes
-
-- Updated dependencies
-  - @webblackbox/player-sdk@0.3.0
+- No package-specific runtime changes shipped in this release. The version bump keeps the share server aligned with the extension-focused 0.3.0 workspace release.
 
 ## 0.2.0
 

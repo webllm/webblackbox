@@ -2,18 +2,11 @@
 
 ## 0.3.0
 
-### Minor Changes
+### Changed
 
-- fix ext
-
-### Patch Changes
-
-- Updated dependencies
-  - @webblackbox/cdp-router@0.3.0
-  - @webblackbox/pipeline@0.3.0
-  - @webblackbox/protocol@0.3.0
-  - @webblackbox/recorder@0.3.0
-  - webblackbox@0.3.0
+- Hardened popup, options, and sessions rendering by escaping dynamic content and moving the extension pages off string-built markup onto DOM API rendering, with new coverage for the shared HTML helpers and page UI flows.
+- Reworked the build and release pipeline so the manifest is generated and validated from package metadata, Chrome Web Store ZIP packaging is pure Node.js, and `pnpm verify` now exercises lint, typecheck, tests, and packaging in one pass.
+- Refreshed the packaged extension icons to match the updated WebBlackbox logo.
 
 ## 0.2.0
 
