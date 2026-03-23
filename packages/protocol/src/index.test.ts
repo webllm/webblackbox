@@ -5,6 +5,7 @@ import {
   DEFAULT_RECORDER_CONFIG,
   EventIdFactory,
   eventEnvelopeSchema,
+  extractNetworkResponseSummary,
   extractRequestId,
   extractRequestIdFromPayload,
   exportManifestSchema,
@@ -101,5 +102,36 @@ describe("protocol", () => {
         data: { requestId: "R-payload" }
       })
     ).toBe("R-ref");
+  });
+
+  it("normalizes nested and lite network response payloads", () => {
+    expect(
+      extractNetworkResponseSummary({
+        requestId: "R-1",
+        response: {
+          status: 200
+        }
+      })
+    ).toMatchObject({
+      reqId: "R-1",
+      status: 200,
+      ok: null,
+      failed: false
+    });
+
+    expect(
+      extractNetworkResponseSummary({
+        reqId: "R-2",
+        status: 503,
+        ok: false,
+        duration: 123
+      })
+    ).toMatchObject({
+      reqId: "R-2",
+      status: 503,
+      ok: false,
+      failed: true,
+      duration: 123
+    });
   });
 });

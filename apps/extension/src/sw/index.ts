@@ -51,6 +51,7 @@ import {
   buildLiteNetworkRequestRawEvent,
   buildLiteNetworkResponseRawEvent
 } from "./lite-network-baseline.js";
+import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 
 type SessionRuntime = {
   sid: string;
@@ -1356,11 +1357,7 @@ function evaluatePerformanceBudget(runtime: SessionRuntime, event: WebBlackboxEv
   }
 
   if (event.type === "network.response") {
-    const payload = asRecord(event.data);
-    const duration = asFiniteNumber(payload?.duration);
-    const status = asFiniteNumber(payload?.status);
-    const ok = payload?.ok === true;
-    const failed = payload?.failed === true || (typeof status === "number" && status >= 400) || !ok;
+    const { duration, failed } = extractPerformanceBudgetNetworkSample(event.data);
 
     runtime.networkBudgetSample.total += 1;
 
