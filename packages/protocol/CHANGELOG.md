@@ -1,5 +1,11 @@
 # @webblackbox/protocol
 
+## 0.3.0
+
+### Minor Changes
+
+- fix ext
+
 ## 0.2.0
 
 ### Changed

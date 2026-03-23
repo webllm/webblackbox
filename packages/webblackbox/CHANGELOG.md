@@ -1,5 +1,18 @@
 # webblackbox
 
+## 0.3.0
+
+### Minor Changes
+
+- fix ext
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/pipeline@0.3.0
+  - @webblackbox/protocol@0.3.0
+  - @webblackbox/recorder@0.3.0
+
 ## 0.2.0
 
 ### Changed

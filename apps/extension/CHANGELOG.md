@@ -1,5 +1,20 @@
 # @webblackbox/extension
 
+## 0.3.0
+
+### Minor Changes
+
+- fix ext
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/cdp-router@0.3.0
+  - @webblackbox/pipeline@0.3.0
+  - @webblackbox/protocol@0.3.0
+  - @webblackbox/recorder@0.3.0
+  - webblackbox@0.3.0
+
 ## 0.2.0
 
 ### Changed
