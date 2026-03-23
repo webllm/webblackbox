@@ -1,7 +1,8 @@
 import { constants } from "node:fs";
-import { access, cp, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import JSZip from "jszip";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 
@@ -60,17 +61,19 @@ const PERMISSIONS = [
   "webRequest"
 ];
 const URL_MATCHES = ["<all_urls>"];
+const ARCHIVE_FIXED_DATE = new Date("1980-01-01T00:00:00.000Z");
+const ARCHIVE_EXCLUDED_FILE_NAMES = new Set([".DS_Store"]);
 
-export async function readJson(path) {
+async function readJson(path) {
   const text = await readFile(path, "utf8");
   return JSON.parse(text);
 }
 
-export async function writeJson(path, value) {
+async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-export async function readAppPackage() {
+async function readAppPackage() {
   return readJson(packageJsonPath);
 }
 
@@ -232,24 +235,83 @@ export async function prepareBuildOutput({ outputDir = buildDir, release = false
   return manifest;
 }
 
-export function hasFlag(args, flagName) {
-  return args.includes(flagName);
-}
+export async function createChromeArchive({ sourceDir = buildDir, outputPath } = {}) {
+  await stat(sourceDir);
 
-export function readFlagValue(args, flagName) {
-  const inline = args.find((entry) => entry.startsWith(`${flagName}=`));
+  const sourceManifest = await readJson(resolve(sourceDir, "manifest.json"));
+  const version =
+    typeof sourceManifest?.version === "string" && sourceManifest.version.length > 0
+      ? sourceManifest.version
+      : null;
+  const sourceReleaseBuild = !Object.hasOwn(sourceManifest ?? {}, "key");
 
-  if (inline) {
-    return inline.slice(flagName.length + 1);
+  if (!version) {
+    throw new Error(`Missing manifest version in ${resolve(sourceDir, "manifest.json")}`);
   }
 
-  const index = args.indexOf(flagName);
+  await assertExtensionBuild(sourceDir, { version, release: sourceReleaseBuild });
 
-  if (index === -1) {
-    return null;
+  const releaseManifest = createExtensionManifest({ version, release: true });
+  const releaseIssues = validateExtensionManifest(releaseManifest, { version, release: true });
+
+  if (releaseIssues.length > 0) {
+    throw new Error(`Release manifest is invalid:\n- ${releaseIssues.join("\n- ")}`);
   }
 
-  return args[index + 1] ?? null;
+  const archiveSlug = slugify(
+    typeof releaseManifest.name === "string" ? releaseManifest.name : "webblackbox"
+  );
+  const resolvedOutputPath = outputPath
+    ? resolve(process.cwd(), outputPath)
+    : resolve(distDir, `${archiveSlug}-${version}-chrome.zip`);
+
+  await mkdir(dirname(resolvedOutputPath), { recursive: true });
+  await mkdir(distDir, { recursive: true });
+
+  if (!outputPath) {
+    await removeStaleArchives(distDir, archiveSlug, resolvedOutputPath);
+  }
+
+  await rm(resolvedOutputPath, { force: true });
+
+  const zip = new JSZip();
+  const files = await listPackagedFiles(sourceDir);
+  const releaseManifestBytes = Buffer.from(`${JSON.stringify(releaseManifest, null, 2)}\n`, "utf8");
+
+  for (const relativePath of files) {
+    const bytes =
+      relativePath === "manifest.json"
+        ? releaseManifestBytes
+        : await readFile(resolve(sourceDir, relativePath));
+
+    zip.file(relativePath, bytes, {
+      binary: true,
+      date: ARCHIVE_FIXED_DATE
+    });
+  }
+
+  const archiveBytes = await zip.generateAsync({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+    compressionOptions: {
+      level: 6
+    },
+    platform: "UNIX"
+  });
+
+  await writeFile(resolvedOutputPath, archiveBytes);
+
+  const archiveStat = await stat(resolvedOutputPath);
+
+  return {
+    path: resolvedOutputPath,
+    bytes: archiveStat.size,
+    manifest: {
+      name: releaseManifest.name,
+      version: releaseManifest.version
+    },
+    strippedKeys: Object.hasOwn(sourceManifest ?? {}, "key") ? ["key"] : []
+  };
 }
 
 function validateUniqueStringArray(value, fieldName, issues) {
@@ -273,4 +335,56 @@ function validateUniqueStringArray(value, fieldName, issues) {
 
     seen.add(entry);
   }
+}
+
+async function removeStaleArchives(directory, slug, keepPath) {
+  const entries = await readdir(directory).catch(() => []);
+
+  await Promise.all(
+    entries
+      .filter((entry) => entry.startsWith(`${slug}-`) && entry.endsWith("-chrome.zip"))
+      .map(async (entry) => {
+        const candidatePath = resolve(directory, entry);
+
+        if (candidatePath === keepPath) {
+          return;
+        }
+
+        await rm(candidatePath, { force: true });
+      })
+  );
+}
+
+async function listPackagedFiles(rootDir, currentDir = rootDir) {
+  const entries = await readdir(currentDir, { withFileTypes: true });
+  const files = [];
+
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const absolutePath = resolve(currentDir, entry.name);
+
+    if (entry.isDirectory()) {
+      files.push(...(await listPackagedFiles(rootDir, absolutePath)));
+      continue;
+    }
+
+    if (!entry.isFile() || shouldSkipPackagedFile(entry.name)) {
+      continue;
+    }
+
+    files.push(relative(rootDir, absolutePath).split(sep).join("/"));
+  }
+
+  return files;
+}
+
+function shouldSkipPackagedFile(fileName) {
+  return ARCHIVE_EXCLUDED_FILE_NAMES.has(fileName) || fileName.endsWith(".map");
+}
+
+function slugify(value) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
 }
