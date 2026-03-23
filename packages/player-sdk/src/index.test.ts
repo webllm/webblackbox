@@ -392,6 +392,20 @@ describe("WebBlackboxPlayer", () => {
     expect(domTimeline).toHaveLength(1);
   });
 
+  it("diffs lite DOM snapshots stored as HTML blobs", async () => {
+    const bytes = await createLiteDomFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+
+    const domDiff = await player.compareDomSnapshots("E-lite-1", "E-lite-2");
+    expect(domDiff).not.toBeNull();
+    expect(domDiff?.summary.added).toBeGreaterThan(0);
+    expect(domDiff?.summary.removed).toBeGreaterThan(0);
+
+    const domTimeline = await player.getDomDiffTimeline();
+    expect(domTimeline).toHaveLength(1);
+    expect(domTimeline[0]?.summary.added).toBeGreaterThan(0);
+  });
+
   it("compares two recordings", async () => {
     const left = await WebBlackboxPlayer.open(await createFixtureArchive());
     const right = await WebBlackboxPlayer.open(await createRichFixtureArchive());
@@ -1251,6 +1265,95 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
   zip.file(
     "blobs/sha256-dom-hash-2.json",
     new TextEncoder().encode(JSON.stringify(createDomSnapshotPayload(["DIV", "SPAN"])))
+  );
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const events: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: "S-lite-dom",
+      tab: 3,
+      t: 3000,
+      mono: 1,
+      type: "meta.session.start",
+      id: "E-lite-start",
+      data: {}
+    },
+    {
+      v: 1,
+      sid: "S-lite-dom",
+      tab: 3,
+      t: 3001,
+      mono: 2,
+      type: "dom.snapshot",
+      id: "E-lite-1",
+      data: {
+        snapshotId: "D-lite-1",
+        contentHash: "dom-lite-1",
+        source: "html",
+        nodeCount: 3,
+        reason: "interval"
+      }
+    },
+    {
+      v: 1,
+      sid: "S-lite-dom",
+      tab: 3,
+      t: 3002,
+      mono: 3,
+      type: "dom.snapshot",
+      id: "E-lite-2",
+      data: {
+        snapshotId: "D-lite-2",
+        contentHash: "dom-lite-2",
+        source: "html",
+        nodeCount: 4,
+        reason: "interval"
+      }
+    }
+  ];
+
+  const manifest: ExportManifest = {
+    protocolVersion: 1,
+    createdAt: new Date(0).toISOString(),
+    mode: "lite",
+    site: {
+      origin: "https://example.com",
+      title: "Example"
+    },
+    chunkCodec: "none",
+    redactionProfile: {
+      redactHeaders: [],
+      redactCookieNames: [],
+      redactBodyPatterns: [],
+      blockedSelectors: [],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: events.length,
+      chunkCount: 1,
+      blobCount: 2,
+      durationMs: 2
+    }
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("index/time.json", JSON.stringify([]));
+  zip.file("index/req.json", JSON.stringify([]));
+  zip.file("index/inv.json", JSON.stringify([]));
+  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
+  zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
+  zip.file(
+    "blobs/sha256-dom-lite-1.html",
+    new TextEncoder().encode("<html><body><div><p></p></div></body></html>")
+  );
+  zip.file(
+    "blobs/sha256-dom-lite-2.html",
+    new TextEncoder().encode("<html><body><div><span></span><a></a></div></body></html>")
   );
 
   return zip.generateAsync({ type: "uint8array" });

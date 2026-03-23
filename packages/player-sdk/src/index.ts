@@ -1495,18 +1495,24 @@ export class WebBlackboxPlayer {
     if (snapshot.contentHash) {
       const blob = await this.getBlob(snapshot.contentHash);
 
-      if (blob && blob.mime === "application/json") {
+      if (blob) {
         const text = new TextDecoder().decode(blob.bytes);
 
-        try {
-          const parsed = JSON.parse(text) as unknown;
-          const fromCdp = extractCdpDomPaths(parsed);
+        if (blob.mime === "application/json") {
+          try {
+            const parsed = JSON.parse(text) as unknown;
+            const fromCdp = extractCdpDomPaths(parsed);
 
-          if (fromCdp.size > 0) {
-            return fromCdp;
+            if (fromCdp.size > 0) {
+              return fromCdp;
+            }
+          } catch {
+            return new Set();
           }
-        } catch {
-          return new Set();
+        }
+
+        if (blob.mime === "text/html" || snapshot.source === "html") {
+          return extractHtmlPaths(text);
         }
       }
     }
