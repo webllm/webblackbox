@@ -4,9 +4,6 @@
   "files": [],
   "references": [
     {
-      "path": "./packages/mcp-core"
-    },
-    {
       "path": "./packages/protocol"
     },
     {

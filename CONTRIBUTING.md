@@ -37,8 +37,7 @@ webblackbox/
 │   ├── pipeline/       # Chunking, storage, export
 │   ├── webblackbox/    # Browser lite capture SDK
 │   ├── player-sdk/     # Archive loading and analysis APIs
-│   ├── cdp-router/     # Chrome DevTools Protocol routing
-│   └── mcp-core/       # Shared MCP analysis helpers
+│   └── cdp-router/     # Chrome DevTools Protocol routing
 ├── config/
 │   └── typescript/     # Shared TypeScript config
 └── docs/               # Architecture, performance, generated API docs
