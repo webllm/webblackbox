@@ -42,6 +42,14 @@ export class EventChunker {
     return this.finalize();
   }
 
+  public restoreSequence(sequence: number): void {
+    if (!Number.isFinite(sequence) || sequence <= this.sequence) {
+      return;
+    }
+
+    this.sequence = Math.floor(sequence);
+  }
+
   private async finalize(): Promise<FinalizedChunk> {
     this.sequence += 1;
 

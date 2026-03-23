@@ -73,6 +73,10 @@ export class FlightRecorderPipeline {
   }
 
   public async start(): Promise<void> {
+    const chunks = await this.options.storage.listChunks(this.options.session.sid);
+    const lastSequence = chunks[chunks.length - 1]?.meta.seq ?? 0;
+
+    this.chunker.restoreSequence(lastSequence);
     await this.options.storage.putSession(this.options.session);
   }
 

@@ -235,6 +235,48 @@ describe("pipeline", () => {
     expect(blobPaths.some((path) => path.includes(shotHash))).toBe(true);
   });
 
+  it("continues chunk sequencing after pipeline recovery", async () => {
+    const storage = new MemoryPipelineStorage();
+    const session: SessionMetadata = {
+      ...SESSION,
+      sid: "S-recovery-seq"
+    };
+    const initialPipeline = new FlightRecorderPipeline({
+      session,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await initialPipeline.start();
+    await initialPipeline.ingest(
+      createEvent("E-recovery-seq-1", "network.request", 10, {
+        reqId: "R-recovery-seq-1",
+        payload: "x".repeat(80)
+      })
+    );
+    await initialPipeline.flush();
+
+    const recoveredPipeline = new FlightRecorderPipeline({
+      session,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await recoveredPipeline.start();
+    await recoveredPipeline.ingest(
+      createEvent("E-recovery-seq-2", "network.response", 20, {
+        reqId: "R-recovery-seq-1",
+        payload: "y".repeat(80)
+      })
+    );
+    await recoveredPipeline.flush();
+
+    const chunks = await storage.listChunks(session.sid);
+
+    expect(chunks.map((chunk) => chunk.meta.seq)).toEqual([1, 2]);
+    expect(chunks.map((chunk) => chunk.meta.chunkId)).toEqual(["C-000001", "C-000002"]);
+  });
+
   it("exports only blobs referenced by retained events", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
