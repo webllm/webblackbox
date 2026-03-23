@@ -135,6 +135,9 @@ export async function readWebBlackboxArchive(
   options: ArchiveReadOptions = {}
 ): Promise<ParsedWebBlackboxArchive> {
   const zip = await JSZip.loadAsync(bytes);
+  const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
+
+  await verifyArchiveIntegrity(zip, integrity);
 
   const manifest = await readJson<ExportManifest>(zip, "manifest.json");
   const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
@@ -163,11 +166,6 @@ export async function readWebBlackboxArchive(
       (chunkId ? chunkCodecById.get(chunkId) : undefined) ?? (manifest.chunkCodec as ChunkCodec);
     events.push(...(await decodeChunkEvents(decoded, codec)));
   }
-
-  const integrityFile = zip.file("integrity/hashes.json");
-  const integrity = integrityFile
-    ? await readJson<HashesManifest>(zip, "integrity/hashes.json")
-    : null;
 
   return {
     manifest,
@@ -199,6 +197,33 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
 
   const content = await file.async("string");
   return JSON.parse(content) as TValue;
+}
+
+async function verifyArchiveIntegrity(zip: JSZip, integrity: HashesManifest): Promise<void> {
+  const manifestBytes = await readFileBytes(zip, "manifest.json");
+  const manifestHash = await sha256Hex(manifestBytes);
+
+  if (manifestHash !== integrity.manifestSha256) {
+    throw new Error("Archive integrity mismatch for manifest.json");
+  }
+
+  for (const [path, expectedHash] of Object.entries(integrity.files)) {
+    const actualHash = await sha256Hex(await readFileBytes(zip, path));
+
+    if (actualHash !== expectedHash) {
+      throw new Error(`Archive integrity mismatch for ${path}`);
+    }
+  }
+}
+
+async function readFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {
+  const file = zip.file(path);
+
+  if (!file) {
+    throw new Error(`Archive is missing required file: ${path}`);
+  }
+
+  return file.async("uint8array");
 }
 
 type ArchiveEncryptionState = {

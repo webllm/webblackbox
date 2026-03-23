@@ -91,6 +91,7 @@ describe("WebBlackboxPlayer", () => {
     const zip = await JSZip.loadAsync(fixture);
     zip.file("blobs/sha256-blobpng.png", Uint8Array.from([9]));
     zip.file("blobs/sha256-blobbin.bin", Uint8Array.from([8]));
+    await writeIntegrityManifest(zip);
     const bytes = await zip.generateAsync({ type: "uint8array" });
     const player = await WebBlackboxPlayer.open(bytes);
 
@@ -244,7 +245,7 @@ describe("WebBlackboxPlayer", () => {
   it("rejects archives that use deprecated index/integrity layout paths", async () => {
     const bytes = await createDeprecatedLayoutArchive();
 
-    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow("index/time.json");
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow("integrity/hashes.json");
   });
 
   it("does not resolve blobs that omit the sha256- prefix in path names", async () => {
@@ -254,6 +255,30 @@ describe("WebBlackboxPlayer", () => {
     await expect(player.getBlob("blob1")).resolves.toBeNull();
     await expect(player.getBlob("sha256-blob1")).resolves.toBeNull();
     await expect(player.getBlob("blobs/blob1.webp")).resolves.toBeNull();
+  });
+
+  it("rejects archives with tampered manifest contents", async () => {
+    const bytes = await tamperArchiveFile(
+      await createFixtureArchive(),
+      "manifest.json",
+      JSON.stringify({
+        protocolVersion: 999,
+        createdAt: new Date(0).toISOString()
+      })
+    );
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/integrity mismatch/i);
+  });
+
+  it("rejects tampered blobs on demand", async () => {
+    const bytes = await tamperArchiveFile(
+      await createFixtureArchive(),
+      "blobs/sha256-blob1.webp",
+      Uint8Array.from([9, 9, 9, 9])
+    );
+    const player = await WebBlackboxPlayer.open(bytes);
+
+    await expect(player.getBlob("blob1")).rejects.toThrow(/integrity mismatch/i);
   });
 
   it("builds derived action spans", async () => {
@@ -536,9 +561,10 @@ async function createFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/time.json", JSON.stringify([]));
   zip.file("index/req.json", JSON.stringify([{ reqId: "R-1", eventIds: ["E-3", "E-4"] }]));
   zip.file("index/inv.json", JSON.stringify([{ term: "api", eventIds: ["E-3"] }]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
+
+  await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -677,7 +703,6 @@ async function createTwoChunkFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/time.json", JSON.stringify(timeIndex));
   zip.file("index/req.json", JSON.stringify([]));
   zip.file("index/inv.json", JSON.stringify([]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file(
     "events/chunk-000001.ndjson",
     eventsChunk1.map((event) => JSON.stringify(event)).join("\n")
@@ -686,6 +711,8 @@ async function createTwoChunkFixtureArchive(): Promise<Uint8Array> {
     "events/chunk-000002.ndjson",
     eventsChunk2.map((event) => JSON.stringify(event)).join("\n")
   );
+
+  await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -760,12 +787,13 @@ async function createLazyParseFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/time.json", JSON.stringify(timeIndex));
   zip.file("index/req.json", JSON.stringify([]));
   zip.file("index/inv.json", JSON.stringify([]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file(
     "events/chunk-000001.ndjson",
     validEvents.map((event) => JSON.stringify(event)).join("\n")
   );
   zip.file("events/chunk-000002.ndjson", "{ invalid-json-line");
+
+  await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -868,8 +896,9 @@ async function createCompressedCodecArchive(codec: "gzip" | "br" | "zst"): Promi
   zip.file("index/time.json", JSON.stringify(timeIndex));
   zip.file("index/req.json", JSON.stringify([{ reqId: `R-${codec}`, eventIds: ["E-C-2"] }]));
   zip.file("index/inv.json", JSON.stringify([{ term: codec, eventIds: ["E-C-2"] }]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file("events/chunk-000001.ndjson", chunkBytes);
+
+  await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -956,9 +985,10 @@ async function createArchiveWithDeprecatedBlobPath(): Promise<Uint8Array> {
   zip.file("index/time.json", JSON.stringify([]));
   zip.file("index/req.json", JSON.stringify([]));
   zip.file("index/inv.json", JSON.stringify([]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file("blobs/blob1.webp", new Uint8Array([9, 8, 7]));
+
+  await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -1252,7 +1282,6 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
     JSON.stringify([{ reqId: "R-1", eventIds: ["E-12", "E-13", "E-14"] }])
   );
   zip.file("index/inv.json", JSON.stringify([{ term: "unexpected", eventIds: ["E-16"] }]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
   zip.file("blobs/sha256-blob-body-1.json", new TextEncoder().encode('{"ok":true}'));
@@ -1266,6 +1295,8 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
     "blobs/sha256-dom-hash-2.json",
     new TextEncoder().encode(JSON.stringify(createDomSnapshotPayload(["DIV", "SPAN"])))
   );
+
+  await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -1345,7 +1376,6 @@ async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/time.json", JSON.stringify([]));
   zip.file("index/req.json", JSON.stringify([]));
   zip.file("index/inv.json", JSON.stringify([]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "x", files: {} }));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file(
     "blobs/sha256-dom-lite-1.html",
@@ -1356,7 +1386,54 @@ async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
     new TextEncoder().encode("<html><body><div><span></span><a></a></div></body></html>")
   );
 
+  await writeIntegrityManifest(zip);
+
   return zip.generateAsync({ type: "uint8array" });
+}
+
+async function tamperArchiveFile(
+  source: Uint8Array,
+  path: string,
+  content: string | Uint8Array
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  zip.file(path, content);
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function writeIntegrityManifest(zip: JSZip): Promise<void> {
+  const fileHashes: Record<string, string> = {};
+
+  for (const path of Object.keys(zip.files).sort()) {
+    if (path === "integrity/hashes.json") {
+      continue;
+    }
+
+    const file = zip.file(path);
+
+    if (!file) {
+      continue;
+    }
+
+    fileHashes[path] = await sha256HexForTest(await file.async("uint8array"));
+  }
+
+  zip.file(
+    "integrity/hashes.json",
+    JSON.stringify(
+      {
+        manifestSha256: fileHashes["manifest.json"] ?? "",
+        files: fileHashes
+      },
+      null,
+      2
+    )
+  );
+}
+
+async function sha256HexForTest(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 function createDomSnapshotPayload(bodyChildren: string[]): Record<string, unknown> {
@@ -1428,6 +1505,7 @@ async function createEncryptedArchive(source: Uint8Array, passphrase: string): P
   };
 
   zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+  await writeIntegrityManifest(zip);
   return zip.generateAsync({ type: "uint8array" });
 }
 

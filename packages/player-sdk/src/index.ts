@@ -483,18 +483,28 @@ export class WebBlackboxPlayer {
     const bytes = await normalizeOpenInput(input);
     const zip = await JSZip.loadAsync(bytes);
 
+    const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
+    await assertManifestIntegrity(zip, integrity);
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
     const encryptedFiles = manifest.encryption?.files ?? {};
+    await assertArchiveFileIntegrity(zip, integrity, "index/time.json");
     const timeIndex = await readJson<ChunkTimeIndexEntry[]>(zip, "index/time.json");
+    await assertArchiveFileIntegrity(zip, integrity, "index/req.json");
     const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
+    await assertArchiveFileIntegrity(zip, integrity, "index/inv.json");
     const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
-    const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
-    const eventChunks = await readEventChunkSources(zip, archiveKey, encryptedFiles, {
-      range: options.range,
-      timeIndex,
-      defaultCodec: manifest.chunkCodec
-    });
+    const eventChunks = await readEventChunkSources(
+      zip,
+      archiveKey,
+      encryptedFiles,
+      {
+        range: options.range,
+        timeIndex,
+        defaultCodec: manifest.chunkCodec
+      },
+      integrity
+    );
 
     return new WebBlackboxPlayer(
       zip,
@@ -735,6 +745,7 @@ export class WebBlackboxPlayer {
     }
 
     const rawBytes = await file.async("uint8array");
+    await assertArchiveFileIntegrity(this.zip, this.archive.integrity, blob.path, rawBytes);
     const bytes = await this.decryptArchiveFile(blob.path, rawBytes);
 
     return {
@@ -2502,7 +2513,8 @@ async function readEventChunkSources(
     range?: PlayerRange;
     timeIndex?: ChunkTimeIndexEntry[];
     defaultCodec?: ChunkCodec;
-  } = {}
+  } = {},
+  integrity?: HashesManifest
 ): Promise<EventChunkSource[]> {
   const descriptors = buildEventChunkDescriptors(zip, options);
   const chunks: EventChunkSource[] = [];
@@ -2516,6 +2528,11 @@ async function readEventChunkSources(
     }
 
     const rawBytes = await file.async("uint8array");
+
+    if (integrity) {
+      await assertArchiveFileIntegrity(zip, integrity, path, rawBytes);
+    }
+
     const decrypted = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
     const bytes = await decodeChunkBytes(decrypted, descriptor.codec);
 
@@ -2944,14 +2961,55 @@ function updateActionStats(span: ActionSpan, event: WebBlackboxEvent): void {
 }
 
 async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
+  const content = await readZipFileText(zip, path);
+  return JSON.parse(content) as TValue;
+}
+
+async function readZipFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {
   const file = zip.file(path);
 
   if (!file) {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  const content = await file.async("string");
-  return JSON.parse(content) as TValue;
+  return file.async("uint8array");
+}
+
+async function readZipFileText(zip: JSZip, path: string): Promise<string> {
+  const file = zip.file(path);
+
+  if (!file) {
+    throw new Error(`Archive is missing required file: ${path}`);
+  }
+
+  return file.async("string");
+}
+
+async function assertManifestIntegrity(zip: JSZip, integrity: HashesManifest): Promise<void> {
+  const actual = await sha256Hex(await readZipFileBytes(zip, "manifest.json"));
+
+  if (actual !== integrity.manifestSha256) {
+    throw new Error("Archive integrity mismatch for manifest.json");
+  }
+}
+
+async function assertArchiveFileIntegrity(
+  zip: JSZip,
+  integrity: HashesManifest,
+  path: string,
+  bytes?: Uint8Array
+): Promise<void> {
+  const expected = integrity.files[path];
+
+  if (!expected) {
+    throw new Error(`Archive integrity manifest is missing hash for ${path}`);
+  }
+
+  const actual = await sha256Hex(bytes ?? (await readZipFileBytes(zip, path)));
+
+  if (actual !== expected) {
+    throw new Error(`Archive integrity mismatch for ${path}`);
+  }
 }
 
 function parseBlobPath(path: string): { hash: string; extension: string } | null {
@@ -3050,6 +3108,19 @@ async function deriveArchiveKey(
     false,
     ["decrypt"]
   );
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const cryptoApi = requireCryptoApi();
+  const digest = await cryptoApi.subtle.digest("SHA-256", toArrayBuffer(bytes));
+  const output = new Uint8Array(digest);
+  let hex = "";
+
+  for (const value of output) {
+    hex += value.toString(16).padStart(2, "0");
+  }
+
+  return hex;
 }
 
 async function decryptBytes(
