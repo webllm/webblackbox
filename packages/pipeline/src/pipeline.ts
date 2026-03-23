@@ -206,7 +206,11 @@ export class FlightRecorderPipeline {
     }
 
     const rawChunks = await this.options.storage.listChunks(this.options.session.sid);
-    const exportPolicy = resolveExportPolicy(options);
+    const exportPolicy = resolveExportPolicy(options, {
+      latestEventTimestamp: rawChunks[rawChunks.length - 1]?.meta.tEnd,
+      sessionStartedAt: this.options.session.startedAt,
+      sessionEndedAt: this.options.session.endedAt
+    });
     const prepared = await this.prepareExportChunks(rawChunks, exportPolicy);
     const blobsByHash = await this.listSessionBlobMap();
     let selected = this.selectChunksBySize(prepared, blobsByHash, exportPolicy.maxArchiveBytes);
@@ -589,13 +593,26 @@ export class FlightRecorderPipeline {
   }
 }
 
-function resolveExportPolicy(options: ExportBundleOptions): ResolvedExportPolicy {
+function resolveExportPolicy(
+  options: ExportBundleOptions,
+  context: {
+    latestEventTimestamp?: number;
+    sessionStartedAt: number;
+    sessionEndedAt?: number;
+  }
+): ResolvedExportPolicy {
   const includeScreenshots = options.includeScreenshots !== false;
   const maxArchiveBytes = normalizeBoundedPositiveInt(options.maxArchiveBytes);
   const recentWindowMs = normalizeBoundedPositiveInt(options.recentWindowMs);
-  const now = Date.now();
+  const anchorTimestamp = Math.max(
+    context.latestEventTimestamp ?? Number.NEGATIVE_INFINITY,
+    context.sessionEndedAt ?? Number.NEGATIVE_INFINITY,
+    context.sessionStartedAt
+  );
   const cutoffTimestamp =
-    recentWindowMs === null ? Number.NEGATIVE_INFINITY : Math.max(0, now - recentWindowMs);
+    recentWindowMs === null
+      ? Number.NEGATIVE_INFINITY
+      : Math.max(0, anchorTimestamp - recentWindowMs);
 
   return {
     includeScreenshots,

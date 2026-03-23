@@ -495,6 +495,36 @@ describe("pipeline", () => {
     expect(parsed.events.some((event) => event.t < now - 20 * 60 * 1000)).toBe(false);
   });
 
+  it("anchors recent-window exports to the latest session activity", async () => {
+    const storage = new MemoryPipelineStorage();
+    const sessionEnd = Date.now() - 2 * 60 * 60 * 1000;
+    const session: SessionMetadata = {
+      ...SESSION,
+      sid: "S-export-anchor",
+      startedAt: sessionEnd - 60 * 60 * 1000,
+      endedAt: sessionEnd
+    };
+    const pipeline = new FlightRecorderPipeline({
+      session,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-anchor-old", "user.click", sessionEnd - 50 * 60 * 1000));
+    await pipeline.ingest(
+      createEvent("E-anchor-recent", "user.marker", sessionEnd - 5 * 60 * 1000)
+    );
+
+    const exported = await pipeline.exportBundle({
+      includeScreenshots: true,
+      recentWindowMs: 20 * 60 * 1000
+    });
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.events.map((event) => event.id)).toEqual(["E-anchor-recent"]);
+  });
+
   it("limits exported archive size to recent suffix of chunks", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
