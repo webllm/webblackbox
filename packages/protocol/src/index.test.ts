@@ -5,6 +5,8 @@ import {
   DEFAULT_RECORDER_CONFIG,
   EventIdFactory,
   eventEnvelopeSchema,
+  extractRequestId,
+  extractRequestIdFromPayload,
   exportManifestSchema,
   validateEvent,
   validateMessage,
@@ -87,5 +89,17 @@ describe("protocol", () => {
     });
 
     expect(parsed.success).toBe(true);
+  });
+
+  it("extracts request ids from payloads and event refs", () => {
+    expect(extractRequestIdFromPayload({ reqId: "R-1" })).toBe("R-1");
+    expect(extractRequestIdFromPayload({ requestId: "R-2" })).toBe("R-2");
+    expect(extractRequestIdFromPayload({ request: { requestId: "R-3" } })).toBe("R-3");
+    expect(
+      extractRequestId({
+        ref: { req: "R-ref" },
+        data: { requestId: "R-payload" }
+      })
+    ).toBe("R-ref");
   });
 });

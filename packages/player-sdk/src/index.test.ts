@@ -988,7 +988,6 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       type: "network.request",
       id: "E-12",
       ref: {
-        req: "R-1",
         act: "A-2"
       },
       data: {
@@ -1013,7 +1012,6 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       type: "network.response",
       id: "E-13",
       ref: {
-        req: "R-1",
         act: "A-2"
       },
       data: {
@@ -1037,7 +1035,6 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       type: "network.body",
       id: "E-14",
       ref: {
-        req: "R-1",
         act: "A-2"
       },
       data: {

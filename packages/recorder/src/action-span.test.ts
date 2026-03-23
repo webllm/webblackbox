@@ -77,6 +77,26 @@ describe("ActionSpanTracker", () => {
     expect(lateResponse.ref?.act).toBe(start.ref?.act);
   });
 
+  it("accepts requestId payloads and backfills ref.req", () => {
+    const tracker = new ActionSpanTracker(100);
+    const start = tracker.assign(createEvent("user.click", 0));
+    const request = tracker.assign(
+      createEvent("network.request", 10, {
+        requestId: "R-request-id"
+      })
+    );
+    const response = tracker.assign(
+      createEvent("network.response", 20, {
+        requestId: "R-request-id"
+      })
+    );
+
+    expect(request.ref?.req).toBe("R-request-id");
+    expect(request.ref?.act).toBe(start.ref?.act);
+    expect(response.ref?.req).toBe("R-request-id");
+    expect(response.ref?.act).toBe(start.ref?.act);
+  });
+
   it("removes request-action mapping after terminal network events", () => {
     const tracker = new ActionSpanTracker(100);
     const start = tracker.assign(createEvent("user.marker", 0));

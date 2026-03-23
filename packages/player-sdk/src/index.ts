@@ -11,6 +11,7 @@ import type {
   WebBlackboxEvent,
   WebBlackboxEventType
 } from "@webblackbox/protocol";
+import { extractRequestId } from "@webblackbox/protocol";
 
 /** Player lifecycle status. */
 export type PlayerStatus = "idle" | "loaded";
@@ -555,7 +556,7 @@ export class WebBlackboxPlayer {
         return false;
       }
 
-      if (query.requestId && extractReqId(event) !== query.requestId) {
+      if (query.requestId && extractRequestId(event) !== query.requestId) {
         return false;
       }
 
@@ -851,7 +852,7 @@ export class WebBlackboxPlayer {
         .map((eventId) => scopedById.get(eventId))
         .filter((event): event is WebBlackboxEvent => Boolean(event));
       const requestIds = [
-        ...new Set(spanEvents.map((event) => event.ref?.req).filter(isNonEmptyString))
+        ...new Set(spanEvents.map((event) => extractRequestId(event)).filter(isNonEmptyString))
       ];
       const requests = requestIds
         .map((reqId) => requestById.get(reqId))
@@ -1584,7 +1585,7 @@ function collectNetworkBuckets(events: WebBlackboxEvent[]): MutableNetworkBucket
   const buckets = new Map<string, MutableNetworkBucket>();
 
   for (const event of events) {
-    const reqId = extractReqId(event);
+    const reqId = extractRequestId(event);
 
     if (!reqId) {
       continue;
@@ -1704,21 +1705,6 @@ function toNetworkEntry(bucket: MutableNetworkBucket): NetworkWaterfallEntry {
     responseBodySize: asNumber(bodyPayload?.size) ?? asNumber(bodyPayload?.sampledSize),
     eventIds: bucket.events.map((event) => event.id)
   };
-}
-
-function extractReqId(event: WebBlackboxEvent): string | null {
-  if (event.ref?.req) {
-    return event.ref.req;
-  }
-
-  const payload = asRecord(event.data);
-
-  return (
-    asString(payload?.reqId) ??
-    asString(payload?.requestId) ??
-    asString(asRecord(payload?.request)?.requestId) ??
-    null
-  );
 }
 
 function detectStorageKind(type: WebBlackboxEventType): StorageTimelineEntry["kind"] {

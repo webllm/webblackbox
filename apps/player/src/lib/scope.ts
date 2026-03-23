@@ -1,4 +1,4 @@
-import type { WebBlackboxEvent } from "@webblackbox/protocol";
+import { extractRequestId, type WebBlackboxEvent } from "@webblackbox/protocol";
 
 export type ScopeFilter = "all" | "main" | "iframe";
 export type EventScope = "main" | "iframe";
@@ -9,16 +9,6 @@ export type ActionSpanScopeInput = {
 };
 
 type ScopeEventLike = Pick<WebBlackboxEvent, "cdp" | "frame" | "ref" | "data">;
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
-}
 
 export function inferEventScope(event: Pick<WebBlackboxEvent, "cdp" | "frame">): EventScope {
   if ((event.cdp && event.cdp.length > 0) || (event.frame && event.frame.length > 0)) {
@@ -47,18 +37,7 @@ export function matchesScopeFilter(scope: EventScope, filter: ScopeFilter): bool
 export function extractReqIdFromEvent(
   event: Pick<WebBlackboxEvent, "ref" | "data">
 ): string | null {
-  if (event.ref?.req) {
-    return event.ref.req;
-  }
-
-  const payload = asRecord(event.data);
-
-  return (
-    asString(payload?.reqId) ??
-    asString(payload?.requestId) ??
-    asString(asRecord(payload?.request)?.requestId) ??
-    null
-  );
+  return extractRequestId(event);
 }
 
 export function buildActionScopeIndex(

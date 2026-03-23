@@ -1,4 +1,4 @@
-import type { WebBlackboxEventType } from "@webblackbox/protocol";
+import { extractRequestIdFromPayload, type WebBlackboxEventType } from "@webblackbox/protocol";
 
 import type { EventNormalizer, RawRecorderEvent } from "./types.js";
 
@@ -283,12 +283,7 @@ function normalizeContentNetworkBodyPayload(
 }
 
 function readRequestId(payload: Record<string, unknown> | null): string | null {
-  return (
-    asString(payload?.reqId) ??
-    asString(payload?.requestId) ??
-    asString(asRecord(payload?.request)?.requestId) ??
-    null
-  );
+  return extractRequestIdFromPayload(payload);
 }
 
 function buildFallbackReqId(method: string, url: string): string {

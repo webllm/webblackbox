@@ -1,4 +1,9 @@
-import { createActionId, type EventReference, type WebBlackboxEvent } from "@webblackbox/protocol";
+import {
+  createActionId,
+  extractRequestId,
+  type EventReference,
+  type WebBlackboxEvent
+} from "@webblackbox/protocol";
 
 const ACTION_START_EVENTS = new Set([
   "user.click",
@@ -54,6 +59,8 @@ export class ActionSpanTracker {
     }
 
     const reqId = this.readReqId(event);
+    const eventWithReqRef =
+      reqId && event.ref?.req !== reqId ? this.withRef(event, { req: reqId }) : event;
 
     if (!actionId && event.type.startsWith("network.")) {
       actionId = reqId ? this.reqToAction.get(reqId) : undefined;
@@ -68,10 +75,10 @@ export class ActionSpanTracker {
     }
 
     if (actionId) {
-      return this.withRef(event, { act: actionId });
+      return this.withRef(eventWithReqRef, { act: actionId });
     }
 
-    return event;
+    return eventWithReqRef;
   }
 
   private isActionStartEvent(event: WebBlackboxEvent): boolean {
@@ -99,18 +106,7 @@ export class ActionSpanTracker {
   }
 
   private readReqId(event: WebBlackboxEvent): string | undefined {
-    const payload = this.asRecord(event.data);
-    const reqId = payload?.reqId;
-
-    if (typeof reqId === "string" && reqId.length > 0) {
-      return reqId;
-    }
-
-    if (typeof event.ref?.req === "string" && event.ref.req.length > 0) {
-      return event.ref.req;
-    }
-
-    return undefined;
+    return extractRequestId(event) ?? undefined;
   }
 
   private asRecord(value: unknown): Record<string, unknown> | null {
