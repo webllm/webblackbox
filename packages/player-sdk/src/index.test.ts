@@ -466,6 +466,9 @@ describe("WebBlackboxPlayer", () => {
   it("diffs lite DOM snapshots stored as HTML blobs", async () => {
     const bytes = await createLiteDomFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
+    const blob = await player.getBlob("dom-lite-1");
+
+    expect(blob?.mime).toBe("text/html");
 
     const domDiff = await player.compareDomSnapshots("E-lite-1", "E-lite-2");
     expect(domDiff).not.toBeNull();

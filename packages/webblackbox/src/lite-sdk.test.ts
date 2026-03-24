@@ -228,6 +228,35 @@ describe("WebBlackboxLiteSdk", () => {
     await sdk.dispose();
   });
 
+  it("exports materialized DOM snapshots as html blobs", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-dom-html",
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    await sdk.start();
+    sdk.ingestRawEvent(
+      createRawEvent("snapshot", {
+        html: "<html><body><main><section>hello</section></main></body></html>",
+        snapshotId: "D-sdk-html",
+        nodeCount: 4,
+        reason: "interval"
+      })
+    );
+
+    const exported = await sdk.export();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+    const snapshotEvent = parsed.events.find((event) => event.type === "dom.snapshot");
+    const contentHash = (snapshotEvent?.data as { contentHash?: unknown })?.contentHash;
+
+    expect(typeof contentHash).toBe("string");
+    expect(parsed.integrity?.files[`blobs/sha256-${contentHash}.html`]).toMatch(/[a-f0-9]{64}/);
+    expect(parsed.integrity?.files[`blobs/sha256-${contentHash}.bin`]).toBeUndefined();
+
+    await sdk.dispose();
+  });
+
   it("normalizes invalid tab ids to non-negative values", async () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-tab-id",

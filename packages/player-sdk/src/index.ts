@@ -11,7 +11,7 @@ import type {
   WebBlackboxEvent,
   WebBlackboxEventType
 } from "@webblackbox/protocol";
-import { extractRequestId } from "@webblackbox/protocol";
+import { extractRequestId, inferBlobMime } from "@webblackbox/protocol";
 
 /** Player lifecycle status. */
 export type PlayerStatus = "idle" | "loaded";
@@ -459,7 +459,7 @@ export class WebBlackboxPlayer {
 
       const blobRef: BlobRef = {
         path,
-        mime: inferMime(parsed.extension)
+        mime: inferBlobMime(parsed.extension)
       };
 
       // Always register exact path lookups to avoid collisions across extensions.
@@ -3081,22 +3081,6 @@ function normalizeBlobHashCandidate(value: string): string | null {
   }
 
   return trimmed.startsWith("sha256-") ? trimmed.slice("sha256-".length) : trimmed;
-}
-
-function inferMime(extension: string): string {
-  if (extension === "png") {
-    return "image/png";
-  }
-
-  if (extension === "webp") {
-    return "image/webp";
-  }
-
-  if (extension === "json") {
-    return "application/json";
-  }
-
-  return "application/octet-stream";
 }
 
 async function deriveArchiveKey(

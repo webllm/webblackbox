@@ -5,6 +5,8 @@ import {
   DEFAULT_RECORDER_CONFIG,
   EventIdFactory,
   eventEnvelopeSchema,
+  inferBlobFileExtension,
+  inferBlobMime,
   extractNetworkResponseSummary,
   extractRequestId,
   extractRequestIdFromPayload,
@@ -133,5 +135,12 @@ describe("protocol", () => {
       failed: true,
       duration: 123
     });
+  });
+
+  it("round-trips blob html mime mappings", () => {
+    expect(inferBlobFileExtension("text/html")).toBe("html");
+    expect(inferBlobMime("html")).toBe("text/html");
+    expect(inferBlobFileExtension("application/json")).toBe("json");
+    expect(inferBlobMime("bin")).toBe("application/octet-stream");
   });
 });

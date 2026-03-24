@@ -1,5 +1,7 @@
 import JSZip from "jszip";
 
+import { inferBlobFileExtension } from "@webblackbox/protocol";
+
 import type {
   ChunkCodec,
   ChunkTimeIndexEntry,
@@ -63,7 +65,7 @@ export async function createWebBlackboxArchive(
   await addJsonFile(zip, "index/inv.json", input.invertedIndex, fileHashes);
 
   for (const blob of input.blobs) {
-    const extension = inferFileExtension(blob.mime);
+    const extension = inferBlobFileExtension(blob.mime);
     const path = `blobs/sha256-${blob.hash}.${extension}`;
     const bytes = encryption ? await encryptForArchive(path, blob.bytes, encryption) : blob.bytes;
     zip.file(path, bytes);
@@ -470,22 +472,6 @@ function fromBase64(value: string): Uint8Array {
   }
 
   throw new Error("Base64 decoding is unavailable in this environment.");
-}
-
-function inferFileExtension(mime: string): string {
-  if (mime.includes("png")) {
-    return "png";
-  }
-
-  if (mime.includes("webp")) {
-    return "webp";
-  }
-
-  if (mime.includes("json")) {
-    return "json";
-  }
-
-  return "bin";
 }
 
 function parseChunkIdFromPath(path: string): string | null {
