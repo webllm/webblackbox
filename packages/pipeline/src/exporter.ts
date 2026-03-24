@@ -200,6 +200,8 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
 }
 
 async function verifyArchiveIntegrity(zip: JSZip, integrity: HashesManifest): Promise<void> {
+  assertArchiveFileSet(zip, integrity);
+
   const manifestBytes = await readFileBytes(zip, "manifest.json");
   const manifestHash = await sha256Hex(manifestBytes);
 
@@ -212,6 +214,25 @@ async function verifyArchiveIntegrity(zip: JSZip, integrity: HashesManifest): Pr
 
     if (actualHash !== expectedHash) {
       throw new Error(`Archive integrity mismatch for ${path}`);
+    }
+  }
+}
+
+function assertArchiveFileSet(zip: JSZip, integrity: HashesManifest): void {
+  const actualPaths = Object.entries(zip.files)
+    .filter(([, file]) => !file.dir)
+    .map(([path]) => path)
+    .filter((path) => path !== "integrity/hashes.json")
+    .sort();
+  const expectedPaths = Object.keys(integrity.files).sort();
+
+  if (actualPaths.length !== expectedPaths.length) {
+    throw new Error("Archive integrity manifest does not match archive contents.");
+  }
+
+  for (let index = 0; index < actualPaths.length; index += 1) {
+    if (actualPaths[index] !== expectedPaths[index]) {
+      throw new Error("Archive integrity manifest does not match archive contents.");
     }
   }
 }

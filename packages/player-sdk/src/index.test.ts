@@ -303,6 +303,30 @@ describe("WebBlackboxPlayer", () => {
     await expect(player.getBlob("blob1")).rejects.toThrow(/integrity mismatch/i);
   });
 
+  it("rejects archives with undeclared event chunks", async () => {
+    const source = await createFixtureArchive();
+    const zip = await JSZip.loadAsync(source);
+    zip.file(
+      "events/chunk-999999.ndjson",
+      JSON.stringify({
+        v: 1,
+        sid: "S-1",
+        tab: 1,
+        t: 999,
+        mono: 999,
+        type: "user.marker",
+        id: "E-extra",
+        data: { message: "extra" }
+      })
+    );
+
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(
+      /integrity manifest does not match archive contents/i
+    );
+  });
+
   it("builds derived action spans", async () => {
     const bytes = await createFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);

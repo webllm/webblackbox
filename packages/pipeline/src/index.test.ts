@@ -390,6 +390,40 @@ describe("pipeline", () => {
     await expect(readWebBlackboxArchive(tampered)).rejects.toThrow(/integrity mismatch/i);
   });
 
+  it("rejects archives with undeclared event chunks on read", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-integrity-extra", "user.click", 10));
+
+    const exported = await pipeline.exportBundle();
+    const zip = await JSZip.loadAsync(exported.bytes);
+    zip.file(
+      "events/C-999999.ndjson",
+      JSON.stringify({
+        v: 1,
+        sid: SESSION.sid,
+        tab: 1,
+        t: 99,
+        mono: 99,
+        type: "user.marker",
+        id: "E-extra",
+        data: { message: "extra" }
+      })
+    );
+
+    const tampered = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(readWebBlackboxArchive(tampered)).rejects.toThrow(
+      /integrity manifest does not match archive contents/i
+    );
+  });
+
   it("writes provided redaction profile into export manifest", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({

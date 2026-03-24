@@ -484,6 +484,7 @@ export class WebBlackboxPlayer {
     const zip = await JSZip.loadAsync(bytes);
 
     const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
+    assertArchiveFileSet(zip, integrity);
     await assertManifestIntegrity(zip, integrity);
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
@@ -2990,6 +2991,25 @@ async function assertManifestIntegrity(zip: JSZip, integrity: HashesManifest): P
 
   if (actual !== integrity.manifestSha256) {
     throw new Error("Archive integrity mismatch for manifest.json");
+  }
+}
+
+function assertArchiveFileSet(zip: JSZip, integrity: HashesManifest): void {
+  const actualPaths = Object.entries(zip.files)
+    .filter(([, file]) => !file.dir)
+    .map(([path]) => path)
+    .filter((path) => path !== "integrity/hashes.json")
+    .sort();
+  const expectedPaths = Object.keys(integrity.files).sort();
+
+  if (actualPaths.length !== expectedPaths.length) {
+    throw new Error("Archive integrity manifest does not match archive contents.");
+  }
+
+  for (let index = 0; index < actualPaths.length; index += 1) {
+    if (actualPaths[index] !== expectedPaths[index]) {
+      throw new Error("Archive integrity manifest does not match archive contents.");
+    }
   }
 }
 
