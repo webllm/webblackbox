@@ -77,6 +77,38 @@ describe("pipeline", () => {
     expect(indexes.request.some((entry) => entry.reqId === "R-1")).toBe(true);
   });
 
+  it("indexes request ids from nested request payloads", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-nested-request-id"
+      },
+      storage,
+      maxChunkBytes: 100
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-nested-1", "network.request", 1, {
+        request: {
+          requestId: "R-nested-1",
+          method: "GET",
+          url: "https://example.com/api"
+        }
+      })
+    );
+    await pipeline.flush();
+    await pipeline.finalizeIndexes();
+
+    const indexes = await storage.getIndexes("S-nested-request-id");
+
+    expect(indexes.request).toContainEqual({
+      reqId: "R-nested-1",
+      eventIds: ["E-nested-1"]
+    });
+  });
+
   it("encodes and decodes chunk codecs when runtime support is available", async () => {
     for (const codec of ["gzip", "br", "zst"] as const) {
       const storage = new MemoryPipelineStorage();

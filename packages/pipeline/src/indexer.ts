@@ -4,6 +4,7 @@ import type {
   RequestIndexEntry,
   WebBlackboxEvent
 } from "@webblackbox/protocol";
+import { extractRequestId } from "@webblackbox/protocol";
 
 type MutableIndexes = {
   time: ChunkTimeIndexEntry[];
@@ -54,11 +55,7 @@ export class EventIndexer {
   }
 
   private addRequestMapping(event: WebBlackboxEvent): void {
-    const payload = asRecord(event.data);
-    const reqId =
-      event.ref?.req ??
-      (typeof payload?.reqId === "string" ? payload.reqId : undefined) ??
-      (typeof payload?.requestId === "string" ? payload.requestId : undefined);
+    const reqId = extractRequestId(event);
 
     if (!reqId) {
       return;
@@ -158,10 +155,4 @@ function shouldIndexTerm(term: string): boolean {
   }
 
   return true;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
