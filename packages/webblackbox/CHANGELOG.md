@@ -1,5 +1,12 @@
 # webblackbox
 
+## 0.4.0
+
+### Changed
+
+- Lite SDK exports that materialize DOM snapshots as HTML blobs now round-trip correctly through the archive pipeline and player stack.
+- Picked up the pipeline/protocol/recorder 0.4.0 updates for integrity-checked archive handling and consistent request-id normalization across downstream tooling.
+
 ## 0.3.0
 
 ### Changed

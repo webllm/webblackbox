@@ -1,5 +1,12 @@
 # @webblackbox/mcp-server
 
+## 0.4.0
+
+### Changed
+
+- No package-specific source changes shipped in this release.
+- Picked up `@webblackbox/player-sdk` 0.4.0, so archive inspection now benefits from stricter integrity verification on open and more consistent request-id matching in queries and action timelines.
+
 ## 0.3.0
 
 ### Changed

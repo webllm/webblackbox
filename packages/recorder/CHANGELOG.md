@@ -1,5 +1,12 @@
 # @webblackbox/recorder
 
+## 0.4.0
+
+### Changed
+
+- Normalized request-id extraction through the shared protocol helpers so action-span tracking and content-event normalization accept `reqId`, `requestId`, and nested `request.requestId` consistently.
+- Backfilled `ref.req` on action-linked events when request ids are only present in payload data, keeping downstream request/action association stable.
+
 ## 0.3.0
 
 ### Changed

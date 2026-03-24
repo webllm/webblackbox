@@ -1,5 +1,12 @@
 # @webblackbox/protocol
 
+## 0.4.0
+
+### Changed
+
+- Added shared helpers to extract request ids from `reqId`, `requestId`, and nested `request.requestId` payload shapes, plus normalized network-response summaries for downstream consumers.
+- Added shared HTML blob MIME and file-extension mapping so archive producers and readers can round-trip `text/html` snapshot blobs consistently.
+
 ## 0.3.0
 
 ### Changed

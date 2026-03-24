@@ -1,5 +1,14 @@
 # @webblackbox/pipeline
 
+## 0.4.0
+
+### Changed
+
+- Resumed chunk sequence numbers from stored session state after recovery so restarted pipelines stop overwriting earlier chunks for the same session.
+- Anchored `recentWindowMs` exports to the latest session activity for completed sessions instead of the export wall clock time.
+- Enforced archive integrity manifests on read, including file-set verification and per-file hash checks, and aligned request indexing with nested `request.requestId` payloads.
+- Added a Node `crypto` fallback for SHA-256 hashing when Web Crypto is unavailable in Node-based archive tooling.
+
 ## 0.3.0
 
 ### Changed

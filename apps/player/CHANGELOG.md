@@ -1,5 +1,12 @@
 # @webblackbox/player
 
+## 0.4.0
+
+### Changed
+
+- Normalized request-id extraction for scope inference, so main/iframe request scoping stays correct when events carry `requestId` in payload data instead of `ref.req`.
+- Picked up `@webblackbox/player-sdk` 0.4.0 improvements, including integrity-checked archive opens and lite DOM diff support for HTML snapshot blobs.
+
 ## 0.3.0
 
 ### Changed

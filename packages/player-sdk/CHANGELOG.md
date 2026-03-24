@@ -1,5 +1,13 @@
 # @webblackbox/player-sdk
 
+## 0.4.0
+
+### Changed
+
+- Normalized request-id extraction across query filtering, network aggregation, and action timelines so events linked by `requestId` or nested request payloads stay correlated.
+- Added integrity verification for archive opens and on-demand blob reads, with a Node `crypto` fallback for plain-archive hashing in Node runtimes without global Web Crypto.
+- Added lite DOM diff support for HTML snapshot blobs and corrected HTML blob MIME round-tripping in archive reads.
+
 ## 0.3.0
 
 ### Changed

@@ -1,5 +1,12 @@
 # @webblackbox/share-server
 
+## 0.4.0
+
+### Changed
+
+- No package-specific source changes shipped in this release.
+- Picked up `@webblackbox/player-sdk` 0.4.0, so uploaded archives are analyzed with integrity verification on read and more consistent request/action correlation in generated summaries.
+
 ## 0.3.0
 
 ### Changed

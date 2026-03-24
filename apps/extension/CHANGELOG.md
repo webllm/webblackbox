@@ -1,5 +1,12 @@
 # @webblackbox/extension
 
+## 0.4.0
+
+### Changed
+
+- Normalized performance-budget network failure sampling so full-mode `network.response` events with nested response payloads no longer inflate error-rate breaches.
+- Simplified the release packaging pipeline into a single Node-based build flow, with manifest validation and updated packaging coverage for the generated Chrome artifact.
+
 ## 0.3.0
 
 ### Changed
