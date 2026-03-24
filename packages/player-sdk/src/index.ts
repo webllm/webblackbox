@@ -3111,16 +3111,27 @@ async function deriveArchiveKey(
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const cryptoApi = requireCryptoApi();
-  const digest = await cryptoApi.subtle.digest("SHA-256", toArrayBuffer(bytes));
-  const output = new Uint8Array(digest);
-  let hex = "";
+  const subtle = globalThis.crypto?.subtle;
 
-  for (const value of output) {
-    hex += value.toString(16).padStart(2, "0");
+  if (subtle) {
+    const digest = await subtle.digest("SHA-256", toArrayBuffer(bytes));
+    const output = new Uint8Array(digest);
+    let hex = "";
+
+    for (const value of output) {
+      hex += value.toString(16).padStart(2, "0");
+    }
+
+    return hex;
   }
 
-  return hex;
+  const fromNode = await sha256HexWithNodeCrypto(bytes);
+
+  if (fromNode) {
+    return fromNode;
+  }
+
+  throw new Error("Web Crypto API or Node crypto is required for SHA-256 hashing.");
 }
 
 async function decryptBytes(
@@ -3147,6 +3158,31 @@ function requireCryptoApi(): Crypto {
   }
 
   throw new Error("Web Crypto API is required to open encrypted archives.");
+}
+
+let nodeCryptoPromise: Promise<typeof import("node:crypto") | null> | null = null;
+
+async function sha256HexWithNodeCrypto(bytes: Uint8Array): Promise<string | null> {
+  const runtime = globalThis as typeof globalThis & {
+    process?: {
+      versions?: {
+        node?: string;
+      };
+    };
+  };
+
+  if (!runtime.process?.versions?.node) {
+    return null;
+  }
+
+  nodeCryptoPromise ??= import("node:crypto").catch(() => null);
+  const nodeCrypto = await nodeCryptoPromise;
+
+  if (!nodeCrypto) {
+    return null;
+  }
+
+  return nodeCrypto.createHash("sha256").update(bytes).digest("hex");
 }
 
 function fromBase64(value: string): Uint8Array {

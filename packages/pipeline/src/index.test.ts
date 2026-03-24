@@ -326,6 +326,38 @@ describe("pipeline", () => {
     expect(parsed.integrity).not.toBeNull();
   });
 
+  it("reads plain archives without global Web Crypto when Node crypto is available", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-plain-read", "user.click", 10));
+
+    const exported = await pipeline.exportBundle();
+    const originalCrypto = (globalThis as unknown as { crypto?: Crypto }).crypto;
+
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+
+    try {
+      const parsed = await readWebBlackboxArchive(exported.bytes);
+      expect(parsed.events.map((event) => event.id)).toContain("E-plain-read");
+    } finally {
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        writable: true,
+        value: originalCrypto
+      });
+    }
+  });
+
   it("rejects archives with integrity mismatches on read", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
@@ -523,6 +555,32 @@ describe("pipeline", () => {
     const parsed = await readWebBlackboxArchive(exported.bytes);
 
     expect(parsed.events.map((event) => event.id)).toEqual(["E-anchor-recent"]);
+  });
+
+  it("anchors active recent-window exports to export time", async () => {
+    const storage = new MemoryPipelineStorage();
+    const now = Date.now();
+    const session: SessionMetadata = {
+      ...SESSION,
+      sid: "S-export-live-anchor",
+      startedAt: now - 60 * 60 * 1000
+    };
+    const pipeline = new FlightRecorderPipeline({
+      session,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-live-old", "user.click", now - 50 * 60 * 1000));
+
+    const exported = await pipeline.exportBundle({
+      includeScreenshots: true,
+      recentWindowMs: 20 * 60 * 1000
+    });
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.events).toEqual([]);
   });
 
   it("limits exported archive size to recent suffix of chunks", async () => {

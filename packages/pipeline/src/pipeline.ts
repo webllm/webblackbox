@@ -73,8 +73,8 @@ export class FlightRecorderPipeline {
   }
 
   public async start(): Promise<void> {
-    const chunks = await this.options.storage.listChunks(this.options.session.sid);
-    const lastSequence = chunks[chunks.length - 1]?.meta.seq ?? 0;
+    const lastSequence =
+      (await this.options.storage.getLatestChunkMeta(this.options.session.sid))?.seq ?? 0;
 
     this.chunker.restoreSequence(lastSequence);
     await this.options.storage.putSession(this.options.session);
@@ -604,11 +604,18 @@ function resolveExportPolicy(
   const includeScreenshots = options.includeScreenshots !== false;
   const maxArchiveBytes = normalizeBoundedPositiveInt(options.maxArchiveBytes);
   const recentWindowMs = normalizeBoundedPositiveInt(options.recentWindowMs);
-  const anchorTimestamp = Math.max(
-    context.latestEventTimestamp ?? Number.NEGATIVE_INFINITY,
-    context.sessionEndedAt ?? Number.NEGATIVE_INFINITY,
-    context.sessionStartedAt
-  );
+  const anchorTimestamp =
+    typeof context.sessionEndedAt === "number"
+      ? Math.max(
+          context.latestEventTimestamp ?? Number.NEGATIVE_INFINITY,
+          context.sessionEndedAt,
+          context.sessionStartedAt
+        )
+      : Math.max(
+          Date.now(),
+          context.latestEventTimestamp ?? Number.NEGATIVE_INFINITY,
+          context.sessionStartedAt
+        );
   const cutoffTimestamp =
     recentWindowMs === null
       ? Number.NEGATIVE_INFINITY

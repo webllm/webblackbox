@@ -34,6 +34,7 @@ export type PipelineStorage = {
   getSession(sid: string): Promise<SessionMetadata | undefined>;
   putChunk(chunk: StoredChunk): Promise<void>;
   listChunks(sid: string): Promise<StoredChunk[]>;
+  getLatestChunkMeta(sid: string): Promise<ChunkTimeIndexEntry | undefined>;
   getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined>;
   putBlob(blob: StoredBlob, sidHint?: string): Promise<void>;
   getBlob(hash: string): Promise<StoredBlob | undefined>;
@@ -101,6 +102,19 @@ export class MemoryPipelineStorage implements PipelineStorage {
   public async listChunks(sid: string): Promise<StoredChunk[]> {
     const chunks = this.chunks.get(sid) ?? [];
     return [...chunks].sort((left, right) => left.meta.seq - right.meta.seq);
+  }
+
+  public async getLatestChunkMeta(sid: string): Promise<ChunkTimeIndexEntry | undefined> {
+    const chunks = this.chunks.get(sid) ?? [];
+    let latest: ChunkTimeIndexEntry | undefined;
+
+    for (const chunk of chunks) {
+      if (!latest || chunk.meta.seq > latest.seq) {
+        latest = chunk.meta;
+      }
+    }
+
+    return latest;
   }
 
   public async getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined> {
@@ -282,6 +296,10 @@ export class EncryptedPipelineStorage implements PipelineStorage {
         };
       })
     );
+  }
+
+  public async getLatestChunkMeta(sid: string): Promise<ChunkTimeIndexEntry | undefined> {
+    return this.storage.getLatestChunkMeta(sid);
   }
 
   public async getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined> {
@@ -475,6 +493,29 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
 
       return requestToPromise<ChunkRow[]>(index.getAll(range)).then((rows) =>
         rows.map((row) => row.value)
+      );
+    });
+  }
+
+  public async getLatestChunkMeta(sid: string): Promise<ChunkTimeIndexEntry | undefined> {
+    const db = await this.db();
+
+    return runTransaction(db, "chunks", "readonly", (store) => {
+      if (!store.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
+        return requestToPromise<ChunkRow[]>(store.getAll()).then((rows) => {
+          const latest = rows
+            .map((row) => row.value)
+            .filter((chunk) => chunk.sid === sid)
+            .sort((left, right) => right.meta.seq - left.meta.seq)[0];
+
+          return latest?.meta;
+        });
+      }
+
+      const index = store.index(CHUNKS_BY_SID_SEQ_INDEX);
+      const range = IDBKeyRange.bound([sid, 0], [sid, Number.MAX_SAFE_INTEGER]);
+      return firstCursorValue<ChunkRow>(index.openCursor(range, "prev")).then(
+        (row) => row?.value.meta
       );
     });
   }
@@ -1077,6 +1118,21 @@ function deleteByCursor(request: IDBRequest<IDBCursorWithValue | null>): Promise
 
       cursor.delete();
       cursor.continue();
+    };
+  });
+}
+
+function firstCursorValue<TResult>(
+  request: IDBRequest<IDBCursorWithValue | null>
+): Promise<TResult | undefined> {
+  return new Promise<TResult | undefined>((resolve, reject) => {
+    request.onerror = () => {
+      reject(request.error ?? new Error("IndexedDB cursor iteration failed"));
+    };
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      resolve((cursor?.value as TResult | undefined) ?? undefined);
     };
   });
 }

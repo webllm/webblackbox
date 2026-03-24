@@ -129,6 +129,7 @@ describe("storage", () => {
 
     const chunks = await storage.listChunks(SESSION_A.sid);
     expect(chunks.map((chunk) => chunk.meta.chunkId)).toEqual(["C-1", "C-2"]);
+    expect((await storage.getLatestChunkMeta(SESSION_A.sid))?.chunkId).toBe("C-2");
     expect(await storage.getSession(SESSION_A.sid)).toEqual(expect.objectContaining(SESSION_A));
     expect((await storage.getBlob(hash))?.refCount).toBe(2);
 
@@ -214,6 +215,7 @@ describe("storage", () => {
     const decryptedChunk = await storage.getChunk(sid, "C-enc");
     const decryptedBlob = await storage.getBlob(hash);
     const decryptedList = await storage.listBlobs();
+    expect((await storage.getLatestChunkMeta(sid))?.chunkId).toBe("C-enc");
     expect(Array.from(decryptedChunk?.bytes ?? [])).toEqual(Array.from(chunk.bytes));
     expect(Array.from(decryptedBlob?.bytes ?? [])).toEqual(Array.from(blobBytes));
     expect(decryptedList).toHaveLength(1);
@@ -314,6 +316,7 @@ describe("storage", () => {
     const storage = new IndexedDbPipelineStorage(dbName);
     const chunks = await storage.listChunks(sid);
     expect(chunks.map((chunk) => chunk.meta.chunkId)).toEqual(["C-1", "C-2"]);
+    expect((await storage.getLatestChunkMeta(sid))?.chunkId).toBe("C-2");
 
     await storage.deleteSession(sid);
     expect(await storage.listChunks(sid)).toEqual([]);

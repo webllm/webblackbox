@@ -80,6 +80,28 @@ describe("WebBlackboxPlayer", () => {
     expect(fromBlob.events.length).toBeGreaterThan(0);
   });
 
+  it("opens plain archives without global Web Crypto when Node crypto is available", async () => {
+    const bytes = await createFixtureArchive();
+    const originalCrypto = (globalThis as unknown as { crypto?: Crypto }).crypto;
+
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+
+    try {
+      const player = await WebBlackboxPlayer.open(bytes);
+      expect(player.events.length).toBeGreaterThan(0);
+    } finally {
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        writable: true,
+        value: originalCrypto
+      });
+    }
+  });
+
   it("throws for unsupported archive input type", async () => {
     await expect(WebBlackboxPlayer.open("invalid-input" as unknown as Uint8Array)).rejects.toThrow(
       /unsupported archive input type/i
