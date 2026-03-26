@@ -20,6 +20,7 @@ export default defineConfig({
   sourcemap: true,
   outDir: "build",
   clean: false,
+  minify: true,
   splitting: false,
   dts: false,
   define: {
