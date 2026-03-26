@@ -69,6 +69,9 @@ export type ChromeApi = {
   downloads?: {
     download(options: { url: string; filename: string; saveAs?: boolean }): Promise<number>;
   };
+  i18n?: {
+    getUILanguage(): string;
+  };
   offscreen?: {
     createDocument(options: {
       url: string;

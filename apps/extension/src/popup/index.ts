@@ -1,6 +1,7 @@
 import { DEFAULT_EXPORT_POLICY, type ExportPolicy, type FreezeReason } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
+import { createExtensionI18n } from "../shared/i18n.js";
 import {
   PORT_NAMES,
   type ExtensionInboundMessage,
@@ -11,6 +12,16 @@ import {
 const chromeApi = getChromeApi();
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.popup });
 const extensionVersion = chromeApi?.runtime?.getManifest?.().version ?? "dev";
+const i18n = createExtensionI18n({
+  pageTitleKey: "pageTitlePopup"
+});
+const {
+  t,
+  formatMode,
+  formatFreezeReason,
+  formatRelativeTime: formatLocaleRelativeTime,
+  formatByteSize: formatLocaleByteSize
+} = i18n;
 
 const root = document.getElementById("popup-root");
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
@@ -27,6 +38,7 @@ const state: {
   recording: { active: boolean; sid?: string; mode?: string };
   exportPolicyForm: PopupExportPolicyForm;
   exportStatus?: string;
+  exportStatusIsError?: boolean;
   lastFreeze?: { sid: string; reason: FreezeReason; at: number };
 } = {
   tabId: null,
@@ -34,6 +46,7 @@ const state: {
   recording: { active: false },
   exportPolicyForm: toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY),
   exportStatus: undefined,
+  exportStatusIsError: false,
   lastFreeze: undefined
 };
 
@@ -83,27 +96,49 @@ function render(container: HTMLElement): void {
   const activeOnCurrentTab = activeSession && activeSession.tabId === state.tabId;
   const status = activeSession
     ? activeOnCurrentTab
-      ? `Recording (${activeSession.mode})`
-      : `Recording (${activeSession.mode}) on Tab ${activeSession.tabId}`
+      ? t("popupStatusRecordingCurrent", {
+          mode: formatMode(activeSession.mode)
+        })
+      : t("popupStatusRecordingOtherTab", {
+          mode: formatMode(activeSession.mode),
+          tabId: activeSession.tabId
+        })
     : exportSession
       ? exportSession.tabId === state.tabId
-        ? `Idle (Last ${exportSession.mode})`
-        : `Idle (Last ${exportSession.mode} on Tab ${exportSession.tabId})`
-      : "Idle";
+        ? t("popupStatusIdleLastCurrent", {
+            mode: formatMode(exportSession.mode)
+          })
+        : t("popupStatusIdleLastOtherTab", {
+            mode: formatMode(exportSession.mode),
+            tabId: exportSession.tabId
+          })
+      : t("popupStatusIdle");
   const summarySession = activeSession ?? exportSession;
   const budgetAlerts = summarySession?.budgetAlertCount ?? 0;
   const ringUsage = summarySession ? describeRingBufferUsage(summarySession, now) : null;
   const captureSummary = summarySession
-    ? `${summarySession.eventCount ?? 0} events • ${summarySession.errorCount ?? 0} errors • ${budgetAlerts} budget alerts • ${formatByteSize(summarySession.sizeBytes ?? 0)}`
-    : "No captured events";
+    ? t("popupCaptureSummary", {
+        events: summarySession.eventCount ?? 0,
+        errors: summarySession.errorCount ?? 0,
+        budgetAlerts,
+        size: formatLocaleByteSize(summarySession.sizeBytes ?? 0)
+      })
+    : t("popupNoCapturedEvents");
   const recentFreeze =
     state.lastFreeze && now - state.lastFreeze.at <= 10 * 60 * 1000 ? state.lastFreeze : null;
   const incidentText = recentFreeze
-    ? `${recentFreeze.reason} (${formatRelativeTime(recentFreeze.at, now)})`
-    : "none";
-  const badgeText = recentFreeze ? "ALERT" : activeSession ? "REC" : "IDLE";
+    ? t("popupRecentFreeze", {
+        reason: formatFreezeReason(recentFreeze.reason),
+        timeAgo: formatLocaleRelativeTime(recentFreeze.at, now)
+      })
+    : t("popupIncidentNone");
+  const badgeText = recentFreeze
+    ? t("popupBadgeAlert")
+    : activeSession
+      ? t("popupBadgeRecording")
+      : t("popupBadgeIdle");
   const badgeClass = recentFreeze ? "wb-popup__badge wb-popup__badge--alert" : "wb-popup__badge";
-  const exportStatusClass = state.exportStatus?.startsWith("Export failed")
+  const exportStatusClass = state.exportStatusIsError
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
   const startDisabled = Boolean(activeOnCurrentTab);
@@ -123,10 +158,10 @@ function render(container: HTMLElement): void {
   const meta = document.createElement("div");
   meta.className = "wb-popup__meta";
   meta.append(
-    createMetaLine("Tab", String(state.tabId ?? "n/a")),
-    createMetaLine("Status", status),
-    createMetaLine("Capture", captureSummary),
-    createMetaLine("Incident", incidentText)
+    createMetaLine(t("popupLabelTab"), String(state.tabId ?? "n/a")),
+    createMetaLine(t("popupLabelStatus"), status),
+    createMetaLine(t("popupLabelCapture"), captureSummary),
+    createMetaLine(t("popupLabelIncident"), incidentText)
   );
   section.append(meta);
 
@@ -137,18 +172,23 @@ function render(container: HTMLElement): void {
   const actions = document.createElement("div");
   actions.className = "wb-popup__actions";
   actions.append(
-    createActionButton("Start Lite", "wb-btn wb-btn--brand", "start-lite", startDisabled),
-    createActionButton("Start Full", "wb-btn wb-btn--brand-alt", "start-full", startDisabled),
-    createActionButton("Stop", "wb-btn wb-btn--muted", "stop", !activeSession),
-    createActionButton("Export", "wb-btn wb-btn--accent", "export", !exportSession)
+    createActionButton(t("popupStartLite"), "wb-btn wb-btn--brand", "start-lite", startDisabled),
+    createActionButton(
+      t("popupStartFull"),
+      "wb-btn wb-btn--brand-alt",
+      "start-full",
+      startDisabled
+    ),
+    createActionButton(t("popupStop"), "wb-btn wb-btn--muted", "stop", !activeSession),
+    createActionButton(t("popupExport"), "wb-btn wb-btn--accent", "export", !exportSession)
   );
   section.append(actions);
 
   const nav = document.createElement("div");
   nav.className = "wb-popup__nav";
   nav.append(
-    createActionButton("Sessions", "wb-btn wb-btn--surface", "open-sessions"),
-    createActionButton("Options", "wb-btn wb-btn--surface", "open-options")
+    createActionButton(t("popupSessions"), "wb-btn wb-btn--surface", "open-sessions"),
+    createActionButton(t("popupOptions"), "wb-btn wb-btn--surface", "open-options")
   );
   section.append(nav);
 
@@ -161,7 +201,7 @@ function render(container: HTMLElement): void {
 
   const hint = document.createElement("p");
   hint.className = "wb-popup__hint";
-  hint.textContent = "Marker: Ctrl/Cmd + Shift + M";
+  hint.textContent = t("popupMarkerHint");
   section.append(hint);
 
   container.replaceChildren(section);
@@ -296,16 +336,16 @@ function openPassphraseDialog(): Promise<string | null> {
     const title = document.createElement("h2");
     title.id = "wb-passphrase-title";
     title.className = "wb-confirm-title";
-    title.textContent = "Export Passphrase";
+    title.textContent = t("popupExportPassphraseTitle");
 
     const body = document.createElement("p");
     body.className = "wb-confirm-body";
-    body.textContent = "Optional AES-GCM passphrase. Leave blank for unencrypted export.";
+    body.textContent = t("popupExportPassphraseBody");
 
     const label = document.createElement("label");
     label.className = "wb-field-label";
     label.htmlFor = "wb-passphrase-input";
-    label.textContent = "Passphrase";
+    label.textContent = t("popupPassphraseLabel");
 
     const input = document.createElement("input");
     input.id = "wb-passphrase-input";
@@ -320,12 +360,12 @@ function openPassphraseDialog(): Promise<string | null> {
     cancelButton.type = "button";
     cancelButton.className = "wb-btn wb-btn--muted";
     cancelButton.setAttribute("data-passphrase-cancel", "");
-    cancelButton.textContent = "Cancel";
+    cancelButton.textContent = t("popupCancel");
 
     const submitButton = document.createElement("button");
     submitButton.type = "submit";
     submitButton.className = "wb-btn wb-btn--accent";
-    submitButton.textContent = "Export";
+    submitButton.textContent = t("popupExport");
 
     actions.append(cancelButton, submitButton);
     form.append(title, body, label, input, actions);
@@ -377,9 +417,14 @@ function applyMessage(message: ExtensionOutboundMessage): void {
   }
 
   if (message.kind === "sw.export-status") {
+    state.exportStatusIsError = !message.ok;
     state.exportStatus = message.ok
-      ? `Exported: ${message.fileName ?? message.sid}`
-      : `Export failed: ${message.error ?? "Unknown error"}`;
+      ? t("popupExported", {
+          name: message.fileName ?? message.sid
+        })
+      : t("popupExportFailed", {
+          error: message.error ?? t("unknownError")
+        });
     return;
   }
 
@@ -447,42 +492,6 @@ function isRecordableTabUrl(url: string | undefined): boolean {
   }
 
   return true;
-}
-
-function formatRelativeTime(timestamp: number, now: number): string {
-  const deltaMs = Math.max(0, now - timestamp);
-  const seconds = Math.floor(deltaMs / 1000);
-
-  if (seconds < 60) {
-    return `${seconds}s ago`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-
-  if (minutes < 60) {
-    return `${minutes}m ago`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
-}
-
-function formatByteSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return "0 B";
-  }
-
-  if (bytes < 1024) {
-    return `${Math.round(bytes)} B`;
-  }
-
-  const kb = bytes / 1024;
-  if (kb < 1024) {
-    return `${kb.toFixed(1)} KB`;
-  }
-
-  const mb = kb / 1024;
-  return `${mb.toFixed(2)} MB`;
 }
 
 function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
@@ -728,7 +737,7 @@ function createRingUsageSection(ringUsage: {
   label.className = "wb-popup__buffer-label";
 
   const labelText = document.createElement("span");
-  labelText.textContent = "Ring buffer";
+  labelText.textContent = t("popupRingBuffer");
 
   const labelValue = document.createElement("strong");
   labelValue.textContent = ringUsage.windowLabel;
@@ -766,7 +775,7 @@ function createArchivePolicySection(): HTMLElement {
 
   const title = document.createElement("p");
   title.className = "wb-popup__policy-title";
-  title.textContent = "Archive Policy";
+  title.textContent = t("popupArchivePolicyTitle");
 
   const toggleLabel = document.createElement("label");
   toggleLabel.className = "wb-toggle";
@@ -776,13 +785,13 @@ function createArchivePolicySection(): HTMLElement {
   includeScreenshots.type = "checkbox";
 
   const toggleText = document.createElement("span");
-  toggleText.textContent = "Include screenshots in export";
+  toggleText.textContent = t("popupIncludeScreenshots");
   toggleLabel.append(includeScreenshots, toggleText);
 
   const sizeLabel = document.createElement("label");
   sizeLabel.className = "wb-field-label";
   sizeLabel.htmlFor = "export-max-size-mb";
-  sizeLabel.textContent = "Max archive size (MB)";
+  sizeLabel.textContent = t("popupMaxArchiveSizeMb");
 
   const sizeInput = document.createElement("input");
   sizeInput.id = "export-max-size-mb";
@@ -795,7 +804,7 @@ function createArchivePolicySection(): HTMLElement {
   const recentLabel = document.createElement("label");
   recentLabel.className = "wb-field-label";
   recentLabel.htmlFor = "export-recent-minutes";
-  recentLabel.textContent = "Recent window (minutes)";
+  recentLabel.textContent = t("popupRecentWindowMinutes");
 
   const recentInput = document.createElement("input");
   recentInput.id = "export-recent-minutes";

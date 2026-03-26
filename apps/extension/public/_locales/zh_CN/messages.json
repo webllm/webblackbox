@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "WebBlackbox"
+  },
+  "extensionDescription": {
+    "message": "面向 Web 应用的飞行记录器与时光回溯调试工具。"
+  },
+  "extensionActionTitle": {
+    "message": "WebBlackbox"
+  },
+  "extensionCommandMarkBug": {
+    "message": "创建用户标记"
+  }
+}

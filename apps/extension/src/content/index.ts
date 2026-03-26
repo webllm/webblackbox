@@ -3,10 +3,12 @@ import { INJECTED_CAPTURE_CONFIG_EVENT } from "webblackbox/injected-hooks";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
+import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
 import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
 
 const chromeApi = getChromeApi();
+const { t } = createExtensionI18n();
 let contentPort: PortLike | null = null;
 let reconnectTimer = 0;
 let reconnectAttempts = 0;
@@ -36,7 +38,7 @@ connectContentPort();
 
 chromeApi?.runtime?.onMessage.addListener((message) => {
   if (isMarkerCommand(message)) {
-    captureAgent.emitMarker("Keyboard marker");
+    captureAgent.emitMarker(t("contentKeyboardMarker"));
     return false;
   }
 

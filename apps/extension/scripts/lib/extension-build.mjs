@@ -12,14 +12,18 @@ export const distDir = resolve(appRoot, "dist");
 export const publicDir = resolve(appRoot, "public");
 export const packageJsonPath = resolve(appRoot, "package.json");
 
-const EXTENSION_NAME = "WebBlackbox";
-const EXTENSION_DESCRIPTION = "Flight recorder and time-travel debugger for web apps.";
+const EXTENSION_DEFAULT_LOCALE = "en";
+const EXTENSION_NAME = "__MSG_extensionName__";
+const EXTENSION_DESCRIPTION = "__MSG_extensionDescription__";
+const EXTENSION_ARCHIVE_NAME = "WebBlackbox";
+const EXTENSION_ARCHIVE_SLUG = "webblackbox";
 const EXTENSION_MINIMUM_CHROME_VERSION = "125";
 const EXTENSION_DEVELOPMENT_KEY =
   "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2HDVz1RBsIjEKY/KUOuP3glU4SmMUtvdXXER0JV9mksg6cufsMXUwPpzj7M4aCqCPMV8NkMhRHuGEumnDx/lhc/UI1OUyGpMSP2DSozID5w1s6NY2NbBERcNe0QPwlG9DBkZHHrSXycAHBK8IOaGcsju3Dzmbxr9RI7boLVE0dchdo5bt9tyOxT6LQL1ZlQOgErRf2pSQpU/dqngQ0Wd3/rj5aZ9c04TkycJrXq1FBY4uBiUdFOjuQ6djW4UtJsudYuDaqZ5PsRErilDAbWttkQsN7w5lS7aJANEU/83nIyz8YZ56vn1P1wBqWOxJ2CsyW/lFJdKjgZor6AS5AWCRQIDAQAB";
 const EXTENSION_PAGE_CSP =
   "script-src 'self'; object-src 'self'; style-src 'self'; img-src 'self' data:;";
 const STATIC_PUBLIC_FILES = [
+  "_locales",
   "offscreen.html",
   "options.html",
   "popup.html",
@@ -29,6 +33,8 @@ const STATIC_PUBLIC_FILES = [
 ];
 const REQUIRED_BUILD_FILES = [
   "manifest.json",
+  "_locales/en/messages.json",
+  "_locales/zh_CN/messages.json",
   "content.js",
   "injected.js",
   "offscreen.html",
@@ -80,6 +86,7 @@ async function readAppPackage() {
 export function createExtensionManifest({ version, release = false }) {
   return {
     manifest_version: 3,
+    default_locale: EXTENSION_DEFAULT_LOCALE,
     name: EXTENSION_NAME,
     description: EXTENSION_DESCRIPTION,
     version,
@@ -99,7 +106,7 @@ export function createExtensionManifest({ version, release = false }) {
       128: "icon/128.png"
     },
     action: {
-      default_title: EXTENSION_NAME,
+      default_title: "__MSG_extensionActionTitle__",
       default_popup: "popup.html",
       default_icon: {
         16: "icon/16.png",
@@ -127,7 +134,7 @@ export function createExtensionManifest({ version, release = false }) {
     },
     commands: {
       "mark-bug": {
-        description: "Create user marker",
+        description: "__MSG_extensionCommandMarkBug__",
         suggested_key: {
           default: "Ctrl+Shift+M",
           mac: "Command+Shift+M"
@@ -142,6 +149,10 @@ export function validateExtensionManifest(manifest, { version, release = false }
 
   if (manifest?.manifest_version !== 3) {
     issues.push("manifest_version must be 3.");
+  }
+
+  if (manifest?.default_locale !== EXTENSION_DEFAULT_LOCALE) {
+    issues.push(`default_locale must be ${EXTENSION_DEFAULT_LOCALE}.`);
   }
 
   if (version && manifest?.version !== version) {
@@ -258,9 +269,7 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
     throw new Error(`Release manifest is invalid:\n- ${releaseIssues.join("\n- ")}`);
   }
 
-  const archiveSlug = slugify(
-    typeof releaseManifest.name === "string" ? releaseManifest.name : "webblackbox"
-  );
+  const archiveSlug = slugify(EXTENSION_ARCHIVE_SLUG);
   const resolvedOutputPath = outputPath
     ? resolve(process.cwd(), outputPath)
     : resolve(distDir, `${archiveSlug}-${version}-chrome.zip`);
@@ -307,7 +316,7 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
     path: resolvedOutputPath,
     bytes: archiveStat.size,
     manifest: {
-      name: releaseManifest.name,
+      name: EXTENSION_ARCHIVE_NAME,
       version: releaseManifest.version
     },
     strippedKeys: Object.hasOwn(sourceManifest ?? {}, "key") ? ["key"] : []

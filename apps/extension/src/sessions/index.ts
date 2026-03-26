@@ -1,4 +1,5 @@
 import { getChromeApi } from "../shared/chrome-api.js";
+import { createExtensionI18n } from "../shared/i18n.js";
 import {
   PORT_NAMES,
   type ExtensionInboundMessage,
@@ -8,6 +9,10 @@ import {
 
 const chromeApi = getChromeApi();
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.sessions });
+const i18n = createExtensionI18n({
+  pageTitleKey: "pageTitleSessions"
+});
+const { locale, t, formatMode, formatRelativeTime, formatDuration, formatByteSize } = i18n;
 const root = document.getElementById("sessions-root");
 
 let sessions: SessionListItem[] = [];
@@ -53,13 +58,16 @@ function render(container: HTMLElement): void {
 
   const count = document.createElement("span");
   count.className = "wb-sessions-count";
-  count.textContent = `${ordered.length} total · ${activeCount} active`;
+  count.textContent = t("sessionsCountSummary", {
+    total: ordered.length,
+    active: activeCount
+  });
   header.append(count);
   section.append(header);
 
   const subtitle = document.createElement("p");
   subtitle.className = "wb-sessions-subtitle";
-  subtitle.textContent = "Recent recordings with source context and quick actions.";
+  subtitle.textContent = t("sessionsSubtitle");
   section.append(subtitle);
 
   const list = document.createElement("div");
@@ -68,7 +76,7 @@ function render(container: HTMLElement): void {
   if (ordered.length === 0) {
     const empty = document.createElement("p");
     empty.className = "wb-sessions-empty";
-    empty.textContent = "No sessions captured yet.";
+    empty.textContent = t("sessionsEmpty");
     list.append(empty);
   } else {
     list.append(...ordered.map((session) => renderSessionCard(session, now)));
@@ -94,7 +102,7 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
   const note = typeof session.note === "string" ? session.note : "";
   const tagsValue = formatTagInputValue(tags);
   const sidShort = shortenSessionId(session.sid);
-  const statusLabel = session.active ? "LIVE" : "Stopped";
+  const statusLabel = session.active ? t("sessionsStatusLive") : t("sessionsStatusStopped");
   const statusClass = session.active ? "wb-session-status--live" : "wb-session-status--stopped";
 
   const article = document.createElement("article");
@@ -128,18 +136,18 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
   const meta = document.createElement("div");
   meta.className = "wb-session-card__meta";
   meta.append(
-    createChip(`mode ${session.mode.toUpperCase()}`),
-    createChip(`tab ${session.tabId}`),
-    createChip(`started ${startedRelative}`, startedAt),
-    createChip(`events ${eventCount}`),
-    createChip(`errors ${errorCount}`),
-    createChip(`budget alerts ${budgetAlertCount}`),
-    createChip(`size ${formatByteSize(sizeBytes)}`),
-    createChip(`duration ${elapsed}`)
+    createChip(t("sessionsChipMode", { mode: formatMode(session.mode) })),
+    createChip(t("sessionsChipTab", { tabId: session.tabId })),
+    createChip(t("sessionsChipStarted", { timeAgo: startedRelative }), startedAt),
+    createChip(t("sessionsChipEvents", { count: eventCount })),
+    createChip(t("sessionsChipErrors", { count: errorCount })),
+    createChip(t("sessionsChipBudgetAlerts", { count: budgetAlertCount })),
+    createChip(t("sessionsChipSize", { size: formatByteSize(sizeBytes) })),
+    createChip(t("sessionsChipDuration", { duration: elapsed }))
   );
 
   if (endedAt) {
-    meta.append(createChip("ended", endedAt));
+    meta.append(createChip(t("sessionsChipEnded"), endedAt));
   }
 
   article.append(meta);
@@ -147,7 +155,9 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
   const sid = document.createElement("p");
   sid.className = "wb-session-card__sid mono";
   sid.title = session.sid;
-  sid.textContent = `sid ${sidShort}`;
+  sid.textContent = t("sessionsSid", {
+    sid: sidShort
+  });
   article.append(sid);
 
   if (note) {
@@ -170,14 +180,14 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
   const actions = document.createElement("div");
   actions.className = "wb-session-card__actions";
   actions.append(
-    createActionButton("Export", "wb-btn wb-btn--brand", { export: session.sid }),
+    createActionButton(t("sessionsActionExport"), "wb-btn wb-btn--brand", { export: session.sid }),
     createActionButton(
-      "Stop",
+      t("sessionsActionStop"),
       "wb-btn wb-btn--muted",
       { stop: String(session.tabId) },
       !session.active
     ),
-    createActionButton("Delete", "wb-btn wb-btn--muted", { delete: session.sid })
+    createActionButton(t("sessionsActionDelete"), "wb-btn wb-btn--muted", { delete: session.sid })
   );
   article.append(actions);
 
@@ -187,7 +197,7 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
 
   const tagsLabel = document.createElement("label");
   tagsLabel.className = "wb-field-label";
-  tagsLabel.append("Tags (comma-separated)");
+  tagsLabel.append(t("sessionsTagsLabel"));
 
   const tagsInput = document.createElement("input");
   tagsInput.className = "wb-input";
@@ -197,7 +207,7 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
 
   const noteLabel = document.createElement("label");
   noteLabel.className = "wb-field-label";
-  noteLabel.append("Notes");
+  noteLabel.append(t("sessionsNotesLabel"));
 
   const noteInput = document.createElement("textarea");
   noteInput.className = "wb-session-note-input";
@@ -209,7 +219,7 @@ function renderSessionCard(session: SessionListItem, now: number): HTMLElement {
   const saveButton = document.createElement("button");
   saveButton.className = "wb-btn wb-btn--muted";
   saveButton.type = "submit";
-  saveButton.textContent = "Save Context";
+  saveButton.textContent = t("sessionsSaveContext");
 
   form.append(tagsLabel, noteLabel, saveButton);
   article.append(form);
@@ -224,7 +234,11 @@ function describeSessionPage(session: SessionListItem): { primary: string; secon
 
   if (rawUrl.length === 0) {
     return {
-      primary: title || `Tab ${session.tabId}`,
+      primary:
+        title ||
+        t("sessionsFallbackTab", {
+          tabId: session.tabId
+        }),
       secondary: `tab:${session.tabId}`
     };
   }
@@ -254,63 +268,7 @@ function shortenSessionId(sid: string): string {
 }
 
 function formatAbsoluteTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleString();
-}
-
-function formatRelativeTime(timestamp: number, now: number): string {
-  const deltaMs = Math.max(0, now - timestamp);
-  const seconds = Math.floor(deltaMs / 1000);
-
-  if (seconds < 60) {
-    return `${seconds}s ago`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-
-  if (minutes < 60) {
-    return `${minutes}m ago`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-
-  if (hours < 24) {
-    return `${hours}h ago`;
-  }
-
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-function formatDuration(startedAt: number, endedAt: number): string {
-  const totalSeconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-
-  if (minutes < 60) {
-    return `${minutes}m ${seconds}s`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  const remMinutes = minutes % 60;
-  return `${hours}h ${remMinutes}m`;
-}
-
-function formatByteSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return "0 B";
-  }
-
-  if (bytes < 1024) {
-    return `${Math.round(bytes)} B`;
-  }
-
-  const kb = bytes / 1024;
-  if (kb < 1024) {
-    return `${kb.toFixed(1)} KB`;
-  }
-
-  const mb = kb / 1024;
-  return `${mb.toFixed(2)} MB`;
+  return new Date(timestamp).toLocaleString(locale);
 }
 
 function parseTagInput(value: string): string[] {
@@ -396,7 +354,9 @@ function bindActions(container: HTMLElement): void {
       }
 
       const confirmed = await openConfirmDialog(
-        `Delete session ${sid}? This removes local archive data.`
+        t("sessionsDeletePrompt", {
+          sid
+        })
       );
 
       if (!confirmed) {
@@ -444,7 +404,7 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
     const title = document.createElement("h2");
     title.id = "wb-passphrase-title";
     title.className = "wb-confirm-title";
-    title.textContent = "Export Session";
+    title.textContent = t("sessionsExportDialogTitle");
 
     const sidText = document.createElement("p");
     sidText.className = "wb-confirm-body mono";
@@ -452,12 +412,12 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
 
     const body = document.createElement("p");
     body.className = "wb-confirm-body";
-    body.textContent = "Optional AES-GCM passphrase. Leave blank for unencrypted export.";
+    body.textContent = t("sessionsExportDialogBody");
 
     const label = document.createElement("label");
     label.className = "wb-field-label";
     label.htmlFor = "wb-passphrase-input";
-    label.textContent = "Passphrase";
+    label.textContent = t("popupPassphraseLabel");
 
     const input = document.createElement("input");
     input.id = "wb-passphrase-input";
@@ -472,12 +432,12 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
     cancelButton.type = "button";
     cancelButton.className = "wb-btn wb-btn--muted";
     cancelButton.dataset.passphraseCancel = "";
-    cancelButton.textContent = "Cancel";
+    cancelButton.textContent = t("popupCancel");
 
     const submitButton = document.createElement("button");
     submitButton.type = "submit";
     submitButton.className = "wb-btn wb-btn--accent";
-    submitButton.textContent = "Export";
+    submitButton.textContent = t("sessionsActionExport");
 
     actions.append(cancelButton, submitButton);
     form.append(title, sidText, body, label, input, actions);
@@ -527,7 +487,7 @@ function openConfirmDialog(message: string): Promise<boolean> {
     const title = document.createElement("h2");
     title.id = "wb-confirm-title";
     title.className = "wb-confirm-title";
-    title.textContent = "Confirm Delete";
+    title.textContent = t("sessionsConfirmDeleteTitle");
 
     const body = document.createElement("p");
     body.className = "wb-confirm-body";
@@ -540,13 +500,13 @@ function openConfirmDialog(message: string): Promise<boolean> {
     cancelButton.type = "button";
     cancelButton.className = "wb-btn wb-btn--muted";
     cancelButton.dataset.confirmCancel = "";
-    cancelButton.textContent = "Cancel";
+    cancelButton.textContent = t("popupCancel");
 
     const acceptButton = document.createElement("button");
     acceptButton.type = "button";
     acceptButton.className = "wb-btn wb-btn--brand";
     acceptButton.dataset.confirmAccept = "";
-    acceptButton.textContent = "Delete";
+    acceptButton.textContent = t("sessionsActionDelete");
 
     actions.append(cancelButton, acceptButton);
     dialog.append(title, body, actions);
@@ -595,11 +555,11 @@ function createBrandLockup(): HTMLElement {
 
   const eyebrow = document.createElement("p");
   eyebrow.className = "wb-brand-lockup__eyebrow";
-  eyebrow.textContent = "Chrome Extension";
+  eyebrow.textContent = t("brandEyebrowChromeExtension");
 
   const title = document.createElement("h1");
   title.className = "wb-sessions-title";
-  title.textContent = "Sessions";
+  title.textContent = t("sessionsTitle");
 
   copy.append(eyebrow, title);
   lockup.append(icon, copy);

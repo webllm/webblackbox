@@ -2,6 +2,7 @@ import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/p
 import type { RedactionProfile, SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
+import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES } from "../shared/messages.js";
 
 type OffscreenPipelineRequest = {
@@ -37,6 +38,9 @@ type OffscreenState = {
 };
 
 const chromeApi = getChromeApi();
+createExtensionI18n({
+  pageTitleKey: "pageTitleOffscreen"
+});
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.offscreen });
 const pipelines = new Map<string, FlightRecorderPipeline>();
 const EXPORT_OBJECT_URL_TTL_MS = 90_000;

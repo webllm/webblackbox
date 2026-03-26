@@ -16,6 +16,8 @@ describe("extension build manifest", () => {
     const manifest = createExtensionManifest({ version: "1.2.3" });
 
     expect(manifest.version).toBe("1.2.3");
+    expect(manifest.default_locale).toBe("en");
+    expect(manifest.name).toBe("__MSG_extensionName__");
     expect(manifest.key).toBeTypeOf("string");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
     expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
@@ -79,6 +81,8 @@ describe("extension build manifest", () => {
 async function writeBuildFixture(outputDir, manifest) {
   const fixtureFiles = {
     "manifest.json": `${JSON.stringify(manifest, null, 2)}\n`,
+    "_locales/en/messages.json": '{"extensionName":{"message":"WebBlackbox"}}\n',
+    "_locales/zh_CN/messages.json": '{"extensionName":{"message":"WebBlackbox"}}\n',
     "content.js": "export {};\n",
     "injected.js": "export {};\n",
     "offscreen.html": "<!doctype html><title>offscreen</title>\n",

@@ -2,6 +2,7 @@ import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { MODE_PRODUCT_PROFILES } from "../shared/mode-profile.js";
+import { createExtensionI18n } from "../shared/i18n.js";
 import { migrateStoredRecorderConfig, OPTIONS_STORAGE_VERSION } from "../shared/options-storage.js";
 import {
   DEFAULT_PERFORMANCE_BUDGET,
@@ -12,6 +13,10 @@ import {
 const STORAGE_KEY = "webblackbox.options";
 
 const chromeApi = getChromeApi();
+const i18n = createExtensionI18n({
+  pageTitleKey: "pageTitleOptions"
+});
+const { locale, t } = i18n;
 const root = document.getElementById("options-root");
 
 type OptionsState = {
@@ -41,44 +46,54 @@ function render(container: HTMLElement, options: OptionsState): void {
 
   const subtitle = document.createElement("p");
   subtitle.className = "wb-page-header__subtitle";
-  subtitle.textContent = "Configure redaction and sampling defaults per browser profile.";
+  subtitle.textContent = t("optionsSubtitle");
   header.append(subtitle);
   section.append(header);
 
   section.append(createRuntimeProfilesSection());
   section.append(
-    ...createNumberField("Ring Buffer (minutes)", "ringBufferMinutes", config.ringBufferMinutes, {
-      min: 1,
-      max: 120
-    })
+    ...createNumberField(
+      t("optionsRingBufferMinutes"),
+      "ringBufferMinutes",
+      config.ringBufferMinutes,
+      {
+        min: 1,
+        max: 120
+      }
+    )
   );
   section.append(
-    ...createNumberField("Action Window (ms)", "actionWindowMs", config.sampling.actionWindowMs, {
-      min: 100,
-      max: 10_000
-    })
+    ...createNumberField(
+      t("optionsActionWindowMs"),
+      "actionWindowMs",
+      config.sampling.actionWindowMs,
+      {
+        min: 100,
+        max: 10_000
+      }
+    )
   );
   section.append(
-    ...createNumberField("Mousemove Sampling (Hz)", "mousemoveHz", config.sampling.mousemoveHz, {
+    ...createNumberField(t("optionsMousemoveHz"), "mousemoveHz", config.sampling.mousemoveHz, {
       min: 1,
       max: 240
     })
   );
   section.append(
-    ...createNumberField("Scroll Sampling (Hz)", "scrollHz", config.sampling.scrollHz, {
+    ...createNumberField(t("optionsScrollHz"), "scrollHz", config.sampling.scrollHz, {
       min: 1,
       max: 120
     })
   );
   section.append(
-    ...createNumberField("DOM Flush Interval (ms)", "domFlushMs", config.sampling.domFlushMs, {
+    ...createNumberField(t("optionsDomFlushMs"), "domFlushMs", config.sampling.domFlushMs, {
       min: 25,
       max: 10_000
     })
   );
   section.append(
     ...createNumberField(
-      "DOM Snapshot Interval (ms)",
+      t("optionsSnapshotIntervalMs"),
       "snapshotIntervalMs",
       config.sampling.snapshotIntervalMs,
       { min: 500, max: 120_000 }
@@ -86,61 +101,46 @@ function render(container: HTMLElement, options: OptionsState): void {
   );
   section.append(
     ...createNumberField(
-      "Screenshot Idle Interval (ms)",
+      t("optionsScreenshotIdleMs"),
       "screenshotIdleMs",
       config.sampling.screenshotIdleMs,
       { min: 0, max: 120_000 }
     )
   );
-  section.append(
-    createHelpText([
-      "Lite captures idle screenshots by default. Set this to ",
-      createCode("0"),
-      " to disable runtime screenshots. Full mode uses this for browser-side screenshot cadence."
-    ])
-  );
+  section.append(createHelpText([t("optionsScreenshotIdleHelp")]));
   section.append(
     ...createNumberField(
-      "Network Body Capture Max Bytes",
+      t("optionsBodyCaptureMaxBytes"),
       "bodyCaptureMaxBytes",
       config.sampling.bodyCaptureMaxBytes,
       { min: 0, max: 1_048_576 }
     )
   );
+  section.append(createHelpText([t("optionsBodyCaptureHelp")]));
   section.append(
-    createHelpText([
-      "Lite keeps page-side response-body capture disabled. In the extension, this knob only affects the capped browser-side body capture path used by full mode."
-    ])
-  );
-  section.append(
-    createCheckboxRow("freezeOnError", "Freeze on uncaught errors", config.freezeOnError, {
+    createCheckboxRow("freezeOnError", t("optionsFreezeOnError"), config.freezeOnError, {
       spacious: true
     })
   );
-  section.append(
-    createHelpText(
-      ["Runtime safety mode keeps performance-trigger freeze disabled for lite/full recording."],
-      { variant: "spacious" }
-    )
-  );
+  section.append(createHelpText([t("optionsFreezeHelp")], { variant: "spacious" }));
   section.append(createPerformanceBudgetSection(performanceBudget));
   section.append(
     ...createTextareaField(
-      "Blocked Selectors (one per line)",
+      t("optionsBlockedSelectors"),
       "blockedSelectors",
       config.redaction.blockedSelectors.join("\n")
     )
   );
   section.append(
     ...createTextareaField(
-      "Redacted Header Names (one per line)",
+      t("optionsRedactedHeaders"),
       "redactHeaders",
       config.redaction.redactHeaders.join("\n")
     )
   );
   section.append(
     ...createTextareaField(
-      "Body Sensitive Patterns (one per line)",
+      t("optionsBodySensitivePatterns"),
       "redactBodyPatterns",
       config.redaction.redactBodyPatterns.join("\n")
     )
@@ -148,7 +148,7 @@ function render(container: HTMLElement, options: OptionsState): void {
   section.append(
     createCheckboxRow(
       "hashSensitiveValues",
-      "Hash sensitive values",
+      t("optionsHashSensitiveValues"),
       config.redaction.hashSensitiveValues,
       { spacious: true }
     )
@@ -161,13 +161,13 @@ function render(container: HTMLElement, options: OptionsState): void {
   saveConfigButton.id = "saveConfig";
   saveConfigButton.type = "button";
   saveConfigButton.className = "wb-btn wb-btn--brand";
-  saveConfigButton.textContent = "Save";
+  saveConfigButton.textContent = t("optionsSave");
 
   const resetConfigButton = document.createElement("button");
   resetConfigButton.id = "resetConfig";
   resetConfigButton.type = "button";
   resetConfigButton.className = "wb-btn wb-btn--muted";
-  resetConfigButton.textContent = "Reset Defaults";
+  resetConfigButton.textContent = t("optionsResetDefaults");
 
   actions.append(saveConfigButton, resetConfigButton);
   section.append(actions);
@@ -192,7 +192,9 @@ function render(container: HTMLElement, options: OptionsState): void {
 
     const status = container.querySelector<HTMLElement>("#statusText");
     if (status) {
-      status.textContent = `Saved at ${new Date().toLocaleTimeString()}`;
+      status.textContent = t("optionsSavedAt", {
+        time: new Date().toLocaleTimeString(locale)
+      });
     }
   });
 
@@ -415,11 +417,11 @@ function createBrandLockup(): HTMLElement {
 
   const eyebrow = document.createElement("p");
   eyebrow.className = "wb-brand-lockup__eyebrow";
-  eyebrow.textContent = "Chrome Extension";
+  eyebrow.textContent = t("brandEyebrowChromeExtension");
 
   const title = document.createElement("h1");
   title.className = "wb-options-title";
-  title.textContent = "Capture Settings";
+  title.textContent = t("optionsTitle");
 
   copy.append(eyebrow, title);
   lockup.append(icon, copy);
@@ -431,44 +433,39 @@ function createRuntimeProfilesSection(): HTMLElement {
 
   const title = document.createElement("h2");
   title.className = "wb-options-section-title";
-  title.textContent = "Runtime Profiles";
+  title.textContent = t("optionsRuntimeProfilesTitle");
 
-  const summary = createHelpText(
-    [
-      "WebBlackbox currently exposes two runtime profiles only: ",
-      createCode("lite"),
-      " and ",
-      createCode("full"),
-      ". There is no ",
-      createCode("balanced"),
-      " mode in the shipped extension build."
-    ],
-    { variant: "flush" }
-  );
+  const summary = createHelpText([t("optionsRuntimeProfilesSummary")], { variant: "flush" });
 
   section.append(title, summary, ...createModeProfileCards());
   return section;
 }
 
 function createModeProfileCards(): HTMLElement[] {
-  return Object.entries(MODE_PRODUCT_PROFILES).map(([mode, profile]) => {
+  return Object.keys(MODE_PRODUCT_PROFILES).map((mode) => {
     const card = document.createElement("article");
     card.className = "wb-options-profile-card";
 
     const title = document.createElement("strong");
-    title.append(profile.label, " ", createCode(mode));
+    title.append(mode === "full" ? t("modeFull") : t("modeLite"), " ", createCode(mode));
 
     const summary = document.createElement("span");
     summary.className = "wb-options-profile-summary";
-    summary.textContent = profile.summary;
+    summary.textContent =
+      mode === "full" ? t("optionsFullProfileSummary") : t("optionsLiteProfileSummary");
 
     const signals = document.createElement("span");
     signals.className = "wb-options-profile-meta";
-    signals.textContent = `Signals: ${profile.signals}`;
+    signals.textContent = t("optionsProfileSignals", {
+      value: mode === "full" ? t("optionsFullProfileSignals") : t("optionsLiteProfileSignals")
+    });
 
     const heavyCapture = document.createElement("span");
     heavyCapture.className = "wb-options-profile-meta";
-    heavyCapture.textContent = `Heavy capture: ${profile.heavyCapture}`;
+    heavyCapture.textContent = t("optionsProfileHeavyCapture", {
+      value:
+        mode === "full" ? t("optionsFullProfileHeavyCapture") : t("optionsLiteProfileHeavyCapture")
+    });
 
     card.append(title, summary, signals, heavyCapture);
     return card;
@@ -480,23 +477,18 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
 
   const title = document.createElement("h2");
   title.className = "wb-options-section-title";
-  title.textContent = "Performance Budget Alerts";
+  title.textContent = t("optionsPerformanceBudgetTitle");
 
   section.append(
     title,
+    ...createNumberField(t("optionsLcpWarnMs"), "budgetLcpWarnMs", performanceBudget.lcpWarnMs, {
+      min: 500,
+      max: 30_000,
+      step: 100,
+      compact: true
+    }),
     ...createNumberField(
-      "LCP warn threshold (ms)",
-      "budgetLcpWarnMs",
-      performanceBudget.lcpWarnMs,
-      {
-        min: 500,
-        max: 30_000,
-        step: 100,
-        compact: true
-      }
-    ),
-    ...createNumberField(
-      "Slow request threshold (ms)",
+      t("optionsRequestWarnMs"),
       "budgetRequestWarnMs",
       performanceBudget.requestWarnMs,
       {
@@ -507,7 +499,7 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
       }
     ),
     ...createNumberField(
-      "Error-rate warn threshold (%)",
+      t("optionsErrorRateWarnPct"),
       "budgetErrorRateWarnPct",
       performanceBudget.errorRateWarnPct,
       {
@@ -519,7 +511,7 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
     ),
     createCheckboxRow(
       "budgetAutoFreezeOnBreach",
-      "Auto-freeze on budget breach",
+      t("optionsAutoFreezeOnBreach"),
       performanceBudget.autoFreezeOnBreach
     )
   );
