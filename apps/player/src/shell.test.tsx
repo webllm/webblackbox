@@ -18,6 +18,7 @@ describe("PlayerShell", () => {
     const archiveInput = screen.getByLabelText("Load Archive");
     const compareInput = screen.getByLabelText("Load Compare");
     const repoLink = screen.getByRole("link", { name: "GitHub Repo" });
+    const localeSelect = screen.getByLabelText("Language");
     const playbackRate = screen.getByLabelText("Speed");
     const playerVersion = screen.getByLabelText("Player version");
     const stagePlaceholder = document.querySelector("#stage-placeholder");
@@ -27,6 +28,7 @@ describe("PlayerShell", () => {
     expect(compareInput).toHaveAttribute("type", "file");
     expect(compareInput).toHaveAttribute("accept", ".webblackbox,.zip");
     expect(repoLink).toHaveAttribute("href", "https://github.com/webllm/webblackbox");
+    expect(localeSelect).toHaveValue("en");
     expect(playerVersion).toHaveTextContent("v0.1.0");
     expect(stagePlaceholder?.tagName).toBe("LABEL");
     expect(stagePlaceholder).toHaveAttribute("for", "archive-input");
@@ -35,6 +37,15 @@ describe("PlayerShell", () => {
     expect(screen.getByRole("button", { name: "-1s" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+1s" })).toBeInTheDocument();
     expect(playbackRate).toHaveValue("1");
+  });
+
+  it("renders Chinese labels when locale is zh-CN", () => {
+    render(<PlayerShell locale="zh-CN" />);
+
+    expect(screen.getByLabelText("语言")).toHaveValue("zh-CN");
+    expect(screen.getByLabelText("加载归档")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "时间线" })).toBeInTheDocument();
+    expect(screen.getByText("复制 cURL")).toBeInTheDocument();
   });
 
   it("supports key UI interactions for triage and playback controls", async () => {

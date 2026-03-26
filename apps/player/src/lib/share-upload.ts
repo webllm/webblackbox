@@ -1,9 +1,14 @@
+import { createPlayerI18n, type PlayerLocale } from "./i18n.js";
+
 export function uploadArchiveWithProgress(
   url: string,
   headers: Record<string, string>,
   body: ArrayBuffer,
-  onProgress: (loadedBytes: number, totalBytes: number | null) => void
+  onProgress: (loadedBytes: number, totalBytes: number | null) => void,
+  locale: PlayerLocale = "en"
 ): Promise<Record<string, unknown>> {
+  const i18n = createPlayerI18n(locale);
+
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
@@ -18,11 +23,11 @@ export function uploadArchiveWithProgress(
     });
 
     xhr.addEventListener("error", () => {
-      reject(new Error("Network error while uploading archive."));
+      reject(new Error(i18n.messages.uploadNetworkError));
     });
 
     xhr.addEventListener("abort", () => {
-      reject(new Error("Upload aborted."));
+      reject(new Error(i18n.messages.uploadAborted));
     });
 
     xhr.addEventListener("load", () => {
@@ -46,9 +51,9 @@ export function uploadArchiveWithProgress(
           return;
         }
 
-        reject(new Error("Share server response is not a JSON object."));
+        reject(new Error(i18n.messages.uploadResponseNotJsonObject));
       } catch {
-        reject(new Error("Share server returned invalid JSON."));
+        reject(new Error(i18n.messages.uploadInvalidJson));
       }
     });
 

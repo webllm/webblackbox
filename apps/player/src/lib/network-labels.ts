@@ -1,5 +1,6 @@
 import type { NetworkWaterfallEntry } from "@webblackbox/player-sdk";
 
+import { createPlayerI18n, type PlayerLocale } from "./i18n.js";
 import { compactText } from "./text.js";
 
 export function describeRequestName(url: string): {
@@ -24,16 +25,21 @@ export function describeRequestName(url: string): {
   }
 }
 
-export function resolveNetworkInitiator(entry: NetworkWaterfallEntry): string {
+export function resolveNetworkInitiator(
+  entry: NetworkWaterfallEntry,
+  locale: PlayerLocale = "en"
+): string {
+  const i18n = createPlayerI18n(locale);
+
   if (entry.actionId && entry.actionId.length > 0) {
     const maybeActionNumber = /(\d+)$/.exec(entry.actionId)?.[1];
 
     if (maybeActionNumber) {
-      return `action #${maybeActionNumber}`;
+      return i18n.formatNetworkInitiatorActionNumber(maybeActionNumber);
     }
 
     return compactText(entry.actionId, 24);
   }
 
-  return "(direct)";
+  return i18n.messages.networkInitiatorDirect;
 }

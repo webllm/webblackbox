@@ -1,5 +1,6 @@
 import type { NetworkWaterfallEntry } from "@webblackbox/player-sdk";
 
+import { createPlayerI18n, type PlayerLocale } from "./i18n.js";
 import { describeRequestName, resolveNetworkInitiator } from "./network-labels.js";
 import { resolveNetworkSizeBytes } from "./network-size.js";
 
@@ -45,7 +46,8 @@ export type NetworkViewFilters = {
 
 export function applyNetworkViewFilters(
   entries: NetworkWaterfallEntry[],
-  view: NetworkViewFilters
+  view: NetworkViewFilters,
+  locale: PlayerLocale = "en"
 ): NetworkWaterfallEntry[] {
   const methodFilter = view.method.toUpperCase();
   const query = view.query.trim().toLowerCase();
@@ -70,9 +72,9 @@ export function applyNetworkViewFilters(
     }
 
     const requestName = describeRequestName(entry.url);
-    const status = describeNetworkStatus(entry);
-    const type = resolveNetworkTypeLabel(entry.mimeType);
-    const initiator = resolveNetworkInitiator(entry);
+    const status = describeNetworkStatus(entry, locale);
+    const type = resolveNetworkTypeLabel(entry.mimeType, locale);
+    const initiator = resolveNetworkInitiator(entry, locale);
     const haystack =
       `${entry.reqId} ${entry.method} ${entry.url} ${requestName.name} ${requestName.host} ${status} ${type} ${initiator}`
         .trim()
@@ -84,7 +86,8 @@ export function applyNetworkViewFilters(
 export function sortNetworkEntries(
   entries: NetworkWaterfallEntry[],
   sortKey: NetworkSortKey,
-  sortDirection: NetworkSortDirection
+  sortDirection: NetworkSortDirection,
+  locale: PlayerLocale = "en"
 ): NetworkWaterfallEntry[] {
   const direction = sortDirection === "asc" ? 1 : -1;
 
@@ -94,7 +97,7 @@ export function sortNetworkEntries(
       index
     }))
     .sort((left, right) => {
-      const order = compareNetworkEntries(left.entry, right.entry, sortKey) * direction;
+      const order = compareNetworkEntries(left.entry, right.entry, sortKey, locale) * direction;
 
       if (order !== 0) {
         return order;
@@ -108,7 +111,8 @@ export function sortNetworkEntries(
 export function compareNetworkEntries(
   left: NetworkWaterfallEntry,
   right: NetworkWaterfallEntry,
-  sortKey: NetworkSortKey
+  sortKey: NetworkSortKey,
+  locale: PlayerLocale = "en"
 ): number {
   if (sortKey === "start") {
     return left.startMono - right.startMono;
@@ -123,13 +127,15 @@ export function compareNetworkEntries(
   }
 
   if (sortKey === "type") {
-    return resolveNetworkTypeLabel(left.mimeType).localeCompare(
-      resolveNetworkTypeLabel(right.mimeType)
+    return resolveNetworkTypeLabel(left.mimeType, locale).localeCompare(
+      resolveNetworkTypeLabel(right.mimeType, locale)
     );
   }
 
   if (sortKey === "initiator") {
-    return resolveNetworkInitiator(left).localeCompare(resolveNetworkInitiator(right));
+    return resolveNetworkInitiator(left, locale).localeCompare(
+      resolveNetworkInitiator(right, locale)
+    );
   }
 
   if (sortKey === "size") {
@@ -202,9 +208,14 @@ export function networkStatusCode(entry: NetworkWaterfallEntry): number {
   return typeof entry.status === "number" ? entry.status : 0;
 }
 
-export function describeNetworkStatus(entry: NetworkWaterfallEntry): string {
+export function describeNetworkStatus(
+  entry: NetworkWaterfallEntry,
+  locale: PlayerLocale = "en"
+): string {
+  const i18n = createPlayerI18n(locale);
+
   if (entry.failed) {
-    return "(failed)";
+    return i18n.messages.networkStatusFailed;
   }
 
   if (typeof entry.status === "number") {
@@ -215,7 +226,7 @@ export function describeNetworkStatus(entry: NetworkWaterfallEntry): string {
     return String(entry.status);
   }
 
-  return "(pending)";
+  return i18n.messages.networkStatusPending;
 }
 
 export function resolveNetworkStatusClass(entry: NetworkWaterfallEntry): string {
@@ -252,8 +263,13 @@ export function resolveNetworkStatusClass(entry: NetworkWaterfallEntry): string 
   return "wf-status-neutral";
 }
 
-export function resolveNetworkTypeLabel(mimeType: string | undefined): string {
-  return resolveNetworkTypeBucket(mimeType);
+export function resolveNetworkTypeLabel(
+  mimeType: string | undefined,
+  locale: PlayerLocale = "en"
+): string {
+  const i18n = createPlayerI18n(locale);
+  const bucket = resolveNetworkTypeBucket(mimeType);
+  return i18n.formatNetworkType(bucket === "all" ? "other" : bucket);
 }
 
 export function resolveNetworkTypeBucket(mimeType: string | undefined): NetworkTypeFilter {

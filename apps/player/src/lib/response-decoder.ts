@@ -1,3 +1,4 @@
+import { createPlayerI18n, type PlayerLocale } from "./i18n.js";
 import { compactText } from "./text.js";
 
 export type ResponsePreview = {
@@ -10,15 +11,17 @@ export type ResponsePreview = {
 export function decodeResponsePreview(
   mime: string,
   bytes: Uint8Array,
-  maxPlainTextChars: number
+  maxPlainTextChars: number,
+  locale: PlayerLocale = "en"
 ): ResponsePreview | null {
+  const i18n = createPlayerI18n(locale);
   const normalizedMime = mime.toLowerCase();
 
   if (bytes.byteLength === 0) {
     return {
       mime: normalizedMime || "unknown",
       sizeBytes: 0,
-      text: "(empty body)",
+      text: i18n.messages.responsePreviewEmptyBody,
       isJson: false
     };
   }
@@ -34,7 +37,7 @@ export function decodeResponsePreview(
     return {
       mime: normalizedMime || "unknown",
       sizeBytes: bytes.byteLength,
-      text: `[binary ${normalizedMime || "unknown"} ${bytes.byteLength}B]`,
+      text: i18n.formatBinaryResponsePreview(normalizedMime || "unknown", bytes.byteLength),
       isJson: false
     };
   }
@@ -46,7 +49,7 @@ export function decodeResponsePreview(
     return {
       mime: normalizedMime || "text/plain",
       sizeBytes: bytes.byteLength,
-      text: "(empty body)",
+      text: i18n.messages.responsePreviewEmptyBody,
       isJson: false
     };
   }

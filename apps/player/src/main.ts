@@ -8,7 +8,6 @@ import {
   type StorageTimelineEntry,
   WebBlackboxPlayer
 } from "@webblackbox/player-sdk";
-import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -19,6 +18,12 @@ import { escapeHtml, getElement } from "./lib/dom.js";
 import { copyText, downloadTextFile } from "./lib/export.js";
 import { formatDelta, formatMono, formatTimelineEventLabel } from "./lib/format.js";
 import { openDialog } from "./lib/dialog.js";
+import {
+  applyPlayerDocumentLocale,
+  createPlayerI18n,
+  detectPlayerLocale,
+  storePlayerLocale
+} from "./lib/i18n.js";
 import { describeRequestName, resolveNetworkInitiator } from "./lib/network-labels.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
 import { sha256HexFromText } from "./lib/hash.js";
@@ -81,7 +86,7 @@ import {
 } from "./lib/storage.js";
 import { compactText, shortUrl, truncateId } from "./lib/text.js";
 import { computeTriageStats, findFirstErrorEvent, findSlowestRequest } from "./lib/triage.js";
-import { PlayerShell } from "./shell.js";
+import { PlayerShell, type PlayerShellProps } from "./shell.js";
 
 type TimelineFilter = "all" | "errors" | "network" | "storage" | "console";
 type LogPanelKey =
@@ -95,16 +100,21 @@ type LogPanelKey =
   | "storage"
   | "perf";
 
+const locale = detectPlayerLocale();
+const i18n = createPlayerI18n(locale);
+
+applyPlayerDocumentLocale(locale);
+
 const PANEL_LABELS: Record<LogPanelKey, string> = {
-  timeline: "Timeline",
-  details: "Event",
-  actions: "Actions",
-  network: "Network",
-  compare: "Compare",
-  console: "Console",
-  realtime: "Realtime",
-  storage: "Storage",
-  perf: "Performance"
+  timeline: i18n.formatPanelLabel("timeline"),
+  details: i18n.formatPanelLabel("details"),
+  actions: i18n.formatPanelLabel("actions"),
+  network: i18n.formatPanelLabel("network"),
+  compare: i18n.formatPanelLabel("compare"),
+  console: i18n.formatPanelLabel("console"),
+  realtime: i18n.formatPanelLabel("realtime"),
+  storage: i18n.formatPanelLabel("storage"),
+  perf: i18n.formatPanelLabel("perf")
 };
 
 const PANEL_SHORTCUT_BY_CODE: Record<string, LogPanelKey> = {
@@ -385,8 +395,11 @@ function mountPlayerShell(): void {
   }
 
   const root = createRoot(app);
+  const shellProps: PlayerShellProps = {
+    locale
+  };
   flushSync(() => {
-    root.render(createElement(PlayerShell));
+    root.render(PlayerShell(shellProps));
   });
 }
 
@@ -399,6 +412,7 @@ const refs = {
   archiveDropOverlay: getElement<HTMLElement>("archive-drop-overlay"),
   archiveInput: getElement<HTMLInputElement>("archive-input"),
   compareInput: getElement<HTMLInputElement>("compare-input"),
+  playerLocale: getElement<HTMLSelectElement>("player-locale"),
   summary: getElement<HTMLElement>("summary"),
   compareDetails: getElement<HTMLElement>("compare-details"),
   compareRegressions: getElement<HTMLElement>("compare-regressions"),
@@ -520,6 +534,17 @@ function bindGlobalActions(): void {
   bindStageSplitter();
   bindLogGridSplitter();
   bindArchiveDropTarget();
+
+  refs.playerLocale.addEventListener("change", () => {
+    const nextLocale = refs.playerLocale.value === "zh-CN" ? "zh-CN" : "en";
+
+    if (nextLocale === locale) {
+      return;
+    }
+
+    storePlayerLocale(nextLocale);
+    window.location.reload();
+  });
 
   refs.archiveInput.addEventListener("change", () => {
     void handlePrimaryArchiveChange();
@@ -916,7 +941,7 @@ function bindGlobalActions(): void {
 
   refs.preview.addEventListener("error", () => {
     refs.preview.hidden = true;
-    clearScreenshotView("Failed to decode screenshot.");
+    clearScreenshotView(i18n.messages.screenshotDecodeFailed);
   });
 
   window.addEventListener("resize", () => {
@@ -1003,7 +1028,7 @@ function bindGlobalActions(): void {
     }
 
     downloadTextFile("webblackbox-report.md", player.generateBugReport(), "text/markdown");
-    setFeedback("Bug report exported.");
+    setFeedback(i18n.messages.feedbackBugReportExported);
   });
 
   refs.exportHar.addEventListener("click", () => {
@@ -1014,7 +1039,7 @@ function bindGlobalActions(): void {
     }
 
     downloadTextFile("webblackbox-session.har", player.exportHar(), "application/json");
-    setFeedback("HAR exported.");
+    setFeedback(i18n.messages.feedbackHarExported);
   });
 
   refs.exportPlaywright.addEventListener("click", () => {
@@ -1038,7 +1063,7 @@ function bindGlobalActions(): void {
       JSON.stringify(payload, null, 2),
       "application/json"
     );
-    setFeedback("GitHub issue template exported.");
+    setFeedback(i18n.messages.feedbackGitHubIssueExported);
   });
 
   refs.exportJiraIssue.addEventListener("click", () => {
@@ -1054,7 +1079,7 @@ function bindGlobalActions(): void {
       JSON.stringify(payload, null, 2),
       "application/json"
     );
-    setFeedback("Jira issue template exported.");
+    setFeedback(i18n.messages.feedbackJiraIssueExported);
   });
 
   refs.shareUpload.addEventListener("click", () => {
@@ -1095,7 +1120,7 @@ function bindGlobalActions(): void {
 
   refs.preflightOpenPlayer.addEventListener("click", () => {
     hideQuickTriagePanel();
-    setFeedback("Quick triage dismissed.");
+    setFeedback(i18n.messages.feedbackQuickTriageDismissed);
   });
 
   refs.preflightCopyReport.addEventListener("click", () => {
@@ -1206,7 +1231,7 @@ function bindArchiveDropTarget(): void {
     const file = pickArchiveFile(event.dataTransfer?.files ?? null);
 
     if (!file) {
-      setFeedback("No supported archive found in drop payload.");
+      setFeedback(i18n.messages.feedbackNoSupportedArchive);
       return;
     }
 
@@ -1452,10 +1477,15 @@ async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): P
 
     await renderAll({ forcePanels: true, forceScreenshot: true });
     showQuickTriagePanel(model, sourceName);
-    setFeedback(`Loaded ${sourceName}`);
+    setFeedback(i18n.t("feedbackArchiveLoaded", { sourceName }));
   } catch (error) {
     hideQuickTriagePanel();
-    setFeedback(`Failed to load ${sourceName}: ${String(error)}`);
+    setFeedback(
+      i18n.t("feedbackArchiveLoadFailed", {
+        sourceName,
+        error: String(error)
+      })
+    );
   }
 }
 
@@ -1477,11 +1507,16 @@ async function handleCompareArchiveChange(): Promise<void> {
     state.compareModel = buildArchiveModel(comparePlayer);
     refreshCompareSummary();
     renderSummary();
-    setFeedback(`Loaded comparison archive: ${file.name}`);
+    setFeedback(i18n.t("feedbackCompareLoaded", { fileName: file.name }));
   } catch (error) {
     state.comparePlayer = null;
     state.compareModel = null;
-    setFeedback(`Failed to load comparison archive ${file.name}: ${String(error)}`);
+    setFeedback(
+      i18n.t("feedbackCompareLoadFailed", {
+        fileName: file.name,
+        error: String(error)
+      })
+    );
   }
 }
 
@@ -1567,7 +1602,7 @@ async function copyBugReportFromQuickTriage(): Promise<void> {
   }
 
   await copyText(player.generateBugReport());
-  setFeedback("Bug report copied.");
+  setFeedback(i18n.messages.feedbackBugReportCopied);
 }
 
 async function openPlaywrightPreviewDialog(): Promise<void> {
@@ -1575,7 +1610,7 @@ async function openPlaywrightPreviewDialog(): Promise<void> {
   const player = state.player;
 
   if (!model || !player) {
-    setFeedback("Load an archive before generating Playwright.");
+    setFeedback(i18n.messages.feedbackLoadArchiveBeforePlaywright);
     return;
   }
 
@@ -1652,7 +1687,7 @@ async function copyPlaywrightPreview(): Promise<void> {
   }
 
   await copyText(content);
-  setFeedback("Playwright preview copied.");
+  setFeedback(i18n.messages.feedbackPlaywrightPreviewCopied);
 }
 
 function downloadPlaywrightPreview(): void {
@@ -1667,7 +1702,7 @@ function downloadPlaywrightPreview(): void {
   }
 
   downloadTextFile("webblackbox-replay.spec.ts", `${content}\n`, "text/plain");
-  setFeedback("Playwright script exported.");
+  setFeedback(i18n.messages.feedbackPlaywrightScriptExported);
 }
 
 async function exportPlaywrightMocks(): Promise<void> {
@@ -1679,14 +1714,14 @@ async function exportPlaywrightMocks(): Promise<void> {
 
   const script = await player.generatePlaywrightMockScript({ maxMocks: 25 });
   downloadTextFile("webblackbox-replay-mocks.spec.ts", script, "text/plain");
-  setFeedback("Playwright mock script exported.");
+  setFeedback(i18n.messages.feedbackPlaywrightMocksExported);
 }
 
 async function shareLoadedArchive(): Promise<void> {
   const bytes = state.loadedArchiveBytes;
 
   if (!bytes) {
-    setFeedback("Load an archive before sharing.");
+    setFeedback(i18n.messages.feedbackLoadArchiveBeforeSharing);
     return;
   }
 
@@ -1699,7 +1734,7 @@ async function shareLoadedArchive(): Promise<void> {
   const normalizedBaseUrl = normalizeShareServerBaseUrl(shareConfig.baseUrl);
 
   if (!normalizedBaseUrl) {
-    setFeedback("Invalid share server URL.");
+    setFeedback(i18n.messages.feedbackInvalidShareServerUrl);
     return;
   }
 
@@ -1739,9 +1774,14 @@ async function shareLoadedArchive(): Promise<void> {
         lastProgressUpdate = now;
         const percent = targetTotal > 0 ? Math.min(100, (loadedBytes / targetTotal) * 100) : 0;
         setFeedback(
-          `Uploading share archive... ${percent.toFixed(1)}% (${formatByteSize(loadedBytes)} / ${formatByteSize(targetTotal)})`
+          i18n.formatShareUploadProgress(
+            percent.toFixed(1),
+            formatByteSize(loadedBytes),
+            formatByteSize(targetTotal)
+          )
         );
-      }
+      },
+      locale
     )) as {
       shareId?: unknown;
       shareUrl?: unknown;
@@ -1756,13 +1796,13 @@ async function shareLoadedArchive(): Promise<void> {
           : null;
 
     if (!shareUrl) {
-      throw new Error("Share server did not return a share URL.");
+      throw new Error(i18n.messages.feedbackShareMissingUrl);
     }
 
     await copyText(shareUrl);
-    setFeedback(`Shared archive. URL copied: ${shareUrl}`);
+    setFeedback(i18n.t("feedbackShareSucceeded", { shareUrl }));
   } catch (error) {
-    setFeedback(`Share failed: ${String(error)}`);
+    setFeedback(i18n.t("feedbackShareFailed", { error: String(error) }));
   }
 }
 
@@ -1783,7 +1823,7 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
   const resolved = resolveShareArchiveRequest(trimmedReference, state.shareServerBaseUrl);
 
   if (!resolved) {
-    setFeedback("Invalid share reference.");
+    setFeedback(i18n.messages.feedbackInvalidShareReference);
     return;
   }
 
@@ -1808,9 +1848,9 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
 
     const bytes = new Uint8Array(await response.arrayBuffer());
     await loadPrimaryArchiveBytes(bytes, `shared-${resolved.shareId}.webblackbox`);
-    setFeedback(`Loaded shared archive ${resolved.shareId}.`);
+    setFeedback(i18n.t("feedbackSharedArchiveLoaded", { shareId: resolved.shareId }));
   } catch (error) {
-    setFeedback(`Failed to load shared archive: ${String(error)}`);
+    setFeedback(i18n.t("feedbackSharedArchiveLoadFailed", { error: String(error) }));
   }
 }
 
@@ -1827,7 +1867,7 @@ async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
     return;
   }
 
-  setFeedback("Loading shared archive from URL...");
+  setFeedback(i18n.messages.feedbackSharedArchiveLoadingFromUrl);
   await loadArchiveFromShareReference(shareRef, "");
 }
 
@@ -2030,7 +2070,9 @@ function renderPlaybackChrome(): void {
   refs.playbackProgress.disabled = !hasModel;
   refs.shareUpload.disabled = state.loadedArchiveBytes === null;
 
-  refs.playbackToggle.textContent = state.isPlaying ? "Pause" : "Play";
+  refs.playbackToggle.textContent = state.isPlaying
+    ? i18n.messages.playbackPause
+    : i18n.messages.playbackPlay;
 
   if (!model) {
     state.progressMarkerSource = null;
@@ -2201,8 +2243,8 @@ function renderPlaybackReadout(): void {
 
   if (!model || !state.player) {
     refs.playbackWindowLabel.textContent = "0.00s / 0.00s";
-    refs.playbackWindowEvents.textContent = "0 events | 0 errors | 0 requests";
-    refs.playbackWindowPanel.textContent = "Event panel";
+    refs.playbackWindowEvents.textContent = i18n.formatStatusCounts(0, 0, 0);
+    refs.playbackWindowPanel.textContent = i18n.formatStatusPanel("details");
     return;
   }
 
@@ -2218,11 +2260,14 @@ function renderPlaybackReadout(): void {
     (entry) => entry.startMono
   );
   const panelKey = state.activePanel === "timeline" ? "details" : state.activePanel;
-  const panelLabel = PANEL_LABELS[panelKey];
   const selection = [
-    state.selectedActionId ? `action ${truncateId(state.selectedActionId)}` : null,
-    state.selectedEventId ? `event ${truncateId(state.selectedEventId)}` : null,
-    state.selectedRequestId ? `request ${truncateId(state.selectedRequestId)}` : null
+    state.selectedActionId
+      ? i18n.formatSelection("action", truncateId(state.selectedActionId))
+      : null,
+    state.selectedEventId ? i18n.formatSelection("event", truncateId(state.selectedEventId)) : null,
+    state.selectedRequestId
+      ? i18n.formatSelection("request", truncateId(state.selectedRequestId))
+      : null
   ]
     .filter((item): item is string => Boolean(item))
     .join(" | ");
@@ -2230,10 +2275,12 @@ function renderPlaybackReadout(): void {
   refs.playbackWindowLabel.textContent = `${formatMono(state.playheadMono - model.minMono)} / ${formatMono(
     model.durationMono
   )}`;
-  refs.playbackWindowEvents.textContent = `${visibleEventCount} events | ${visibleErrorCount} errors | ${visibleRequestCount} requests`;
-  refs.playbackWindowPanel.textContent = selection
-    ? `${panelLabel} panel | ${selection}`
-    : `${panelLabel} panel`;
+  refs.playbackWindowEvents.textContent = i18n.formatStatusCounts(
+    visibleEventCount,
+    visibleErrorCount,
+    visibleRequestCount
+  );
+  refs.playbackWindowPanel.textContent = i18n.formatStatusPanel(panelKey, selection);
 }
 
 function renderProgressMarkers(model: ArchiveModel): void {
@@ -2252,7 +2299,7 @@ function renderProgressMarkers(model: ArchiveModel): void {
     .map((marker) => {
       const ratio = (marker.mono - model.minMono) / model.durationMono;
       const left = (Math.min(1, Math.max(0, ratio)) * 100).toFixed(3);
-      const tip = `${marker.kind} @ ${formatMono(marker.mono - model.minMono)}`;
+      const tip = `${i18n.formatMarkerKind(marker.kind)} @ ${formatMono(marker.mono - model.minMono)}`;
       return `<button type="button" class="progress-marker progress-marker-${marker.kind}" data-marker-mono="${marker.mono}" data-marker-kind="${marker.kind}" style="left:${left}%;" title="${escapeHtml(tip)}"></button>`;
     })
     .join("");
@@ -2340,7 +2387,11 @@ async function renderProgressHoverResponse(
     return;
   }
 
-  const status = entry.failed ? "FAILED" : String(entry.status ?? "PENDING");
+  const status = entry.failed
+    ? i18n.messages.networkStatusFailed
+    : typeof entry.status === "number"
+      ? String(entry.status)
+      : i18n.messages.networkStatusPendingPlain;
   const isError = entry.failed || (typeof entry.status === "number" && entry.status >= 400);
   const isWarn =
     !isError && typeof entry.status === "number" && entry.status >= 300 && entry.status < 400;
@@ -2351,13 +2402,13 @@ async function renderProgressHoverResponse(
   refs.progressHoverResponseMeta.textContent = `${entry.method.toUpperCase()} ${shortUrl(entry.url)}`;
   refs.progressHoverResponseBody.classList.remove("expanded");
   refs.progressHoverResponseToggle.disabled = true;
-  refs.progressHoverResponseToggle.textContent = "Expand JSON";
+  refs.progressHoverResponseToggle.textContent = i18n.messages.responseExpandJson;
   refs.progressHoverResponseCopy.disabled = true;
-  refs.progressHoverResponseCopy.textContent = "Copy";
+  refs.progressHoverResponseCopy.textContent = i18n.messages.copy;
   state.responseCopyText = "";
 
   if (!entry.responseBodyHash) {
-    refs.progressHoverResponseBody.textContent = "(no response body captured)";
+    refs.progressHoverResponseBody.textContent = i18n.messages.responseNoBodyCaptured;
     return;
   }
 
@@ -2368,7 +2419,7 @@ async function renderProgressHoverResponse(
   }
 
   if (!preview) {
-    refs.progressHoverResponseBody.textContent = "(response body unavailable)";
+    refs.progressHoverResponseBody.textContent = i18n.messages.responseUnavailable;
     return;
   }
 
@@ -2387,8 +2438,8 @@ async function renderProgressHoverResponse(
     refs.progressHoverResponseBody.innerHTML = highlightJsonPreview(jsonPreview);
     refs.progressHoverResponseToggle.disabled = false;
     refs.progressHoverResponseToggle.textContent = state.responseJsonExpanded
-      ? "Collapse JSON"
-      : "Expand JSON";
+      ? i18n.messages.responseCollapseJson
+      : i18n.messages.responseExpandJson;
     refs.progressHoverResponseCopy.disabled = false;
     state.responseCopyText = jsonPreview;
     refs.progressHoverResponseBody.scrollTop = 0;
@@ -2410,9 +2461,9 @@ function hideProgressHoverResponse(): void {
   refs.progressHoverResponseBody.textContent = "";
   refs.progressHoverResponseBody.classList.remove("expanded");
   refs.progressHoverResponseToggle.disabled = true;
-  refs.progressHoverResponseToggle.textContent = "Expand JSON";
+  refs.progressHoverResponseToggle.textContent = i18n.messages.responseExpandJson;
   refs.progressHoverResponseCopy.disabled = true;
-  refs.progressHoverResponseCopy.textContent = "Copy";
+  refs.progressHoverResponseCopy.textContent = i18n.messages.copy;
   state.responseCopyText = "";
 }
 
@@ -2487,12 +2538,17 @@ function buildProgressHoverSummary(
     }
   }
 
-  const markerText = markerKind ? `${markerKind} marker · ` : "";
-  const eventText = latest ? `${latest.type} (${latest.id})` : "No event at this time";
+  const eventText = latest ? `${latest.type} (${latest.id})` : i18n.messages.noEventAtTime;
   const { tags, requestEntry } = buildProgressHoverTags(model, mono, markerKind, latest);
 
   return {
-    text: `${markerText}${eventText} · ${endIndex - startIndex} ev/1s · ${network} net · ${errors} err`,
+    text: i18n.formatProgressSummary({
+      markerKind,
+      eventText,
+      eventCount: endIndex - startIndex,
+      networkCount: network,
+      errorCount: errors
+    }),
     tags,
     requestEntry
   };
@@ -2513,7 +2569,9 @@ function buildProgressHoverTags(
   if (markerKind) {
     const panel = markerKindToPanel(markerKind);
     tags.push({
-      label: `${markerKind} marker`,
+      label: i18n.t("progressMarkerLabel", {
+        kind: i18n.formatMarkerKind(markerKind)
+      }),
       tone: markerKind === "error" ? "error" : markerKind,
       panel: panel ?? undefined,
       mono
@@ -2563,7 +2621,11 @@ function buildRequestHoverContext(model: ArchiveModel, mono: number): RequestHov
       break;
     }
 
-    const status = entry.failed ? "FAILED" : String(entry.status ?? "PENDING");
+    const status = entry.failed
+      ? i18n.messages.networkStatusFailed
+      : typeof entry.status === "number"
+        ? String(entry.status)
+        : i18n.messages.networkStatusPendingPlain;
     const method = entry.method.toUpperCase();
     const path = compactText(shortUrl(entry.url), 44);
     const failed = entry.failed || (typeof entry.status === "number" && entry.status >= 400);
@@ -2637,7 +2699,12 @@ async function getResponsePreviewByHash(hash: string): Promise<ResponsePreview |
     return null;
   }
 
-  const preview = decodeResponsePreview(blob.mime, blob.bytes, RESPONSE_PREVIEW_EXPANDED_CHARS);
+  const preview = decodeResponsePreview(
+    blob.mime,
+    blob.bytes,
+    RESPONSE_PREVIEW_EXPANDED_CHARS,
+    locale
+  );
   state.responsePreviewByHash.set(hash, preview);
   return preview;
 }
@@ -2652,7 +2719,7 @@ function jumpToFirstError(): void {
   const firstError = findFirstErrorEvent(model.events);
 
   if (!firstError) {
-    setFeedback("No error events in this archive.");
+    setFeedback(i18n.messages.jumpNoErrorEvents);
     return;
   }
 
@@ -2661,21 +2728,25 @@ function jumpToFirstError(): void {
   state.selectedEventId = firstError.id;
   state.activePanel = "details";
   setPlayhead(firstError.mono, { forcePanels: true });
-  setFeedback(`Jumped to first error at ${formatMono(firstError.mono - model.minMono)}.`);
+  setFeedback(
+    i18n.t("jumpedFirstError", {
+      time: formatMono(firstError.mono - model.minMono)
+    })
+  );
 }
 
 function jumpToSlowestRequest(): void {
   const model = state.model;
 
   if (!model) {
-    setFeedback("No network requests in this archive.");
+    setFeedback(i18n.messages.jumpNoNetworkRequests);
     return;
   }
 
   const slowest = findSlowestRequest(model.waterfall);
 
   if (!slowest) {
-    setFeedback("No network requests in this archive.");
+    setFeedback(i18n.messages.jumpNoNetworkRequests);
     return;
   }
 
@@ -2684,15 +2755,19 @@ function jumpToSlowestRequest(): void {
   state.selectedEventId = slowest.eventIds[0] ?? state.selectedEventId;
   state.activePanel = "network";
   setPlayhead(slowest.startMono, { forcePanels: true });
-  setFeedback(`Jumped to slowest request (${slowest.durationMs.toFixed(0)}ms).`);
+  setFeedback(
+    i18n.t("jumpedSlowestRequest", {
+      durationMs: slowest.durationMs.toFixed(0)
+    })
+  );
 }
 
 function renderSummary(): void {
   const model = state.model;
 
   if (!model || !state.player) {
-    refs.summary.innerHTML = `<p class="empty">Load an archive to inspect playback.</p>`;
-    refs.compareDetails.textContent = "Load a comparison archive to inspect deltas.";
+    refs.summary.innerHTML = `<p class="empty">${escapeHtml(i18n.messages.summaryEmptyLoadArchive)}</p>`;
+    refs.compareDetails.textContent = i18n.messages.compareDetailsEmpty;
     refs.compareRegressions.innerHTML = "";
     return;
   }
@@ -2743,45 +2818,66 @@ function renderSummary(): void {
   const triage = computeTriageStats(model.events, model.waterfall, TRIAGE_SLOW_REQUEST_MS);
 
   const compareDelta = state.compareSummary
-    ? `<div class="pill">compare event delta ${formatDelta(state.compareSummary.eventDelta)}</div>`
+    ? `<div class="pill">${escapeHtml(
+        i18n.t("summaryCompareEventDelta", {
+          delta: formatDelta(state.compareSummary.eventDelta)
+        })
+      )}</div>`
     : "";
 
   refs.summary.innerHTML = `
     <div class="summary-triage">
-      <span class="summary-triage__label">triage</span>
-      <div class="pill">errors ${model.totals.errors}</div>
-      <div class="pill">failed requests ${triage.failedRequests}</div>
-      <div class="pill">slow requests ${triage.slowRequests} (>=${TRIAGE_SLOW_REQUEST_MS}ms)</div>
+      <span class="summary-triage__label">${escapeHtml(i18n.messages.summaryLabelTriage)}</span>
+      <div class="pill">${escapeHtml(i18n.t("summaryPillErrors", { count: model.totals.errors }))}</div>
+      <div class="pill">${escapeHtml(
+        i18n.t("summaryPillFailedRequests", { count: triage.failedRequests })
+      )}</div>
+      <div class="pill">${escapeHtml(
+        i18n.t("summaryPillSlowRequests", {
+          count: triage.slowRequests,
+          thresholdMs: TRIAGE_SLOW_REQUEST_MS
+        })
+      )}</div>
       <button class="summary-jump-btn" type="button" data-summary-jump="first-error" ${
         triage.firstError ? "" : "disabled"
       }>
-        Jump to first error
+        ${escapeHtml(i18n.messages.preflightJumpFirstError)}
       </button>
       <button class="summary-jump-btn" type="button" data-summary-jump="slowest-request" ${
         triage.slowestRequest ? "" : "disabled"
       }>
-        Jump to slowest request
+        ${escapeHtml(i18n.messages.preflightJumpSlowestRequest)}
       </button>
     </div>
-    <div class="pill"><strong>${state.player.archive.manifest.mode.toUpperCase()}</strong> mode</div>
-    <div class="pill">origin ${escapeHtml(state.player.archive.manifest.site.origin)}</div>
-    <div class="pill">playhead ${formatMono(state.playheadMono - model.minMono)}</div>
-    <div class="pill">visible events ${visibleEventCount}</div>
-    <div class="pill">main events ${visibleMainEventCount}</div>
-    <div class="pill">iframe events ${visibleIframeEventCount}</div>
-    <div class="pill">visible errors ${visibleErrorCount}</div>
-    <div class="pill">visible requests ${visibleRequestCount}</div>
-    <div class="pill">main requests ${visibleNetworkMainCount}</div>
-    <div class="pill">iframe requests ${visibleNetworkIframeCount}</div>
-    <div class="pill">visible actions ${visibleActionCount}</div>
-    <div class="pill">visible screenshots ${visibleShotCount}</div>
-    <div class="pill">all actions ${model.totals.actionSpans}</div>
+    <div class="pill">${escapeHtml(
+      i18n.t("summaryMode", {
+        mode: i18n.formatMode(state.player.archive.manifest.mode)
+      })
+    )}</div>
+    <div class="pill">${escapeHtml(
+      i18n.t("summaryOrigin", { origin: state.player.archive.manifest.site.origin })
+    )}</div>
+    <div class="pill">${escapeHtml(
+      i18n.t("summaryPlayhead", {
+        time: formatMono(state.playheadMono - model.minMono)
+      })
+    )}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryVisibleEvents", { count: visibleEventCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryMainEvents", { count: visibleMainEventCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryIframeEvents", { count: visibleIframeEventCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryVisibleErrors", { count: visibleErrorCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryVisibleRequests", { count: visibleRequestCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryMainRequests", { count: visibleNetworkMainCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryIframeRequests", { count: visibleNetworkIframeCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryVisibleActions", { count: visibleActionCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryVisibleScreenshots", { count: visibleShotCount }))}</div>
+    <div class="pill">${escapeHtml(i18n.t("summaryAllActions", { count: model.totals.actionSpans }))}</div>
     ${compareDelta}
   `;
 
   refs.compareDetails.textContent = state.compareSummary
-    ? formatCompareSummary(state.compareSummary)
-    : "Load a comparison archive to inspect event deltas.";
+    ? formatCompareSummary(state.compareSummary, locale)
+    : i18n.messages.compareDetailsEmpty;
   refs.compareRegressions.innerHTML = renderCompareRegressions(
     state.compareSummary,
     model,
@@ -2795,7 +2891,7 @@ function renderCompareRegressions(
   rightModel: ArchiveModel | null
 ): string {
   if (!summary || !leftModel || !rightModel) {
-    return `<p class="empty compare-empty">No comparison archive loaded.</p>`;
+    return `<p class="empty compare-empty">${escapeHtml(i18n.messages.compareNoArchiveLoaded)}</p>`;
   }
 
   const regressionRows = summary.endpointRegressions.slice(0, 8);
@@ -2803,15 +2899,15 @@ function renderCompareRegressions(
   const waterfallRows = renderCompareWaterfallRows(leftModel, rightModel);
   const endpointSection =
     regressionRows.length === 0
-      ? `<p class="empty compare-empty">No endpoint regression deltas.</p>`
+      ? `<p class="empty compare-empty">${escapeHtml(i18n.messages.compareNoEndpointDeltas)}</p>`
       : `
       <table class="compare-regressions-table">
         <thead>
           <tr>
-            <th>Endpoint</th>
-            <th>Count Δ</th>
-            <th>Fail-rate Δ</th>
-            <th>P95 Δ</th>
+            <th>${escapeHtml(i18n.messages.compareColumnEndpoint)}</th>
+            <th>${escapeHtml(i18n.messages.compareColumnCountDelta)}</th>
+            <th>${escapeHtml(i18n.messages.compareColumnFailRateDelta)}</th>
+            <th>${escapeHtml(i18n.messages.compareColumnP95Delta)}</th>
           </tr>
         </thead>
         <tbody>
@@ -2838,7 +2934,7 @@ function renderCompareRegressions(
   return `
     <section class="compare-dual-block">
       <header class="compare-dual-head">
-        <h3>Timeline (A/B)</h3>
+        <h3>${escapeHtml(i18n.messages.compareHeadingTimelineAB)}</h3>
       </header>
       <div class="compare-dual-grid">
         ${timelineRows}
@@ -2846,15 +2942,15 @@ function renderCompareRegressions(
     </section>
     <section class="compare-dual-block">
       <header class="compare-dual-head">
-        <h3>Waterfall Alignment</h3>
+        <h3>${escapeHtml(i18n.messages.compareHeadingWaterfallAlignment)}</h3>
       </header>
       <table class="compare-waterfall-table">
         <thead>
           <tr>
-            <th>Endpoint</th>
-            <th>Session A</th>
-            <th>Session B</th>
-            <th>Signal</th>
+            <th>${escapeHtml(i18n.messages.compareColumnEndpoint)}</th>
+            <th>${escapeHtml(i18n.messages.compareColumnSessionA)}</th>
+            <th>${escapeHtml(i18n.messages.compareColumnSessionB)}</th>
+            <th>${escapeHtml(i18n.messages.compareColumnSignal)}</th>
           </tr>
         </thead>
         <tbody>${waterfallRows}</tbody>
@@ -2862,7 +2958,7 @@ function renderCompareRegressions(
     </section>
     <section class="compare-dual-block">
       <header class="compare-dual-head">
-        <h3>Endpoint Regressions</h3>
+        <h3>${escapeHtml(i18n.messages.compareHeadingEndpointRegressions)}</h3>
       </header>
       ${endpointSection}
     </section>
@@ -2946,7 +3042,7 @@ function renderCompareWaterfallRows(leftModel: ArchiveModel, rightModel: Archive
         <td title="${escapeHtml(row.key)}">${escapeHtml(row.key)}</td>
         <td class="mono">${escapeHtml(leftCell)}</td>
         <td class="mono">${escapeHtml(rightCell)}</td>
-        <td><span class="${signalClass}">${signal}</span></td>
+        <td><span class="${signalClass}">${escapeHtml(i18n.formatCompareSignal(signal))}</span></td>
       </tr>`;
     })
     .join("");
@@ -3000,7 +3096,7 @@ function summarizeWaterfallByEndpoint(
 
 function formatEndpointSummaryCell(entry: CompareEndpointSummary): string {
   const failRate = entry.count > 0 ? (entry.failureCount / entry.count) * 100 : 0;
-  return `${entry.count} req • ${failRate.toFixed(0)}% fail • p95 ${entry.p95Ms.toFixed(0)}ms`;
+  return i18n.formatCompareEndpointSummary(entry.count, failRate, entry.p95Ms);
 }
 
 function renderPanels(): void {
@@ -3011,12 +3107,11 @@ function renderPanels(): void {
     state.selectedActionId = null;
     refs.timelineList.innerHTML = "";
     refs.actionsList.innerHTML = "";
-    refs.eventDetails.textContent =
-      "Select a timeline event or action card to inspect payload details.";
+    refs.eventDetails.textContent = i18n.messages.eventDetailsEmpty;
     refs.waterfallBody.innerHTML = "";
-    refs.networkScopeSummary.textContent = "main 0 | iframe 0";
-    refs.networkSummary.textContent = "0 / 0 requests";
-    refs.requestDetails.textContent = "Select a request row to inspect network details.";
+    refs.networkScopeSummary.textContent = i18n.formatScopeSummary(0, 0);
+    refs.networkSummary.textContent = i18n.messages.networkSummaryEmpty;
+    refs.requestDetails.textContent = i18n.messages.requestDetailsEmpty;
     renderNetworkSortButtons();
     refs.consoleList.innerHTML = "";
     refs.realtimeList.innerHTML = "";
@@ -3055,7 +3150,7 @@ function renderTimeline(): void {
   if (filtered.length === 0) {
     state.timelineRows = [];
     state.selectedEventId = null;
-    refs.timelineList.innerHTML = `<li class="empty">No timeline events at current filters.</li>`;
+    refs.timelineList.innerHTML = `<li class="empty">${escapeHtml(i18n.messages.timelineEmpty)}</li>`;
     return;
   }
 
@@ -3085,7 +3180,7 @@ function renderActionTimeline(): void {
 
   if (filtered.length === 0) {
     state.selectedActionId = null;
-    refs.actionsList.innerHTML = `<li class="empty">No action spans at current filters.</li>`;
+    refs.actionsList.innerHTML = `<li class="empty">${escapeHtml(i18n.messages.actionsEmpty)}</li>`;
     return;
   }
 
@@ -3147,7 +3242,7 @@ function renderTimelineRow(event: WebBlackboxEvent): string {
   const scope = model ? resolveEventScope(model, event) : inferEventScope(event);
   const scopeTagClass =
     scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
-  const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+  const scopeLabel = i18n.formatScopeTag(scope);
   const sessionLabel = event.cdp ? truncateId(event.cdp) : "";
   const frameLabel = event.frame ? truncateId(event.frame) : "";
   const sourceLabel =
@@ -3173,15 +3268,17 @@ function renderActionCard(action: ActionTimelineEntry, model: ArchiveModel): str
   const relativeStart = Math.max(0, action.startMono - model.minMono);
   const relativeEnd = Math.max(relativeStart, action.endMono - model.minMono);
   const screenshotMeta = action.screenshot
-    ? `shot ${formatMono(Math.max(0, action.screenshot.mono - model.minMono))}`
-    : "no-shot";
+    ? i18n.t("actionMetricShot", {
+        time: formatMono(Math.max(0, action.screenshot.mono - model.minMono))
+      })
+    : i18n.messages.actionMetricNoShot;
   const requestPreview = action.requests
     .slice(0, 2)
     .map((entry) => {
       const status = entry.failed
-        ? "(failed)"
+        ? i18n.messages.networkStatusFailed
         : entry.status === null
-          ? "(pending)"
+          ? i18n.messages.networkStatusPending
           : String(entry.status);
       return `${entry.method.toUpperCase()} ${shortUrl(entry.url)} ${status}`;
     })
@@ -3198,20 +3295,25 @@ function renderActionCard(action: ActionTimelineEntry, model: ArchiveModel): str
         <span class="action-card-time mono">${formatMono(relativeStart)} - ${formatMono(relativeEnd)}</span>
       </div>
       <div class="action-card-metrics mono">
-        <span>duration ${Number(action.durationMs.toFixed(1))}ms</span>
-        <span>events ${action.eventCount}</span>
-        <span>req ${action.requestCount}</span>
-        <span>err ${action.errorCount}</span>
-        <span>${escapeHtml(screenshotMeta)}</span>
+        ${i18n
+          .formatActionMetrics({
+            durationMs: Number(action.durationMs.toFixed(1)),
+            eventCount: action.eventCount,
+            requestCount: action.requestCount,
+            errorCount: action.errorCount,
+            screenshotMeta
+          })
+          .map((label) => `<span>${escapeHtml(label)}</span>`)
+          .join("")}
       </div>
       ${
         requestPreview
-          ? `<div class="action-card-section"><span class="action-card-label">network</span><span>${escapeHtml(requestPreview)}</span></div>`
+          ? `<div class="action-card-section"><span class="action-card-label">${escapeHtml(i18n.messages.actionSectionNetwork)}</span><span>${escapeHtml(requestPreview)}</span></div>`
           : ""
       }
       ${
         errorPreview
-          ? `<div class="action-card-section"><span class="action-card-label">errors</span><span>${escapeHtml(errorPreview)}</span></div>`
+          ? `<div class="action-card-section"><span class="action-card-label">${escapeHtml(i18n.messages.actionSectionErrors)}</span><span>${escapeHtml(errorPreview)}</span></div>`
           : ""
       }
     </button></li>`;
@@ -3221,8 +3323,7 @@ function renderEventDetails(): void {
   const model = state.model;
 
   if (!model) {
-    refs.eventDetails.textContent =
-      "Select a timeline event or action card to inspect payload details.";
+    refs.eventDetails.textContent = i18n.messages.eventDetailsEmpty;
     return;
   }
 
@@ -3234,15 +3335,14 @@ function renderEventDetails(): void {
   const eventId = state.selectedEventId;
 
   if (!eventId) {
-    refs.eventDetails.textContent =
-      "Select a timeline event or action card to inspect payload details.";
+    refs.eventDetails.textContent = i18n.messages.eventDetailsEmpty;
     return;
   }
 
   const selected = model.eventById.get(eventId);
 
   if (!selected || selected.mono > state.playheadMono) {
-    refs.eventDetails.textContent = "Selected event is outside the current playhead range.";
+    refs.eventDetails.textContent = i18n.messages.eventDetailsOutOfRange;
     return;
   }
 
@@ -3262,15 +3362,14 @@ function renderActionRootCauseDetails(model: ArchiveModel): void {
   const actionId = state.selectedActionId;
 
   if (!actionId) {
-    refs.eventDetails.textContent =
-      "Select an action card to inspect trigger and root-cause context.";
+    refs.eventDetails.textContent = i18n.messages.actionDetailsEmpty;
     return;
   }
 
   const action = model.actionTimeline.find((entry) => entry.actId === actionId);
 
   if (!action || action.startMono > state.playheadMono) {
-    refs.eventDetails.textContent = "Selected action is outside the current playhead range.";
+    refs.eventDetails.textContent = i18n.messages.actionDetailsOutOfRange;
     return;
   }
 
@@ -3331,8 +3430,13 @@ function renderNetworkSortButtons(): void {
     button.classList.toggle("is-asc", ascending);
     button.setAttribute("aria-pressed", String(active));
     button.title = active
-      ? `Sorted by ${button.textContent?.trim() ?? "column"} (${descending ? "desc" : "asc"})`
-      : `Sort by ${button.textContent?.trim() ?? "column"}`;
+      ? i18n.t("sortedByColumn", {
+          column: button.textContent?.trim() ?? i18n.messages.sortColumnFallback,
+          direction: i18n.formatSortDirection(descending ? "desc" : "asc")
+        })
+      : i18n.t("sortByColumn", {
+          column: button.textContent?.trim() ?? i18n.messages.sortColumnFallback
+        });
   }
 }
 
@@ -3344,9 +3448,9 @@ function renderWaterfall(): void {
 
   if (!model || !player) {
     refs.waterfallBody.innerHTML = "";
-    refs.networkScopeSummary.textContent = "main 0 | iframe 0";
-    refs.networkSummary.textContent = "0 / 0 requests";
-    refs.requestDetails.textContent = "Select a request row to inspect network details.";
+    refs.networkScopeSummary.textContent = i18n.formatScopeSummary(0, 0);
+    refs.networkSummary.textContent = i18n.messages.networkSummaryEmpty;
+    refs.requestDetails.textContent = i18n.messages.requestDetailsEmpty;
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
     refs.replayRequest.disabled = true;
@@ -3359,14 +3463,15 @@ function renderWaterfall(): void {
     (entry) => entry.startMono
   );
   const visibleEntries = model.waterfall.slice(0, visibleCount);
-  const queryFilteredEntries = applyNetworkViewFilters(visibleEntries, state.networkView);
+  const queryFilteredEntries = applyNetworkViewFilters(visibleEntries, state.networkView, locale);
   const filteredEntries = queryFilteredEntries.filter((entry) =>
     matchesScopeFilter(resolveRequestScope(model, entry.reqId), state.networkView.scope)
   );
   const sortedEntries = sortNetworkEntries(
     filteredEntries,
     state.networkView.sortKey,
-    state.networkView.sortDirection
+    state.networkView.sortDirection,
+    locale
   );
   const renderedEntries = sortedEntries.slice(0, MAX_WATERFALL_ROWS);
 
@@ -3376,8 +3481,8 @@ function renderWaterfall(): void {
     state.selectedRequestId = null;
     refs.waterfallBody.innerHTML = "";
     refs.requestDetails.textContent = filteredEntries.length
-      ? "No requests visible in current table window."
-      : "No requests at current playhead or current filters.";
+      ? i18n.messages.requestWindowEmpty
+      : i18n.messages.requestFilterEmpty;
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
     refs.replayRequest.disabled = true;
@@ -3400,19 +3505,19 @@ function renderWaterfall(): void {
 
   refs.waterfallBody.innerHTML = renderedEntries
     .map((entry) => {
-      const status = describeNetworkStatus(entry);
+      const status = describeNetworkStatus(entry, locale);
       const selectedClass = state.selectedRequestId === entry.reqId ? "selected" : "";
       const statusClass = resolveNetworkStatusClass(entry);
       const requestName = describeRequestName(entry.url);
       const method = entry.method.toUpperCase();
-      const type = resolveNetworkTypeLabel(entry.mimeType);
-      const initiator = resolveNetworkInitiator(entry);
+      const type = resolveNetworkTypeLabel(entry.mimeType, locale);
+      const initiator = resolveNetworkInitiator(entry, locale);
       const size = formatNetworkSize(entry);
       const elapsed = `${entry.durationMs.toFixed(1)} ms`;
       const scope = resolveRequestScope(model, entry.reqId);
       const scopeClass =
         scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
-      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeLabel = i18n.formatScopeTag(scope);
       const offset = Math.max(0, entry.startMono - timelineStart);
       const left = clamp((offset / timelineSpan) * 100, 0, 100);
       const width = clamp((Math.max(entry.durationMs, 1) / timelineSpan) * 100, 0.8, 100 - left);
@@ -3444,7 +3549,7 @@ function renderWaterfall(): void {
   const selectedEntry = selectedReqId ? (model.waterfallByReqId.get(selectedReqId) ?? null) : null;
 
   if (!selectedEntry) {
-    refs.requestDetails.textContent = "No request selected.";
+    refs.requestDetails.textContent = i18n.messages.requestNoneSelected;
     refs.copyCurl.disabled = true;
     refs.copyFetch.disabled = true;
     refs.replayRequest.disabled = true;
@@ -3486,8 +3591,8 @@ function renderNetworkSummary(
   renderedEntries: NetworkWaterfallEntry[]
 ): void {
   if (visibleEntries.length === 0) {
-    refs.networkScopeSummary.textContent = "main 0 | iframe 0";
-    refs.networkSummary.textContent = "0 / 0 requests";
+    refs.networkScopeSummary.textContent = i18n.formatScopeSummary(0, 0);
+    refs.networkSummary.textContent = i18n.messages.networkSummaryEmpty;
     return;
   }
 
@@ -3497,14 +3602,17 @@ function renderNetworkSummary(
   const filteredIframeCount = Math.max(0, filteredEntries.length - filteredMainCount);
   const filteredBytes = sumNetworkTransferBytes(filteredEntries);
   const totalBytes = sumNetworkTransferBytes(visibleEntries);
-  const hiddenCount = Math.max(0, filteredEntries.length - renderedEntries.length);
-  const truncatedSuffix =
-    hiddenCount > 0
-      ? ` | showing ${renderedEntries.length}/${filteredEntries.length} (${hiddenCount} hidden; narrow filters to inspect more)`
-      : "";
-
-  refs.networkScopeSummary.textContent = `main ${filteredMainCount} | iframe ${filteredIframeCount}`;
-  refs.networkSummary.textContent = `${filteredEntries.length} / ${visibleEntries.length} requests | ${formatByteSize(filteredBytes)} / ${formatByteSize(totalBytes)} transferred${truncatedSuffix}`;
+  refs.networkScopeSummary.textContent = i18n.formatScopeSummary(
+    filteredMainCount,
+    filteredIframeCount
+  );
+  refs.networkSummary.textContent = i18n.formatNetworkSummary(
+    filteredEntries.length,
+    visibleEntries.length,
+    formatByteSize(filteredBytes),
+    formatByteSize(totalBytes),
+    renderedEntries.length
+  );
 }
 
 function renderConsoleSignals(): void {
@@ -3570,9 +3678,9 @@ function renderRealtimeSignals(): void {
         ? entry.payloadPreview.length > 120
           ? `${entry.payloadPreview.slice(0, 120)}...`
           : entry.payloadPreview
-        : "(no payload)";
+        : i18n.messages.realtimeNoPayload;
       const scope = resolveScopeByEventId(model, entry.eventId);
-      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeLabel = i18n.formatScopeTag(scope);
       const scopeClass =
         scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
 
@@ -3603,7 +3711,7 @@ function renderStorageSignals(): void {
       const hash = entry.hash ? ` hash=${entry.hash}` : "";
       const summary = `${entry.kind} ${operation}@ ${entry.mono.toFixed(2)}ms${hash}`;
       const scope = resolveScopeByEventId(model, entry.eventId);
-      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeLabel = i18n.formatScopeTag(scope);
       const scopeClass =
         scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
       return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="${scopeClass}">${scopeLabel}</span><span class="signal-text">${escapeHtml(summary)}</span></li>`;
@@ -3633,7 +3741,7 @@ function renderPerfSignals(): void {
       const hash = entry.hash ? ` hash=${entry.hash}` : "";
       const summary = `${entry.kind} @ ${entry.mono.toFixed(2)}ms${size}${hash}`;
       const scope = resolveScopeByEventId(model, entry.eventId);
-      const scopeLabel = scope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeLabel = i18n.formatScopeTag(scope);
       const scopeClass =
         scope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
       return `<li class="signal"><span class="signal-type">${escapeHtml(entry.eventType)}</span><span class="${scopeClass}">${scopeLabel}</span><span class="signal-text">${escapeHtml(summary)}</span></li>`;
@@ -3645,7 +3753,7 @@ function renderFilmstripList(): void {
   const model = state.model;
 
   if (!model || model.screenshots.length === 0) {
-    refs.filmstripList.innerHTML = `<li class="empty">No screenshot events in this archive.</li>`;
+    refs.filmstripList.innerHTML = `<li class="empty">${escapeHtml(i18n.messages.noScreenshotEvents)}</li>`;
     return;
   }
 
@@ -3665,14 +3773,14 @@ async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
   const player = state.player;
 
   if (!model || !player) {
-    clearScreenshotView("Load an archive to start playback.");
+    clearScreenshotView(i18n.messages.stagePlaceholderLoadArchive);
     return;
   }
 
   const shot = resolveShotForMono(model.screenshots, state.playheadMono);
 
   if (!shot) {
-    clearScreenshotView("No screenshot available before this playhead.");
+    clearScreenshotView(i18n.messages.screenshotBeforePlayhead);
     return;
   }
 
@@ -3683,7 +3791,7 @@ async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
     state.screenshotShotId = shot.shotId;
     refs.preview.hidden = true;
     refs.stagePlaceholder.hidden = false;
-    refs.stagePlaceholder.textContent = "Loading screenshot...";
+    refs.stagePlaceholder.textContent = i18n.messages.screenshotLoading;
 
     const token = ++state.screenshotLoadToken;
     const url = await getScreenshotUrlByShotId(shot.shotId);
@@ -3693,7 +3801,7 @@ async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
     }
 
     if (!url) {
-      clearScreenshotView(`Missing screenshot blob: ${shot.shotId}`);
+      clearScreenshotView(i18n.t("screenshotMissingBlob", { shotId: shot.shotId }));
       return;
     }
 
@@ -3705,7 +3813,8 @@ async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
   state.screenshotMarker = resolveScreenshotMarker(model.pointers, state.playheadMono, shot.marker);
   refs.filmstripMeta.textContent = describeScreenshotMeta(
     state.screenshotMarker,
-    state.screenshotTrail
+    state.screenshotTrail,
+    locale
   );
   renderScreenshotOverlay();
 }
@@ -3852,12 +3961,12 @@ function updateStagePlaceholder(): void {
   }
 
   if (hasSource) {
-    refs.stagePlaceholder.textContent = "Loading screenshot...";
+    refs.stagePlaceholder.textContent = i18n.messages.screenshotLoading;
     return;
   }
 
   if (!refs.stagePlaceholder.textContent) {
-    refs.stagePlaceholder.textContent = "No screenshot loaded.";
+    refs.stagePlaceholder.textContent = i18n.messages.screenshotNoLoaded;
   }
 }
 
@@ -3870,7 +3979,7 @@ function resetScreenshotResources(): void {
   }
 
   state.screenshotUrlCache.clear();
-  clearScreenshotView("Load an archive to start playback.");
+  clearScreenshotView(i18n.messages.stagePlaceholderLoadArchive);
 }
 
 function applyTimelineFilters(model: ArchiveModel, visibleCount: number): WebBlackboxEvent[] {
@@ -4136,7 +4245,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
         x,
         y,
         click,
-        reason: click ? "action:click" : "pointer:move"
+        reason: click ? i18n.messages.pointerReasonActionClick : i18n.messages.pointerReasonMove
       });
     }
   }
@@ -4359,7 +4468,7 @@ function renderSignalEvents(
     .map((event) => {
       const text = stringifySignalPayload(event.data);
       const eventScope = resolveEventScope(model, event);
-      const scopeLabel = eventScope === "iframe" ? "IFRAME" : "MAIN";
+      const scopeLabel = i18n.formatScopeTag(eventScope);
       const scopeClass =
         eventScope === "iframe" ? "scope-tag scope-tag-iframe" : "scope-tag scope-tag-main";
       const sourceLabel = [
@@ -4418,7 +4527,7 @@ async function copySelectedRequestAsCurl(): Promise<void> {
   }
 
   await copyText(curl);
-  setFeedback(`Copied cURL for ${reqId}`);
+  setFeedback(i18n.t("feedbackCopyCurl", { reqId }));
 }
 
 async function copySelectedRequestAsFetch(): Promise<void> {
@@ -4436,7 +4545,7 @@ async function copySelectedRequestAsFetch(): Promise<void> {
   }
 
   await copyText(fetchSnippet);
-  setFeedback(`Copied fetch snippet for ${reqId}`);
+  setFeedback(i18n.t("feedbackCopyFetch", { reqId }));
 }
 
 async function replaySelectedRequest(): Promise<void> {
@@ -4520,8 +4629,12 @@ async function replaySelectedRequest(): Promise<void> {
     const statusLabel =
       capturedStatus === null
         ? String(replayStatus)
-        : `${replayStatus} (captured ${capturedStatus}, delta ${formatDelta(statusDelta ?? 0)})`;
-    setFeedback(`Replayed ${reqId}: ${statusLabel}`);
+        : i18n.t("feedbackReplayStatusDelta", {
+            status: replayStatus,
+            captured: capturedStatus,
+            delta: formatDelta(statusDelta ?? 0)
+          });
+    setFeedback(i18n.t("feedbackReplaySucceeded", { reqId, statusLabel }));
   } catch (error) {
     refs.requestDetails.textContent = JSON.stringify(
       {
@@ -4535,7 +4648,7 @@ async function replaySelectedRequest(): Promise<void> {
       null,
       2
     );
-    setFeedback(`Replay failed for ${reqId}.`);
+    setFeedback(i18n.t("feedbackReplayFailed", { reqId }));
   }
 }
 
@@ -4549,12 +4662,12 @@ async function copyProgressHoverResponse(): Promise<void> {
   try {
     await copyText(payload);
   } catch {
-    setFeedback("Failed to copy response preview.");
+    setFeedback(i18n.messages.responseCopyFailed);
     return;
   }
 
-  refs.progressHoverResponseCopy.textContent = "Copied";
-  setFeedback("Copied response preview.");
+  refs.progressHoverResponseCopy.textContent = i18n.messages.copied;
+  setFeedback(i18n.messages.responseCopied);
   const token = state.progressHoverToken;
 
   window.setTimeout(() => {
@@ -4562,7 +4675,7 @@ async function copyProgressHoverResponse(): Promise<void> {
       return;
     }
 
-    refs.progressHoverResponseCopy.textContent = "Copy";
+    refs.progressHoverResponseCopy.textContent = i18n.messages.copy;
   }, 1200);
 }
 
@@ -4582,7 +4695,7 @@ async function openArchiveWithPassphraseFallback(
     const passphrase = await promptArchivePassphrase(fileName);
 
     if (!passphrase || passphrase.trim().length === 0) {
-      throw new Error("Passphrase is required for encrypted archive.");
+      throw new Error(i18n.messages.encryptedArchivePassphraseRequired);
     }
 
     return WebBlackboxPlayer.open(bytes, {
@@ -4592,7 +4705,7 @@ async function openArchiveWithPassphraseFallback(
 }
 
 async function promptArchivePassphrase(fileName: string): Promise<string | null> {
-  refs.archivePassphraseContext.textContent = `Archive '${fileName}' is encrypted. Enter passphrase to continue loading.`;
+  refs.archivePassphraseContext.textContent = i18n.formatPassphrasePrompt(fileName);
   refs.archivePassphraseInput.value = "";
   const result = await openDialog(refs.archivePassphraseDialog, refs.archivePassphraseInput);
 
