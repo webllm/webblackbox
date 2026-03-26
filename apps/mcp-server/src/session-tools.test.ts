@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -317,14 +318,40 @@ async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Ar
     }
   };
 
-  zip.file("manifest.json", JSON.stringify(manifest));
-  zip.file("index/time.json", JSON.stringify([]));
-  zip.file("index/req.json", JSON.stringify(reqIndex));
-  zip.file("index/inv.json", JSON.stringify([]));
-  zip.file("integrity/hashes.json", JSON.stringify({ manifestSha256: "fixture", files: {} }));
-  zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
+  const files = new Map<string, string>();
+  const addJsonFile = (path: string, value: unknown) => {
+    const content = JSON.stringify(value, null, 2);
+    zip.file(path, content);
+    files.set(path, content);
+  };
+  const addTextFile = (path: string, content: string) => {
+    zip.file(path, content);
+    files.set(path, content);
+  };
+
+  addJsonFile("manifest.json", manifest);
+  addJsonFile("index/time.json", []);
+  addJsonFile("index/req.json", reqIndex);
+  addJsonFile("index/inv.json", []);
+  addTextFile(
+    "events/chunk-000001.ndjson",
+    events.map((event) => JSON.stringify(event)).join("\n")
+  );
+
+  const fileHashes = Object.fromEntries(
+    [...files.entries()].map(([path, content]) => [path, sha256Hex(content)])
+  );
+
+  addJsonFile("integrity/hashes.json", {
+    manifestSha256: fileHashes["manifest.json"] ?? "",
+    files: fileHashes
+  });
 
   return zip.generateAsync({ type: "uint8array" });
+}
+
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(Buffer.from(content)).digest("hex");
 }
 
 function createBaselineEvents(): WebBlackboxEvent[] {
