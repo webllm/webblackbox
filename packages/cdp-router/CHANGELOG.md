@@ -1,5 +1,11 @@
 # @webblackbox/cdp-router
 
+## 0.4.2
+
+### Changed
+
+- No package-specific source changes shipped in this release. The version bump keeps the CDP router aligned with the 0.4.2 workspace release.
+
 ## 0.4.1
 
 ### Changed

@@ -1,5 +1,11 @@
 # @webblackbox/protocol
 
+## 0.4.2
+
+### Changed
+
+- No schema or default changes shipped in this release. The version bump keeps the protocol package aligned with the 0.4.2 workspace release.
+
 ## 0.4.1
 
 ### Changed

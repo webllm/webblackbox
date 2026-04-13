@@ -1,5 +1,12 @@
 # @webblackbox/extension
 
+## 0.4.2
+
+### Changed
+
+- Removed the unused `alarms` permission from the packaged extension manifest, tightening the extension's declared permission surface.
+- Dropped the matching `chrome.alarms` API typing and README permission note so the codebase and extension docs stay aligned with what the extension actually uses.
+
 ## 0.4.1
 
 ### Changed

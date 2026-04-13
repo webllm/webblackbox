@@ -1,5 +1,11 @@
 # @webblackbox/player
 
+## 0.4.2
+
+### Changed
+
+- No package-specific UI or runtime changes shipped in this release. The version bump keeps the hosted Player aligned with the 0.4.2 workspace release.
+
 ## 0.4.1
 
 ### Changed
