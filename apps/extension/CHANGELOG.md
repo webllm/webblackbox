@@ -1,5 +1,12 @@
 # @webblackbox/extension
 
+## 0.4.1
+
+### Changed
+
+- Added English and Simplified Chinese localization across the popup, options, sessions, content, and offscreen surfaces, including locale-aware page titles, status text, and marker labels.
+- Localized the Chrome manifest through `_locales` message catalogs and tightened build validation so packaged release artifacts include the required locale assets.
+
 ## 0.4.0
 
 ### Changed

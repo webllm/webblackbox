@@ -1,5 +1,11 @@
 # @webblackbox/recorder
 
+## 0.4.1
+
+### Changed
+
+- No package-specific runtime changes shipped in this release. The version bump keeps the recorder package aligned with the 0.4.1 workspace release.
+
 ## 0.4.0
 
 ### Changed

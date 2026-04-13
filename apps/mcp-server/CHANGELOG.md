@@ -1,5 +1,12 @@
 # @webblackbox/mcp-server
 
+## 0.4.1
+
+### Changed
+
+- No package-specific runtime or CLI changes shipped in this release.
+- Updated internal archive-integrity test fixtures to match the stricter archive verification used by the 0.4.x toolchain.
+
 ## 0.4.0
 
 ### Changed

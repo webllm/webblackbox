@@ -1,5 +1,13 @@
 # @webblackbox/player
 
+## 0.4.1
+
+### Changed
+
+- Added English and Simplified Chinese localization across the hosted Player UI, including a toolbar language switcher that persists the selected locale.
+- Localized compare summaries, network labels, screenshot descriptions, response preview copy, and share/load dialogs so generated analysis output follows the active language.
+- Minified the Player build output to keep CI artifacts and hosted bundles smaller.
+
 ## 0.4.0
 
 ### Changed
