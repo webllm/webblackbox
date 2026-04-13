@@ -56,7 +56,6 @@ const REQUIRED_BUILD_FILES = [
 
 const PERMISSIONS = [
   "activeTab",
-  "alarms",
   "cookies",
   "debugger",
   "downloads",

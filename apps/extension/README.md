@@ -98,7 +98,6 @@ The extension consists of multiple main components:
 | `webRequest` | Network request monitoring                       |
 | `downloads`  | Archive file download                            |
 | `cookies`    | Cookie access for storage snapshots              |
-| `alarms`     | Periodic tasks (snapshots, cleanup)              |
 | `<all_urls>` | Content script injection on any page             |
 
 ## Keyboard Shortcuts

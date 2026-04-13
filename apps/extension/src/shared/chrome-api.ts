@@ -26,12 +26,6 @@ export type ChromeApi = {
     setBadgeText(details: { text: string }): Promise<void>;
     setBadgeBackgroundColor(details: { color: string }): Promise<void>;
   };
-  alarms?: {
-    create(name: string, alarmInfo: { periodInMinutes?: number; when?: number }): void;
-    onAlarm: {
-      addListener(callback: (alarm: { name: string }) => void): void;
-    };
-  };
   commands?: {
     onCommand: {
       addListener(callback: (command: string) => void): void;
