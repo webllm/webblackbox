@@ -352,6 +352,22 @@ input[type="file"],
   gap: 4px;
 }
 
+.toolbar-locale {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--sys-color-on-surface-subtle);
+}
+
+.toolbar-locale__label {
+  white-space: nowrap;
+}
+
+.toolbar-locale .ui-select {
+  min-width: 78px;
+  padding-left: 6px;
+}
+
 .upload {
   display: inline-flex;
   align-items: center;
