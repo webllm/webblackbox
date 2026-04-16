@@ -54,9 +54,10 @@ const REQUIRED_BUILD_FILES = [
   "icon/128.png"
 ];
 
+// Cookie snapshots are collected through the CDP Storage domain via `debugger`,
+// and persistent host access comes from `<all_urls>`, so neither `cookies`
+// nor `activeTab` belongs in the required permission set.
 const PERMISSIONS = [
-  "activeTab",
-  "cookies",
   "debugger",
   "downloads",
   "offscreen",

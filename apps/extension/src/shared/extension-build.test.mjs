@@ -19,6 +19,8 @@ describe("extension build manifest", () => {
     expect(manifest.default_locale).toBe("en");
     expect(manifest.name).toBe("__MSG_extensionName__");
     expect(manifest.key).toBeTypeOf("string");
+    expect(manifest.permissions).not.toContain("activeTab");
+    expect(manifest.permissions).not.toContain("cookies");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
     expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
     expect(validateExtensionManifest(manifest, { version: "1.2.3" })).toEqual([]);

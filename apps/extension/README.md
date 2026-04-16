@@ -34,6 +34,7 @@ The extension consists of multiple main components:
 - Instantiates `WebBlackboxRecorder` for event normalization
 - Routes events between content scripts, CDP, and the pipeline
 - Handles session lifecycle (start, stop, freeze, export)
+- Captures storage snapshots, including cookies, through CDP storage commands
 - Manages the offscreen document lifecycle
 
 #### Content Script (`content.js`)
@@ -93,11 +94,9 @@ The extension consists of multiple main components:
 | `tabs`       | Tab information and URL access                   |
 | `scripting`  | Content script injection                         |
 | `storage`    | Extension settings and session data              |
-| `activeTab`  | Access to the current tab                        |
 | `offscreen`  | Pipeline processing in background                |
 | `webRequest` | Network request monitoring                       |
 | `downloads`  | Archive file download                            |
-| `cookies`    | Cookie access for storage snapshots              |
 | `<all_urls>` | Content script injection on any page             |
 
 ## Keyboard Shortcuts
