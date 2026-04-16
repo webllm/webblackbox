@@ -1,5 +1,12 @@
 # @webblackbox/extension
 
+## 0.4.3
+
+### Changed
+
+- Hardened the full-chain end-to-end demo harness so Chrome startup retries with fresh profiles and ports, emits log-tail diagnostics when the DevTools endpoint never comes up, and tears down child browser processes more reliably.
+- Removed the unused `cookies` and `activeTab` permissions from the generated extension manifest, and added regression coverage so release artifacts stay aligned with the extension's actual permission usage.
+
 ## 0.4.2
 
 ### Changed

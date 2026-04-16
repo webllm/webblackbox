@@ -1,5 +1,11 @@
 # webblackbox
 
+## 0.4.3
+
+### Changed
+
+- No browser SDK source or runtime changes shipped in this release. The version bump keeps the package aligned with the extension-focused 0.4.3 workspace release.
+
 ## 0.4.2
 
 ### Changed

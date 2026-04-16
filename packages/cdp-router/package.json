@@ -1,7 +1,7 @@
 {
   "name": "@webblackbox/cdp-router",
   "description": "Chrome DevTools Protocol router for managing debugger targets and CDP sessions across tabs, iframes, and workers.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
