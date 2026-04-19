@@ -14,8 +14,8 @@
   <a href="https://github.com/webllm/webblackbox/actions/workflows/ci.yml"><img src="https://github.com/webllm/webblackbox/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://www.npmjs.com/package/webblackbox"><img src="https://img.shields.io/npm/v/webblackbox.svg?color=f97316" alt="npm version" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/npm/l/webblackbox?color=374151" alt="License" /></a>
-  <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/github/v/release/webllm/webblackbox.svg" alt="Release" /></a>
-  <a href="https://github.com/webllm/webblackbox/releases"><img src="https://img.shields.io/badge/Chrome-Extension-4285F4?logo=googlechrome&logoColor=white" alt="Chrome Extension" /></a>
+  <a href="https://chromewebstore.google.com/detail/webblackbox/heklgedghicnjglakenbmfilolcgknnp?hl=en"><img src="https://img.shields.io/github/v/release/webllm/webblackbox.svg" alt="Release" /></a>
+  <a href="https://chromewebstore.google.com/detail/webblackbox/heklgedghicnjglakenbmfilolcgknnp?hl=en"><img src="https://img.shields.io/badge/Chrome-Extension-4285F4?logo=googlechrome&logoColor=white" alt="Chrome Extension" /></a>
   <a href="https://webllm.github.io/webblackbox/"><img src="https://img.shields.io/badge/Hosted-Player-f97316" alt="Hosted Player" /></a>
   <img src="https://img.shields.io/badge/TypeScript-first-blue" alt="TypeScript" />
 </p>
@@ -62,7 +62,7 @@ https://github.com/user-attachments/assets/46273fc0-36f2-4aeb-9dfa-9c60cfcba98c
 
 ### Record with the Chrome Extension
 
-1. Download the latest extension package from [GitHub Releases](https://github.com/webllm/webblackbox/releases/latest).
+1. Download the latest extension package from [Chrome Web Store](https://chromewebstore.google.com/detail/webblackbox/heklgedghicnjglakenbmfilolcgknnp?hl=en) or [GitHub Releases](https://github.com/webllm/webblackbox/releases/latest).
 2. Unzip the downloaded Chrome extension package locally.
 3. Open `chrome://extensions/`.
 4. Enable `Developer mode`.
