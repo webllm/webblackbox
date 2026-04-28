@@ -164,6 +164,7 @@ export class LiteCaptureAgent {
   private lastScrollTime = 0;
   private lastPointerTime = Number.NEGATIVE_INFINITY;
   private screenshotInFlight = false;
+  private screenshotCaptureBlocked = false;
   private screenshotInFlightPromise: Promise<void> | null = null;
   private screenshotPendingReason: string | null = null;
   private hasCapturedScreenshot = false;
@@ -310,7 +311,11 @@ export class LiteCaptureAgent {
     }
 
     if (this.shouldCaptureScreenshots() && !this.hasCapturedScreenshot) {
-      await this.captureScreenshot("stop");
+      if (this.screenshotCaptureBlocked) {
+        return;
+      }
+
+      await this.startScreenshotCapture("stop");
     }
   }
 
@@ -1241,28 +1246,27 @@ export class LiteCaptureAgent {
       this.lastActionScreenshotMono = nowMono;
     }
 
-    if (this.screenshotInFlight) {
+    if (this.screenshotInFlight || this.screenshotCaptureBlocked) {
       this.setPendingScreenshotReason(reason, prioritize);
 
       return;
     }
 
+    void this.startScreenshotCapture(reason);
+  }
+
+  private startScreenshotCapture(reason: string): Promise<void> {
     this.screenshotInFlight = true;
 
     const capturePromise = this.captureScreenshot(reason).finally(() => {
       this.screenshotInFlight = false;
       this.screenshotInFlightPromise = null;
 
-      const pending = this.screenshotPendingReason;
-      this.screenshotPendingReason = null;
-
-      if (pending) {
-        this.scheduleScreenshotCapture(pending);
-      }
+      this.schedulePendingScreenshotCapture();
     });
 
     this.screenshotInFlightPromise = capturePromise;
-    void capturePromise;
+    return capturePromise;
   }
 
   private async captureScreenshot(reason: string): Promise<void> {
@@ -1289,13 +1293,21 @@ export class LiteCaptureAgent {
     }
 
     try {
-      const screenshot = await withTimeout(
-        captureSnapdomDataUrl(root, snapdomCaptureOptions, {
-          width: captureWidth,
-          height: captureHeight
-        }),
-        SCREENSHOT_CAPTURE_TIMEOUT_MS
+      const captureTask = captureSnapdomDataUrl(root, snapdomCaptureOptions, {
+        width: captureWidth,
+        height: captureHeight
+      });
+      this.screenshotCaptureBlocked = true;
+      void captureTask.then(
+        () => {
+          this.releaseScreenshotCaptureBlock();
+        },
+        () => {
+          this.releaseScreenshotCaptureBlock();
+        }
       );
+
+      const screenshot = await withTimeout(captureTask, SCREENSHOT_CAPTURE_TIMEOUT_MS);
 
       if (
         !screenshot ||
@@ -1594,6 +1606,27 @@ export class LiteCaptureAgent {
     ) {
       this.screenshotPendingReason = reason;
     }
+  }
+
+  private releaseScreenshotCaptureBlock(): void {
+    this.screenshotCaptureBlocked = false;
+    this.schedulePendingScreenshotCapture();
+  }
+
+  private schedulePendingScreenshotCapture(): void {
+    if (
+      this.disposed ||
+      !this.recordingActive ||
+      this.screenshotInFlight ||
+      this.screenshotCaptureBlocked ||
+      !this.screenshotPendingReason
+    ) {
+      return;
+    }
+
+    const pending = this.screenshotPendingReason;
+    this.screenshotPendingReason = null;
+    this.scheduleScreenshotCapture(pending);
   }
 
   private scheduleBackgroundCaptureRetry(): void {

@@ -46,6 +46,7 @@ import {
   resolveLiteBodyCaptureRule as resolveLiteBodyCaptureRuleUtil,
   transformResponseBodyForCapture
 } from "./body-capture-utils.js";
+import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
 import {
   buildLiteNetworkFailureRawEvent,
   buildLiteNetworkRequestRawEvent,
@@ -2505,11 +2506,9 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
   }
 
   await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.enable");
-  const started = Boolean(
-    await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.start")
-  );
+  const started = await sendCdpCommandOutcome(runtime, { tabId: runtime.tabId }, "Profiler.start");
 
-  if (!started) {
+  if (!started.ok) {
     return;
   }
 
@@ -2559,23 +2558,21 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
 
   await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.enable");
 
-  const completed = Boolean(
-    await sendCdpCommand(
-      runtime,
-      { tabId: runtime.tabId },
-      "HeapProfiler.takeHeapSnapshot",
-      {
-        reportProgress: false,
-        captureNumericValue: true
-      },
-      CDP_HEAP_SNAPSHOT_TIMEOUT_MS
-    )
+  const completed = await sendCdpCommandOutcome(
+    runtime,
+    { tabId: runtime.tabId },
+    "HeapProfiler.takeHeapSnapshot",
+    {
+      reportProgress: false,
+      captureNumericValue: true
+    },
+    CDP_HEAP_SNAPSHOT_TIMEOUT_MS
   );
 
   const snapshot = runtime.heapSnapshotCapture;
   runtime.heapSnapshotCapture = null;
 
-  if (!completed || !snapshot || snapshot.chunks.length === 0) {
+  if (!completed.ok || !snapshot || snapshot.chunks.length === 0) {
     await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.disable");
     return;
   }
@@ -2620,34 +2617,22 @@ async function sendCdpCommand<TResult = unknown>(
   params?: Record<string, unknown>,
   timeoutMs = CDP_ARTIFACT_TIMEOUT_MS
 ): Promise<TResult | undefined> {
-  if (!runtime.cdpRouter || runtime.stopping) {
-    return undefined;
-  }
-
-  return withTimeout(
-    runtime.cdpRouter.send<TResult>(target, method, params).catch(() => undefined),
-    timeoutMs
-  );
+  const outcome = await sendCdpCommandOutcome<TResult>(runtime, target, method, params, timeoutMs);
+  return outcome.ok ? outcome.value : undefined;
 }
 
-function withTimeout<TResult>(
-  task: Promise<TResult | undefined>,
-  timeoutMs: number
-): Promise<TResult | undefined> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
+async function sendCdpCommandOutcome<TResult = unknown>(
+  runtime: SessionRuntime,
+  target: { tabId: number; sessionId?: string },
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs = CDP_ARTIFACT_TIMEOUT_MS
+): Promise<CdpCommandOutcome<TResult>> {
+  if (!runtime.cdpRouter || runtime.stopping) {
+    return { ok: false };
+  }
 
-  return Promise.race<TResult | undefined>([
-    task,
-    new Promise<undefined>((resolve) => {
-      timer = setTimeout(() => {
-        resolve(undefined);
-      }, timeoutMs);
-    })
-  ]).finally(() => {
-    if (timer !== null) {
-      clearTimeout(timer);
-    }
-  });
+  return withCdpCommandTimeout(runtime.cdpRouter.send<TResult>(target, method, params), timeoutMs);
 }
 
 async function evaluateExpression(runtime: SessionRuntime, expression: string): Promise<unknown> {

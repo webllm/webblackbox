@@ -242,16 +242,27 @@ describe("LiteCaptureAgent", () => {
   it("releases screenshot capture state when snapdom does not settle", async () => {
     const { agent } = createAgent();
     const state = agent as unknown as {
+      screenshotCaptureBlocked: boolean;
       screenshotInFlight: boolean;
     };
 
     await vi.advanceTimersByTimeAsync(3_500);
 
     expect(state.screenshotInFlight).toBe(true);
+    expect(state.screenshotCaptureBlocked).toBe(true);
 
     await vi.advanceTimersByTimeAsync(4_000);
 
     expect(state.screenshotInFlight).toBe(false);
+    expect(state.screenshotCaptureBlocked).toBe(true);
+
+    await agent.prepareStopCapture();
+
+    expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
 
     agent.dispose();
   });

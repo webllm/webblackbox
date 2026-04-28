@@ -18,6 +18,7 @@ let captureAgent: LiteCaptureAgent | null = null;
 let captureAgentPromise: Promise<LiteCaptureAgent> | null = null;
 
 let recordingActive = false;
+let recordingStatusVersion = 0;
 let pendingEvents: RawRecorderEvent[] = [];
 let pendingEventFlushTimer = 0;
 let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
@@ -49,6 +50,7 @@ window.addEventListener("pagehide", cleanup, { once: true });
 
 function cleanup(): void {
   recordingActive = false;
+  recordingStatusVersion += 1;
   stopPortReconnect();
   stopPendingEventFlush();
   pendingEvents = [];
@@ -252,6 +254,7 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
   }
 
   if (message.kind === "sw.recording-status") {
+    const statusVersion = (recordingStatusVersion += 1);
     syncInjectedCaptureConfig(message);
     const nextState = {
       active: message.active,
@@ -265,6 +268,11 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
       recordingActive = true;
       connectContentPort();
       const agent = await ensureCaptureAgent();
+
+      if (statusVersion !== recordingStatusVersion || !recordingActive) {
+        return;
+      }
+
       agent.setRecordingStatus(nextState);
       schedulePendingEventFlush();
     } else {
@@ -273,11 +281,27 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
 
       if (wasRecording && agent) {
         await agent.prepareStopCapture();
+
+        if (statusVersion !== recordingStatusVersion) {
+          return;
+        }
+
         agent.setRecordingStatus(nextState);
         await flushAllPendingEvents();
+
+        if (statusVersion !== recordingStatusVersion) {
+          return;
+        }
+
         emitStopDrained(nextState.sid);
       } else if (agent) {
         agent.setRecordingStatus(nextState);
+      } else if (wasRecording) {
+        emitStopDrained(nextState.sid);
+      }
+
+      if (statusVersion !== recordingStatusVersion) {
+        return;
       }
 
       recordingActive = false;
@@ -325,7 +349,13 @@ async function ensureCaptureAgent(): Promise<LiteCaptureAgent> {
 }
 
 async function emitKeyboardMarker(): Promise<void> {
+  const statusVersion = recordingStatusVersion;
   const agent = await ensureCaptureAgent();
+
+  if (statusVersion !== recordingStatusVersion || !recordingActive) {
+    return;
+  }
+
   agent.emitMarker(t("contentKeyboardMarker"));
 }
 
