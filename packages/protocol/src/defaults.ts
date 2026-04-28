@@ -16,10 +16,37 @@ export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
     bodyCaptureMaxBytes: 262144
   },
   redaction: {
-    redactHeaders: ["authorization", "cookie", "set-cookie"],
-    redactCookieNames: ["token", "session", "auth"],
-    redactBodyPatterns: ["password", "token", "secret", "otp"],
-    blockedSelectors: [".secret", "[data-sensitive]", "input[type='password']"],
+    redactHeaders: [
+      "authorization",
+      "cookie",
+      "set-cookie",
+      "proxy-authorization",
+      "x-api-key",
+      "x-auth-token",
+      "x-csrf-token",
+      "x-xsrf-token"
+    ],
+    redactCookieNames: ["token", "session", "auth", "jwt", "refresh_token", "csrf", "xsrf"],
+    redactBodyPatterns: [
+      "password",
+      "token",
+      "secret",
+      "otp",
+      "credential",
+      "api_key",
+      "apikey",
+      "private_key",
+      "refresh_token"
+    ],
+    blockedSelectors: [
+      ".secret",
+      "[data-sensitive]",
+      "[data-webblackbox-redact]",
+      "input[type='password']",
+      "input[name*='token']",
+      "input[name*='secret']",
+      "input[autocomplete='cc-number']"
+    ],
     hashSensitiveValues: true
   },
   sitePolicies: []

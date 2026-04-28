@@ -48,6 +48,8 @@ type ShareSummary = {
     count: number;
     errorRate: number;
   }>;
+  privacy?: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>;
+  sensitivePreview?: ReturnType<WebBlackboxPlayer["getSensitiveDataPreview"]>;
 };
 
 const DEFAULT_PORT = 8787;
@@ -356,7 +358,9 @@ async function buildShareSummary(bytes: Uint8Array, passphrase?: string): Promis
       },
       topEndpoints: collectTopEndpoints(waterfall),
       topErrorFingerprints: collectTopErrorFingerprints(actions, errorEvents),
-      topActionTriggers: collectTopActionTriggers(actions)
+      topActionTriggers: collectTopActionTriggers(actions),
+      privacy: player.getPrivacyProtectionReport(),
+      sensitivePreview: player.getSensitiveDataPreview({ limit: 10 })
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

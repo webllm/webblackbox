@@ -54,6 +54,28 @@ describe("WebBlackboxPlayer", () => {
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
   });
 
+  it("builds an explainable privacy protection report", async () => {
+    const bytes = await createPrivacyFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+    const report = player.getPrivacyProtectionReport();
+
+    expect(report.encrypted).toBe(false);
+    expect(report.redaction.headers).toEqual(
+      expect.arrayContaining(["authorization", "x-api-key"])
+    );
+    expect(report.redaction.strategy.join(" ")).toContain("Hashes sensitive string values");
+    expect(report.detected.redactedMarkers).toBeGreaterThanOrEqual(1);
+    expect(report.detected.hashedSensitiveValues).toBeGreaterThanOrEqual(1);
+    expect(report.detected.sensitiveKeyMentions).toBeGreaterThanOrEqual(1);
+
+    const preview = player.getSensitiveDataPreview({ limit: 10 });
+    expect(preview.totalMatches).toBeGreaterThanOrEqual(3);
+    expect(preview.samples.map((sample) => sample.reason)).toEqual(
+      expect.arrayContaining(["redacted-marker", "hashed-value", "sensitive-pattern"])
+    );
+    expect(preview.samples.some((sample) => sample.snippet.includes("…"))).toBe(true);
+  });
+
   it("supports range-preloaded open via time index chunks", async () => {
     const bytes = await createTwoChunkFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes, {
@@ -643,6 +665,65 @@ async function createFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/inv.json", JSON.stringify([{ term: "api", eventIds: ["E-3"] }]));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
+
+  await writeIntegrityManifest(zip);
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function createPrivacyFixtureArchive(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const hashed = "a".repeat(64);
+  const events: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: "S-privacy",
+      tab: 1,
+      t: 1_000,
+      mono: 1,
+      type: "network.request",
+      id: "E-privacy-1",
+      data: {
+        reqId: "R-privacy",
+        headers: {
+          authorization: hashed,
+          "x-api-key": "[REDACTED]"
+        },
+        body: {
+          api_key: "[REDACTED]",
+          passwordHash: hashed
+        }
+      }
+    }
+  ];
+  const manifest: ExportManifest = {
+    protocolVersion: 1,
+    createdAt: new Date(0).toISOString(),
+    mode: "lite",
+    site: {
+      origin: "https://privacy.example.test"
+    },
+    chunkCodec: "none",
+    redactionProfile: {
+      redactHeaders: ["authorization", "x-api-key"],
+      redactCookieNames: ["session", "refresh_token"],
+      redactBodyPatterns: ["password", "api_key"],
+      blockedSelectors: ["[data-webblackbox-redact]", "input[type='password']"],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: events.length,
+      chunkCount: 1,
+      blobCount: 0,
+      durationMs: 1
+    }
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("index/time.json", JSON.stringify([]));
+  zip.file("index/req.json", JSON.stringify([{ reqId: "R-privacy", eventIds: ["E-privacy-1"] }]));
+  zip.file("index/inv.json", JSON.stringify([]));
+  zip.file("events/chunk-privacy.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
 
   await writeIntegrityManifest(zip);
 

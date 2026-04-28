@@ -114,6 +114,36 @@ export type PlayerArchive = {
   integrity: HashesManifest;
 };
 
+/** Explainable privacy posture for export/share preflight review. */
+export type PrivacyProtectionReport = {
+  encrypted: boolean;
+  redaction: {
+    hashSensitiveValues: boolean;
+    headers: string[];
+    cookieNames: string[];
+    bodyPatterns: string[];
+    blockedSelectors: string[];
+    strategy: string[];
+  };
+  detected: {
+    redactedMarkers: number;
+    hashedSensitiveValues: number;
+    sensitiveKeyMentions: number;
+  };
+};
+
+/** Bounded sensitive-data preview for export/share review before publishing an archive. */
+export type SensitiveDataPreview = {
+  totalMatches: number;
+  samples: Array<{
+    eventId: string;
+    type: WebBlackboxEventType;
+    mono: number;
+    reason: "redacted-marker" | "hashed-value" | "sensitive-pattern";
+    snippet: string;
+  }>;
+};
+
 /** Normalized request waterfall entry. */
 export type NetworkWaterfallEntry = {
   reqId: string;
@@ -827,6 +857,57 @@ export class WebBlackboxPlayer {
     }
 
     return derived;
+  }
+
+  /** Builds a privacy/export preflight report that explains configured redaction and detected evidence. */
+  public getPrivacyProtectionReport(range?: PlayerRange): PrivacyProtectionReport {
+    const profile = this.archive.manifest.redactionProfile;
+    const events = this.query({ range });
+    const counters = countPrivacySignals(events, profile.redactBodyPatterns);
+
+    return {
+      encrypted: Boolean(this.archive.manifest.encryption),
+      redaction: {
+        hashSensitiveValues: profile.hashSensitiveValues,
+        headers: [...profile.redactHeaders].sort(),
+        cookieNames: [...profile.redactCookieNames].sort(),
+        bodyPatterns: [...profile.redactBodyPatterns].sort(),
+        blockedSelectors: [...profile.blockedSelectors].sort(),
+        strategy: describeRedactionStrategy(profile)
+      },
+      detected: counters
+    };
+  }
+
+  /** Returns bounded redaction evidence samples so users can review sensitive data before export/share. */
+  public getSensitiveDataPreview(
+    options: {
+      range?: PlayerRange;
+      limit?: number;
+    } = {}
+  ): SensitiveDataPreview {
+    const limit = Math.max(1, options.limit ?? 25);
+    const patterns = this.archive.manifest.redactionProfile.redactBodyPatterns;
+    const samples: SensitiveDataPreview["samples"] = [];
+    let totalMatches = 0;
+
+    for (const event of this.query({ range: options.range })) {
+      const matches = collectSensitivePreviewMatches(event, patterns);
+      totalMatches += matches.length;
+
+      for (const match of matches) {
+        if (samples.length >= limit) {
+          continue;
+        }
+
+        samples.push(match);
+      }
+    }
+
+    return {
+      totalMatches,
+      samples
+    };
   }
 
   /** Builds per-action timeline rows with related requests/errors/screenshots. */
@@ -2483,6 +2564,109 @@ function asNumber(value: unknown): number | undefined {
   }
 
   return undefined;
+}
+
+function describeRedactionStrategy(profile: ExportManifest["redactionProfile"]): string[] {
+  const strategy = [
+    `Redacts ${profile.redactHeaders.length} sensitive HTTP header names before archive export.`,
+    `Masks ${profile.redactCookieNames.length} configured cookie names in cookie headers and snapshots.`,
+    `Scans payload keys/text for ${profile.redactBodyPatterns.length} sensitive body patterns.`,
+    `Blocks ${profile.blockedSelectors.length} configured DOM selectors from captured text/value payloads.`
+  ];
+
+  strategy.push(
+    profile.hashSensitiveValues
+      ? "Hashes sensitive string values so correlation remains possible without exposing raw secrets."
+      : "Replaces sensitive values with fixed redaction markers."
+  );
+
+  return strategy;
+}
+
+function countPrivacySignals(
+  events: WebBlackboxEvent[],
+  sensitivePatterns: string[]
+): PrivacyProtectionReport["detected"] {
+  let redactedMarkers = 0;
+  let hashedSensitiveValues = 0;
+  let sensitiveKeyMentions = 0;
+  const normalizedPatterns = sensitivePatterns
+    .map((pattern) => pattern.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const event of events) {
+    const serialized = safeStringify(event.data);
+    redactedMarkers += countMatches(serialized, /\[(?:REDACTED|redacted(?:-[a-z]+)?)\]/g);
+    hashedSensitiveValues += countMatches(serialized, /\b[a-f0-9]{64}\b/g);
+    const lowered = serialized.toLowerCase();
+
+    for (const pattern of normalizedPatterns) {
+      if (lowered.includes(pattern)) {
+        sensitiveKeyMentions += 1;
+      }
+    }
+  }
+
+  return {
+    redactedMarkers,
+    hashedSensitiveValues,
+    sensitiveKeyMentions
+  };
+}
+
+function countMatches(value: string, pattern: RegExp): number {
+  return value.match(pattern)?.length ?? 0;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+function collectSensitivePreviewMatches(
+  event: WebBlackboxEvent,
+  sensitivePatterns: string[]
+): SensitiveDataPreview["samples"] {
+  const serialized = safeStringify(event.data);
+  const matches: SensitiveDataPreview["samples"] = [];
+  const addMatch = (reason: SensitiveDataPreview["samples"][number]["reason"], snippet: string) => {
+    matches.push({
+      eventId: event.id,
+      type: event.type,
+      mono: event.mono,
+      reason,
+      snippet: compactSensitiveSnippet(snippet)
+    });
+  };
+
+  for (const match of serialized.matchAll(/\[(?:REDACTED|redacted(?:-[a-z]+)?)\]/g)) {
+    addMatch("redacted-marker", match[0]);
+  }
+
+  for (const match of serialized.matchAll(/\b[a-f0-9]{64}\b/g)) {
+    addMatch("hashed-value", match[0]);
+  }
+
+  const lowered = serialized.toLowerCase();
+  for (const pattern of sensitivePatterns) {
+    const normalized = pattern.trim().toLowerCase();
+    if (normalized && lowered.includes(normalized)) {
+      addMatch("sensitive-pattern", normalized);
+    }
+  }
+
+  return matches;
+}
+
+function compactSensitiveSnippet(value: string): string {
+  if (/^[a-f0-9]{64}$/i.test(value)) {
+    return `${value.slice(0, 8)}…${value.slice(-6)}`;
+  }
+
+  return value.length <= 80 ? value : `${value.slice(0, 77)}...`;
 }
 
 async function resolveArchiveReadKey(

@@ -57,6 +57,21 @@ describe("protocol", () => {
     expect(result.success).toBe(true);
   });
 
+  it("ships product-safe redaction defaults", () => {
+    expect(DEFAULT_RECORDER_CONFIG.redaction.redactHeaders).toEqual(
+      expect.arrayContaining(["authorization", "x-api-key", "x-csrf-token"])
+    );
+    expect(DEFAULT_RECORDER_CONFIG.redaction.redactCookieNames).toEqual(
+      expect.arrayContaining(["jwt", "refresh_token", "csrf"])
+    );
+    expect(DEFAULT_RECORDER_CONFIG.redaction.redactBodyPatterns).toEqual(
+      expect.arrayContaining(["credential", "private_key", "api_key"])
+    );
+    expect(DEFAULT_RECORDER_CONFIG.redaction.blockedSelectors).toEqual(
+      expect.arrayContaining(["[data-webblackbox-redact]", "input[autocomplete='cc-number']"])
+    );
+  });
+
   it("parses export manifest schema", () => {
     const result = exportManifestSchema.safeParse({
       protocolVersion: 1,
