@@ -1,7 +1,7 @@
 {
   "name": "@webblackbox/protocol",
   "description": "Shared event types, schemas, IDs, and configuration defaults for the WebBlackbox ecosystem.",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

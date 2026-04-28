@@ -1,5 +1,16 @@
 # @webblackbox/player
 
+## 0.4.4
+
+### Patch Changes
+
+- Fixed playback timelines for archives that mix monotonic-time domains, so Play no longer stretches the session range and screenshot/network/action markers stay aligned with the loaded log.
+- Restored visible, clickable progress markers and playhead rendering for screenshots, network requests, errors, and actions.
+- Kept Playwright preview range filtering in the Player's normalized playback-time domain so partial-range scripts do not drop events from mixed-time archives.
+- Updated dependencies
+  - @webblackbox/player-sdk@0.4.4
+  - @webblackbox/protocol@0.4.4
+
 ## 0.4.3
 
 ### Changed

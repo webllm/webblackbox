@@ -1,5 +1,13 @@
 # @webblackbox/recorder
 
+## 0.4.4
+
+### Patch Changes
+
+- No recorder runtime changes shipped in this release. The version bump keeps the recorder package aligned with the Player timeline and marker fixes in the 0.4.4 workspace release.
+- Updated dependencies
+  - @webblackbox/protocol@0.4.4
+
 ## 0.4.3
 
 ### Changed

@@ -1,5 +1,13 @@
 # @webblackbox/cdp-router
 
+## 0.4.4
+
+### Patch Changes
+
+- No CDP router source changes shipped in this release. The version bump keeps the package aligned with the Player timeline and marker fixes in the 0.4.4 workspace release.
+- Updated dependencies
+  - @webblackbox/protocol@0.4.4
+
 ## 0.4.3
 
 ### Changed

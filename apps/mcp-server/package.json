@@ -1,6 +1,6 @@
 {
   "name": "@webblackbox/mcp-server",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "MCP stdio server for inspecting and analyzing WebBlackbox archives.",
   "license": "MIT",
   "type": "module",

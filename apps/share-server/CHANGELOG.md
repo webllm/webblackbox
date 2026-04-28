@@ -1,5 +1,13 @@
 # @webblackbox/share-server
 
+## 0.4.4
+
+### Patch Changes
+
+- No share-server runtime changes shipped in this release. The version bump keeps the share server aligned with the Player timeline and marker fixes in the 0.4.4 workspace release.
+- Updated dependencies
+  - @webblackbox/player-sdk@0.4.4
+
 ## 0.4.3
 
 ### Changed
