@@ -227,7 +227,7 @@ const pendingOffscreenRequests = new Map<
 const offscreenSessionRecovery = new Map<string, Promise<void>>();
 let offscreenRequestSeq = 0;
 let freezeBadgeTimer: ReturnType<typeof setTimeout> | null = null;
-let liteWebRequestCaptureInstalled = false;
+let liteWebRequestCaptureCleanup: (() => void) | null = null;
 
 const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
@@ -334,7 +334,6 @@ const STOP_DRAIN_ACK_TIMEOUT_MS = 3_000;
 
 console.info("[WebBlackbox] service worker booted");
 
-installLiteWebRequestCapture();
 void restoreRuntimeState();
 
 chromeApi?.runtime?.onInstalled.addListener(() => {
@@ -777,6 +776,10 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   sessionsByTab.set(tabId, runtime);
   sessionsBySid.set(sid, runtime);
 
+  if (mode === "lite") {
+    installLiteWebRequestCapture();
+  }
+
   ingestRawEvent({
     source: "system",
     rawType: "config",
@@ -817,6 +820,7 @@ async function stopSession(tabId: number): Promise<void> {
   await flushBufferedPipelineEvents(runtime);
   await teardownCaptureInstrumentation(runtime);
   sessionsByTab.delete(runtime.tabId);
+  uninstallLiteWebRequestCaptureIfUnused();
   runtime.stoppedAt = Date.now();
   scheduleStoppedRuntimeCleanup(runtime);
 
@@ -3058,13 +3062,19 @@ async function ensureInjectedHooks(tabId: number): Promise<void> {
 }
 
 function installLiteWebRequestCapture(): void {
-  if (!chromeApi?.webRequest || liteWebRequestCaptureInstalled) {
+  if (!chromeApi?.webRequest || liteWebRequestCaptureCleanup) {
     return;
   }
 
   const filter = { urls: ["<all_urls>"] };
-
-  chromeApi.webRequest.onBeforeRequest.addListener((details) => {
+  const onBeforeRequest = (details: {
+    requestId: string;
+    tabId: number;
+    frameId?: number;
+    method?: string;
+    url: string;
+    timeStamp?: number;
+  }) => {
     const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
 
     if (!runtime) {
@@ -3094,9 +3104,18 @@ function installLiteWebRequestCapture(): void {
         }
       )
     );
-  }, filter);
+  };
 
-  chromeApi.webRequest.onCompleted.addListener((details) => {
+  const onCompleted = (details: {
+    requestId: string;
+    tabId: number;
+    frameId?: number;
+    method?: string;
+    url: string;
+    statusCode?: number;
+    statusLine?: string;
+    timeStamp?: number;
+  }) => {
     const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
 
     if (!runtime) {
@@ -3129,9 +3148,17 @@ function installLiteWebRequestCapture(): void {
     );
 
     runtime.requestMeta.delete(details.requestId);
-  }, filter);
+  };
 
-  chromeApi.webRequest.onErrorOccurred.addListener((details) => {
+  const onErrorOccurred = (details: {
+    requestId: string;
+    tabId: number;
+    frameId?: number;
+    method?: string;
+    url: string;
+    error?: string;
+    timeStamp?: number;
+  }) => {
     const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
 
     if (!runtime) {
@@ -3163,9 +3190,36 @@ function installLiteWebRequestCapture(): void {
     );
 
     runtime.requestMeta.delete(details.requestId);
-  }, filter);
+  };
 
-  liteWebRequestCaptureInstalled = true;
+  chromeApi.webRequest.onBeforeRequest.addListener(onBeforeRequest, filter);
+  chromeApi.webRequest.onCompleted.addListener(onCompleted, filter);
+  chromeApi.webRequest.onErrorOccurred.addListener(onErrorOccurred, filter);
+
+  liteWebRequestCaptureCleanup = () => {
+    chromeApi.webRequest?.onBeforeRequest.removeListener(onBeforeRequest);
+    chromeApi.webRequest?.onCompleted.removeListener(onCompleted);
+    chromeApi.webRequest?.onErrorOccurred.removeListener(onErrorOccurred);
+    liteWebRequestCaptureCleanup = null;
+  };
+}
+
+function uninstallLiteWebRequestCaptureIfUnused(): void {
+  if (!liteWebRequestCaptureCleanup || hasActiveLiteRuntime()) {
+    return;
+  }
+
+  liteWebRequestCaptureCleanup();
+}
+
+function hasActiveLiteRuntime(): boolean {
+  for (const runtime of sessionsByTab.values()) {
+    if (runtime.mode === "lite" && !runtime.stopping && !runtime.stoppedAt) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function resolveLiteRuntimeForWebRequest(tabId: number): SessionRuntime | undefined {

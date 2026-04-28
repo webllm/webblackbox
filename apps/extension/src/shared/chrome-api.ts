@@ -115,6 +115,16 @@ export type ChromeApi = {
         }) => void,
         filter: { urls: string[] }
       ): void;
+      removeListener(
+        callback: (details: {
+          requestId: string;
+          tabId: number;
+          frameId?: number;
+          method?: string;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
     };
     onCompleted: {
       addListener(
@@ -130,6 +140,18 @@ export type ChromeApi = {
         }) => void,
         filter: { urls: string[] }
       ): void;
+      removeListener(
+        callback: (details: {
+          requestId: string;
+          tabId: number;
+          frameId?: number;
+          method?: string;
+          url: string;
+          statusCode?: number;
+          statusLine?: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
     };
     onErrorOccurred: {
       addListener(
@@ -143,6 +165,17 @@ export type ChromeApi = {
           timeStamp?: number;
         }) => void,
         filter: { urls: string[] }
+      ): void;
+      removeListener(
+        callback: (details: {
+          requestId: string;
+          tabId: number;
+          frameId?: number;
+          method?: string;
+          url: string;
+          error?: string;
+          timeStamp?: number;
+        }) => void
       ): void;
     };
   };
