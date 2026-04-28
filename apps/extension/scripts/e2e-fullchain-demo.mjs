@@ -29,7 +29,10 @@ const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ??
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
-const usePopupUiActions = (process.env.WB_E2E_USE_POPUP_UI ?? "1") !== "0";
+const usePopupUiActions =
+  process.env.WB_E2E_USE_POPUP_UI === undefined
+    ? !headless
+    : process.env.WB_E2E_USE_POPUP_UI !== "0";
 const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "";
 const realWorldScenario = process.env.WB_E2E_REALWORLD_SCENARIO ?? "";
 const realWorldLongRecordingMs = Number(process.env.WB_E2E_REALWORLD_LONG_MS ?? "2500");
@@ -106,6 +109,7 @@ async function main() {
 
   const version = chrome.version;
   console.log(`Chrome: ${version.Browser}`);
+  assertCommandLineExtensionLoadingSupported(chromeBinary, version.Browser);
 
   const browserWsUrl =
     typeof version.webSocketDebuggerUrl === "string" ? version.webSocketDebuggerUrl : null;
@@ -148,15 +152,15 @@ async function main() {
 
   let popupTarget = null;
   let warmupPopupTargetId = null;
+  const swExceptions = [];
 
-  if (!swTarget) {
+  if (!swTarget && usePopupUiActions) {
     popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
     state.openedTargetIds.push(popupTarget.id);
     warmupPopupTargetId = popupTarget.id;
     swTarget = await waitForExtensionServiceWorker(baseUrl, 25_000, extensionId).catch(() => null);
   }
 
-  const swExceptions = [];
   if (swTarget?.webSocketDebuggerUrl) {
     const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
     await swClient.connect();
@@ -173,30 +177,33 @@ async function main() {
     console.warn("Service worker target is unavailable; continuing without SW runtime hook.");
   }
 
-  if (!popupTarget) {
-    popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
-    state.openedTargetIds.push(popupTarget.id);
-  } else if (warmupPopupTargetId) {
-    await closeTarget(baseUrl, warmupPopupTargetId);
-    state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
-    popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
-    state.openedTargetIds.push(popupTarget.id);
-  }
-
   const demoClient = new CdpClient(demoTarget.webSocketDebuggerUrl);
-  const popupClient = new CdpClient(popupTarget.webSocketDebuggerUrl);
+  const demoContexts = createRuntimeContextTracker(demoClient);
   await demoClient.connect();
-  await popupClient.connect();
   await demoClient.send("Runtime.enable");
-  await popupClient.send("Runtime.enable");
   await demoClient.send("DOM.enable");
-  await popupClient.send("DOM.enable");
   state.demoClient = demoClient;
-  state.popupClient = popupClient;
 
   let usePopupUiActionsEffective = usePopupUiActions;
+  let control = null;
 
   if (usePopupUiActionsEffective) {
+    if (!popupTarget) {
+      popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+      state.openedTargetIds.push(popupTarget.id);
+    } else if (warmupPopupTargetId) {
+      await closeTarget(baseUrl, warmupPopupTargetId);
+      state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
+      popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+      state.openedTargetIds.push(popupTarget.id);
+    }
+
+    const popupClient = new CdpClient(popupTarget.webSocketDebuggerUrl);
+    await popupClient.connect();
+    await popupClient.send("Runtime.enable");
+    await popupClient.send("DOM.enable");
+    state.popupClient = popupClient;
+
     const popupUiReady = await waitForPopupUiReady(popupClient, 20_000).catch(() => null);
 
     if (!popupUiReady) {
@@ -211,8 +218,57 @@ async function main() {
         throw new Error("Popup UI/runtime is not ready");
       }
     }
+
+    control = {
+      kind: "popup",
+      client: popupClient,
+      useUiActions: usePopupUiActionsEffective
+    };
   } else {
-    await waitForPopupRuntimeReady(popupClient, 20_000);
+    let runtimeContext = await waitForExtensionRuntimeContext(
+      demoClient,
+      demoContexts,
+      extensionId,
+      15_000
+    ).catch(() => null);
+
+    if (!runtimeContext) {
+      await demoClient.send("Page.reload", { ignoreCache: true }).catch(() => undefined);
+      runtimeContext = await waitForExtensionRuntimeContext(
+        demoClient,
+        demoContexts,
+        extensionId,
+        20_000
+      );
+    }
+
+    control = {
+      kind: "content-runtime",
+      client: demoClient,
+      contextId: runtimeContext.contextId,
+      contextTracker: demoContexts,
+      extensionId
+    };
+
+    if (!state.swClient) {
+      swTarget = await waitForExtensionServiceWorker(baseUrl, 10_000, extensionId).catch(
+        () => null
+      );
+
+      if (swTarget?.webSocketDebuggerUrl) {
+        const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
+        await swClient.connect();
+        await swClient.send("Runtime.enable");
+        state.swClient = swClient;
+
+        swClient.on("Runtime.exceptionThrown", (params) => {
+          swExceptions.push({
+            text: params?.exceptionDetails?.text ?? "unknown",
+            line: params?.exceptionDetails?.lineNumber ?? null
+          });
+        });
+      }
+    }
   }
 
   const demoExceptions = [];
@@ -225,17 +281,13 @@ async function main() {
 
   await sleep(1_200);
 
-  const start = await startSessionFromPopup(
-    popupClient,
-    captureMode,
-    demoUrl,
-    usePopupUiActionsEffective
-  );
+  const start = await startSessionFromControl(control, captureMode, demoUrl);
   assert(start?.ok === true, `Failed to start ${captureMode} mode`, start);
-  const demoTab = usePopupUiActionsEffective
-    ? await findTabByUrlFromPopup(popupClient, demoUrl)
-    : null;
-  if (usePopupUiActionsEffective) {
+  const demoTab =
+    control.kind === "popup" && control.useUiActions
+      ? await findTabByUrlFromPopup(control.client, demoUrl)
+      : null;
+  if (control.kind === "popup" && control.useUiActions) {
     assert(typeof demoTab?.id === "number", "Demo tab is not discoverable from popup", {
       demoUrl,
       demoTab,
@@ -262,7 +314,7 @@ async function main() {
     );
   }
 
-  const activeSessions = await readRuntimeSessions(popupClient);
+  const activeSessions = await readRuntimeSessions(control);
   assert(
     Array.isArray(activeSessions) && activeSessions.length === 1,
     "Expected exactly one active runtime session",
@@ -286,7 +338,7 @@ async function main() {
   const realWorldResult = await runRealWorldScenarioAddons({
     scenario: realWorldScenario,
     demoClient,
-    popupClient,
+    control,
     baseUrl,
     demoUrl,
     browserClient: state.browserClient,
@@ -296,7 +348,7 @@ async function main() {
 
   await sleep(1_600);
 
-  const stop = await stopActiveSessionFromPopup(popupClient, usePopupUiActionsEffective);
+  const stop = await stopActiveSessionFromControl(control);
   assert(stop?.ok === true, `Failed to stop ${captureMode} mode`, stop);
 
   const indicatorGone = await waitForIndicatorGone(demoClient, 15_000);
@@ -304,7 +356,7 @@ async function main() {
 
   const sessionsAfterStop = await waitFor(
     async () => {
-      const rows = await readRuntimeSessions(popupClient);
+      const rows = await readRuntimeSessions(control);
       return Array.isArray(rows) && rows.length === 0 ? rows : null;
     },
     10_000,
@@ -320,26 +372,22 @@ async function main() {
   );
 
   const exportStartedAtMs = Date.now();
-  const exportStatusBefore = usePopupUiActionsEffective
-    ? await readExportStatusLine(popupClient)
-    : null;
-  const exportTriggered = await exportSessionFromPopup(
-    popupClient,
-    sid,
-    usePopupUiActionsEffective
-  );
+  const exportStatusBefore =
+    control.kind === "popup" && control.useUiActions
+      ? await readExportStatusLine(control.client)
+      : null;
+  const exportTriggered = await exportSessionFromControl(control, sid);
   assert(exportTriggered?.ok === true, "Failed to trigger export from popup", exportTriggered);
-  const exportStatus = usePopupUiActionsEffective
-    ? await waitForExportStatus(popupClient, exportStatusBefore, 35_000)
-    : { ok: true, text: "Export triggered (runtime fallback)." };
+  const exportStatus =
+    control.kind === "popup" && control.useUiActions
+      ? await waitForExportStatus(control.client, exportStatusBefore, 35_000)
+      : { ok: true, text: "Export triggered (runtime fallback)." };
   assert(exportStatus?.ok, "Export status indicates failure", exportStatus);
 
-  const downloadRecord = await waitForExportedDownload(
-    popupClient,
-    sid,
-    exportStartedAtMs,
-    downloadTimeoutMs
-  );
+  const downloadRecord =
+    control.kind === "popup"
+      ? await waitForExportedDownload(control.client, sid, exportStartedAtMs, downloadTimeoutMs)
+      : await waitForExportedArchiveFile(sid, exportStartedAtMs, downloadTimeoutMs);
   assert(typeof downloadRecord?.filename === "string", "Download record missing filename", {
     downloadRecord
   });
@@ -453,14 +501,17 @@ async function main() {
   }
 
   const restartResult = realWorldScenario.includes("restart")
-    ? await verifyExtensionRestart(popupClient, baseUrl, extensionId)
+    ? await verifyExtensionRestart(control, baseUrl, extensionId)
     : { ok: true, skipped: true };
   assert(restartResult.ok, "Extension restart verification failed", restartResult);
 
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
   console.log("Capture mode:", captureMode);
-  console.log("Popup actions:", usePopupUiActionsEffective ? "ui" : "runtime");
+  console.log(
+    "Popup actions:",
+    control.kind === "popup" ? (control.useUiActions ? "ui" : "runtime") : control.kind
+  );
   console.log("Reload after start:", reloadAfterStart);
   console.log("Session:", sid);
   console.log("Export:", exportStatus.text);
@@ -511,6 +562,24 @@ async function resolveChromeBinary(candidates) {
   throw new Error(
     "Chrome binary not found. Set WB_E2E_CHROME_BIN or install Chrome for Testing/Google Chrome."
   );
+}
+
+function assertCommandLineExtensionLoadingSupported(binary, browserVersion) {
+  const major = Number(/^Chrome\/(\d+)/u.exec(browserVersion ?? "")?.[1] ?? "0");
+  const normalizedBinary = String(binary).replaceAll("\\", "/").toLowerCase();
+  const isChromeForTesting = normalizedBinary.includes("chrome for testing");
+  const isChromium = normalizedBinary.includes("chromium");
+  const isMacBrandedChrome = normalizedBinary.includes("/applications/google chrome.app/");
+
+  if (major >= 137 && isMacBrandedChrome && !isChromeForTesting && !isChromium) {
+    throw new Error(
+      [
+        "This E2E requires a browser that still supports command-line unpacked extensions.",
+        "Official Chrome branded builds block --load-extension starting with Chrome 137.",
+        "Set WB_E2E_CHROME_BIN to Chrome for Testing or Chromium."
+      ].join(" ")
+    );
+  }
 }
 
 async function resolveChromeCandidate(candidate) {
@@ -1497,6 +1566,187 @@ async function closeTarget(urlBase, targetId) {
   }
 }
 
+function createRuntimeContextTracker(client) {
+  const contexts = new Map();
+
+  client.on("Runtime.executionContextCreated", (params) => {
+    const context = params?.context;
+
+    if (context && typeof context.id === "number") {
+      contexts.set(context.id, context);
+    }
+  });
+
+  client.on("Runtime.executionContextDestroyed", (params) => {
+    const id = params?.executionContextId;
+
+    if (typeof id === "number") {
+      contexts.delete(id);
+    }
+  });
+
+  client.on("Runtime.executionContextsCleared", () => {
+    contexts.clear();
+  });
+
+  return {
+    list() {
+      return [...contexts.values()];
+    }
+  };
+}
+
+async function waitForExtensionRuntimeContext(pageClient, tracker, extensionId, timeoutMs) {
+  let lastSnapshot = null;
+
+  try {
+    return await waitFor(
+      async () => {
+        const contexts = tracker.list().filter((context) => {
+          const origin = typeof context.origin === "string" ? context.origin : "";
+          const name = typeof context.name === "string" ? context.name : "";
+          const auxData =
+            context.auxData && typeof context.auxData === "object" ? context.auxData : {};
+          const type = typeof auxData.type === "string" ? auxData.type : "";
+
+          return (
+            type === "isolated" ||
+            origin.startsWith(`chrome-extension://${extensionId}`) ||
+            name.includes(extensionId) ||
+            name.includes("WebBlackbox")
+          );
+        });
+
+        for (const context of contexts) {
+          const snapshot = await pageClient
+            .evaluate(
+              `
+                (() => {
+                  const chromeApi =
+                    typeof chrome === "object" && chrome !== null ? chrome : null;
+                  const runtime = chromeApi?.runtime ?? null;
+                  return {
+                    contextId: ${JSON.stringify(context.id)},
+                    contextName: ${JSON.stringify(context.name ?? "")},
+                    contextOrigin: ${JSON.stringify(context.origin ?? "")},
+                    url: location.href,
+                    runtimeId:
+                      runtime && typeof runtime.id === "string" ? runtime.id : null,
+                    hasRuntimeMessaging:
+                      runtime !== null && typeof runtime.sendMessage === "function",
+                    hasStorageLocal:
+                      typeof chromeApi?.storage?.local?.get === "function"
+                  };
+                })()
+              `,
+              { contextId: context.id }
+            )
+            .catch((error) => ({
+              contextId: context.id,
+              error: error instanceof Error ? error.message : String(error)
+            }));
+
+          lastSnapshot = snapshot;
+
+          if (
+            snapshot?.hasRuntimeMessaging &&
+            (snapshot.runtimeId === extensionId || typeof snapshot.runtimeId === "string")
+          ) {
+            return {
+              contextId: context.id,
+              snapshot
+            };
+          }
+        }
+
+        return null;
+      },
+      timeoutMs,
+      200,
+      "Extension runtime context not ready"
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const contextSummary = tracker
+      .list()
+      .map((context) => ({
+        id: context.id,
+        name: context.name,
+        origin: context.origin,
+        auxData: context.auxData
+      }))
+      .slice(0, 12);
+    throw new Error(
+      `${message}; lastSnapshot=${JSON.stringify(lastSnapshot)}; contexts=${JSON.stringify(
+        contextSummary
+      )}`
+    );
+  }
+}
+
+async function evaluateControl(control, expression) {
+  try {
+    return await control.client.evaluate(
+      expression,
+      typeof control.contextId === "number" ? { contextId: control.contextId } : undefined
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const canRefreshContext =
+      control.kind === "content-runtime" &&
+      control.contextTracker &&
+      control.extensionId &&
+      /Cannot find context|Execution context|Cannot find object with id/u.test(message);
+
+    if (!canRefreshContext) {
+      throw error;
+    }
+
+    const runtimeContext = await waitForExtensionRuntimeContext(
+      control.client,
+      control.contextTracker,
+      control.extensionId,
+      10_000
+    );
+    control.contextId = runtimeContext.contextId;
+
+    return control.client.evaluate(expression, { contextId: control.contextId });
+  }
+}
+
+async function startSessionFromControl(control, mode, expectedUrl) {
+  if (control.kind === "popup") {
+    return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions);
+  }
+
+  return evaluateControl(
+    control,
+    `
+      (async () => {
+        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+        if (typeof chromeApi?.runtime?.sendMessage !== 'function') {
+          return { ok: false, reason: 'runtime-api-unavailable' };
+        }
+
+        const response = await chromeApi.runtime.sendMessage({
+          kind: 'ui.start',
+          mode: ${JSON.stringify(mode)}
+        });
+
+        if (response && typeof response === 'object' && response.ok === false) {
+          return {
+            ok: false,
+            reason: 'runtime-start-rejected',
+            response
+          };
+        }
+
+        return { ok: true, mode: ${JSON.stringify(mode)}, via: 'content-runtime' };
+      })()
+    `
+  );
+}
+
 async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiActions) {
   if (useUiActions) {
     const expression = `
@@ -1569,6 +1819,47 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
   return popupClient.evaluate(expression);
 }
 
+async function stopActiveSessionFromControl(control) {
+  if (control.kind === "popup") {
+    return stopActiveSessionFromPopup(control.client, control.useUiActions);
+  }
+
+  return evaluateControl(
+    control,
+    `
+      (async () => {
+        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+        if (typeof chromeApi?.runtime?.sendMessage !== 'function') {
+          return { ok: false, reason: 'runtime-api-unavailable' };
+        }
+
+        const store =
+          typeof chromeApi?.storage?.local?.get === 'function'
+            ? await chromeApi.storage.local.get('webblackbox.runtime.sessions')
+            : {};
+        const rows = store['webblackbox.runtime.sessions'];
+        const active = Array.isArray(rows) ? rows[0] : undefined;
+
+        if (!active || typeof active.tabId !== 'number') {
+          return { ok: false, reason: 'no-active-session', rows };
+        }
+
+        const response = await chromeApi.runtime.sendMessage({
+          kind: 'ui.stop',
+          tabId: active.tabId
+        });
+
+        if (response && typeof response === 'object' && response.ok === false) {
+          return { ok: false, reason: 'runtime-stop-rejected', response };
+        }
+
+        return { ok: true, tabId: active.tabId, via: 'content-runtime' };
+      })()
+    `
+  );
+}
+
 async function stopActiveSessionFromPopup(popupClient, useUiActions) {
   if (useUiActions) {
     const expression = `
@@ -1607,6 +1898,37 @@ async function stopActiveSessionFromPopup(popupClient, useUiActions) {
   `;
 
   return popupClient.evaluate(expression);
+}
+
+async function exportSessionFromControl(control, sid) {
+  if (control.kind === "popup") {
+    return exportSessionFromPopup(control.client, sid, control.useUiActions);
+  }
+
+  return evaluateControl(
+    control,
+    `
+      (async () => {
+        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+        if (typeof chromeApi?.runtime?.sendMessage !== 'function') {
+          return { ok: false, reason: 'runtime-api-unavailable' };
+        }
+
+        const response = await chromeApi.runtime.sendMessage({
+          kind: 'ui.export',
+          sid: ${JSON.stringify(sid)},
+          saveAs: false
+        });
+
+        if (response && typeof response === 'object' && response.ok === false) {
+          return { ok: false, reason: 'runtime-export-rejected', response };
+        }
+
+        return { ok: true, sid: ${JSON.stringify(sid)}, via: 'content-runtime' };
+      })()
+    `
+  );
 }
 
 async function exportSessionFromPopup(popupClient, sid, useUiActions) {
@@ -1674,16 +1996,22 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
   return popupClient.evaluate(expression);
 }
 
-async function readRuntimeSessions(popupClient) {
+async function readRuntimeSessions(control) {
   const expression = `
     (async () => {
-      const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
+      const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+      if (typeof chromeApi?.storage?.local?.get !== 'function') {
+        return [];
+      }
+
+      const store = await chromeApi.storage.local.get('webblackbox.runtime.sessions');
       const rows = store['webblackbox.runtime.sessions'];
       return Array.isArray(rows) ? rows : [];
     })()
   `;
 
-  return popupClient.evaluate(expression);
+  return evaluateControl(control, expression);
 }
 
 async function findTabByUrlFromPopup(popupClient, expectedUrl) {
@@ -1823,6 +2151,59 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
   );
 }
 
+async function waitForExportedArchiveFile(sid, startedAtMs, timeoutMs) {
+  return waitFor(
+    async () => {
+      const directories = [resolve(downloadDir, "webblackbox"), downloadDir];
+      const matches = [];
+
+      for (const directory of directories) {
+        let entries;
+
+        try {
+          entries = await readdir(directory, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+
+        for (const entry of entries) {
+          const isArchive = entry.name.endsWith(".webblackbox") || entry.name.endsWith(".zip");
+
+          if (!entry.isFile() || !isArchive) {
+            continue;
+          }
+
+          const filename = resolve(directory, entry.name);
+          const info = await stat(filename).catch(() => null);
+
+          if (!info || info.size <= 0 || info.mtimeMs < startedAtMs - 5_000) {
+            continue;
+          }
+
+          matches.push({
+            filename,
+            state: "complete",
+            bytesReceived: info.size,
+            totalBytes: info.size,
+            url: null,
+            mtimeMs: info.mtimeMs,
+            sidMatch: entry.name.includes(sid)
+          });
+        }
+      }
+
+      matches.sort(
+        (left, right) =>
+          Number(right.sidMatch) - Number(left.sidMatch) || right.mtimeMs - left.mtimeMs
+      );
+      return matches[0] ?? null;
+    },
+    timeoutMs,
+    400,
+    "Exported archive file not found"
+  );
+}
+
 async function runDemoScenario(demoClient) {
   const expression = `
     (async () => {
@@ -1847,7 +2228,7 @@ async function runDemoScenario(demoClient) {
 async function runRealWorldScenarioAddons({
   scenario,
   demoClient,
-  popupClient,
+  control,
   baseUrl,
   demoUrl,
   browserClient
@@ -1925,19 +2306,23 @@ async function runRealWorldScenarioAddons({
     })()
   `);
 
-  const permissionResult = await popupClient.evaluate(`
+  const permissionResult = await evaluateControl(
+    control,
+    `
     (async () => {
       try {
-        if (!chrome?.permissions?.request) {
+        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+        if (!chromeApi?.permissions?.request) {
           return { ok: true, denied: true, reason: 'permissions-api-unavailable' };
         }
 
         const granted = await new Promise((resolve) => {
-          chrome.permissions.request({ permissions: ['bookmarks'] }, (value) => {
+          chromeApi.permissions.request({ permissions: ['bookmarks'] }, (value) => {
             resolve(Boolean(value));
           });
         });
-        const lastError = chrome.runtime.lastError?.message ?? null;
+        const lastError = chromeApi.runtime.lastError?.message ?? null;
         return { ok: true, denied: !granted, granted, lastError };
       } catch (error) {
         return {
@@ -1947,7 +2332,8 @@ async function runRealWorldScenarioAddons({
         };
       }
     })()
-  `);
+  `
+  );
 
   let multiTabResult = { ok: true, skipped: true };
   if (scenario.includes("multitab") || scenario.includes("multitarget")) {
@@ -1979,23 +2365,61 @@ async function runRealWorldScenarioAddons({
   };
 }
 
-async function verifyExtensionRestart(popupClient, urlBase, extensionId) {
-  const reload = await popupClient
-    .evaluate(
-      `
-    (() => {
-      if (!chrome?.runtime?.reload) {
-        return { ok: false, reason: 'runtime-reload-unavailable' };
+async function verifyExtensionRestart(control, urlBase, extensionId) {
+  let reload = await evaluateControl(
+    control,
+    `
+      (() => {
+        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+        if (typeof chromeApi?.runtime?.reload !== 'function') {
+          return { ok: false, reason: 'runtime-reload-unavailable' };
+        }
+
+        chromeApi.runtime.reload();
+        return { ok: true, via: ${JSON.stringify(control.kind)} };
+      })()
+    `
+  ).catch((error) => ({
+    ok: false,
+    reason: error instanceof Error ? error.message : String(error)
+  }));
+
+  if (!reload.ok && control.kind !== "popup") {
+    const swTarget = await waitForExtensionServiceWorker(urlBase, 10_000, extensionId).catch(
+      () => null
+    );
+
+    if (swTarget?.webSocketDebuggerUrl) {
+      const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
+
+      try {
+        await swClient.connect();
+        await swClient.send("Runtime.enable");
+        reload = await swClient
+          .evaluate(
+            `
+              (() => {
+                const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+                if (typeof chromeApi?.runtime?.reload !== 'function') {
+                  return { ok: false, reason: 'service-worker-runtime-reload-unavailable' };
+                }
+
+                chromeApi.runtime.reload();
+                return { ok: true, via: 'service-worker' };
+              })()
+            `
+          )
+          .catch((error) => ({
+            ok: false,
+            reason: error instanceof Error ? error.message : String(error)
+          }));
+      } finally {
+        swClient.close();
       }
-      chrome.runtime.reload();
-      return { ok: true };
-    })()
-  `
-    )
-    .catch((error) => ({
-      ok: false,
-      reason: error instanceof Error ? error.message : String(error)
-    }));
+    }
+  }
 
   if (!reload.ok) {
     return reload;
@@ -2060,41 +2484,63 @@ async function waitForPopupUiReady(popupClient, timeoutMs) {
 }
 
 async function waitForPopupRuntimeReady(popupClient, timeoutMs) {
-  return waitFor(
-    async () => {
-      const snapshot = await popupClient.evaluate(`
-        (() => {
-          const hasRuntimeMessaging =
-            typeof chrome === "object" &&
-            chrome !== null &&
-            typeof chrome.runtime === "object" &&
-            chrome.runtime !== null &&
-            typeof chrome.runtime.id === "string" &&
-            typeof chrome.runtime.sendMessage === "function";
-          const hasTabsQuery =
-            typeof chrome === "object" &&
-            chrome !== null &&
-            typeof chrome.tabs === "object" &&
-            chrome.tabs !== null &&
-            typeof chrome.tabs.query === "function";
+  let lastSnapshot = null;
 
-          return {
-            hasRuntimeMessaging,
-            hasTabsQuery
-          };
-        })()
-      `);
+  try {
+    return await waitFor(
+      async () => {
+        const snapshot = await popupClient.evaluate(`
+          (() => {
+            const hasRuntimeMessaging =
+              typeof chrome === "object" &&
+              chrome !== null &&
+              typeof chrome.runtime === "object" &&
+              chrome.runtime !== null &&
+              typeof chrome.runtime.id === "string" &&
+              typeof chrome.runtime.sendMessage === "function";
+            const hasTabsQuery =
+              typeof chrome === "object" &&
+              chrome !== null &&
+              typeof chrome.tabs === "object" &&
+              chrome.tabs !== null &&
+              typeof chrome.tabs.query === "function";
 
-      if (snapshot?.hasRuntimeMessaging) {
-        return snapshot;
-      }
+            return {
+              url: location.href,
+              title: document.title,
+              bodyText: (document.body?.textContent ?? "").trim().slice(0, 240),
+              readyState: document.readyState,
+              hasChrome: typeof chrome === "object" && chrome !== null,
+              runtimeId:
+                typeof chrome === "object" &&
+                chrome !== null &&
+                typeof chrome.runtime === "object" &&
+                chrome.runtime !== null &&
+                typeof chrome.runtime.id === "string"
+                  ? chrome.runtime.id
+                  : null,
+              hasRuntimeMessaging,
+              hasTabsQuery
+            };
+          })()
+        `);
 
-      return null;
-    },
-    timeoutMs,
-    200,
-    "Popup runtime not ready"
-  );
+        lastSnapshot = snapshot ?? null;
+
+        if (snapshot?.hasRuntimeMessaging) {
+          return snapshot;
+        }
+
+        return null;
+      },
+      timeoutMs,
+      200,
+      "Popup runtime not ready"
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}; lastSnapshot=${JSON.stringify(lastSnapshot)}`);
+  }
 }
 
 async function waitForIndicatorGone(pageClient, timeoutMs) {
@@ -2730,11 +3176,12 @@ class CdpClient {
     });
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, options = undefined) {
     const result = await this.send("Runtime.evaluate", {
       expression,
       awaitPromise: true,
-      returnByValue: true
+      returnByValue: true,
+      ...(options ?? {})
     });
 
     if (result?.exceptionDetails) {

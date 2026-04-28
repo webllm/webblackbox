@@ -8,6 +8,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const fullchainScript = resolve(root, "e2e-fullchain-demo.mjs");
 
 const quick = (process.env.WB_E2E_REALWORLD_QUICK ?? "0") === "1";
+const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const basePort = Number(process.env.WB_E2E_REALWORLD_BASE_PORT ?? "9250");
 
 const scenarios = [
@@ -24,14 +25,15 @@ const scenarios = [
     }
   },
   {
-    name: "lite-popup-download-upload-large-response",
+    name: "lite-download-upload-large-response",
     mode: "lite",
-    description:
-      "Lite popup path preserving the existing demo upload/download/export and response-body hover checks.",
+    description: headless
+      ? "Lite runtime path preserving upload/download/export and response-body hover checks in headless Chrome."
+      : "Lite popup path preserving upload/download/export and response-body hover checks.",
     env: {
       WB_E2E_MODE: "lite",
       WB_E2E_RELOAD_AFTER_START: "0",
-      WB_E2E_USE_POPUP_UI: "1",
+      WB_E2E_USE_POPUP_UI: headless ? "0" : "1",
       WB_E2E_REALWORLD_SCENARIO: "upload-download-large-response"
     }
   },
