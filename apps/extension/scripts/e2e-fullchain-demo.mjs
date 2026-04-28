@@ -2320,7 +2320,8 @@ async function runRealWorldScenarioAddons({
   }
 
   const wantsIframeNetwork = scenario.includes("iframe") || scenario.includes("multitarget");
-  const wantsMultiTab = scenario.includes("multitab") || scenario.includes("multitarget");
+  const wantsChildTarget = scenario.includes("multitarget");
+  const wantsMultiTab = scenario.includes("multitab");
   const pageResult = await demoClient.evaluate(`
     (async () => {
       const result = {
@@ -2330,6 +2331,8 @@ async function runRealWorldScenarioAddons({
         markers: [],
         iframe: false,
         iframeNetworkBytes: 0,
+        worker: false,
+        workerNetworkBytes: 0,
         upload: false,
         download: false,
         largeResponseBytes: 0,
@@ -2368,6 +2371,52 @@ async function runRealWorldScenarioAddons({
           const iframeText = iframeResponse ? await iframeResponse.text() : '';
           result.iframeNetworkBytes = iframeText.length;
           mark('iframe network ' + result.iframeNetworkBytes);
+        }
+
+        if (${JSON.stringify(wantsChildTarget)}) {
+          const workerResult = await new Promise((resolve) => {
+            const workerFetchUrl = new URL('/api/large-response?source=worker&bytes=2048', location.href).href;
+            const workerSource = [
+              'self.onmessage = async () => {',
+              '  try {',
+              '    const response = await fetch(' + JSON.stringify(workerFetchUrl) + ');',
+              '    const text = await response.text();',
+              '    self.postMessage({ ok: true, bytes: text.length });',
+              '  } catch (error) {',
+              '    self.postMessage({',
+              '      ok: false,',
+              '      reason: error instanceof Error ? error.message : String(error)',
+              '    });',
+              '  }',
+              '};'
+            ].join('\\n');
+            const blobUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+            const worker = new Worker(blobUrl);
+            const timeout = setTimeout(() => {
+              worker.terminate();
+              URL.revokeObjectURL(blobUrl);
+              resolve({ ok: false, reason: 'worker-timeout' });
+            }, 5000);
+            worker.onmessage = (event) => {
+              clearTimeout(timeout);
+              worker.terminate();
+              URL.revokeObjectURL(blobUrl);
+              resolve(event.data);
+            };
+            worker.onerror = (event) => {
+              clearTimeout(timeout);
+              worker.terminate();
+              URL.revokeObjectURL(blobUrl);
+              resolve({ ok: false, reason: event.message || 'worker-error' });
+            };
+            worker.postMessage({ start: true });
+          });
+          result.worker = workerResult?.ok === true;
+          result.workerNetworkBytes = Number(workerResult?.bytes ?? 0);
+          if (!result.worker) {
+            result.workerReason = workerResult?.reason ?? 'worker-failed';
+          }
+          mark('worker target network ' + result.workerNetworkBytes);
         }
 
         const input = document.createElement('input');
@@ -2461,14 +2510,58 @@ async function runRealWorldScenarioAddons({
   if (wantsMultiTab) {
     const target = await openTarget(baseUrl, `${demoUrl}?realworld-secondary=1`);
     state.openedTargetIds.push(target.id);
-    multiTabResult = {
-      ok: Boolean(target.id),
-      targetId: target.id,
-      url: target.url ?? null
-    };
+    let secondaryClient = null;
+
+    try {
+      secondaryClient = new CdpClient(target.webSocketDebuggerUrl);
+      await secondaryClient.connect();
+      await secondaryClient.send("Runtime.enable");
+      await waitFor(
+        async () => {
+          const loaded = await secondaryClient.evaluate(`
+            (() => ({
+              href: location.href,
+              readyState: document.readyState
+            }))()
+          `);
+
+          return loaded?.href?.includes("realworld-secondary=1") && loaded?.readyState !== "loading"
+            ? loaded
+            : null;
+        },
+        5_000,
+        100,
+        "Secondary target did not finish loading"
+      );
+      const secondaryMarker = await emitPageRealWorldMarker(
+        secondaryClient,
+        "secondary target exercised"
+      );
+
+      multiTabResult = {
+        ok: Boolean(target.id && secondaryMarker),
+        targetId: target.id,
+        url: target.url ?? null,
+        secondaryMarker
+      };
+    } catch (error) {
+      multiTabResult = {
+        ok: false,
+        targetId: target.id,
+        url: target.url ?? null,
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    } finally {
+      if (secondaryClient) {
+        secondaryClient.close();
+      }
+    }
+
     await closeTarget(baseUrl, target.id);
     state.openedTargetIds = state.openedTargetIds.filter((id) => id !== target.id);
-    multiTabMarker = await emitPageRealWorldMarker(demoClient, "multitab target opened");
+    if (multiTabResult.ok) {
+      multiTabMarker = await emitPageRealWorldMarker(demoClient, "primary tab survived multitab");
+    }
   }
 
   const expectedMarkers = [
@@ -2481,12 +2574,17 @@ async function runRealWorldScenarioAddons({
   if (wantsIframeNetwork) {
     expectedUrls.push("/api/large-response?source=iframe");
   }
+  if (wantsChildTarget) {
+    expectedUrls.push("/api/large-response?source=worker");
+  }
 
   return {
     ok:
       pageResult?.ok === true &&
       pageResult.iframe === true &&
       (!wantsIframeNetwork || pageResult.iframeNetworkBytes >= 1024) &&
+      (!wantsChildTarget ||
+        (pageResult.worker === true && pageResult.workerNetworkBytes >= 1024)) &&
       pageResult.upload === true &&
       pageResult.download === true &&
       pageResult.largeResponseBytes >= 1024 &&
