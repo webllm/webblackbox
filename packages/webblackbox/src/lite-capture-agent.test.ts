@@ -129,12 +129,12 @@ function inputTarget(): HTMLInputElement {
   return target;
 }
 
-function movePointer(): void {
+function movePointer(x = 12, y = 18): void {
   document.dispatchEvent(
     new MouseEvent("pointermove", {
       bubbles: true,
-      clientX: 12,
-      clientY: 18
+      clientX: x,
+      clientY: y
     })
   );
 }
@@ -201,6 +201,7 @@ describe("LiteCaptureAgent", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
 
@@ -287,6 +288,44 @@ describe("LiteCaptureAgent", () => {
     clickTarget();
     agent.flush();
     expect(emitBatch).not.toHaveBeenCalled();
+
+    agent.dispose();
+  });
+
+  it("does not install page performance observers in full mode", () => {
+    const observe = vi.fn();
+    const requestAnimationFrame = vi.fn(() => 1);
+    const PerformanceObserverMock = vi.fn(() => ({
+      observe,
+      disconnect: vi.fn()
+    }));
+
+    vi.stubGlobal("PerformanceObserver", PerformanceObserverMock);
+    vi.stubGlobal("requestAnimationFrame", requestAnimationFrame);
+
+    const { agent } = createAgent({ mode: "full" });
+
+    expect(PerformanceObserverMock).not.toHaveBeenCalled();
+    expect(requestAnimationFrame).not.toHaveBeenCalled();
+
+    agent.dispose();
+  });
+
+  it("throttles full-mode pointer tracking", () => {
+    const { agent } = createAgent({ mode: "full" });
+    const state = agent as unknown as {
+      lastPointerState: { x: number; y: number } | null;
+    };
+
+    movePointer(10, 12);
+    expect(state.lastPointerState).toMatchObject({ x: 10, y: 12 });
+
+    movePointer(30, 32);
+    expect(state.lastPointerState).toMatchObject({ x: 10, y: 12 });
+
+    vi.advanceTimersByTime(251);
+    movePointer(40, 42);
+    expect(state.lastPointerState).toMatchObject({ x: 40, y: 42 });
 
     agent.dispose();
   });

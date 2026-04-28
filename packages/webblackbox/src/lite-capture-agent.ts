@@ -26,6 +26,7 @@ const INPUT_PRESSURE_BURST_COUNT = 6;
 const INPUT_PRESSURE_COOLDOWN_MS = 1_800;
 const INPUT_PRESSURE_EDITOR_COOLDOWN_MS = 2_400;
 const INPUT_PRESSURE_MUTATION_SAMPLE_LIMIT = 16;
+const FULL_MODE_POINTER_TRACK_INTERVAL_MS = 250;
 const QUIET_MODE_MUTATION_RECORD_LIMIT = 360;
 const QUIET_MODE_EVENT_BUFFER_LIMIT = 560;
 const QUIET_MODE_COOLDOWN_MS = 3_000;
@@ -160,7 +161,7 @@ export class LiteCaptureAgent {
   private mutationFlushTimer = 0;
   private flushTimer = 0;
   private lastScrollTime = 0;
-  private lastPointerTime = 0;
+  private lastPointerTime = Number.NEGATIVE_INFINITY;
   private screenshotInFlight = false;
   private screenshotInFlightPromise: Promise<void> | null = null;
   private screenshotPendingReason: string | null = null;
@@ -573,12 +574,21 @@ export class LiteCaptureAgent {
       document,
       "pointermove",
       (event: PointerEvent) => {
-        this.markUserActivity();
-        this.trackPointer(event.clientX, event.clientY);
-
         if (this.mode === "full") {
+          const now = performance.now();
+
+          if (now - this.lastPointerTime < FULL_MODE_POINTER_TRACK_INTERVAL_MS) {
+            return;
+          }
+
+          this.lastPointerTime = now;
+          this.markUserActivity();
+          this.trackPointer(event.clientX, event.clientY);
           return;
         }
+
+        this.markUserActivity();
+        this.trackPointer(event.clientX, event.clientY);
 
         if (this.shouldSuppressPointerMoveCapture()) {
           return;
@@ -923,7 +933,7 @@ export class LiteCaptureAgent {
 
     this.installInputAndLifecycleCapture();
 
-    if (this.isTopLevelFrame) {
+    if (this.isTopLevelFrame && this.mode !== "full") {
       this.installPerformanceCapture();
     }
 
