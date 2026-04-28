@@ -36,6 +36,7 @@ const SCREENSHOT_MAX_DIMENSION_PX = 1_200;
 const SCREENSHOT_MAX_SCALE = 1.5;
 const SCREENSHOT_MIN_SCALE = 0.45;
 const SCREENSHOT_WEBP_QUALITY = 0.66;
+const SCREENSHOT_CAPTURE_TIMEOUT_MS = 4_000;
 const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
 const DOM_SNAPSHOT_SUMMARY_NODE_THRESHOLD = 3_500;
 const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
@@ -1288,10 +1289,13 @@ export class LiteCaptureAgent {
     }
 
     try {
-      const screenshot = await captureSnapdomDataUrl(root, snapdomCaptureOptions, {
-        width: captureWidth,
-        height: captureHeight
-      });
+      const screenshot = await withTimeout(
+        captureSnapdomDataUrl(root, snapdomCaptureOptions, {
+          width: captureWidth,
+          height: captureHeight
+        }),
+        SCREENSHOT_CAPTURE_TIMEOUT_MS
+      );
 
       if (
         !screenshot ||
@@ -2506,6 +2510,23 @@ async function safeSnapdomToBlob(
   } catch {
     return null;
   }
+}
+
+function withTimeout<T>(task: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  return Promise.race<T | null>([
+    task,
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        resolve(null);
+      }, timeoutMs);
+    })
+  ]).finally(() => {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 async function cropBlobToDataUrl(

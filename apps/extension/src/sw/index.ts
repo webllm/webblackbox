@@ -328,6 +328,8 @@ const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
 const OFFSCREEN_PORT_READY_MAX_ATTEMPTS = 200;
 const OFFSCREEN_PORT_READY_WAIT_MS = 25;
 const STOP_DRAIN_ACK_TIMEOUT_MS = 3_000;
+const CDP_ARTIFACT_TIMEOUT_MS = 5_000;
+const CDP_HEAP_SNAPSHOT_TIMEOUT_MS = 8_000;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -2057,12 +2059,10 @@ async function captureResponseBody(
   }
 
   const target = sessionId ? { tabId: runtime.tabId, sessionId } : { tabId: runtime.tabId };
-  const response = await runtime.cdpRouter
-    .send<{
-      body?: string;
-      base64Encoded?: boolean;
-    }>(target, "Network.getResponseBody", { requestId })
-    .catch(() => undefined);
+  const response = await sendCdpCommand<{
+    body?: string;
+    base64Encoded?: boolean;
+  }>(runtime, target, "Network.getResponseBody", { requestId });
 
   if (!response?.body) {
     return;
@@ -2261,13 +2261,16 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
     return;
   }
 
-  const screenshot = await runtime.cdpRouter
-    .send<{ data?: string }>({ tabId: runtime.tabId }, "Page.captureScreenshot", {
+  const screenshot = await sendCdpCommand<{ data?: string }>(
+    runtime,
+    { tabId: runtime.tabId },
+    "Page.captureScreenshot",
+    {
       format: "webp",
       quality: 62,
       fromSurface: true
-    })
-    .catch(() => undefined);
+    }
+  );
 
   if (!screenshot?.data) {
     return;
@@ -2320,13 +2323,16 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
     return;
   }
 
-  const snapshot = await runtime.cdpRouter
-    .send<Record<string, unknown>>({ tabId: runtime.tabId }, "DOMSnapshot.captureSnapshot", {
+  const snapshot = await sendCdpCommand<Record<string, unknown>>(
+    runtime,
+    { tabId: runtime.tabId },
+    "DOMSnapshot.captureSnapshot",
+    {
       computedStyles: [],
       includeDOMRects: false,
       includePaintOrder: false
-    })
-    .catch(() => undefined);
+    }
+  );
 
   if (!snapshot) {
     return;
@@ -2361,9 +2367,11 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     return;
   }
 
-  const cookies = await runtime.cdpRouter
-    .send<{ cookies?: unknown[] }>({ tabId: runtime.tabId }, "Storage.getCookies")
-    .catch(() => undefined);
+  const cookies = await sendCdpCommand<{ cookies?: unknown[] }>(
+    runtime,
+    { tabId: runtime.tabId },
+    "Storage.getCookies"
+  );
 
   if (cookies?.cookies) {
     const cookieNames = cookies.cookies
@@ -2418,15 +2426,14 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
   const origin = await evaluateExpression(runtime, "location.origin");
 
   if (typeof origin === "string") {
-    const dbNames = await runtime.cdpRouter
-      .send<{ databaseNames?: string[] }>(
-        { tabId: runtime.tabId },
-        "IndexedDB.requestDatabaseNames",
-        {
-          securityOrigin: origin
-        }
-      )
-      .catch(() => undefined);
+    const dbNames = await sendCdpCommand<{ databaseNames?: string[] }>(
+      runtime,
+      { tabId: runtime.tabId },
+      "IndexedDB.requestDatabaseNames",
+      {
+        securityOrigin: origin
+      }
+    );
 
     if (dbNames?.databaseNames) {
       const bytes = new TextEncoder().encode(JSON.stringify(dbNames.databaseNames));
@@ -2455,9 +2462,11 @@ async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Pro
     return;
   }
 
-  const metrics = await runtime.cdpRouter
-    .send<Record<string, unknown>>({ tabId: runtime.tabId }, "Performance.getMetrics")
-    .catch(() => undefined);
+  const metrics = await sendCdpCommand<Record<string, unknown>>(
+    runtime,
+    { tabId: runtime.tabId },
+    "Performance.getMetrics"
+  );
 
   if (!metrics) {
     return;
@@ -2495,11 +2504,10 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
     return;
   }
 
-  await runtime.cdpRouter.send({ tabId: runtime.tabId }, "Profiler.enable").catch(() => undefined);
-  const started = await runtime.cdpRouter
-    .send({ tabId: runtime.tabId }, "Profiler.start")
-    .then(() => true)
-    .catch(() => false);
+  await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.enable");
+  const started = Boolean(
+    await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.start")
+  );
 
   if (!started) {
     return;
@@ -2507,9 +2515,11 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
 
   await wait(CPU_PROFILE_SAMPLE_MS);
 
-  const profileResult = await runtime.cdpRouter
-    .send<{ profile?: unknown }>({ tabId: runtime.tabId }, "Profiler.stop")
-    .catch(() => undefined);
+  const profileResult = await sendCdpCommand<{ profile?: unknown }>(
+    runtime,
+    { tabId: runtime.tabId },
+    "Profiler.stop"
+  );
 
   if (!profileResult?.profile) {
     return;
@@ -2533,7 +2543,7 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
     }
   });
 
-  await runtime.cdpRouter.send({ tabId: runtime.tabId }, "Profiler.disable").catch(() => undefined);
+  await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.disable");
 }
 
 async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
@@ -2547,25 +2557,26 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
     truncated: false
   };
 
-  await runtime.cdpRouter
-    .send({ tabId: runtime.tabId }, "HeapProfiler.enable")
-    .catch(() => undefined);
+  await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.enable");
 
-  const completed = await runtime.cdpRouter
-    .send({ tabId: runtime.tabId }, "HeapProfiler.takeHeapSnapshot", {
-      reportProgress: false,
-      captureNumericValue: true
-    })
-    .then(() => true)
-    .catch(() => false);
+  const completed = Boolean(
+    await sendCdpCommand(
+      runtime,
+      { tabId: runtime.tabId },
+      "HeapProfiler.takeHeapSnapshot",
+      {
+        reportProgress: false,
+        captureNumericValue: true
+      },
+      CDP_HEAP_SNAPSHOT_TIMEOUT_MS
+    )
+  );
 
   const snapshot = runtime.heapSnapshotCapture;
   runtime.heapSnapshotCapture = null;
 
   if (!completed || !snapshot || snapshot.chunks.length === 0) {
-    await runtime.cdpRouter
-      .send({ tabId: runtime.tabId }, "HeapProfiler.disable")
-      .catch(() => undefined);
+    await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.disable");
     return;
   }
 
@@ -2589,9 +2600,7 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
     }
   });
 
-  await runtime.cdpRouter
-    .send({ tabId: runtime.tabId }, "HeapProfiler.disable")
-    .catch(() => undefined);
+  await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.disable");
 }
 
 function shouldCaptureAdvancedProfiles(reason: string): boolean {
@@ -2604,22 +2613,57 @@ function wait(durationMs: number): Promise<void> {
   });
 }
 
+async function sendCdpCommand<TResult = unknown>(
+  runtime: SessionRuntime,
+  target: { tabId: number; sessionId?: string },
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs = CDP_ARTIFACT_TIMEOUT_MS
+): Promise<TResult | undefined> {
+  if (!runtime.cdpRouter || runtime.stopping) {
+    return undefined;
+  }
+
+  return withTimeout(
+    runtime.cdpRouter.send<TResult>(target, method, params).catch(() => undefined),
+    timeoutMs
+  );
+}
+
+function withTimeout<TResult>(
+  task: Promise<TResult | undefined>,
+  timeoutMs: number
+): Promise<TResult | undefined> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  return Promise.race<TResult | undefined>([
+    task,
+    new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        resolve(undefined);
+      }, timeoutMs);
+    })
+  ]).finally(() => {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  });
+}
+
 async function evaluateExpression(runtime: SessionRuntime, expression: string): Promise<unknown> {
   if (!runtime.cdpRouter) {
     return undefined;
   }
 
-  const result = await runtime.cdpRouter
-    .send<{
-      result?: {
-        value?: unknown;
-      };
-    }>({ tabId: runtime.tabId }, "Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true
-    })
-    .catch(() => undefined);
+  const result = await sendCdpCommand<{
+    result?: {
+      value?: unknown;
+    };
+  }>(runtime, { tabId: runtime.tabId }, "Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true
+  });
 
   return result?.result?.value;
 }

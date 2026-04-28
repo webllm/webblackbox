@@ -239,6 +239,23 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("releases screenshot capture state when snapdom does not settle", async () => {
+    const { agent } = createAgent();
+    const state = agent as unknown as {
+      screenshotInFlight: boolean;
+    };
+
+    await vi.advanceTimersByTimeAsync(3_500);
+
+    expect(state.screenshotInFlight).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(state.screenshotInFlight).toBe(false);
+
+    agent.dispose();
+  });
+
   it("captures a stop screenshot when the session stops before the first idle screenshot lands", async () => {
     const { agent } = createAgent();
     const captureScreenshotSpy = vi
