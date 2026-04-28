@@ -748,7 +748,7 @@ input[type="file"],
   border: none;
   background: transparent;
   position: relative;
-  z-index: 3;
+  z-index: 2;
   cursor: pointer;
 }
 
@@ -784,26 +784,27 @@ input[type="file"],
 
 .progress-markers {
   position: absolute;
-  top: 2px;
+  top: 1px;
   left: 4px;
   right: 4px;
-  height: 10px;
+  height: 13px;
   pointer-events: none;
-  z-index: 2;
+  z-index: 4;
 }
 
 .progress-marker {
   position: absolute;
-  top: 0;
-  transform: translateX(-50%);
-  width: 2px;
-  height: 9px;
-  border: 0;
-  border-radius: 1px;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 8px;
+  height: 8px;
+  border: 1px solid #ffffff;
+  border-radius: 999px;
   padding: 0;
-  opacity: 0.85;
+  opacity: 0.95;
   cursor: pointer;
   pointer-events: auto;
+  box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.08);
 }
 
 .progress-marker-error {
@@ -826,14 +827,13 @@ input[type="file"],
   position: absolute;
   top: 0;
   left: 0;
-  width: 1px;
-  height: 10px;
+  width: 2px;
+  height: 15px;
   transform: translateX(-50%);
   background: #111827;
-  opacity: 0.6;
+  opacity: 0.72;
   pointer-events: none;
-  z-index: 1;
-  display: none;
+  z-index: 5;
 }
 
 .progress-hover {
