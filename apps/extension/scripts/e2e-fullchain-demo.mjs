@@ -31,6 +31,11 @@ const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
 const usePopupUiActions = (process.env.WB_E2E_USE_POPUP_UI ?? "1") !== "0";
 const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "";
+const realWorldScenario = process.env.WB_E2E_REALWORLD_SCENARIO ?? "";
+const realWorldLongRecordingMs = Number(process.env.WB_E2E_REALWORLD_LONG_MS ?? "2500");
+const realWorldLargeResponseBytes = Number(
+  process.env.WB_E2E_REALWORLD_LARGE_RESPONSE_BYTES ?? "1048576"
+);
 
 const chromeCandidates = [
   process.env.WB_E2E_CHROME_BIN,
@@ -278,6 +283,17 @@ async function main() {
   const scenarioResult = await runDemoScenario(demoClient);
   assert(scenarioResult?.ok === true, "Demo scenario failed", scenarioResult);
 
+  const realWorldResult = await runRealWorldScenarioAddons({
+    scenario: realWorldScenario,
+    demoClient,
+    popupClient,
+    baseUrl,
+    demoUrl,
+    browserClient: state.browserClient,
+    extensionId
+  });
+  assert(realWorldResult.ok, "Real-world scenario failed", realWorldResult);
+
   await sleep(1_600);
 
   const stop = await stopActiveSessionFromPopup(popupClient, usePopupUiActionsEffective);
@@ -436,6 +452,11 @@ async function main() {
     throw new Error(`Player page runtime exceptions: ${JSON.stringify(playerExceptions)}`);
   }
 
+  const restartResult = realWorldScenario.includes("restart")
+    ? await verifyExtensionRestart(popupClient, baseUrl, extensionId)
+    : { ok: true, skipped: true };
+  assert(restartResult.ok, "Extension restart verification failed", restartResult);
+
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
   console.log("Capture mode:", captureMode);
@@ -446,9 +467,11 @@ async function main() {
   console.log("Archive:", exportedPath);
   console.log("Archive bytes:", fileInfo.size);
   console.log("Scenario:", JSON.stringify(scenarioResult));
+  console.log("Real-world scenario:", JSON.stringify(realWorldResult));
   console.log("Player:", JSON.stringify(playerResult));
   console.log("Screenshot marker:", JSON.stringify(markerResult));
   console.log("Hover response:", JSON.stringify(hoverResponseResult));
+  console.log("Extension restart:", JSON.stringify(restartResult));
   console.log(`Chrome log: ${chromeLogPath}`);
   console.log("Fullchain E2E passed.");
 
@@ -831,6 +854,22 @@ async function handleApiRequest(request, response, requestUrl, tasks) {
         errorRate: 0.013
       }
     });
+    return;
+  }
+
+  if (pathname === "/api/large-response" && request.method === "GET") {
+    const rawBytes = Number(requestUrl.searchParams.get("bytes") ?? realWorldLargeResponseBytes);
+    const size = Number.isFinite(rawBytes)
+      ? Math.max(1024, Math.min(rawBytes, 4 * 1024 * 1024))
+      : 1024;
+    const payload = {
+      ok: true,
+      kind: "real-world-large-response",
+      bytes: size,
+      data: "x".repeat(Math.max(0, size - 96))
+    };
+
+    writeJson(response, 200, payload);
     return;
   }
 
@@ -1803,6 +1842,171 @@ async function runDemoScenario(demoClient) {
   `;
 
   return demoClient.evaluate(expression);
+}
+
+async function runRealWorldScenarioAddons({
+  scenario,
+  demoClient,
+  popupClient,
+  baseUrl,
+  demoUrl,
+  browserClient
+}) {
+  if (!scenario) {
+    return { ok: true, skipped: true };
+  }
+
+  const pageResult = await demoClient.evaluate(`
+    (async () => {
+      const result = {
+        ok: true,
+        scenario: ${JSON.stringify(scenario)},
+        spaRoutes: [],
+        iframe: false,
+        upload: false,
+        download: false,
+        largeResponseBytes: 0,
+        longRecordingMs: 0,
+        permissionDenied: false
+      };
+
+      try {
+        history.pushState({ route: 'settings' }, '', '#/settings');
+        window.dispatchEvent(new PopStateEvent('popstate', { state: { route: 'settings' } }));
+        result.spaRoutes.push(location.href);
+        history.replaceState({ route: 'checkout' }, '', '#/checkout?step=payment');
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+        result.spaRoutes.push(location.href);
+
+        const iframe = document.createElement('iframe');
+        iframe.id = 'wb-realworld-frame';
+        iframe.srcdoc = '<!doctype html><button id="frame-button">Frame action</button><script>document.body.dataset.ready="true";<\\/script>';
+        document.body.appendChild(iframe);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        iframe.contentDocument?.getElementById('frame-button')?.dispatchEvent(
+          new MouseEvent('click', { bubbles: true })
+        );
+        result.iframe = iframe.contentDocument?.body?.dataset.ready === 'true';
+
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.id = 'wb-realworld-upload';
+        document.body.appendChild(input);
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        result.upload = true;
+
+        const link = document.createElement('a');
+        link.download = 'webblackbox-realworld-download.txt';
+        link.href = URL.createObjectURL(new Blob(['download-body'], { type: 'text/plain' }));
+        document.body.appendChild(link);
+        link.click();
+        result.download = true;
+
+        const response = await fetch('/api/large-response?bytes=${Math.floor(realWorldLargeResponseBytes)}');
+        const text = await response.text();
+        result.largeResponseBytes = text.length;
+
+        const started = performance.now();
+        while (performance.now() - started < ${Math.max(500, Math.floor(realWorldLongRecordingMs))}) {
+          document.body.dataset.realWorldTick = String(performance.now());
+          window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 8, clientY: 8 }));
+          await new Promise((resolve) => setTimeout(resolve, 125));
+        }
+        result.longRecordingMs = Math.round(performance.now() - started);
+
+        return result;
+      } catch (error) {
+        return {
+          ...result,
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error)
+        };
+      }
+    })()
+  `);
+
+  const permissionResult = await popupClient.evaluate(`
+    (async () => {
+      try {
+        if (!chrome?.permissions?.request) {
+          return { ok: true, denied: true, reason: 'permissions-api-unavailable' };
+        }
+
+        const granted = await new Promise((resolve) => {
+          chrome.permissions.request({ permissions: ['bookmarks'] }, (value) => {
+            resolve(Boolean(value));
+          });
+        });
+        const lastError = chrome.runtime.lastError?.message ?? null;
+        return { ok: true, denied: !granted, granted, lastError };
+      } catch (error) {
+        return {
+          ok: true,
+          denied: true,
+          reason: error instanceof Error ? error.message : String(error)
+        };
+      }
+    })()
+  `);
+
+  let multiTabResult = { ok: true, skipped: true };
+  if (scenario.includes("multitab") || scenario.includes("multitarget")) {
+    const target = await openTarget(baseUrl, `${demoUrl}?realworld-secondary=1`);
+    state.openedTargetIds.push(target.id);
+    multiTabResult = {
+      ok: Boolean(target.id),
+      targetId: target.id,
+      url: target.url ?? null
+    };
+    await closeTarget(baseUrl, target.id);
+    state.openedTargetIds = state.openedTargetIds.filter((id) => id !== target.id);
+  }
+
+  return {
+    ok:
+      pageResult?.ok === true &&
+      pageResult.iframe === true &&
+      pageResult.upload === true &&
+      pageResult.download === true &&
+      pageResult.largeResponseBytes >= 1024 &&
+      pageResult.longRecordingMs >= 500 &&
+      permissionResult?.denied === true &&
+      multiTabResult.ok === true,
+    page: pageResult,
+    permission: permissionResult,
+    multiTab: multiTabResult,
+    browserConnected: Boolean(browserClient)
+  };
+}
+
+async function verifyExtensionRestart(popupClient, urlBase, extensionId) {
+  const reload = await popupClient
+    .evaluate(
+      `
+    (() => {
+      if (!chrome?.runtime?.reload) {
+        return { ok: false, reason: 'runtime-reload-unavailable' };
+      }
+      chrome.runtime.reload();
+      return { ok: true };
+    })()
+  `
+    )
+    .catch((error) => ({
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error)
+    }));
+
+  if (!reload.ok) {
+    return reload;
+  }
+
+  const swTarget = await waitForExtensionServiceWorker(urlBase, 20_000, extensionId);
+  return {
+    ok: Boolean(swTarget?.id),
+    targetId: swTarget?.id ?? null,
+    url: swTarget?.url ?? null
+  };
 }
 
 async function waitForIndicatorText(pageClient, fragment, timeoutMs) {
