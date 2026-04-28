@@ -142,18 +142,22 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
-      jszip:
-        specifier: ^3.10.1
-        version: 3.10.1
       jsdom:
         specifier: ^26.1.0
         version: 26.1.0
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
 
   apps/share-server:
     dependencies:
       '@webblackbox/player-sdk':
         specifier: workspace:*
         version: link:../../packages/player-sdk
+    devDependencies:
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
 
   packages/cdp-router:
     dependencies:

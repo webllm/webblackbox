@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsup src/index.ts --format esm --clean",
+    "e2e:share": "pnpm --filter @webblackbox/player-sdk build && pnpm build && node scripts/e2e-share-flow.mjs",
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -15,5 +16,8 @@
   },
   "dependencies": {
     "@webblackbox/player-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "jszip": "^3.10.1"
   }
 }
