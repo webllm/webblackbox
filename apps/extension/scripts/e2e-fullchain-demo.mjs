@@ -8,6 +8,7 @@ import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/p
 import { createServer as createNetServer } from "node:net";
 import { dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import JSZip from "jszip";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -411,6 +412,16 @@ async function main() {
     downloadRecord
   });
 
+  const archiveEvidenceResult =
+    realWorldScenario && realWorldResult.archiveEvidence
+      ? await verifyRealWorldArchiveEvidence(exportedPath, realWorldResult.archiveEvidence)
+      : { ok: true, skipped: true };
+  assert(
+    archiveEvidenceResult.ok,
+    "Exported archive missing real-world captured evidence",
+    archiveEvidenceResult
+  );
+
   const playerTarget = await openTarget(baseUrl, playerUrl);
   state.openedTargetIds.push(playerTarget.id);
 
@@ -519,6 +530,7 @@ async function main() {
   console.log("Archive bytes:", fileInfo.size);
   console.log("Scenario:", JSON.stringify(scenarioResult));
   console.log("Real-world scenario:", JSON.stringify(realWorldResult));
+  console.log("Real-world archive evidence:", JSON.stringify(archiveEvidenceResult));
   console.log("Player:", JSON.stringify(playerResult));
   console.log("Screenshot marker:", JSON.stringify(markerResult));
   console.log("Hover response:", JSON.stringify(hoverResponseResult));
@@ -533,6 +545,14 @@ function assert(condition, message, details) {
   if (!condition) {
     const suffix = details === undefined ? "" : ` | details=${JSON.stringify(details)}`;
     throw new Error(`${message}${suffix}`);
+  }
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
   }
 }
 
@@ -732,7 +752,7 @@ async function launchChromeWithRetry(binary, options) {
 }
 
 async function terminateChromeProcess(proc) {
-  if (!proc || proc.killed || proc.exitCode !== null) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
     return;
   }
 
@@ -744,7 +764,7 @@ async function terminateChromeProcess(proc) {
     sleep(5_000)
   ]);
 
-  if (proc.exitCode === null && !proc.killed) {
+  if (proc.exitCode === null && proc.signalCode === null) {
     proc.kill("SIGKILL");
     await Promise.race([
       new Promise((resolve) => {
@@ -2204,6 +2224,68 @@ async function waitForExportedArchiveFile(sid, startedAtMs, timeoutMs) {
   );
 }
 
+async function verifyRealWorldArchiveEvidence(archivePath, evidence) {
+  if (exportPassphrase.length > 0) {
+    return { ok: true, skipped: "encrypted-export" };
+  }
+
+  const events = await readArchiveEvents(archivePath);
+  const eventTexts = events.map((event) => `${event.type} ${safeStringify(event.data)}`);
+  const missingMarkers = (evidence.markers ?? []).filter(
+    (marker) => !eventTexts.some((text) => text.includes(marker))
+  );
+  const missingUrls = (evidence.urls ?? []).filter(
+    (url) => !eventTexts.some((text) => text.includes(url))
+  );
+  const missingEventTypes = (evidence.eventTypes ?? []).filter(
+    (type) => !events.some((event) => event.type === type)
+  );
+
+  return {
+    ok: missingMarkers.length === 0 && missingUrls.length === 0 && missingEventTypes.length === 0,
+    eventCount: events.length,
+    missingMarkers,
+    missingUrls,
+    missingEventTypes
+  };
+}
+
+async function readArchiveEvents(archivePath) {
+  const zip = await JSZip.loadAsync(await readFile(archivePath));
+  const paths = Object.keys(zip.files)
+    .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
+    .sort();
+  const events = [];
+
+  for (const path of paths) {
+    const file = zip.file(path);
+
+    if (!file) {
+      continue;
+    }
+
+    const text = await file.async("string");
+
+    for (const line of text.split(/\r?\n/u)) {
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        continue;
+      }
+
+      try {
+        events.push(JSON.parse(trimmed));
+      } catch (error) {
+        throw new Error(
+          `Failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+
+  return events;
+}
+
 async function runDemoScenario(demoClient) {
   const expression = `
     (async () => {
@@ -2237,18 +2319,28 @@ async function runRealWorldScenarioAddons({
     return { ok: true, skipped: true };
   }
 
+  const wantsIframeNetwork = scenario.includes("iframe") || scenario.includes("multitarget");
+  const wantsMultiTab = scenario.includes("multitab") || scenario.includes("multitarget");
   const pageResult = await demoClient.evaluate(`
     (async () => {
       const result = {
         ok: true,
         scenario: ${JSON.stringify(scenario)},
         spaRoutes: [],
+        markers: [],
         iframe: false,
+        iframeNetworkBytes: 0,
         upload: false,
         download: false,
         largeResponseBytes: 0,
         longRecordingMs: 0,
         permissionDenied: false
+      };
+      const mark = (message) => {
+        const marker = '[wb-realworld] ' + message;
+        result.markers.push(marker);
+        console.info(marker);
+        return marker;
       };
 
       try {
@@ -2258,6 +2350,7 @@ async function runRealWorldScenarioAddons({
         history.replaceState({ route: 'checkout' }, '', '#/checkout?step=payment');
         window.dispatchEvent(new HashChangeEvent('hashchange'));
         result.spaRoutes.push(location.href);
+        mark('spa route checkout');
 
         const iframe = document.createElement('iframe');
         iframe.id = 'wb-realworld-frame';
@@ -2268,6 +2361,14 @@ async function runRealWorldScenarioAddons({
           new MouseEvent('click', { bubbles: true })
         );
         result.iframe = iframe.contentDocument?.body?.dataset.ready === 'true';
+        mark('iframe ready');
+
+        if (${JSON.stringify(wantsIframeNetwork)}) {
+          const iframeResponse = await iframe.contentWindow?.fetch('/api/large-response?source=iframe&bytes=2048');
+          const iframeText = iframeResponse ? await iframeResponse.text() : '';
+          result.iframeNetworkBytes = iframeText.length;
+          mark('iframe network ' + result.iframeNetworkBytes);
+        }
 
         const input = document.createElement('input');
         input.type = 'file';
@@ -2275,6 +2376,7 @@ async function runRealWorldScenarioAddons({
         document.body.appendChild(input);
         input.dispatchEvent(new Event('change', { bubbles: true }));
         result.upload = true;
+        mark('upload change');
 
         const link = document.createElement('a');
         link.download = 'webblackbox-realworld-download.txt';
@@ -2282,18 +2384,15 @@ async function runRealWorldScenarioAddons({
         document.body.appendChild(link);
         link.click();
         result.download = true;
+        mark('download click');
 
         const response = await fetch('/api/large-response?bytes=${Math.floor(realWorldLargeResponseBytes)}');
         const text = await response.text();
         result.largeResponseBytes = text.length;
+        mark('large response ' + result.largeResponseBytes);
 
-        const started = performance.now();
-        while (performance.now() - started < ${Math.max(500, Math.floor(realWorldLongRecordingMs))}) {
-          document.body.dataset.realWorldTick = String(performance.now());
-          window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 8, clientY: 8 }));
-          await new Promise((resolve) => setTimeout(resolve, 125));
-        }
-        result.longRecordingMs = Math.round(performance.now() - started);
+        document.body.dataset.realWorldTick = String(performance.now());
+        mark('long recording page ready');
 
         return result;
       } catch (error) {
@@ -2306,6 +2405,19 @@ async function runRealWorldScenarioAddons({
     })()
   `);
 
+  const pointerResult = await performRealWorldPointerActivity(
+    demoClient,
+    Math.max(500, Math.floor(realWorldLongRecordingMs))
+  );
+  if (pageResult && typeof pageResult === "object") {
+    pageResult.longRecordingMs = pointerResult.durationMs;
+    pageResult.pointerMoves = pointerResult.moves;
+  }
+  const pointerMarker = await emitPageRealWorldMarker(
+    demoClient,
+    `trusted pointer moves ${pointerResult.moves}`
+  );
+
   const permissionResult = await evaluateControl(
     control,
     `
@@ -2314,7 +2426,7 @@ async function runRealWorldScenarioAddons({
         const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
 
         if (!chromeApi?.permissions?.request) {
-          return { ok: true, denied: true, reason: 'permissions-api-unavailable' };
+          return { ok: true, denied: false, granted: false, unavailable: true, reason: 'permissions-api-unavailable' };
         }
 
         const granted = await new Promise((resolve) => {
@@ -2335,8 +2447,18 @@ async function runRealWorldScenarioAddons({
   `
   );
 
+  const permissionMarker = await emitPageRealWorldMarker(
+    demoClient,
+    permissionResult?.granted
+      ? "permission unexpectedly granted"
+      : permissionResult?.unavailable
+        ? "permission unavailable"
+        : "permission denied"
+  );
+
   let multiTabResult = { ok: true, skipped: true };
-  if (scenario.includes("multitab") || scenario.includes("multitarget")) {
+  let multiTabMarker = null;
+  if (wantsMultiTab) {
     const target = await openTarget(baseUrl, `${demoUrl}?realworld-secondary=1`);
     state.openedTargetIds.push(target.id);
     multiTabResult = {
@@ -2346,23 +2468,76 @@ async function runRealWorldScenarioAddons({
     };
     await closeTarget(baseUrl, target.id);
     state.openedTargetIds = state.openedTargetIds.filter((id) => id !== target.id);
+    multiTabMarker = await emitPageRealWorldMarker(demoClient, "multitab target opened");
+  }
+
+  const expectedMarkers = [
+    ...(Array.isArray(pageResult?.markers) ? pageResult.markers : []),
+    pointerMarker,
+    permissionMarker,
+    multiTabMarker
+  ].filter((marker) => typeof marker === "string" && marker.length > 0);
+  const expectedUrls = ["/api/large-response?bytes="];
+  if (wantsIframeNetwork) {
+    expectedUrls.push("/api/large-response?source=iframe");
   }
 
   return {
     ok:
       pageResult?.ok === true &&
       pageResult.iframe === true &&
+      (!wantsIframeNetwork || pageResult.iframeNetworkBytes >= 1024) &&
       pageResult.upload === true &&
       pageResult.download === true &&
       pageResult.largeResponseBytes >= 1024 &&
-      pageResult.longRecordingMs >= 500 &&
-      permissionResult?.denied === true &&
+      pointerResult.ok === true &&
+      pointerResult.durationMs >= 500 &&
+      permissionResult?.ok === true &&
+      permissionResult?.granted !== true &&
       multiTabResult.ok === true,
     page: pageResult,
+    pointer: pointerResult,
     permission: permissionResult,
     multiTab: multiTabResult,
+    archiveEvidence: {
+      markers: expectedMarkers,
+      urls: expectedUrls,
+      eventTypes: ["console.entry", "network.request"]
+    },
     browserConnected: Boolean(browserClient)
   };
+}
+
+async function performRealWorldPointerActivity(demoClient, durationMs) {
+  const started = Date.now();
+  let moves = 0;
+
+  while (Date.now() - started < durationMs) {
+    await demoClient.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: 24 + (moves % 32),
+      y: 24 + ((moves * 3) % 32),
+      button: "none"
+    });
+    moves += 1;
+    await sleep(125);
+  }
+
+  return {
+    ok: moves > 0,
+    moves,
+    durationMs: Date.now() - started
+  };
+}
+
+async function emitPageRealWorldMarker(demoClient, message) {
+  return demoClient.evaluate(`
+    (() => {
+      const marker = ${JSON.stringify("[wb-realworld] ")} + ${JSON.stringify(message)};
+      console.info(marker);
+      return marker;
+    })()
+  `);
 }
 
 async function verifyExtensionRestart(control, urlBase, extensionId) {
