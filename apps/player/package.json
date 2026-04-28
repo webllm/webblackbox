@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node scripts/copy-assets.mjs && tsup --config tsup.config.ts --watch",
     "build": "tsup --config tsup.config.ts --clean && node scripts/copy-assets.mjs",
+    "e2e:playback": "pnpm run build && node scripts/e2e-playback-regression.mjs",
     "pages:build": "pnpm build && node scripts/prepare-pages-build.mjs",
     "pages:deploy": "node scripts/deploy-gh-pages.mjs",
     "serve": "npx -y http-server ./ -p 4177",
@@ -29,6 +30,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "jszip": "^3.10.1",
     "jsdom": "^26.1.0"
   }
 }
