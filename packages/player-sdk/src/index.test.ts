@@ -216,9 +216,14 @@ describe("WebBlackboxPlayer", () => {
 
     const searchResults = player.search("large-session-checkpoint", 25);
     heapSamples.push(process.memoryUsage().heapUsed);
-    const actionTimeline = player.getActionTimeline({ limit: 75 });
-    heapSamples.push(process.memoryUsage().heapUsed);
     const networkWaterfall = player.getNetworkWaterfall();
+    heapSamples.push(process.memoryUsage().heapUsed);
+    const actionTimeline = player.getActionTimeline();
+    heapSamples.push(process.memoryUsage().heapUsed);
+    const replayDiagnostics = player.getReplayDiagnostics({
+      actions: actionTimeline,
+      waterfall: networkWaterfall
+    });
     heapSamples.push(process.memoryUsage().heapUsed);
     const domSnapshots = player.getDomSnapshots();
     heapSamples.push(process.memoryUsage().heapUsed);
@@ -231,8 +236,9 @@ describe("WebBlackboxPlayer", () => {
     expect(bytes.byteLength).toBeGreaterThan(16 * 1024 * 1024);
     expect(player.events.length).toBeGreaterThan(30_000);
     expect(searchResults).toHaveLength(25);
-    expect(actionTimeline).toHaveLength(75);
     expect(networkWaterfall).toHaveLength(6_000);
+    expect(actionTimeline).toHaveLength(6_000);
+    expect(replayDiagnostics).toHaveLength(6_000);
     expect(domSnapshots).toHaveLength(300);
     expect(firstScreenshot?.bytes.byteLength).toBe(32 * 1024);
     expect(firstResponseBody?.bytes.byteLength).toBe(16 * 1024);

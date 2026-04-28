@@ -973,7 +973,8 @@ export class WebBlackboxPlayer {
     const screenshots = this.query({
       range,
       types: ["screen.screenshot"]
-    });
+    }).sort(compareEventsByMono);
+    const errorEvents = scopedEvents.filter(isErrorEvent).sort(compareEventsByMono);
 
     return derived.actionSpans.slice(0, limit).map((span) => {
       const spanEvents = span.eventIds
@@ -995,21 +996,7 @@ export class WebBlackboxPlayer {
           failed: entry.failed,
           durationMs: roundTo(entry.durationMs, 2)
         }));
-      const errors = scopedEvents
-        .filter(
-          (event) =>
-            (event.type.startsWith("error.") || event.lvl === "error") &&
-            event.mono >= span.startMono &&
-            event.mono <= span.endMono + screenshotLookaheadMs
-        )
-        .sort((left, right) => left.mono - right.mono)
-        .slice(0, errorLimit)
-        .map((event) => ({
-          eventId: event.id,
-          type: event.type,
-          mono: event.mono,
-          message: readEventMessage(event)
-        }));
+      const errors = findActionErrors(span, errorEvents, screenshotLookaheadMs, errorLimit);
       const triggerEvent = scopedById.get(span.triggerEventId);
       const screenshot = findActionScreenshot(span, screenshots, screenshotLookaheadMs);
 
@@ -2055,18 +2042,60 @@ function compactText(value: string, maxChars: number): string {
   return `${value.slice(0, maxChars)}...`;
 }
 
+function compareEventsByMono(left: WebBlackboxEvent, right: WebBlackboxEvent): number {
+  return left.mono - right.mono || left.id.localeCompare(right.id);
+}
+
+function isErrorEvent(event: WebBlackboxEvent): boolean {
+  return event.type.startsWith("error.") || event.lvl === "error";
+}
+
+function findActionErrors(
+  span: ActionSpan,
+  errorEvents: WebBlackboxEvent[],
+  lookaheadMs: number,
+  limit: number
+): ActionTimelineEntry["errors"] {
+  const errors: ActionTimelineEntry["errors"] = [];
+  const endMono = span.endMono + lookaheadMs;
+
+  for (
+    let index = lowerBoundEventMono(errorEvents, span.startMono);
+    index < errorEvents.length;
+    index += 1
+  ) {
+    const event = errorEvents[index];
+
+    if (!event) {
+      continue;
+    }
+
+    if (event.mono > endMono || errors.length >= limit) {
+      break;
+    }
+
+    errors.push({
+      eventId: event.id,
+      type: event.type,
+      mono: event.mono,
+      message: readEventMessage(event)
+    });
+  }
+
+  return errors;
+}
+
 function findActionScreenshot(
   span: ActionSpan,
   screenshots: WebBlackboxEvent[],
   lookaheadMs: number
 ): ActionTimelineEntry["screenshot"] {
-  const inSpan = screenshots.filter(
-    (event) => event.mono >= span.startMono && event.mono <= span.endMono
-  );
-  const afterSpan = screenshots.find(
-    (event) => event.mono > span.endMono && event.mono <= span.endMono + lookaheadMs
-  );
-  const chosen = inSpan[inSpan.length - 1] ?? afterSpan;
+  const firstInSpan = lowerBoundEventMono(screenshots, span.startMono);
+  const firstAfterSpan = upperBoundEventMono(screenshots, span.endMono);
+  const inSpan = firstAfterSpan > firstInSpan ? screenshots[firstAfterSpan - 1] : undefined;
+  const afterSpan = screenshots[firstAfterSpan];
+  const chosen =
+    inSpan ?? (afterSpan && afterSpan.mono <= span.endMono + lookaheadMs ? afterSpan : undefined);
 
   if (!chosen) {
     return null;
@@ -2081,6 +2110,40 @@ function findActionScreenshot(
     format: asString(payload?.format) ?? null,
     size: asNumber(payload?.size) ?? null
   };
+}
+
+function lowerBoundEventMono(events: WebBlackboxEvent[], mono: number): number {
+  let low = 0;
+  let high = events.length;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+
+    if ((events[mid]?.mono ?? Number.POSITIVE_INFINITY) < mono) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
+function upperBoundEventMono(events: WebBlackboxEvent[], mono: number): number {
+  let low = 0;
+  let high = events.length;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+
+    if ((events[mid]?.mono ?? Number.POSITIVE_INFINITY) <= mono) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
 }
 
 function buildEndpointRegressions(
