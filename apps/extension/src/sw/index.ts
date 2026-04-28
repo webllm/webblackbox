@@ -1821,8 +1821,10 @@ async function recoverOffscreenSession(sid: string): Promise<void> {
 }
 
 async function attachCdp(runtime: SessionRuntime): Promise<void> {
+  let router: CdpRouter | null = null;
+
   try {
-    const router = createCdpRouter(createChromeDebuggerTransport());
+    router = createCdpRouter(createChromeDebuggerTransport());
 
     const unsubscribeEvent = router.onEvent((event) => {
       const normalizedPayload = normalizeFullModePayload(event.method, event.params ?? {});
@@ -1916,8 +1918,8 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       }, screenshotIntervalMs);
     }
   } catch (error) {
+    await cleanupCdpInstrumentation(runtime, router);
     console.warn("[WebBlackbox] failed to attach debugger", error);
-    runtime.cdpRouter = null;
   }
 }
 
@@ -3250,26 +3252,36 @@ async function teardownCaptureInstrumentation(runtime: SessionRuntime): Promise<
     runtime.pipelineFlushTimer = null;
   }
 
-  if (runtime.cdpRouter) {
-    await runtime.cdpRouter.detach(runtime.tabId).catch(() => undefined);
+  await cleanupCdpInstrumentation(runtime, runtime.cdpRouter);
+}
 
-    for (const dispose of runtime.removeCdpListeners) {
-      dispose();
-    }
+async function cleanupCdpInstrumentation(
+  runtime: SessionRuntime,
+  router: CdpRouter | null
+): Promise<void> {
+  if (runtime.screenshotInterval !== null) {
+    clearInterval(runtime.screenshotInterval);
+    runtime.screenshotInterval = null;
+  }
 
-    runtime.removeCdpListeners = [];
-    runtime.cdpRouter.dispose();
+  if (router) {
+    await router.detach(runtime.tabId).catch(() => undefined);
+  }
+
+  for (const dispose of runtime.removeCdpListeners.splice(0, runtime.removeCdpListeners.length)) {
+    dispose();
+  }
+
+  router?.dispose();
+
+  if (runtime.cdpRouter === router) {
     runtime.cdpRouter = null;
   }
 
   runtime.enabledCdpSessions.clear();
   runtime.requestMeta.clear();
   runtime.responseBodyCaptureTimestamps.length = 0;
-
-  if (runtime.screenshotInterval !== null) {
-    clearInterval(runtime.screenshotInterval);
-    runtime.screenshotInterval = null;
-  }
+  runtime.heapSnapshotCapture = null;
 }
 
 function scheduleStoppedRuntimeCleanup(runtime: SessionRuntime): void {
