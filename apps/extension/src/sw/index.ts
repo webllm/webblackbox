@@ -52,6 +52,13 @@ import {
   buildLiteNetworkResponseRawEvent
 } from "./lite-network-baseline.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
+import {
+  buildRequestMetaKey,
+  deleteRequestMeta,
+  getRequestMeta,
+  upsertRequestMeta,
+  type RequestMetaEntry
+} from "./request-meta.js";
 
 type SessionRuntime = {
   sid: string;
@@ -68,17 +75,7 @@ type SessionRuntime = {
   pipeline: SessionPipelineClient;
   cdpRouter: CdpRouter | null;
   enabledCdpSessions: Set<string>;
-  requestMeta: Map<
-    string,
-    {
-      url?: string;
-      method?: string;
-      startedAt?: number;
-      mimeType?: string;
-      status?: number;
-      resourceType?: string;
-    }
-  >;
+  requestMeta: Map<string, RequestMetaEntry>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
   lastPointer: PointerState | null;
   lastViewport: ViewportState | null;
@@ -1980,7 +1977,7 @@ async function processFullModeEvent(
     const resourceType = typeof payload?.type === "string" ? payload.type : undefined;
 
     if (requestId) {
-      runtime.requestMeta.set(requestId, {
+      upsertRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId), {
         url: typeof response?.url === "string" ? response.url : undefined,
         mimeType: typeof response?.mimeType === "string" ? response.mimeType : undefined,
         status: typeof response?.status === "number" ? response.status : undefined,
@@ -1994,12 +1991,12 @@ async function processFullModeEvent(
   if (method === "Network.loadingFinished") {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
 
-    if (requestId && shouldCaptureResponseBody(runtime, requestId, payload)) {
+    if (requestId && shouldCaptureResponseBody(runtime, requestId, payload, sessionId)) {
       await captureResponseBody(runtime, requestId, sessionId);
     }
 
     if (requestId) {
-      runtime.requestMeta.delete(requestId);
+      deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
     }
 
     return;
@@ -2010,7 +2007,7 @@ async function processFullModeEvent(
       const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
 
       if (requestId) {
-        runtime.requestMeta.delete(requestId);
+        deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
       }
     }
 
@@ -2071,7 +2068,7 @@ async function captureResponseBody(
     return;
   }
 
-  const metadata = runtime.requestMeta.get(requestId);
+  const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
   const normalizedMime = normalizeMimeType(metadata?.mimeType ?? null);
   const captureRule = resolveFullBodyCaptureRule(runtime, metadata?.url ?? "", normalizedMime);
 
@@ -2116,7 +2113,8 @@ async function captureResponseBody(
 function shouldCaptureResponseBody(
   runtime: SessionRuntime,
   requestId: string,
-  loadingFinishedPayload: Record<string, unknown> | null
+  loadingFinishedPayload: Record<string, unknown> | null,
+  sessionId?: string
 ): boolean {
   if (runtime.mode !== "full" || runtime.stopping) {
     return false;
@@ -2126,7 +2124,7 @@ function shouldCaptureResponseBody(
     return false;
   }
 
-  const metadata = runtime.requestMeta.get(requestId);
+  const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
 
   if (!metadata) {
     return false;
@@ -3082,8 +3080,7 @@ function installLiteWebRequestCapture(): void {
     }
 
     const startedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
-    runtime.requestMeta.set(details.requestId, {
-      ...runtime.requestMeta.get(details.requestId),
+    upsertRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId), {
       url: details.url,
       method: details.method,
       startedAt
@@ -3122,7 +3119,7 @@ function installLiteWebRequestCapture(): void {
       return;
     }
 
-    const metadata = runtime.requestMeta.get(details.requestId);
+    const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
     const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
 
     ingestRawEvent(
@@ -3147,7 +3144,7 @@ function installLiteWebRequestCapture(): void {
       )
     );
 
-    runtime.requestMeta.delete(details.requestId);
+    deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
   };
 
   const onErrorOccurred = (details: {
@@ -3165,7 +3162,7 @@ function installLiteWebRequestCapture(): void {
       return;
     }
 
-    const metadata = runtime.requestMeta.get(details.requestId);
+    const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
     const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
 
     ingestRawEvent(
@@ -3189,7 +3186,7 @@ function installLiteWebRequestCapture(): void {
       )
     );
 
-    runtime.requestMeta.delete(details.requestId);
+    deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
   };
 
   chromeApi.webRequest.onBeforeRequest.addListener(onBeforeRequest, filter);
