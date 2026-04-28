@@ -1,44 +1,42 @@
-import { LiteCaptureAgent } from "webblackbox/lite-capture-agent";
-import { INJECTED_CAPTURE_CONFIG_EVENT } from "webblackbox/injected-hooks";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
+import type { LiteCaptureAgent } from "webblackbox/lite-capture-agent";
+import type { LiteCaptureAgentOptions } from "webblackbox/types";
 
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
 import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
 
+type ContentAgentModule = typeof import("./content-agent.js");
+
 const chromeApi = getChromeApi();
 const { t } = createExtensionI18n();
 let contentPort: PortLike | null = null;
 let reconnectTimer = 0;
 let reconnectAttempts = 0;
-
-const captureAgent = new LiteCaptureAgent({
-  emitBatch: emitBatch,
-  onMarker: emitMarker,
-  showIndicator: true
-});
+let captureAgent: LiteCaptureAgent | null = null;
+let captureAgentPromise: Promise<LiteCaptureAgent> | null = null;
 
 let recordingActive = false;
-let readyPingTimer = 0;
-let readyPingAttempts = 0;
 let pendingEvents: RawRecorderEvent[] = [];
 let pendingEventFlushTimer = 0;
 let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
 
-const READY_PING_MAX_ATTEMPTS = 50;
-const READY_PING_INTERVAL_MS = 150;
 const PORT_RECONNECT_INITIAL_MS = 250;
 const PORT_RECONNECT_MAX_MS = 5_000;
 const PENDING_EVENT_MAX = 1_200;
 const DEFAULT_TAB_ID = -1;
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
+const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
 
-connectContentPort();
+void requestRecordingStatusOnce();
 
 chromeApi?.runtime?.onMessage.addListener((message) => {
   if (isMarkerCommand(message)) {
-    captureAgent.emitMarker(t("contentKeyboardMarker"));
+    if (recordingActive) {
+      void emitKeyboardMarker();
+    }
+
     return false;
   }
 
@@ -50,15 +48,18 @@ window.addEventListener("beforeunload", cleanup);
 window.addEventListener("pagehide", cleanup, { once: true });
 
 function cleanup(): void {
-  stopReadyPing();
+  recordingActive = false;
   stopPortReconnect();
   stopPendingEventFlush();
   pendingEvents = [];
-  captureAgent.dispose();
+  captureAgent?.dispose();
+  captureAgent = null;
+  captureAgentPromise = null;
+  disconnectContentPort();
 }
 
 function connectContentPort(): void {
-  if (!chromeApi?.runtime || contentPort) {
+  if (!recordingActive || !chromeApi?.runtime || contentPort) {
     return;
   }
 
@@ -87,22 +88,36 @@ function bindContentPort(port: PortLike): void {
 
     port.onMessage.removeListener(onMessage);
     port.onDisconnect.removeListener(onDisconnect);
-    stopReadyPing();
     stopPendingEventFlush();
     schedulePortReconnect();
   };
 
   port.onMessage.addListener(onMessage);
   port.onDisconnect.addListener(onDisconnect);
-  requestRecordingStatusHandshake(true);
 
   if (recordingActive) {
     schedulePendingEventFlush();
   }
 }
 
+function disconnectContentPort(): void {
+  const port = contentPort;
+
+  if (!port) {
+    return;
+  }
+
+  contentPort = null;
+
+  try {
+    port.disconnect?.();
+  } catch (error) {
+    debugPortSendFailure("runtime.disconnect", error);
+  }
+}
+
 function schedulePortReconnect(): void {
-  if (!chromeApi?.runtime || reconnectTimer > 0 || contentPort) {
+  if (!recordingActive || !chromeApi?.runtime || reconnectTimer > 0 || contentPort) {
     return;
   }
 
@@ -248,89 +263,96 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
 
     if (message.active) {
       recordingActive = true;
-      captureAgent.setRecordingStatus(nextState);
-      stopReadyPing();
+      connectContentPort();
+      const agent = await ensureCaptureAgent();
+      agent.setRecordingStatus(nextState);
       schedulePendingEventFlush();
     } else {
       const wasRecording = recordingActive;
+      const agent = captureAgent;
 
-      if (wasRecording) {
-        await captureAgent.prepareStopCapture();
-        captureAgent.setRecordingStatus(nextState);
+      if (wasRecording && agent) {
+        await agent.prepareStopCapture();
+        agent.setRecordingStatus(nextState);
         await flushAllPendingEvents();
         emitStopDrained(nextState.sid);
-      } else {
-        captureAgent.setRecordingStatus(nextState);
+      } else if (agent) {
+        agent.setRecordingStatus(nextState);
       }
 
       recordingActive = false;
       stopPendingEventFlush();
       pendingEvents = [];
-      requestRecordingStatusHandshake(false);
+      disconnectContentPort();
     }
 
     return;
   }
 
   if (message.kind === "sw.freeze") {
-    captureAgent.setIndicatorState(message.sid, "freeze");
+    captureAgent?.setIndicatorState(message.sid, "freeze");
   }
 }
 
-function requestRecordingStatusHandshake(force = false): void {
-  if (!contentPort) {
-    connectContentPort();
-    return;
+async function ensureCaptureAgent(): Promise<LiteCaptureAgent> {
+  if (captureAgent) {
+    return captureAgent;
   }
 
-  if (recordingActive && !force) {
-    stopReadyPing();
-    return;
+  if (captureAgentPromise) {
+    return captureAgentPromise;
   }
 
-  if (force) {
-    readyPingAttempts = 0;
-  }
+  const moduleUrl = chromeApi?.runtime?.getURL?.("content-agent.js") ?? "./content-agent.js";
 
-  sendReadyPing();
+  captureAgentPromise = import(moduleUrl)
+    .then((module) => {
+      const { createContentCaptureAgent } = module as ContentAgentModule;
+      const options: LiteCaptureAgentOptions = {
+        emitBatch,
+        onMarker: emitMarker,
+        showIndicator: true
+      };
+      const agent = createContentCaptureAgent(options);
+      captureAgent = agent;
+      return agent;
+    })
+    .finally(() => {
+      captureAgentPromise = null;
+    });
 
-  if (readyPingTimer > 0) {
-    return;
-  }
-
-  readyPingTimer = window.setInterval(() => {
-    if (recordingActive || readyPingAttempts >= READY_PING_MAX_ATTEMPTS) {
-      stopReadyPing();
-      return;
-    }
-
-    sendReadyPing();
-  }, READY_PING_INTERVAL_MS);
+  return captureAgentPromise;
 }
 
-function sendReadyPing(): void {
-  if (!contentPort || recordingActive) {
+async function emitKeyboardMarker(): Promise<void> {
+  const agent = await ensureCaptureAgent();
+  agent.emitMarker(t("contentKeyboardMarker"));
+}
+
+async function requestRecordingStatusOnce(): Promise<void> {
+  if (!chromeApi?.runtime?.sendMessage) {
     return;
   }
-
-  readyPingAttempts += 1;
 
   try {
-    contentPort.postMessage({
+    const response = await chromeApi.runtime.sendMessage({
       kind: "content.ready"
     });
+
+    if (isRecordingStatusMessage(response)) {
+      await handleSwMessage(response);
+    }
   } catch (error) {
     debugPortSendFailure("content.ready", error);
   }
 }
 
-function stopReadyPing(): void {
-  readyPingAttempts = 0;
-
-  if (readyPingTimer > 0) {
-    clearInterval(readyPingTimer);
-    readyPingTimer = 0;
+function isRecordingStatusMessage(message: unknown): message is ExtensionOutboundMessage {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return false;
   }
+
+  return (message as { kind?: unknown }).kind === "sw.recording-status";
 }
 
 function schedulePendingEventFlush(immediate = false): void {

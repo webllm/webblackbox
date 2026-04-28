@@ -11,6 +11,7 @@ export default defineConfig({
   entry: {
     sw: "src/sw/index.ts",
     content: "src/content/index.ts",
+    "content-agent": "src/content/content-agent.ts",
     offscreen: "src/offscreen/index.ts",
     popup: "src/popup/index.ts",
     options: "src/options/index.ts",

@@ -19,6 +19,7 @@ export type PortLike = {
     removeListener(handler: PortDisconnectHandler): void;
   };
   postMessage(message: unknown): void;
+  disconnect?: () => void;
 };
 
 export type ChromeApi = {

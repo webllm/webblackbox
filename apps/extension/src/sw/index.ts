@@ -503,7 +503,7 @@ async function handleInboundMessage(
   port?: PortLike,
   senderTabId?: number,
   senderFrameId?: number
-): Promise<void> {
+): Promise<unknown> {
   if (message.kind === "ui.start") {
     const tabId = await resolveUiActionTabId(message.tabId);
 
@@ -572,26 +572,41 @@ async function handleInboundMessage(
     const tabId = senderTabId ?? port?.sender?.tab?.id;
 
     if (typeof tabId !== "number") {
-      return;
+      return {
+        kind: "sw.recording-status",
+        active: false
+      };
     }
 
     const runtime = sessionsByTab.get(tabId);
 
     if (!runtime || runtime.stoppedAt) {
-      return;
+      return {
+        kind: "sw.recording-status",
+        active: false
+      };
     }
 
     if (shouldInjectHooksForMode(runtime.mode)) {
       await ensureInjectedHooks(tabId);
     }
 
+    const sampling = toStatusSampling(runtime);
+
     if (port?.name === PORT_NAMES.content) {
       syncContentPortRecordingState(port);
-      return;
+      return {
+        ok: true
+      };
     }
 
-    await notifyTabStatus(tabId, true, runtime.sid, runtime.mode, toStatusSampling(runtime));
-    return;
+    return {
+      kind: "sw.recording-status",
+      active: true,
+      sid: runtime.sid,
+      mode: runtime.mode,
+      sampling
+    };
   }
 
   if (message.kind === "content.stop-drained") {

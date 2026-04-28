@@ -85,6 +85,7 @@ async function writeBuildFixture(outputDir, manifest) {
     "manifest.json": `${JSON.stringify(manifest, null, 2)}\n`,
     "_locales/en/messages.json": '{"extensionName":{"message":"WebBlackbox"}}\n',
     "_locales/zh_CN/messages.json": '{"extensionName":{"message":"WebBlackbox"}}\n',
+    "content-agent.js": "export {};\n",
     "content.js": "export {};\n",
     "injected.js": "export {};\n",
     "offscreen.html": "<!doctype html><title>offscreen</title>\n",

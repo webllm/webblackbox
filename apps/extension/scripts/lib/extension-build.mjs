@@ -36,6 +36,7 @@ const REQUIRED_BUILD_FILES = [
   "_locales/en/messages.json",
   "_locales/zh_CN/messages.json",
   "content.js",
+  "content-agent.js",
   "injected.js",
   "offscreen.html",
   "offscreen.js",
@@ -125,7 +126,7 @@ export function createExtensionManifest({ version, release = false }) {
     ],
     web_accessible_resources: [
       {
-        resources: ["injected.js"],
+        resources: ["content-agent.js", "injected.js"],
         matches: [...URL_MATCHES]
       }
     ],
@@ -182,8 +183,11 @@ export function validateExtensionManifest(manifest, { version, release = false }
       ? webAccessibleResources[0]?.resources
       : null;
 
-  if (!Array.isArray(injectedResources) || injectedResources.join(",") !== "injected.js") {
-    issues.push("Manifest must only expose injected.js as a web accessible resource.");
+  if (
+    !Array.isArray(injectedResources) ||
+    injectedResources.join(",") !== "content-agent.js,injected.js"
+  ) {
+    issues.push("Manifest must only expose content-agent.js and injected.js as web resources.");
   }
 
   validateUniqueStringArray(manifest?.permissions, "permissions", issues);
