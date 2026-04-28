@@ -21,7 +21,10 @@ import {
   type RecorderPlugin
 } from "@webblackbox/recorder";
 
-import { installInjectedLiteCaptureHooks } from "./injected-hooks.js";
+import {
+  INJECTED_CAPTURE_CONFIG_EVENT,
+  installInjectedLiteCaptureHooks
+} from "./injected-hooks.js";
 import { LiteCaptureAgent } from "./lite-capture-agent.js";
 import { materializeLiteRawEvent, shouldMaterializeLiteRawEvent } from "./lite-materializer.js";
 import type {
@@ -115,6 +118,7 @@ export class WebBlackboxLiteSdk {
     if (options.injectHooks !== false) {
       installInjectedLiteCaptureHooks({
         flag: options.injectHookFlag,
+        active: false,
         bodyCaptureMaxBytes: this.config.sampling.bodyCaptureMaxBytes
       });
     }
@@ -175,6 +179,7 @@ export class WebBlackboxLiteSdk {
     }
 
     this.recording = true;
+    this.syncInjectedHookConfig(true);
     this.captureAgent.setRecordingStatus({
       active: true,
       sid: this.sid,
@@ -194,6 +199,7 @@ export class WebBlackboxLiteSdk {
 
     if (this.recording) {
       this.recording = false;
+      this.syncInjectedHookConfig(false);
       this.captureAgent.setRecordingStatus({
         active: false,
         sid: this.sid,
@@ -422,6 +428,21 @@ export class WebBlackboxLiteSdk {
     }
 
     throw new Error("WebBlackboxLiteSdk has been disposed.");
+  }
+
+  private syncInjectedHookConfig(active: boolean): void {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.dispatchEvent(
+      new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
+        detail: {
+          active,
+          bodyCaptureMaxBytes: active ? this.config.sampling.bodyCaptureMaxBytes : 0
+        }
+      })
+    );
   }
 }
 

@@ -199,6 +199,47 @@ describe("injected-hooks", () => {
     });
   });
 
+  it("suppresses hook emissions while runtime capture is inactive", async () => {
+    const flag = "__WB_TEST_INJECTED_ACTIVE_GATE__";
+
+    installInjectedLiteCaptureHooks({ flag, active: false });
+    await delay(10);
+
+    expect(captured).toHaveLength(0);
+
+    console.info("inactive-console");
+    await delay(10);
+
+    expect(captured.some((message) => message.rawType === "console")).toBe(false);
+
+    window.dispatchEvent(
+      new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+        detail: {
+          active: true
+        }
+      })
+    );
+
+    console.info("active-console");
+    await delay(10);
+
+    expect(captured.some((message) => message.rawType === "console")).toBe(true);
+
+    captured.length = 0;
+    window.dispatchEvent(
+      new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+        detail: {
+          active: false
+        }
+      })
+    );
+
+    console.info("inactive-again");
+    await delay(10);
+
+    expect(captured.some((message) => message.rawType === "console")).toBe(false);
+  });
+
   it("does not patch page-side network hooks when captureNetwork is disabled", async () => {
     const flag = "__WB_TEST_INJECTED_NETWORK_DISABLED__";
     window.fetch = vi.fn(async () => new Response("ok")) as typeof fetch;

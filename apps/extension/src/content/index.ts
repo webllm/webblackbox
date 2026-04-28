@@ -422,6 +422,7 @@ function syncInjectedCaptureConfig(
   window.dispatchEvent(
     new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
       detail: {
+        active: message.active && message.mode === "lite",
         bodyCaptureMaxBytes
       }
     })

@@ -62,6 +62,7 @@ const mockRuntime = vi.hoisted(() => {
 
 vi.mock("./injected-hooks.js", () => {
   return {
+    INJECTED_CAPTURE_CONFIG_EVENT: "webblackbox:injected-config",
     installInjectedLiteCaptureHooks: mockRuntime.installInjectedLiteCaptureHooksMock
   };
 });
@@ -122,6 +123,7 @@ describe("WebBlackboxLiteSdk", () => {
     expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledTimes(1);
     expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledWith({
       flag: "__WB_TEST_FLAG__",
+      active: false,
       bodyCaptureMaxBytes: 0
     });
 

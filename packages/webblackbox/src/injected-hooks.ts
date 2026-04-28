@@ -18,6 +18,7 @@ export const INJECTED_MESSAGE_SOURCE = "webblackbox-injected";
 export const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
 
 export type InjectedCaptureConfig = {
+  active?: boolean;
   bodyCaptureMaxBytes?: number;
 };
 
@@ -53,6 +54,8 @@ export type InjectedCaptureWindowMessage =
 export type InjectedHooksOptions = {
   /** Global flag name used to prevent duplicate hook installation. */
   flag?: string;
+  /** Enables event emission after hooks are installed. */
+  active?: boolean;
   /** Per-response capture budget; `0` disables response-body sampling. */
   bodyCaptureMaxBytes?: number;
   /** Disables fetch/xhr/EventSource monkeypatching when browser-side capture is available. */
@@ -75,6 +78,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   let bodyWindowCount = 0;
   let bodyWindowBytes = 0;
   let emitFlushTimer = 0;
+  let captureActive = options.active !== false;
   const pendingCaptureEvents: Array<{
     rawType: string;
     payload: CapturePayload;
@@ -87,12 +91,20 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   const captureNetwork = options.captureNetwork !== false;
 
   if (windowFlags[flag]) {
+    const detail: InjectedCaptureConfig = {};
+
+    if (Object.prototype.hasOwnProperty.call(options, "active")) {
+      detail.active = options.active;
+    }
+
     if (Object.prototype.hasOwnProperty.call(options, "bodyCaptureMaxBytes")) {
+      detail.bodyCaptureMaxBytes = options.bodyCaptureMaxBytes;
+    }
+
+    if (Object.keys(detail).length > 0) {
       window.dispatchEvent(
         new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
-          detail: {
-            bodyCaptureMaxBytes: options.bodyCaptureMaxBytes
-          }
+          detail
         })
       );
     }
@@ -104,6 +116,11 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
   window.addEventListener(INJECTED_CAPTURE_CONFIG_EVENT, (event: Event) => {
     const detail = (event as CustomEvent<InjectedCaptureConfig>).detail;
+
+    if (typeof detail?.active === "boolean") {
+      captureActive = detail.active;
+    }
+
     networkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
       detail?.bodyCaptureMaxBytes
     );
@@ -123,6 +140,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   });
 
   function emit(rawType: string, payload: CapturePayload): void {
+    if (!captureActive) {
+      return;
+    }
+
     pendingCaptureEvents.push({
       rawType,
       payload,
@@ -248,6 +269,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           return Reflect.apply(original, console, args);
         }
 
+        if (!captureActive) {
+          return Reflect.apply(original, console, args);
+        }
+
         const now = Date.now();
 
         if (now - noisyWindowStartedAt >= 1_000) {
@@ -352,6 +377,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
   function installErrorHooks(): void {
     window.addEventListener("error", (event) => {
+      if (!captureActive) {
+        return;
+      }
+
       const target = event.target;
 
       if (target instanceof HTMLElement && ["SCRIPT", "LINK", "IMG"].includes(target.tagName)) {
@@ -372,6 +401,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     });
 
     window.addEventListener("unhandledrejection", (event) => {
+      if (!captureActive) {
+        return;
+      }
+
       emit("unhandledrejection", {
         reason: safeSerialize(event.reason)
       });
@@ -385,28 +418,34 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       const localClear = localStorage.clear.bind(localStorage);
 
       localStorage.setItem = (key: string, value: string) => {
-        emit("localStorageOp", {
-          op: "setItem",
-          key,
-          valueLength: value.length
-        });
+        if (captureActive) {
+          emit("localStorageOp", {
+            op: "setItem",
+            key,
+            valueLength: value.length
+          });
+        }
 
         localSetItem(key, value);
       };
 
       localStorage.removeItem = (key: string) => {
-        emit("localStorageOp", {
-          op: "removeItem",
-          key
-        });
+        if (captureActive) {
+          emit("localStorageOp", {
+            op: "removeItem",
+            key
+          });
+        }
 
         localRemoveItem(key);
       };
 
       localStorage.clear = () => {
-        emit("localStorageOp", {
-          op: "clear"
-        });
+        if (captureActive) {
+          emit("localStorageOp", {
+            op: "clear"
+          });
+        }
 
         localClear();
       };
@@ -420,28 +459,34 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       const sessionClear = sessionStorage.clear.bind(sessionStorage);
 
       sessionStorage.setItem = (key: string, value: string) => {
-        emit("sessionStorageOp", {
-          op: "setItem",
-          key,
-          valueLength: value.length
-        });
+        if (captureActive) {
+          emit("sessionStorageOp", {
+            op: "setItem",
+            key,
+            valueLength: value.length
+          });
+        }
 
         sessionSetItem(key, value);
       };
 
       sessionStorage.removeItem = (key: string) => {
-        emit("sessionStorageOp", {
-          op: "removeItem",
-          key
-        });
+        if (captureActive) {
+          emit("sessionStorageOp", {
+            op: "removeItem",
+            key
+          });
+        }
 
         sessionRemoveItem(key);
       };
 
       sessionStorage.clear = () => {
-        emit("sessionStorageOp", {
-          op: "clear"
-        });
+        if (captureActive) {
+          emit("sessionStorageOp", {
+            op: "clear"
+          });
+        }
 
         sessionClear();
       };
@@ -454,6 +499,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     const originalFetch = window.fetch.bind(window);
 
     window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+      if (!captureActive) {
+        return originalFetch(...args);
+      }
+
       const requestMeta = resolveFetchRequestMeta(args);
       const reqId = nextRequestId("fetch");
       const startedMono = monotonicTime();
@@ -514,10 +563,16 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     XMLHttpRequest.prototype.open = function (
       method: string,
       url: string | URL,
-      async?: boolean,
-      username?: string | null,
-      password?: string | null
+      ...rest: [async?: boolean, username?: string | null, password?: string | null]
     ): void {
+      const args = [method, url, ...rest];
+      const [async, username, password] = rest;
+
+      if (!captureActive) {
+        Reflect.apply(xhrOpen, this, args);
+        return;
+      }
+
       (
         this as XMLHttpRequest & {
           __wbReqId?: string;
@@ -557,15 +612,15 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       const openArgs: unknown[] = [method, url];
 
-      if (arguments.length >= 3) {
+      if (args.length >= 3) {
         openArgs.push(async);
       }
 
-      if (arguments.length >= 4) {
+      if (args.length >= 4) {
         openArgs.push(username);
       }
 
-      if (arguments.length >= 5) {
+      if (args.length >= 5) {
         openArgs.push(password);
       }
 
@@ -575,6 +630,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     XMLHttpRequest.prototype.send = function (
       body?: Document | XMLHttpRequestBodyInit | null
     ): void {
+      if (!captureActive) {
+        return xhrSend.call(this, body as unknown as XMLHttpRequestBodyInit | null | undefined);
+      }
+
       const xhr = this as XMLHttpRequest & {
         __wbReqId?: string;
         __wbMethod?: string;
@@ -673,6 +732,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       class WebBlackboxEventSource extends NativeEventSource {
         public constructor(...args: ConstructorParameters<typeof NativeEventSource>) {
           super(...args);
+
+          if (!captureActive) {
+            return;
+          }
 
           const url = typeof args[0] === "string" ? args[0] : String(args[0]);
           const streamId = nextRequestId("sse");
@@ -1203,11 +1266,13 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     const open = indexedDB.open.bind(indexedDB);
 
     indexedDB.open = (name: string, version?: number) => {
-      emit("indexedDbOp", {
-        op: "open",
-        name,
-        version
-      });
+      if (captureActive) {
+        emit("indexedDbOp", {
+          op: "open",
+          name,
+          version
+        });
+      }
 
       return open(name, version);
     };
