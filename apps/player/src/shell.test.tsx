@@ -48,6 +48,21 @@ describe("PlayerShell", () => {
     expect(screen.getByText("复制 cURL")).toBeInTheDocument();
   });
 
+  it("renders share privacy preflight controls", () => {
+    render(<PlayerShell />);
+
+    const preflight = document.querySelector("#share-privacy-preflight");
+    const review = document.querySelector("#share-upload-privacy-reviewed");
+
+    expect(preflight).toHaveTextContent("Privacy Preflight");
+    expect(preflight).toHaveTextContent("Redaction profile");
+    expect(preflight).toHaveTextContent("Detected signals");
+    expect(preflight).toHaveTextContent("Sensitive preview");
+    expect(review).toBeInstanceOf(HTMLInputElement);
+    expect(review).not.toBeChecked();
+    expect(document.querySelector("#share-upload-confirm")).toBeInTheDocument();
+  });
+
   it("supports key UI interactions for triage and playback controls", async () => {
     const user = userEvent.setup();
     render(<PlayerShell />);

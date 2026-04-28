@@ -505,6 +505,12 @@ const refs = {
   shareUploadPassphrase: getElement<HTMLInputElement>("share-upload-passphrase"),
   shareUploadApiKey: getElement<HTMLInputElement>("share-upload-api-key"),
   shareUploadShowPassphrase: getElement<HTMLInputElement>("share-upload-show-passphrase"),
+  shareUploadPrivacyReviewed: getElement<HTMLInputElement>("share-upload-privacy-reviewed"),
+  shareUploadConfirm: getElement<HTMLButtonElement>("share-upload-confirm"),
+  sharePrivacyProfile: getElement<HTMLElement>("share-privacy-profile"),
+  sharePrivacyDetected: getElement<HTMLElement>("share-privacy-detected"),
+  sharePrivacyPreview: getElement<HTMLElement>("share-privacy-preview"),
+  sharePrivacySamples: getElement<HTMLUListElement>("share-privacy-samples"),
   shareLoadDialog: getElement<HTMLDialogElement>("share-load-dialog"),
   shareLoadReference: getElement<HTMLInputElement>("share-load-reference"),
   shareLoadApiKey: getElement<HTMLInputElement>("share-load-api-key"),
@@ -1098,6 +1104,10 @@ function bindGlobalActions(): void {
 
   refs.shareUploadShowPassphrase.addEventListener("change", () => {
     refs.shareUploadPassphrase.type = refs.shareUploadShowPassphrase.checked ? "text" : "password";
+  });
+
+  refs.shareUploadPrivacyReviewed.addEventListener("change", () => {
+    updateShareUploadConfirmState();
   });
 
   refs.summary.addEventListener("click", (event) => {
@@ -1891,6 +1901,9 @@ async function promptShareUploadConfig(): Promise<{
   refs.shareUploadPassphrase.value = "";
   refs.shareUploadShowPassphrase.checked = false;
   refs.shareUploadPassphrase.type = "password";
+  refs.shareUploadPrivacyReviewed.checked = false;
+  renderSharePrivacyPreflight();
+  updateShareUploadConfirmState();
 
   const detachBinding = bindShareApiKeyInputToTargetOrigin(
     refs.shareUploadBaseUrl,
@@ -1911,11 +1924,96 @@ async function promptShareUploadConfig(): Promise<{
     return null;
   }
 
+  if (!refs.shareUploadPrivacyReviewed.checked) {
+    return null;
+  }
+
   return {
     baseUrl: refs.shareUploadBaseUrl.value.trim(),
     passphrase: refs.shareUploadPassphrase.value,
     apiKey: refs.shareUploadApiKey.value.trim()
   };
+}
+
+function renderSharePrivacyPreflight(): void {
+  const player = state.player;
+
+  if (!player) {
+    refs.sharePrivacyProfile.textContent = i18n.t("sharePrivacyProfileSummary", {
+      headers: 0,
+      cookies: 0,
+      patterns: 0
+    });
+    refs.sharePrivacyDetected.textContent = i18n.t("sharePrivacyDetectedSummary", {
+      markers: 0,
+      hashes: 0,
+      mentions: 0
+    });
+    refs.sharePrivacyPreview.textContent = i18n.t("sharePrivacyPreviewSummary", {
+      matches: 0,
+      samples: 0
+    });
+    refs.sharePrivacySamples.innerHTML = `<li>${escapeHtml(
+      i18n.messages.sharePrivacyPreviewEmpty
+    )}</li>`;
+    return;
+  }
+
+  const report = player.getPrivacyProtectionReport();
+  const preview = player.getSensitiveDataPreview({ limit: 5 });
+
+  refs.sharePrivacyProfile.textContent = i18n.t("sharePrivacyProfileSummary", {
+    headers: report.redaction.headers.length,
+    cookies: report.redaction.cookieNames.length,
+    patterns: report.redaction.bodyPatterns.length
+  });
+  refs.sharePrivacyDetected.textContent = i18n.t("sharePrivacyDetectedSummary", {
+    markers: report.detected.redactedMarkers,
+    hashes: report.detected.hashedSensitiveValues,
+    mentions: report.detected.sensitiveKeyMentions
+  });
+  refs.sharePrivacyPreview.textContent = i18n.t("sharePrivacyPreviewSummary", {
+    matches: preview.totalMatches,
+    samples: preview.samples.length
+  });
+
+  const samples = preview.samples.slice(0, 5);
+
+  if (samples.length === 0) {
+    refs.sharePrivacySamples.innerHTML = `<li>${escapeHtml(
+      i18n.messages.sharePrivacyPreviewEmpty
+    )}</li>`;
+    return;
+  }
+
+  refs.sharePrivacySamples.innerHTML = samples
+    .map((sample) => {
+      const label = i18n.t("sharePrivacyPreviewSample", {
+        reason: formatSensitivePreviewReason(sample.reason),
+        snippet: sample.snippet
+      });
+
+      return `<li>${escapeHtml(label)}</li>`;
+    })
+    .join("");
+}
+
+function updateShareUploadConfirmState(): void {
+  refs.shareUploadConfirm.disabled = !refs.shareUploadPrivacyReviewed.checked;
+}
+
+function formatSensitivePreviewReason(reason: string): string {
+  if (locale === "zh-CN") {
+    const labels: Record<string, string> = {
+      "redacted-marker": "脱敏标记",
+      "hashed-value": "哈希值",
+      "sensitive-pattern": "敏感模式"
+    };
+
+    return labels[reason] ?? reason;
+  }
+
+  return reason.replaceAll("-", " ");
 }
 
 async function promptShareReferenceInput(): Promise<{ reference: string; apiKey: string } | null> {

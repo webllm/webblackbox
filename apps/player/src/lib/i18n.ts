@@ -127,6 +127,17 @@ type PlayerMessages = {
   sharePlaceholderServerUrl: string;
   sharePlaceholderPublicMetadata: string;
   sharePlaceholderApiKeyRequired: string;
+  sharePrivacyPreflightTitle: string;
+  sharePrivacyPreflightDescription: string;
+  sharePrivacyRedactionProfile: string;
+  sharePrivacyDetectedSignals: string;
+  sharePrivacySensitivePreview: string;
+  sharePrivacyReviewed: string;
+  sharePrivacyProfileSummary: string;
+  sharePrivacyDetectedSummary: string;
+  sharePrivacyPreviewSummary: string;
+  sharePrivacyPreviewEmpty: string;
+  sharePrivacyPreviewSample: string;
   loadSharedArchiveTitle: string;
   loadSharedArchiveDescription: string;
   shareReference: string;
@@ -388,6 +399,18 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     sharePlaceholderServerUrl: "https://share.example.com",
     sharePlaceholderPublicMetadata: "Leave empty for public metadata only",
     sharePlaceholderApiKeyRequired: "Required when server auth is enabled",
+    sharePrivacyPreflightTitle: "Privacy Preflight",
+    sharePrivacyPreflightDescription:
+      "Review redaction coverage and detected sensitive signals before uploading.",
+    sharePrivacyRedactionProfile: "Redaction profile",
+    sharePrivacyDetectedSignals: "Detected signals",
+    sharePrivacySensitivePreview: "Sensitive preview",
+    sharePrivacyReviewed: "I reviewed this privacy summary",
+    sharePrivacyProfileSummary: "{headers} headers | {cookies} cookies | {patterns} patterns",
+    sharePrivacyDetectedSummary: "{markers} markers | {hashes} hashes | {mentions} mentions",
+    sharePrivacyPreviewSummary: "{matches} matches | {samples} samples",
+    sharePrivacyPreviewEmpty: "No sensitive preview samples detected.",
+    sharePrivacyPreviewSample: "{reason}: {snippet}",
     loadSharedArchiveTitle: "Load Shared Archive",
     loadSharedArchiveDescription: "Paste a share URL, archive API URL, or share ID.",
     shareReference: "Share reference",
@@ -682,6 +705,17 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     sharePlaceholderServerUrl: "https://share.example.com",
     sharePlaceholderPublicMetadata: "留空则仅公开元数据",
     sharePlaceholderApiKeyRequired: "当服务启用鉴权时必填",
+    sharePrivacyPreflightTitle: "隐私预检",
+    sharePrivacyPreflightDescription: "上传前审核脱敏覆盖范围和检测到的敏感信号。",
+    sharePrivacyRedactionProfile: "脱敏配置",
+    sharePrivacyDetectedSignals: "检测信号",
+    sharePrivacySensitivePreview: "敏感预览",
+    sharePrivacyReviewed: "我已审核该隐私摘要",
+    sharePrivacyProfileSummary: "{headers} 个请求头 | {cookies} 个 Cookie | {patterns} 个模式",
+    sharePrivacyDetectedSummary: "{markers} 个标记 | {hashes} 个哈希 | {mentions} 次提及",
+    sharePrivacyPreviewSummary: "{matches} 处匹配 | {samples} 个样本",
+    sharePrivacyPreviewEmpty: "未检测到敏感预览样本。",
+    sharePrivacyPreviewSample: "{reason}: {snippet}",
     loadSharedArchiveTitle: "加载分享归档",
     loadSharedArchiveDescription: "粘贴分享链接、archive API URL 或 share ID。",
     shareReference: "分享引用",

@@ -671,6 +671,31 @@ export function PlayerShell({ locale = "en" }: PlayerShellProps = {}): React.JSX
             <Checkbox id="share-upload-show-passphrase" />
             {messages.showPassphrase}
           </label>
+          <section id="share-privacy-preflight" className="share-privacy-preflight">
+            <header className="share-privacy-head">
+              <h3>{messages.sharePrivacyPreflightTitle}</h3>
+              <p>{messages.sharePrivacyPreflightDescription}</p>
+            </header>
+            <div className="share-privacy-grid">
+              <div>
+                <span>{messages.sharePrivacyRedactionProfile}</span>
+                <strong id="share-privacy-profile"></strong>
+              </div>
+              <div>
+                <span>{messages.sharePrivacyDetectedSignals}</span>
+                <strong id="share-privacy-detected"></strong>
+              </div>
+              <div>
+                <span>{messages.sharePrivacySensitivePreview}</span>
+                <strong id="share-privacy-preview"></strong>
+              </div>
+            </div>
+            <ul id="share-privacy-samples" className="share-privacy-samples"></ul>
+            <label className="share-dialog-toggle">
+              <Checkbox id="share-upload-privacy-reviewed" />
+              {messages.sharePrivacyReviewed}
+            </label>
+          </section>
           <div className="share-dialog-actions">
             <Button id="share-upload-cancel" type="button" variant="ghost" data-dialog-cancel>
               {messages.cancel}
