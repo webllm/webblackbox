@@ -1467,6 +1467,23 @@ input[type="file"],
   font-size: 9px;
 }
 
+.action-card-replay {
+  padding-top: 4px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.action-card-replay-high {
+  color: #0f6b3d;
+}
+
+.action-card-replay-medium {
+  color: #8a5a00;
+}
+
+.action-card-replay-low {
+  color: #9f1239;
+}
+
 .event-row {
   min-height: 28px;
   border-bottom: 1px solid var(--sys-color-divider);

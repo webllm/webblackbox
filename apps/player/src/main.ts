@@ -6,6 +6,7 @@ import {
   type PerformanceArtifactEntry,
   type PlayerComparison,
   type RealtimeNetworkEntry,
+  type ReplayDiagnosticEntry,
   type StorageTimelineEntry,
   WebBlackboxPlayer
 } from "@webblackbox/player-sdk";
@@ -206,6 +207,8 @@ type ArchiveModel = {
   actionTimeline: ActionTimelineEntry[];
   actionScopeByActId: Map<string, EventScope>;
   actionSearchText: string[];
+  replayDiagnostics: ReplayDiagnosticEntry[];
+  replayDiagnosticByActId: Map<string, ReplayDiagnosticEntry>;
   consoleSignals: WebBlackboxEvent[];
   consoleSignalSearchText: string[];
   eventById: Map<string, WebBlackboxEvent>;
@@ -3396,6 +3399,11 @@ function renderActionCard(action: ActionTimelineEntry, model: ArchiveModel): str
     .slice(0, 2)
     .map((entry) => `${entry.type}${entry.message ? `: ${entry.message}` : ""}`)
     .join(" | ");
+  const replayDiagnostic = model.replayDiagnosticByActId.get(action.actId) ?? null;
+  const replayPreview = replayDiagnostic ? formatReplayDiagnosticSummary(replayDiagnostic) : "";
+  const replayClass = replayDiagnostic
+    ? `action-card-section action-card-replay action-card-replay-${replayDiagnostic.confidence}`
+    : "action-card-section action-card-replay";
   const cardClass = selectedClass ? `action-card ${selectedClass}` : "action-card";
 
   return `<li class="action-card-row"><button class="${cardClass}" data-action-id="${escapeHtml(action.actId)}">
@@ -3425,7 +3433,35 @@ function renderActionCard(action: ActionTimelineEntry, model: ArchiveModel): str
           ? `<div class="action-card-section"><span class="action-card-label">${escapeHtml(i18n.messages.actionSectionErrors)}</span><span>${escapeHtml(errorPreview)}</span></div>`
           : ""
       }
+      ${
+        replayPreview
+          ? `<div class="${replayClass}"><span class="action-card-label">${escapeHtml(i18n.messages.actionSectionReplay)}</span><span>${escapeHtml(replayPreview)}</span></div>`
+          : ""
+      }
     </button></li>`;
+}
+
+function formatReplayDiagnosticSummary(entry: ReplayDiagnosticEntry): string {
+  const chain = entry.causeChain.slice(0, 4).join(" -> ") || i18n.messages.replayCauseChainEmpty;
+
+  return i18n.t("replayDiagnosticSummary", {
+    confidence: formatReplayConfidence(entry.confidence),
+    requests: entry.requestResponseDiffs.length,
+    errors: entry.errorMessages.length,
+    chain
+  });
+}
+
+function formatReplayConfidence(confidence: ReplayDiagnosticEntry["confidence"]): string {
+  if (confidence === "high") {
+    return i18n.messages.replayConfidenceHigh;
+  }
+
+  if (confidence === "medium") {
+    return i18n.messages.replayConfidenceMedium;
+  }
+
+  return i18n.messages.replayConfidenceLow;
 }
 
 function renderEventDetails(): void {
@@ -3503,6 +3539,7 @@ function renderActionRootCauseDetails(model: ArchiveModel): void {
     scope: resolveRequestScope(model, entry.reqId),
     linked: model.waterfallByReqId.get(entry.reqId) ?? null
   }));
+  const replayDiagnostic = model.replayDiagnosticByActId.get(action.actId) ?? null;
 
   refs.eventDetails.textContent = JSON.stringify(
     {
@@ -3518,6 +3555,7 @@ function renderActionRootCauseDetails(model: ArchiveModel): void {
         errorCount: action.errorCount
       },
       scope: resolveActionScope(model, action),
+      replayDiagnostic,
       triggerEvent,
       screenshot: action.screenshot,
       nearbyNetwork: requestContext,
@@ -4378,6 +4416,10 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     )
     .sort((left, right) => left.startMono - right.startMono);
   const actionSearchText = actionTimeline.map((entry) => buildActionSearchText(entry));
+  const replayDiagnostics = player.getReplayDiagnostics();
+  const replayDiagnosticByActId = new Map(
+    replayDiagnostics.map((entry) => [entry.actId, entry] as const)
+  );
   const actionScopeByActId = buildActionScopeIndex(
     derived.actionSpans,
     eventById,
@@ -4393,6 +4435,8 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     actionTimeline,
     actionScopeByActId,
     actionSearchText,
+    replayDiagnostics,
+    replayDiagnosticByActId,
     consoleSignals,
     consoleSignalSearchText,
     eventById,

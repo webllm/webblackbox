@@ -218,6 +218,12 @@ type PlayerMessages = {
   actionMetricNoShot: string;
   actionSectionNetwork: string;
   actionSectionErrors: string;
+  actionSectionReplay: string;
+  replayDiagnosticSummary: string;
+  replayConfidenceHigh: string;
+  replayConfidenceMedium: string;
+  replayConfidenceLow: string;
+  replayCauseChainEmpty: string;
   sortColumnFallback: string;
   sortByColumn: string;
   sortedByColumn: string;
@@ -493,6 +499,12 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     actionMetricNoShot: "no-shot",
     actionSectionNetwork: "network",
     actionSectionErrors: "errors",
+    actionSectionReplay: "replay",
+    replayDiagnosticSummary: "{confidence} confidence | {requests} req | {errors} err | {chain}",
+    replayConfidenceHigh: "high",
+    replayConfidenceMedium: "medium",
+    replayConfidenceLow: "low",
+    replayCauseChainEmpty: "no cause chain",
     sortColumnFallback: "column",
     sortByColumn: "Sort by {column}",
     sortedByColumn: "Sorted by {column} ({direction})",
@@ -797,6 +809,12 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     actionMetricNoShot: "无截图",
     actionSectionNetwork: "网络",
     actionSectionErrors: "错误",
+    actionSectionReplay: "回放",
+    replayDiagnosticSummary: "{confidence} 可信度 | {requests} 个请求 | {errors} 个错误 | {chain}",
+    replayConfidenceHigh: "高",
+    replayConfidenceMedium: "中",
+    replayConfidenceLow: "低",
+    replayCauseChainEmpty: "无因果链",
     sortColumnFallback: "列",
     sortByColumn: "按 {column} 排序",
     sortedByColumn: "按 {column} 排序（{direction}）",

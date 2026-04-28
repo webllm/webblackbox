@@ -133,6 +133,11 @@ async function main() {
     "Action markers are not positioned on the normalized timeline",
     loaded
   );
+  assert(
+    loaded.actionReplayRows.some((row) => row.includes("confidence")),
+    "Action replay diagnostics did not render",
+    loaded
+  );
 
   const playback = await playUntilScreenshotMarkerVisible(client, 8_000);
   assert(
@@ -977,6 +982,9 @@ async function waitForPlaybackRegressionSnapshot(client, timeoutMs) {
           const screenshotButtons = document.querySelectorAll(
             '#filmstrip-list button[data-shot-event]'
           ).length;
+          const actionReplayRows = Array.from(
+            document.querySelectorAll('#actions-list .action-card-replay')
+          ).map((row) => (row.textContent || '').trim());
           const trailSegments = document.querySelectorAll(
             '#filmstrip-trail-svg .preview-trail-line, #filmstrip-trail-svg .preview-trail-point'
           ).length;
@@ -990,6 +998,7 @@ async function waitForPlaybackRegressionSnapshot(client, timeoutMs) {
             markerCounts,
             markers,
             screenshotButtons,
+            actionReplayRows,
             cursorVisible: Boolean(cursor && !cursor.hidden),
             trailSegments,
             previewLoaded: Boolean(
@@ -1013,6 +1022,7 @@ async function waitForPlaybackRegressionSnapshot(client, timeoutMs) {
         snapshot.markerCounts.screenshot < 2 ||
         snapshot.markerCounts.action < 2 ||
         snapshot.screenshotButtons < 2 ||
+        snapshot.actionReplayRows.length < 1 ||
         !snapshot.previewLoaded ||
         !snapshot.cursorVisible ||
         snapshot.trailSegments <= 0 ||
