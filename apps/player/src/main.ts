@@ -1,5 +1,6 @@
 import type { WebBlackboxEvent } from "@webblackbox/protocol";
 import {
+  type ActionSpan,
   type ActionTimelineEntry,
   type NetworkWaterfallEntry,
   type PerformanceArtifactEntry,
@@ -41,6 +42,8 @@ import {
 } from "./lib/network-view.js";
 import { asFiniteNumber, asRecord } from "./lib/parsing.js";
 import { markerKindToPanel } from "./lib/progress.js";
+import { normalizePlaybackEvents, type PlaybackTimeNormalization } from "./lib/playback-time.js";
+import { generatePlaywrightScriptFromEvents } from "./lib/playwright-script.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
 import { createReplayHeaders as buildReplayHeaders, shouldAttachReplayBody } from "./lib/replay.js";
 import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
@@ -190,6 +193,9 @@ type ScreenshotRecord = {
   eventId: string;
   mono: number;
   shotId: string;
+  reason: string | null;
+  format: string | null;
+  size: number | null;
   marker: ScreenshotMarker | null;
   context: ScreenshotRenderContext | null;
 };
@@ -1625,23 +1631,28 @@ async function openPlaywrightPreviewDialog(): Promise<void> {
 
 function regeneratePlaywrightPreview(): void {
   const player = state.player;
+  const model = state.model;
   const options = readPlaywrightPreviewOptions();
 
-  if (!player || !options) {
+  if (!player || !model || !options) {
     refs.playwrightScriptPreview.value = "";
     return;
   }
 
-  const script = player.generatePlaywrightScript({
-    range: options.range,
+  const range = options.range;
+  const events = range
+    ? model.events.filter((event) => event.mono >= range.monoStart && event.mono <= range.monoEnd)
+    : model.events;
+  const script = generatePlaywrightScriptFromEvents(events, {
     maxActions: options.maxActions,
-    includeHarReplay: options.includeHarReplay
+    includeHarReplay: options.includeHarReplay,
+    startUrl: player.archive.manifest.site.origin
   });
   refs.playwrightScriptPreview.value = script;
 }
 
 function readPlaywrightPreviewOptions(): {
-  range?: { monoStart?: number; monoEnd?: number };
+  range?: { monoStart: number; monoEnd: number };
   maxActions: number;
   includeHarReplay: boolean;
 } | null {
@@ -3558,11 +3569,11 @@ function renderWaterfall(): void {
 
   const linkedEvents = player
     .getRequestEvents(selectedEntry.reqId)
-    .filter((event) => event.mono <= state.playheadMono)
+    .filter((event) => (model.eventById.get(event.id)?.mono ?? event.mono) <= state.playheadMono)
     .map((event) => ({
       id: event.id,
       type: event.type,
-      mono: event.mono,
+      mono: model.eventById.get(event.id)?.mono ?? event.mono,
       scope: resolveEventScope(model, event),
       frame: event.frame ?? null,
       cdp: event.cdp ?? null,
@@ -4154,14 +4165,10 @@ function resolveActionScope(model: ArchiveModel, action: ActionTimelineEntry): E
 }
 
 function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
-  const events = [...player.events].sort(
-    (left, right) => left.mono - right.mono || left.t - right.t
-  );
-  const actionTimeline = player
-    .getActionTimeline()
-    .sort((left, right) => left.startMono - right.startMono);
+  const timeNormalization = normalizePlaybackEvents(player.events);
+  const events = timeNormalization.events;
+  const rawActionTimeline = player.getActionTimeline();
   const derived = player.buildDerived();
-  const actionSearchText = actionTimeline.map((entry) => buildActionSearchText(entry));
   const consoleSignals: WebBlackboxEvent[] = [];
   const consoleSignalSearchText: string[] = [];
   const eventById = new Map<string, WebBlackboxEvent>();
@@ -4218,6 +4225,9 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
           eventId: event.id,
           mono: event.mono,
           shotId,
+          reason: typeof data?.reason === "string" ? data.reason : null,
+          format: typeof data?.format === "string" ? data.format : null,
+          size: asFiniteNumber(data?.size),
           marker: readScreenshotMarker(data),
           context: readScreenshotContext(data, event)
         };
@@ -4255,6 +4265,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
 
   const waterfall = player
     .getNetworkWaterfall()
+    .map((entry) => normalizeWaterfallEntry(entry, timeNormalization))
     .sort((left, right) => left.startMono - right.startMono);
   const waterfallByReqId = new Map<string, NetworkWaterfallEntry>();
 
@@ -4262,6 +4273,13 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     waterfallByReqId.set(entry.reqId, entry);
   }
 
+  const actionSpanById = new Map(derived.actionSpans.map((span) => [span.actId, span]));
+  const actionTimeline = rawActionTimeline
+    .map((entry) =>
+      normalizeActionTimelineEntry(entry, actionSpanById, timeNormalization, screenshots)
+    )
+    .sort((left, right) => left.startMono - right.startMono);
+  const actionSearchText = actionTimeline.map((entry) => buildActionSearchText(entry));
   const actionScopeByActId = buildActionScopeIndex(
     derived.actionSpans,
     eventById,
@@ -4289,9 +4307,27 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     waterfall,
     waterfallByReqId,
     requestScopeByReqId,
-    realtime: player.getRealtimeNetworkTimeline(),
-    storage: player.getStorageTimeline(),
-    perf: player.getPerformanceArtifacts(),
+    realtime: player
+      .getRealtimeNetworkTimeline()
+      .map((entry) => ({
+        ...entry,
+        mono: normalizeMonoForEvent(entry.eventId, timeNormalization, entry.mono)
+      }))
+      .sort((left, right) => left.mono - right.mono),
+    storage: player
+      .getStorageTimeline()
+      .map((entry) => ({
+        ...entry,
+        mono: normalizeMonoForEvent(entry.eventId, timeNormalization, entry.mono)
+      }))
+      .sort((left, right) => left.mono - right.mono),
+    perf: player
+      .getPerformanceArtifacts()
+      .map((entry) => ({
+        ...entry,
+        mono: normalizeMonoForEvent(entry.eventId, timeNormalization, entry.mono)
+      }))
+      .sort((left, right) => left.mono - right.mono),
     progressMarkers,
     minMono,
     maxMono,
@@ -4303,6 +4339,130 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
       actionSpans: derived.actionSpans.length
     }
   };
+}
+
+function normalizeWaterfallEntry(
+  entry: NetworkWaterfallEntry,
+  timeNormalization: PlaybackTimeNormalization
+): NetworkWaterfallEntry {
+  const eventMonos = entry.eventIds
+    .map((eventId) => timeNormalization.monoByEventId.get(eventId))
+    .filter((mono): mono is number => typeof mono === "number" && Number.isFinite(mono))
+    .sort((left, right) => left - right);
+
+  if (eventMonos.length === 0) {
+    return entry;
+  }
+
+  const startMono = eventMonos[0] ?? entry.startMono;
+  const eventEndMono = eventMonos[eventMonos.length - 1] ?? startMono;
+  const eventDurationMs = Math.max(0, eventEndMono - startMono);
+  const durationMs =
+    timeNormalization.source === "wall-clock" && eventMonos.length > 1
+      ? eventDurationMs
+      : entry.durationMs;
+  const endMono = Math.max(eventEndMono, startMono + Math.max(0, durationMs));
+
+  return {
+    ...entry,
+    startMono,
+    endMono,
+    durationMs: Math.max(0, durationMs)
+  };
+}
+
+function normalizeActionTimelineEntry(
+  entry: ActionTimelineEntry,
+  actionSpanById: Map<string, ActionSpan>,
+  timeNormalization: PlaybackTimeNormalization,
+  screenshots: ScreenshotRecord[]
+): ActionTimelineEntry {
+  const span = actionSpanById.get(entry.actId);
+  const spanMonos =
+    span?.eventIds
+      .map((eventId) => timeNormalization.monoByEventId.get(eventId))
+      .filter((mono): mono is number => typeof mono === "number" && Number.isFinite(mono)) ?? [];
+  const triggerMono = normalizeMonoForEvent(
+    entry.triggerEventId,
+    timeNormalization,
+    entry.startMono
+  );
+  const startMono = spanMonos.length > 0 ? Math.min(...spanMonos) : triggerMono;
+  const endMono =
+    spanMonos.length > 0
+      ? Math.max(...spanMonos)
+      : Math.max(startMono, normalizeMonoValue(entry.endMono, timeNormalization));
+  const normalizedErrors = entry.errors.map((error) => ({
+    ...error,
+    mono: normalizeMonoForEvent(error.eventId, timeNormalization, error.mono)
+  }));
+  const screenshot = entry.screenshot
+    ? {
+        ...entry.screenshot,
+        mono: normalizeMonoForEvent(
+          entry.screenshot.eventId,
+          timeNormalization,
+          entry.screenshot.mono
+        )
+      }
+    : findScreenshotForNormalizedAction(startMono, endMono, screenshots);
+
+  return {
+    ...entry,
+    startMono,
+    endMono,
+    durationMs: Number(Math.max(0, endMono - startMono).toFixed(2)),
+    errors: normalizedErrors,
+    screenshot
+  };
+}
+
+function findScreenshotForNormalizedAction(
+  startMono: number,
+  endMono: number,
+  screenshots: ScreenshotRecord[]
+): ActionTimelineEntry["screenshot"] {
+  const inSpan = screenshots.filter((shot) => shot.mono >= startMono && shot.mono <= endMono);
+  const afterSpan = screenshots.find((shot) => shot.mono > endMono && shot.mono <= endMono + 2_000);
+  const shot = inSpan[inSpan.length - 1] ?? afterSpan;
+
+  if (!shot) {
+    return null;
+  }
+
+  return {
+    eventId: shot.eventId,
+    mono: shot.mono,
+    shotId: shot.shotId,
+    reason: shot.reason,
+    format: shot.format,
+    size: shot.size
+  };
+}
+
+function normalizeMonoForEvent(
+  eventId: string,
+  timeNormalization: PlaybackTimeNormalization,
+  fallbackMono: number
+): number {
+  return (
+    timeNormalization.monoByEventId.get(eventId) ??
+    normalizeMonoValue(fallbackMono, timeNormalization)
+  );
+}
+
+function normalizeMonoValue(mono: number, timeNormalization: PlaybackTimeNormalization): number {
+  if (timeNormalization.source === "mono") {
+    return mono;
+  }
+
+  for (const [eventId, rawMono] of timeNormalization.rawMonoByEventId.entries()) {
+    if (Math.abs(rawMono - mono) < 0.001) {
+      return timeNormalization.monoByEventId.get(eventId) ?? mono;
+    }
+  }
+
+  return mono;
 }
 
 function buildProgressMarkers(
