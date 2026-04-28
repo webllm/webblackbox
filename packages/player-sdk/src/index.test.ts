@@ -465,6 +465,26 @@ describe("WebBlackboxPlayer", () => {
     );
   });
 
+  it("reuses supplied replay diagnostic inputs without rebuilding derived views", async () => {
+    const bytes = await createRichFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+    const actions = player.getActionTimeline();
+    const waterfall = player.getNetworkWaterfall();
+    const actionSpy = vi.spyOn(player, "getActionTimeline");
+    const waterfallSpy = vi.spyOn(player, "getNetworkWaterfall");
+
+    try {
+      const diagnostics = player.getReplayDiagnostics({ actions, waterfall });
+
+      expect(diagnostics.find((entry) => entry.actId === "A-2")?.confidence).toBe("high");
+      expect(actionSpy).not.toHaveBeenCalled();
+      expect(waterfallSpy).not.toHaveBeenCalled();
+    } finally {
+      actionSpy.mockRestore();
+      waterfallSpy.mockRestore();
+    }
+  });
+
   it("builds network waterfall and export helpers", async () => {
     const bytes = await createRichFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);

@@ -1035,15 +1035,20 @@ export class WebBlackboxPlayer {
     options: {
       range?: PlayerRange;
       limit?: number;
+      actions?: ActionTimelineEntry[];
+      waterfall?: NetworkWaterfallEntry[];
     } = {}
   ): ReplayDiagnosticEntry[] {
-    const actions = this.getActionTimeline({
-      range: options.range,
-      limit: options.limit ?? Number.POSITIVE_INFINITY
-    });
-    const requestById = new Map(
-      this.getNetworkWaterfall(options.range).map((entry) => [entry.reqId, entry])
-    );
+    const limit = Math.max(1, options.limit ?? Number.POSITIVE_INFINITY);
+    const actions = (
+      options.actions ??
+      this.getActionTimeline({
+        range: options.range,
+        limit
+      })
+    ).slice(0, limit);
+    const waterfall = options.waterfall ?? this.getNetworkWaterfall(options.range);
+    const requestById = new Map(waterfall.map((entry) => [entry.reqId, entry]));
 
     return actions.map((action) => {
       const requestResponseDiffs = action.requests.map((request) => {

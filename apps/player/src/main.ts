@@ -4416,7 +4416,10 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     )
     .sort((left, right) => left.startMono - right.startMono);
   const actionSearchText = actionTimeline.map((entry) => buildActionSearchText(entry));
-  const replayDiagnostics = player.getReplayDiagnostics();
+  const replayDiagnostics = player.getReplayDiagnostics({
+    actions: actionTimeline,
+    waterfall
+  });
   const replayDiagnosticByActId = new Map(
     replayDiagnostics.map((entry) => [entry.actId, entry] as const)
   );
