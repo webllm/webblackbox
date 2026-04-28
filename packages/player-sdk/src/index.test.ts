@@ -427,6 +427,44 @@ describe("WebBlackboxPlayer", () => {
     );
   });
 
+  it("builds replay diagnostics with causal chains and request response diffs", async () => {
+    const bytes = await createRichFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+    const diagnostics = player.getReplayDiagnostics();
+    const action = diagnostics.find((entry) => entry.actId === "A-2");
+
+    expect(action).toEqual(
+      expect.objectContaining({
+        confidence: "high",
+        triggerType: "user.click",
+        screenshotEventId: "E-14S"
+      })
+    );
+    expect(action?.causeChain.join(" -> ")).toContain("request:POST:200:response-body:R-1");
+    expect(action?.requestResponseDiffs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reqId: "R-1",
+          hasRequestBody: true,
+          hasResponseBody: true,
+          responseBodySize: 42
+        })
+      ])
+    );
+    expect(action?.errorMessages.join(" ")).toContain("Unexpected failure");
+
+    const diff = await player.getRequestResponseDiff("R-1");
+    expect(diff).toEqual(
+      expect.objectContaining({
+        reqId: "R-1",
+        status: 200,
+        responseBodyBytes: 11,
+        bodySizeDeltaBytes: -6,
+        missingReplayInputs: []
+      })
+    );
+  });
+
   it("builds network waterfall and export helpers", async () => {
     const bytes = await createRichFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
@@ -476,6 +514,7 @@ describe("WebBlackboxPlayer", () => {
     const report = player.generateBugReport({ title: "Issue Snapshot" });
     expect(report).toContain("# Issue Snapshot");
     expect(report).toContain("## Errors");
+    expect(report).toContain("## Replay Diagnostics");
 
     const githubIssue = player.generateGitHubIssueTemplate({
       title: "Checkout flow failure",

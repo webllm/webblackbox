@@ -95,6 +95,41 @@ export type ActionTimelineEntry = {
   } | null;
 };
 
+/** Replay confidence row that links action, request/response, error, and screenshot evidence. */
+export type ReplayDiagnosticEntry = {
+  actId: string;
+  confidence: "high" | "medium" | "low";
+  triggerEventId: string;
+  triggerType: string | null;
+  causeChain: string[];
+  requestResponseDiffs: Array<{
+    reqId: string;
+    method: string;
+    url: string;
+    capturedStatus: number | null;
+    failed: boolean;
+    hasRequestBody: boolean;
+    hasResponseBody: boolean;
+    responseBodySize: number | null;
+  }>;
+  errorMessages: string[];
+  screenshotEventId: string | null;
+};
+
+/** Concrete request/response comparison for replay confidence and debugging. */
+export type RequestResponseDiff = {
+  reqId: string;
+  method: string;
+  url: string;
+  status: number | null;
+  requestBodyBytes: number;
+  responseBodyBytes: number;
+  bodySizeDeltaBytes: number;
+  requestHeaderNames: string[];
+  responseHeaderNames: string[];
+  missingReplayInputs: string[];
+};
+
 /** Cached derived analysis view. */
 export type PlayerDerivedView = {
   actionSpans: ActionSpan[];
@@ -995,6 +1030,54 @@ export class WebBlackboxPlayer {
     });
   }
 
+  /** Builds trusted-replay diagnostics by joining actions with network, errors, and screenshot evidence. */
+  public getReplayDiagnostics(
+    options: {
+      range?: PlayerRange;
+      limit?: number;
+    } = {}
+  ): ReplayDiagnosticEntry[] {
+    const actions = this.getActionTimeline({
+      range: options.range,
+      limit: options.limit ?? Number.POSITIVE_INFINITY
+    });
+    const requestById = new Map(
+      this.getNetworkWaterfall(options.range).map((entry) => [entry.reqId, entry])
+    );
+
+    return actions.map((action) => {
+      const requestResponseDiffs = action.requests.map((request) => {
+        const full = requestById.get(request.reqId);
+
+        return {
+          reqId: request.reqId,
+          method: request.method,
+          url: request.url,
+          capturedStatus: request.status,
+          failed: request.failed,
+          hasRequestBody: Boolean(full?.requestBodyText),
+          hasResponseBody: Boolean(full?.responseBodyHash),
+          responseBodySize: full?.responseBodySize ?? null
+        };
+      });
+      const errorMessages = action.errors
+        .map((error) => error.message)
+        .filter((message): message is string => Boolean(message));
+      const causeChain = buildReplayCauseChain(action, requestResponseDiffs, errorMessages);
+
+      return {
+        actId: action.actId,
+        confidence: resolveReplayConfidence(action, requestResponseDiffs),
+        triggerEventId: action.triggerEventId,
+        triggerType: action.triggerType,
+        causeChain,
+        requestResponseDiffs,
+        errorMessages,
+        screenshotEventId: action.screenshot?.eventId ?? null
+      };
+    });
+  }
+
   /** Returns normalized network waterfall entries sorted by start time. */
   public getNetworkWaterfall(range?: PlayerRange): NetworkWaterfallEntry[] {
     if (isRangeUnbounded(range) && this.allNetworkWaterfallCache) {
@@ -1020,6 +1103,41 @@ export class WebBlackboxPlayer {
   /** Returns all events that reference a specific request id. */
   public getRequestEvents(reqId: string): WebBlackboxEvent[] {
     return this.query({ requestId: reqId }).sort((left, right) => left.mono - right.mono);
+  }
+
+  /** Builds a concrete request/response diff including body sizes and missing replay inputs. */
+  public async getRequestResponseDiff(reqId: string): Promise<RequestResponseDiff | null> {
+    const entry = this.getNetworkWaterfall().find((item) => item.reqId === reqId);
+
+    if (!entry) {
+      return null;
+    }
+
+    const responseBody = entry.responseBodyHash ? await this.getBlob(entry.responseBodyHash) : null;
+    const requestBodyBytes = byteLengthUtf8(entry.requestBodyText ?? "");
+    const responseBodyBytes = responseBody?.bytes.byteLength ?? 0;
+    const missingReplayInputs = [];
+
+    if (!entry.requestBodyText && !["GET", "HEAD"].includes(entry.method.toUpperCase())) {
+      missingReplayInputs.push("request-body");
+    }
+
+    if (!entry.responseBodyHash) {
+      missingReplayInputs.push("response-body");
+    }
+
+    return {
+      reqId: entry.reqId,
+      method: entry.method,
+      url: entry.url,
+      status: entry.status ?? null,
+      requestBodyBytes,
+      responseBodyBytes,
+      bodySizeDeltaBytes: responseBodyBytes - requestBodyBytes,
+      requestHeaderNames: Object.keys(entry.requestHeaders).sort(),
+      responseHeaderNames: Object.keys(entry.responseHeaders).sort(),
+      missingReplayInputs
+    };
   }
 
   /** Returns realtime network stream entries (WebSocket/SSE). */
@@ -1393,6 +1511,10 @@ export class WebBlackboxPlayer {
     const slowRequests = this.getNetworkWaterfall(options.range)
       .sort((left, right) => right.durationMs - left.durationMs)
       .slice(0, maxItems);
+    const replayDiagnostics = this.getReplayDiagnostics({
+      range: options.range,
+      limit: Math.min(maxItems, 10)
+    });
 
     const heading = options.title ?? "WebBlackbox Bug Report";
     const derived = this.buildDerived(options.range);
@@ -1439,6 +1561,16 @@ export class WebBlackboxPlayer {
             .map(
               (entry) =>
                 `- ${entry.method} ${entry.url} (${entry.durationMs.toFixed(1)}ms${entry.actionId ? `, act=${entry.actionId}` : ""})`
+            )
+            .join("\n"),
+      "",
+      "## Replay Diagnostics",
+      replayDiagnostics.length === 0
+        ? "- None"
+        : replayDiagnostics
+            .map(
+              (entry) =>
+                `- ${entry.actId} confidence=${entry.confidence} chain=${entry.causeChain.join(" -> ")}`
             )
             .join("\n")
     ].join("\n");
@@ -2566,6 +2698,10 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function byteLengthUtf8(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
 function describeRedactionStrategy(profile: ExportManifest["redactionProfile"]): string[] {
   const strategy = [
     `Redacts ${profile.redactHeaders.length} sensitive HTTP header names before archive export.`,
@@ -2667,6 +2803,48 @@ function compactSensitiveSnippet(value: string): string {
   }
 
   return value.length <= 80 ? value : `${value.slice(0, 77)}...`;
+}
+
+function buildReplayCauseChain(
+  action: ActionTimelineEntry,
+  diffs: ReplayDiagnosticEntry["requestResponseDiffs"],
+  errorMessages: string[]
+): string[] {
+  const chain = [`trigger:${action.triggerType ?? "unknown"}:${action.triggerEventId}`];
+
+  for (const diff of diffs) {
+    const status = diff.failed ? "failed" : (diff.capturedStatus ?? "pending");
+    const bodyState = diff.hasResponseBody ? "response-body" : "no-response-body";
+    chain.push(`request:${diff.method}:${status}:${bodyState}:${diff.reqId}`);
+  }
+
+  for (const message of errorMessages.slice(0, 3)) {
+    chain.push(`error:${message}`);
+  }
+
+  if (action.screenshot) {
+    chain.push(`screenshot:${action.screenshot.eventId}`);
+  }
+
+  return chain;
+}
+
+function resolveReplayConfidence(
+  action: ActionTimelineEntry,
+  diffs: ReplayDiagnosticEntry["requestResponseDiffs"]
+): ReplayDiagnosticEntry["confidence"] {
+  const hasEvidence = diffs.length > 0 || action.errors.length > 0 || Boolean(action.screenshot);
+  const hasRichNetwork = diffs.some((diff) => diff.hasResponseBody || diff.hasRequestBody);
+
+  if (action.screenshot && (hasRichNetwork || action.errors.length > 0)) {
+    return "high";
+  }
+
+  if (hasEvidence) {
+    return "medium";
+  }
+
+  return "low";
 }
 
 async function resolveArchiveReadKey(
