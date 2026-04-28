@@ -113,5 +113,4 @@ jobs:
           WB_E2E_CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
           WB_E2E_HEADLESS: "1"
           WB_E2E_USE_POPUP_UI: "0"
-          WB_E2E_REALWORLD_QUICK: "1"
         run: ${{ matrix.command }}
