@@ -72,12 +72,16 @@ jobs:
             command: pnpm --filter @webblackbox/share-server e2e:share
           - surface: player
             command: pnpm --filter @webblackbox/player e2e:playback
+          - surface: player-pressure
+            command: pnpm --filter @webblackbox/player-sdk test:pressure
           - surface: lite
             command: pnpm --filter @webblackbox/extension e2e:realworld:ci
           - surface: lite-perf
             command: pnpm --filter @webblackbox/extension e2e:perf:lite:ci
           - surface: full
             command: pnpm --filter @webblackbox/extension e2e:fullchain:full
+          - surface: full-memory
+            command: pnpm --filter @webblackbox/extension e2e:memory:full:ci
     steps:
       - name: Checkout
         uses: actions/checkout@v4

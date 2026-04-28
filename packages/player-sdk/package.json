@@ -43,6 +43,7 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
+    "test:pressure": "vitest run src/index.test.ts -t \"keeps large archive player pressure paths bounded\"",
     "test:coverage": "vitest run --coverage",
     "docs:api": "typedoc --options typedoc.json"
   },

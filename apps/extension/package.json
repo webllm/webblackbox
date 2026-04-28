@@ -18,6 +18,7 @@
     "e2e:realworld": "node scripts/e2e-realworld-stability.mjs",
     "e2e:realworld:ci": "WB_E2E_REALWORLD_QUICK=1 node scripts/e2e-realworld-stability.mjs",
     "e2e:memory:full": "node scripts/e2e-full-memory-regression.mjs",
+    "e2e:memory:full:ci": "WB_E2E_STRESS_REQUESTS=96 WB_E2E_STRESS_CONCURRENCY=4 WB_E2E_MEMORY_SAMPLE_MS=1500 WB_E2E_MEMORY_SETTLE_SAMPLES=1 WB_E2E_MEMORY_TIMEOUT_MS=90000 node scripts/e2e-full-memory-regression.mjs",
     "e2e:perf:lite": "node scripts/e2e-lite-perf-regression.mjs",
     "e2e:perf:lite:ci": "WB_E2E_PERF_REQUESTS=32 WB_E2E_PERF_WARMUP_REQUESTS=12 WB_E2E_PERF_INTERACTION_ROUNDS=8 WB_E2E_PERF_IFRAME_ROUNDS=6 WB_E2E_PERF_EDITOR_ROUNDS=12 WB_E2E_PERF_NAV_ROUNDS=3 WB_E2E_PERF_NAV_WAIT_MS=6000 node scripts/e2e-lite-perf-regression.mjs",
     "lint": "eslint src --ext .ts",
