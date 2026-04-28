@@ -2506,43 +2506,50 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
   }
 
   await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.enable");
-  const started = await sendCdpCommandOutcome(runtime, { tabId: runtime.tabId }, "Profiler.start");
 
-  if (!started.ok) {
-    return;
-  }
+  try {
+    const started = await sendCdpCommandOutcome(
+      runtime,
+      { tabId: runtime.tabId },
+      "Profiler.start"
+    );
 
-  await wait(CPU_PROFILE_SAMPLE_MS);
-
-  const profileResult = await sendCdpCommand<{ profile?: unknown }>(
-    runtime,
-    { tabId: runtime.tabId },
-    "Profiler.stop"
-  );
-
-  if (!profileResult?.profile) {
-    return;
-  }
-
-  const bytes = new TextEncoder().encode(JSON.stringify(profileResult.profile));
-  const hash = await runtime.pipeline.putBlob("application/json", bytes);
-
-  ingestRawEvent({
-    source: "system",
-    rawType: "cdp.perf.cpu.profile",
-    sid: runtime.sid,
-    tabId: runtime.tabId,
-    t: Date.now(),
-    mono: monotonicTime(),
-    payload: {
-      profileHash: hash,
-      sampleMs: CPU_PROFILE_SAMPLE_MS,
-      size: bytes.byteLength,
-      reason
+    if (!started.ok) {
+      return;
     }
-  });
 
-  await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.disable");
+    await wait(CPU_PROFILE_SAMPLE_MS);
+
+    const profileResult = await sendCdpCommand<{ profile?: unknown }>(
+      runtime,
+      { tabId: runtime.tabId },
+      "Profiler.stop"
+    );
+
+    if (!profileResult?.profile) {
+      return;
+    }
+
+    const bytes = new TextEncoder().encode(JSON.stringify(profileResult.profile));
+    const hash = await runtime.pipeline.putBlob("application/json", bytes);
+
+    ingestRawEvent({
+      source: "system",
+      rawType: "cdp.perf.cpu.profile",
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      t: Date.now(),
+      mono: monotonicTime(),
+      payload: {
+        profileHash: hash,
+        sampleMs: CPU_PROFILE_SAMPLE_MS,
+        size: bytes.byteLength,
+        reason
+      }
+    });
+  } finally {
+    await sendCdpCommand(runtime, { tabId: runtime.tabId }, "Profiler.disable");
+  }
 }
 
 async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
