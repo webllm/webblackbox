@@ -1,5 +1,15 @@
 # @webblackbox/player-sdk
 
+## 0.4.5
+
+### Patch Changes
+
+- Added privacy preflight helpers that summarize archive encryption/redaction coverage and provide bounded sensitive-data preview samples before sharing.
+- Added replay diagnostics and request/response diff APIs that join actions with network, error, and screenshot evidence for explainable replay confidence.
+- Optimized action timeline screenshot and error lookups for large archives by using sorted event indexes instead of repeated full scans.
+- Updated dependencies
+  - @webblackbox/protocol@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

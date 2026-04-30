@@ -1,5 +1,13 @@
 # @webblackbox/share-server
 
+## 0.4.5
+
+### Patch Changes
+
+- Added privacy protection reports and bounded sensitive-data previews to generated share summaries.
+- Updated dependencies
+  - @webblackbox/player-sdk@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

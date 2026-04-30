@@ -1,5 +1,16 @@
 # @webblackbox/player
 
+## 0.4.5
+
+### Patch Changes
+
+- Added share privacy preflight UI that requires review of redaction coverage, detected sensitive signals, and preview samples before upload.
+- Added replay confidence diagnostics to action cards so actions show joined trigger, request, error, and screenshot evidence.
+- Reused computed replay diagnostic inputs during rendering to keep large-archive action views responsive.
+- Updated dependencies
+  - @webblackbox/player-sdk@0.4.5
+  - @webblackbox/protocol@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

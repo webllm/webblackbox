@@ -1,5 +1,13 @@
 # @webblackbox/pipeline
 
+## 0.4.5
+
+### Patch Changes
+
+- No pipeline runtime changes shipped in this release. The version bump keeps the package aligned with the 0.4.5 capture performance, privacy preflight, and replay diagnostics workspace release.
+- Updated dependencies
+  - @webblackbox/protocol@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

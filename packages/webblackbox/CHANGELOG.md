@@ -1,5 +1,16 @@
 # webblackbox
 
+## 0.4.5
+
+### Patch Changes
+
+- Kept injected lite capture hooks inactive until recording starts, then synced active state and body-capture limits through start/stop to reduce page overhead outside capture.
+- Reduced full-mode page-thread sampling by throttling pointer tracking, skipping duplicate top-level performance capture, and timeboxing screenshot capture work.
+- Updated dependencies
+  - @webblackbox/pipeline@0.4.5
+  - @webblackbox/protocol@0.4.5
+  - @webblackbox/recorder@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

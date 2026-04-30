@@ -1,5 +1,13 @@
 # @webblackbox/mcp-server
 
+## 0.4.5
+
+### Patch Changes
+
+- No MCP server runtime or CLI changes shipped in this release. The package picks up Player SDK 0.4.5 replay diagnostics and privacy preflight analysis.
+- Updated dependencies
+  - @webblackbox/player-sdk@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

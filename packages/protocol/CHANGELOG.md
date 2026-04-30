@@ -1,5 +1,11 @@
 # @webblackbox/protocol
 
+## 0.4.5
+
+### Patch Changes
+
+- Expanded the default redaction profile to cover additional auth headers, token-like cookie names, sensitive body patterns, and DOM selectors before capture/export.
+
 ## 0.4.4
 
 ### Patch Changes

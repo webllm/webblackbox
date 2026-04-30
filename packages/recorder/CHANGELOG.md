@@ -1,5 +1,13 @@
 # @webblackbox/recorder
 
+## 0.4.5
+
+### Patch Changes
+
+- No recorder runtime changes shipped in this release. The version bump keeps the package aligned with the broader 0.4.5 capture performance and redaction-default updates.
+- Updated dependencies
+  - @webblackbox/protocol@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

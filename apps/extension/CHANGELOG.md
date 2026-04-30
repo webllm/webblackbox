@@ -1,5 +1,20 @@
 # @webblackbox/extension
 
+## 0.4.5
+
+### Patch Changes
+
+- Lazy-loaded the content capture agent and connected the content port only while recording, cutting idle page overhead when the extension is installed but inactive.
+- Installed lite `webRequest` capture only for active lite sessions and gated injected hooks by recording state so page hooks stop emitting outside capture windows.
+- Hardened full-mode CDP cleanup with attach-failure teardown, artifact capture timeouts, bounded request metadata retention, and CPU profiler shutdown safeguards.
+- Expanded real-world product gates for lite/full capture, memory pressure, archive evidence, and headless runtime control paths.
+- Updated dependencies
+  - @webblackbox/cdp-router@0.4.5
+  - @webblackbox/pipeline@0.4.5
+  - @webblackbox/protocol@0.4.5
+  - @webblackbox/recorder@0.4.5
+  - webblackbox@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes
