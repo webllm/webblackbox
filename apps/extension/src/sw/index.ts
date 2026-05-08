@@ -792,6 +792,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   });
 
   if (shouldInjectHooksForMode(mode)) {
+    await ensureContentScriptInjected(tabId);
     await ensureInjectedHooks(tabId);
   }
 
@@ -3094,6 +3095,29 @@ async function ensureInjectedHooks(tabId: number): Promise<void> {
       files: ["injected.js"]
     })
     .catch(() => undefined);
+}
+
+async function ensureContentScriptInjected(tabId: number): Promise<void> {
+  if (manifestDeclaresStaticContentScript()) {
+    return;
+  }
+
+  await chromeApi?.scripting
+    ?.executeScript({
+      target: { tabId, allFrames: true },
+      world: "ISOLATED",
+      files: ["content.js"]
+    })
+    .catch(() => undefined);
+}
+
+function manifestDeclaresStaticContentScript(): boolean {
+  const manifest = chromeApi?.runtime?.getManifest?.();
+  const contentScripts = Array.isArray(manifest?.content_scripts) ? manifest.content_scripts : [];
+
+  return contentScripts.some(
+    (entry) => Array.isArray(entry?.js) && entry.js.includes("content.js")
+  );
 }
 
 function installLiteWebRequestCapture(): void {
