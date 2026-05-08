@@ -1134,7 +1134,10 @@ function respondJson(response: ServerResponse, statusCode: number, payload: unkn
 
 function respondHtml(response: ServerResponse, statusCode: number, html: string): void {
   response.writeHead(statusCode, {
-    "content-type": "text/html; charset=utf-8"
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy":
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "referrer-policy": "no-referrer"
   });
   response.end(html);
 }

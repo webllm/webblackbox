@@ -256,6 +256,18 @@ describe("share-server", () => {
 
     expect(allowedRead.status).toBe(200);
   });
+
+  it("serves share pages with no-referrer and strict csp headers", async () => {
+    const server = await startShareServer();
+    const uploadPayload = await uploadEncryptedFixture(server);
+
+    const response = await fetch(`${server.baseUrl}/share/${uploadPayload.shareId}?key=${apiKey}`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+  });
 });
 
 async function startShareServer(
