@@ -326,6 +326,29 @@ export const privacyManifestSchema = z
     generatedAt: z.string().datetime(),
     effectivePolicy: capturePolicySchema.optional(),
     consent: captureConsentSchema.optional(),
+    transfer: z
+      .object({
+        destination: z.enum([
+          "local-download",
+          "public-cloud-share",
+          "support-upload",
+          "enterprise-upload"
+        ]),
+        archiveKeyEnvelope: z.enum([
+          "passphrase",
+          "enterprise-managed",
+          "client-side-share-fragment",
+          "none"
+        ]),
+        encrypted: z.boolean(),
+        includeScreenshots: z.boolean(),
+        maxArchiveBytes: z.number().int().positive().nullable(),
+        recentWindowMs: z.number().int().positive().nullable(),
+        shareEligible: z.boolean(),
+        computedAt: z.string().datetime()
+      })
+      .strict()
+      .optional(),
     categories: z.array(privacyManifestCategorySummarySchema),
     scanner: privacyScannerResultSchema,
     encryption: z

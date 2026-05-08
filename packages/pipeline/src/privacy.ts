@@ -17,6 +17,7 @@ export type PrivacyManifestInput = {
   blobs: StoredBlob[];
   capturePolicy?: CapturePolicy;
   encrypted: boolean;
+  transfer?: PrivacyManifest["transfer"];
   generatedAt?: Date;
 };
 
@@ -98,6 +99,7 @@ export async function buildPrivacyManifest(input: PrivacyManifestInput): Promise
     generatedAt: generatedAt.toISOString(),
     effectivePolicy: input.capturePolicy,
     consent: input.capturePolicy?.consent,
+    transfer: input.transfer,
     categories: summarizePrivacyCategories(input.events),
     scanner,
     encryption: {

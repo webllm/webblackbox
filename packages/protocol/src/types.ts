@@ -277,6 +277,16 @@ export type PrivacyManifest = {
   generatedAt: string;
   effectivePolicy?: CapturePolicy;
   consent?: CaptureConsent;
+  transfer?: {
+    destination: "local-download" | "public-cloud-share" | "support-upload" | "enterprise-upload";
+    archiveKeyEnvelope: CapturePolicy["encryption"]["archiveKeyEnvelope"];
+    encrypted: boolean;
+    includeScreenshots: boolean;
+    maxArchiveBytes: number | null;
+    recentWindowMs: number | null;
+    shareEligible: boolean;
+    computedAt: string;
+  };
   categories: PrivacyManifestCategorySummary[];
   scanner: PrivacyScannerResult;
   encryption: {

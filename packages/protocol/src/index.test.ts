@@ -145,6 +145,16 @@ describe("protocol", () => {
       generatedAt: "2026-02-13T00:00:00.000Z",
       effectivePolicy: DEFAULT_CAPTURE_POLICY,
       consent: DEFAULT_CAPTURE_POLICY.consent,
+      transfer: {
+        destination: "local-download",
+        archiveKeyEnvelope: "passphrase",
+        encrypted: true,
+        includeScreenshots: false,
+        maxArchiveBytes: 1048576,
+        recentWindowMs: null,
+        shareEligible: true,
+        computedAt: "2026-02-13T00:00:00.000Z"
+      },
       categories: [
         {
           category: "network",

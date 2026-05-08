@@ -199,11 +199,19 @@ export class FlightRecorderPipeline {
       const blobs = await this.listReferencedSessionBlobsFromChunks(chunks);
       const manifest = this.buildManifest(chunks, blobs.length);
       const events = await this.decodeEventsFromChunks(chunks);
+      const encrypted = typeof options.passphrase === "string" && options.passphrase.length > 0;
       const privacyManifest = await buildPrivacyManifest({
         events,
         blobs,
         capturePolicy: this.options.capturePolicy,
-        encrypted: typeof options.passphrase === "string" && options.passphrase.length > 0
+        encrypted,
+        transfer: buildExportTransferPolicy({
+          capturePolicy: this.options.capturePolicy,
+          encrypted,
+          includeScreenshots: true,
+          maxArchiveBytes: null,
+          recentWindowMs: null
+        })
       });
       assertPrivacyScannerPassed(privacyManifest.scanner);
       assertLowRiskOverrideAllowed(privacyManifest, this.options.capturePolicy);
@@ -241,7 +249,12 @@ export class FlightRecorderPipeline {
     const prepared = await this.prepareExportChunks(rawChunks, exportPolicy);
     const blobsByHash = await this.listSessionBlobMap();
     let selected = this.selectChunksBySize(prepared, blobsByHash, exportPolicy.maxArchiveBytes);
-    let archive = await this.createArchiveForSelection(selected, blobsByHash, options.passphrase);
+    let archive = await this.createArchiveForSelection(
+      selected,
+      blobsByHash,
+      exportPolicy,
+      options.passphrase
+    );
 
     if (
       exportPolicy.maxArchiveBytes !== null &&
@@ -251,6 +264,7 @@ export class FlightRecorderPipeline {
       const fitted = await this.fitSelectionToArchiveLimit(
         selected,
         blobsByHash,
+        exportPolicy,
         exportPolicy.maxArchiveBytes,
         options.passphrase
       );
@@ -497,16 +511,25 @@ export class FlightRecorderPipeline {
   private async createArchiveForSelection(
     selectedChunks: PreparedExportChunk[],
     blobsByHash: Map<string, StoredBlob>,
+    exportPolicy: ResolvedExportPolicy,
     passphrase?: string
   ): Promise<Awaited<ReturnType<typeof createWebBlackboxArchive>>> {
     const exportData = this.buildExportSnapshot(selectedChunks, blobsByHash);
     const manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
     const events = selectedChunks.flatMap((chunk) => chunk.events);
+    const encrypted = typeof passphrase === "string" && passphrase.length > 0;
     const privacyManifest = await buildPrivacyManifest({
       events,
       blobs: exportData.blobs,
       capturePolicy: this.options.capturePolicy,
-      encrypted: typeof passphrase === "string" && passphrase.length > 0
+      encrypted,
+      transfer: buildExportTransferPolicy({
+        capturePolicy: this.options.capturePolicy,
+        encrypted,
+        includeScreenshots: exportPolicy.includeScreenshots,
+        maxArchiveBytes: exportPolicy.maxArchiveBytes,
+        recentWindowMs: exportPolicy.recentWindowMs
+      })
     });
     assertPrivacyScannerPassed(privacyManifest.scanner);
     assertLowRiskOverrideAllowed(privacyManifest, this.options.capturePolicy);
@@ -530,6 +553,7 @@ export class FlightRecorderPipeline {
   private async fitSelectionToArchiveLimit(
     selected: PreparedExportChunk[],
     blobsByHash: Map<string, StoredBlob>,
+    exportPolicy: ResolvedExportPolicy,
     maxArchiveBytes: number,
     passphrase?: string
   ): Promise<{
@@ -547,6 +571,7 @@ export class FlightRecorderPipeline {
       const candidateArchive = await this.createArchiveForSelection(
         candidateSelection,
         blobsByHash,
+        exportPolicy,
         passphrase
       );
 
@@ -570,6 +595,7 @@ export class FlightRecorderPipeline {
     const emptyArchive = await this.createArchiveForSelection(
       emptySelection,
       blobsByHash,
+      exportPolicy,
       passphrase
     );
 
@@ -733,6 +759,27 @@ function assertLowRiskOverrideAllowed(
       `Explicit low-risk export override is not allowed for high-risk ${highRiskSummary.category} artifacts.`
     );
   }
+}
+
+function buildExportTransferPolicy(input: {
+  capturePolicy?: CapturePolicy;
+  encrypted: boolean;
+  includeScreenshots: boolean;
+  maxArchiveBytes: number | null;
+  recentWindowMs: number | null;
+}): NonNullable<PrivacyManifest["transfer"]> {
+  return {
+    destination: "local-download",
+    archiveKeyEnvelope: input.encrypted
+      ? (input.capturePolicy?.encryption.archiveKeyEnvelope ?? "passphrase")
+      : "none",
+    encrypted: input.encrypted,
+    includeScreenshots: input.includeScreenshots,
+    maxArchiveBytes: input.maxArchiveBytes,
+    recentWindowMs: input.recentWindowMs,
+    shareEligible: input.encrypted,
+    computedAt: new Date().toISOString()
+  };
 }
 
 function collectBlobHashesFromEvents(events: WebBlackboxEvent[]): string[] {

@@ -207,6 +207,15 @@ describe("pipeline", () => {
     expect(JSON.stringify(parsed.manifest)).not.toContain("token=secret");
     expect(parsed.privacyManifest?.scanner.preEncryption).toBe(true);
     expect(parsed.privacyManifest?.scanner.status).toBe("passed");
+    expect(parsed.privacyManifest?.transfer).toMatchObject({
+      destination: "local-download",
+      archiveKeyEnvelope: "none",
+      encrypted: false,
+      includeScreenshots: true,
+      maxArchiveBytes: null,
+      recentWindowMs: null,
+      shareEligible: false
+    });
     expect(parsed.privacyManifest?.totals.events).toBe(1);
     expect(parsed.integrity?.files["privacy/manifest.json"]).toMatch(/[a-f0-9]{64}/);
   });
@@ -654,6 +663,12 @@ describe("pipeline", () => {
     expect(parsed.manifest.encryption?.algorithm).toBe("AES-GCM");
     expect(parsed.privacyManifest?.scanner.preEncryption).toBe(true);
     expect(parsed.privacyManifest?.encryption.archive).toBe("encrypted");
+    expect(parsed.privacyManifest?.transfer).toMatchObject({
+      destination: "local-download",
+      archiveKeyEnvelope: "passphrase",
+      encrypted: true,
+      shareEligible: true
+    });
     expect(
       Object.keys(parsed.manifest.encryption?.files ?? {}).some((path) =>
         path.startsWith("events/")
