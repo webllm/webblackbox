@@ -1,11 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_CAPTURE_POLICY, type RecorderConfig } from "@webblackbox/protocol";
+import {
+  DEFAULT_CAPTURE_POLICY,
+  type CapturePolicy,
+  type RecorderConfig
+} from "@webblackbox/protocol";
 
 import { EventRingBuffer } from "./ring-buffer.js";
 import { createDefaultRecorderPlugins } from "./plugins.js";
 import { WebBlackboxRecorder } from "./recorder.js";
 import { redactPayload } from "./redaction.js";
+
+const TEST_CAPTURE_POLICY: CapturePolicy = {
+  ...DEFAULT_CAPTURE_POLICY,
+  mode: "debug",
+  categories: {
+    ...DEFAULT_CAPTURE_POLICY.categories,
+    actions: "allow",
+    inputs: "allow",
+    dom: "allow",
+    screenshots: "allow",
+    console: "allow",
+    network: "body-allowlist",
+    storage: "allow",
+    indexedDb: "names-only",
+    cookies: "names-only",
+    cdp: "full",
+    heapProfiles: "lab-only"
+  }
+};
 
 const TEST_CONFIG: RecorderConfig = {
   mode: "lite",
@@ -29,7 +52,7 @@ const TEST_CONFIG: RecorderConfig = {
     blockedSelectors: [".secret", "[data-sensitive]", "input[type='password']"],
     hashSensitiveValues: true
   },
-  capturePolicy: DEFAULT_CAPTURE_POLICY,
+  capturePolicy: TEST_CAPTURE_POLICY,
   sitePolicies: []
 };
 
@@ -670,6 +693,48 @@ describe("recorder", () => {
       sensitivity: "high",
       redacted: true
     });
+  });
+
+  it("emits privacy violations instead of storing policy-blocked artifacts", () => {
+    const recorder = new WebBlackboxRecorder({
+      ...TEST_CONFIG,
+      capturePolicy: DEFAULT_CAPTURE_POLICY
+    });
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "networkBody",
+      sid: "S-policy-gate",
+      tabId: 4,
+      t: Date.now(),
+      mono: 10,
+      payload: {
+        reqId: "R-blocked",
+        contentHash: "blob-sensitive-body",
+        mimeType: "application/json",
+        size: 128,
+        sampledSize: 128,
+        redacted: false
+      }
+    });
+    const payload = result.event?.data as
+      | {
+          blockedType?: string;
+          reason?: string;
+          policyMode?: string;
+          contentHash?: string;
+        }
+      | undefined;
+
+    expect(result.event?.type).toBe("privacy.violation");
+    expect(result.event?.privacy).toEqual({
+      category: "system",
+      sensitivity: "medium",
+      redacted: true
+    });
+    expect(payload?.blockedType).toBe("network.body");
+    expect(payload?.reason).toBe("network-body-disabled");
+    expect(payload?.policyMode).toBe("private");
+    expect(payload?.contentHash).toBeUndefined();
   });
 
   it("maps lite storage snapshot raw types", () => {

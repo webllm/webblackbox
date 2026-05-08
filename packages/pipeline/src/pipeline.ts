@@ -81,6 +81,7 @@ export class FlightRecorderPipeline {
   }
 
   public async ingest(event: WebBlackboxEvent): Promise<void> {
+    assertPrivacyClassifiedEvent(event);
     const chunk = await this.chunker.append(event);
 
     if (!chunk) {
@@ -99,6 +100,10 @@ export class FlightRecorderPipeline {
   public async ingestBatch(events: WebBlackboxEvent[]): Promise<void> {
     if (events.length === 0) {
       return;
+    }
+
+    for (const event of events) {
+      assertPrivacyClassifiedEvent(event);
     }
 
     for (const event of events) {
@@ -679,6 +684,12 @@ function collectBlobHashesFromUnknown(value: unknown, output: Set<string>): void
     for (const entry of Object.values(current as Record<string, unknown>)) {
       stack.push(entry);
     }
+  }
+}
+
+function assertPrivacyClassifiedEvent(event: WebBlackboxEvent): void {
+  if (!event.privacy) {
+    throw new Error(`Event ${event.id} is missing privacy classification.`);
   }
 }
 

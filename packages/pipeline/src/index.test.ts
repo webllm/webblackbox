@@ -34,6 +34,26 @@ function createEvent(
     mono: t,
     type,
     id,
+    privacy: {
+      category: type.startsWith("network.")
+        ? "network"
+        : type.startsWith("screen.")
+          ? "screenshots"
+          : type.startsWith("console.")
+            ? "console"
+            : type.startsWith("storage.")
+              ? "storage"
+              : type.startsWith("dom.")
+                ? "dom"
+                : type.startsWith("perf.")
+                  ? "performance"
+                  : "actions",
+      sensitivity:
+        type === "screen.screenshot" || type === "network.body" || type.startsWith("storage.")
+          ? "high"
+          : "low",
+      redacted: true
+    },
     data: data ?? {
       reqId: "R-1",
       message: "hello"
@@ -56,6 +76,21 @@ function createNoisyPayload(size: number, seed: number): string {
 }
 
 describe("pipeline", () => {
+  it("rejects events without privacy classification", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 100
+    });
+    const event = createEvent("E-no-privacy", "user.click", 1);
+
+    await pipeline.start();
+    delete event.privacy;
+
+    await expect(pipeline.ingest(event)).rejects.toThrow(/missing privacy classification/i);
+  });
+
   it("chunks events and builds request index", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({

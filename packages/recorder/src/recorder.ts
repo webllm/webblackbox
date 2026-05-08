@@ -61,6 +61,17 @@ export class WebBlackboxRecorder {
     }
 
     const redactedPayload = redactPayload(normalized.payload, this.config.redaction);
+    const privacy = classifyPrivacy(
+      normalized.eventType,
+      redactedPayload,
+      this.config.capturePolicy
+    );
+    const violation = evaluateCapturePolicy(
+      normalized.eventType,
+      redactedPayload,
+      privacy,
+      this.config.capturePolicy
+    );
 
     const event: WebBlackboxEvent = {
       v: 1,
@@ -72,10 +83,16 @@ export class WebBlackboxRecorder {
       cdp: nextRawEvent.cdpSessionId,
       t: nextRawEvent.t,
       mono: nextRawEvent.mono,
-      type: normalized.eventType,
+      type: violation ? "privacy.violation" : normalized.eventType,
       id: this.idFactory.next(),
-      privacy: classifyPrivacy(normalized.eventType, redactedPayload, this.config.capturePolicy),
-      data: redactedPayload
+      privacy: violation
+        ? {
+            category: "system",
+            sensitivity: "medium",
+            redacted: true
+          }
+        : privacy,
+      data: violation ?? redactedPayload
     };
 
     const actionLinkedEvent = this.actionSpanTracker.assign(event);
@@ -174,6 +191,15 @@ function normalizeTabId(value: number): number {
   return Math.max(0, Math.round(value));
 }
 
+type PrivacyViolationPayload = {
+  blockedType: WebBlackboxEventType;
+  category: PrivacyClassification["category"];
+  sensitivity: PrivacyClassification["sensitivity"];
+  reason: string;
+  policyMode: CapturePolicy["mode"] | "missing";
+  redacted: true;
+};
+
 function classifyPrivacy(
   eventType: WebBlackboxEventType,
   payload: unknown,
@@ -189,6 +215,119 @@ function classifyPrivacy(
     redacted:
       isRedactedByPolicy(eventType, category, effectivePolicy) || hasRedactionSignal(payload)
   };
+}
+
+function evaluateCapturePolicy(
+  eventType: WebBlackboxEventType,
+  payload: unknown,
+  privacy: PrivacyClassification,
+  policy: CapturePolicy | undefined
+): PrivacyViolationPayload | null {
+  if (eventType === "privacy.violation") {
+    return null;
+  }
+
+  if (!policy) {
+    return createPrivacyViolation(eventType, privacy, "missing-capture-policy", "missing");
+  }
+
+  const reason = findPolicyViolationReason(eventType, payload, policy);
+
+  if (!reason) {
+    return null;
+  }
+
+  return createPrivacyViolation(eventType, privacy, reason, policy.mode);
+}
+
+function createPrivacyViolation(
+  eventType: WebBlackboxEventType,
+  privacy: PrivacyClassification,
+  reason: string,
+  policyMode: CapturePolicy["mode"] | "missing"
+): PrivacyViolationPayload {
+  return {
+    blockedType: eventType,
+    category: privacy.category,
+    sensitivity: privacy.sensitivity,
+    reason,
+    policyMode,
+    redacted: true
+  };
+}
+
+function findPolicyViolationReason(
+  eventType: WebBlackboxEventType,
+  payload: unknown,
+  policy: CapturePolicy
+): string | null {
+  if (eventType === "screen.screenshot" && policy.categories.screenshots === "off") {
+    return "screenshots-disabled";
+  }
+
+  if (eventType === "network.body" && policy.categories.network !== "body-allowlist") {
+    return "network-body-disabled";
+  }
+
+  if (eventType === "dom.snapshot") {
+    if (policy.categories.dom === "off") {
+      return "dom-disabled";
+    }
+
+    if (policy.categories.dom !== "allow" && hasBlobReference(payload)) {
+      return "dom-raw-snapshot-disabled";
+    }
+  }
+
+  if (eventType.startsWith("dom.") && policy.categories.dom === "off") {
+    return "dom-disabled";
+  }
+
+  if (eventType === "user.input") {
+    if (policy.categories.inputs === "none") {
+      return "inputs-disabled";
+    }
+
+    if (policy.categories.inputs === "length-only" && hasRawInputValue(payload)) {
+      return "raw-input-value-disabled";
+    }
+  }
+
+  if (eventType.startsWith("console.") || eventType.startsWith("error.")) {
+    if (policy.categories.console === "off") {
+      return "console-disabled";
+    }
+
+    if (policy.categories.console === "metadata" && hasConsoleTextPayload(payload)) {
+      return "console-payload-disabled";
+    }
+  }
+
+  if (eventType.startsWith("storage.")) {
+    if (isStorageDisabledByPolicy(eventType, policy)) {
+      return "storage-disabled";
+    }
+
+    if (isStorageCountsOnlyByPolicy(eventType, policy) && hasStorageDetail(payload)) {
+      return "storage-detail-disabled";
+    }
+  }
+
+  if (
+    eventType === "perf.heap.snapshot" &&
+    (policy.categories.heapProfiles !== "lab-only" || policy.mode !== "lab")
+  ) {
+    return "heap-profile-disabled";
+  }
+
+  if (
+    (eventType === "perf.trace" || eventType === "perf.cpu.profile") &&
+    policy.categories.cdp !== "full"
+  ) {
+    return "cdp-profile-disabled";
+  }
+
+  return null;
 }
 
 function classifyCategory(eventType: WebBlackboxEventType): PrivacyClassification["category"] {
@@ -288,12 +427,95 @@ function isRedactedByPolicy(
   }
 }
 
-function hasRedactionSignal(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+function isStorageDisabledByPolicy(
+  eventType: WebBlackboxEventType,
+  policy: CapturePolicy
+): boolean {
+  if (eventType.startsWith("storage.cookie.")) {
+    return policy.categories.cookies === "off";
+  }
+
+  if (eventType.startsWith("storage.idb.")) {
+    return policy.categories.indexedDb === "off";
+  }
+
+  return policy.categories.storage === "off";
+}
+
+function isStorageCountsOnlyByPolicy(
+  eventType: WebBlackboxEventType,
+  policy: CapturePolicy
+): boolean {
+  if (eventType.startsWith("storage.cookie.")) {
+    return policy.categories.cookies === "count-only";
+  }
+
+  if (eventType.startsWith("storage.idb.")) {
+    return policy.categories.indexedDb === "counts-only";
+  }
+
+  return policy.categories.storage === "counts-only";
+}
+
+function hasBlobReference(payload: unknown): boolean {
+  const row = asRecord(payload);
+
+  if (!row) {
     return false;
   }
 
-  const row = payload as Record<string, unknown>;
+  return typeof row.contentHash === "string" || typeof row.hash === "string";
+}
+
+function hasRawInputValue(payload: unknown): boolean {
+  const row = asRecord(payload);
+
+  if (!row) {
+    return false;
+  }
+
+  return typeof row.value === "string" || typeof row.text === "string";
+}
+
+function hasConsoleTextPayload(payload: unknown): boolean {
+  const row = asRecord(payload);
+
+  if (!row) {
+    return false;
+  }
+
+  const args = row.args;
+
+  return (
+    typeof row.text === "string" ||
+    typeof row.message === "string" ||
+    typeof row.stack === "string" ||
+    (Array.isArray(args) && args.length > 0)
+  );
+}
+
+function hasStorageDetail(payload: unknown): boolean {
+  const row = asRecord(payload);
+
+  if (!row) {
+    return false;
+  }
+
+  return (
+    hasBlobReference(row) ||
+    Array.isArray(row.names) ||
+    Array.isArray(row.databaseNames) ||
+    asRecord(row.entries) !== null
+  );
+}
+
+function hasRedactionSignal(payload: unknown): boolean {
+  const row = asRecord(payload);
+
+  if (!row) {
+    return false;
+  }
+
   const target = row.target;
 
   return (
@@ -305,4 +527,10 @@ function hasRedactionSignal(payload: unknown): boolean {
       !Array.isArray(target) &&
       (target as Record<string, unknown>).selectorRedacted === true)
   );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }

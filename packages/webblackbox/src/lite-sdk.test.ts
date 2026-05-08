@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { readWebBlackboxArchive } from "@webblackbox/pipeline";
+import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 const mockRuntime = vi.hoisted(() => {
@@ -107,6 +108,20 @@ function createNoisyPayload(size: number, seed: number): string {
   return output;
 }
 
+const HIGH_FIDELITY_TEST_POLICY: CapturePolicy = {
+  ...DEFAULT_CAPTURE_POLICY,
+  mode: "debug",
+  categories: {
+    ...DEFAULT_CAPTURE_POLICY.categories,
+    dom: "allow",
+    screenshots: "allow",
+    network: "body-allowlist",
+    console: "allow",
+    storage: "allow",
+    cdp: "full"
+  }
+};
+
 describe("WebBlackboxLiteSdk", () => {
   beforeEach(() => {
     mockRuntime.instances.length = 0;
@@ -152,7 +167,10 @@ describe("WebBlackboxLiteSdk", () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-export",
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: HIGH_FIDELITY_TEST_POLICY
+      }
     });
 
     await sdk.start();
@@ -234,7 +252,10 @@ describe("WebBlackboxLiteSdk", () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-dom-html",
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: HIGH_FIDELITY_TEST_POLICY
+      }
     });
 
     await sdk.start();
@@ -379,7 +400,10 @@ describe("WebBlackboxLiteSdk", () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-export-policy",
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: HIGH_FIDELITY_TEST_POLICY
+      }
     });
     const now = Date.now();
     const old = now - 30 * 60 * 1000;

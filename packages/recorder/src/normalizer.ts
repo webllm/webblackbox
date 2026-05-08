@@ -542,6 +542,10 @@ function tryNormalizeSystemEvent(rawType: string): WebBlackboxEventType | null {
     return "meta.config";
   }
 
+  if (rawType === "privacyViolation") {
+    return "privacy.violation";
+  }
+
   if (rawType === "cdp.network.body") {
     return "network.body";
   }

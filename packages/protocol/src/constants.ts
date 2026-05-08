@@ -10,6 +10,7 @@ export const WEBBLACKBOX_EVENT_TYPES = [
   "meta.session.start",
   "meta.session.end",
   "meta.config",
+  "privacy.violation",
   "sys.debugger.attach",
   "sys.debugger.detach",
   "sys.notice",
