@@ -46,7 +46,11 @@ import { markerKindToPanel } from "./lib/progress.js";
 import { normalizePlaybackEvents, type PlaybackTimeNormalization } from "./lib/playback-time.js";
 import { generatePlaywrightScriptFromEvents } from "./lib/playwright-script.js";
 import { lowerBoundByMono, prefixValue, upperBoundByMono } from "./lib/range.js";
-import { createReplayHeaders as buildReplayHeaders, shouldAttachReplayBody } from "./lib/replay.js";
+import {
+  createReplayHeaders as buildReplayHeaders,
+  isReplayResourceAllowedByDefault,
+  shouldAttachReplayBody
+} from "./lib/replay.js";
 import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
 import {
@@ -274,7 +278,7 @@ type PlayerState = {
   screenshotContext: ScreenshotRenderContext | null;
   screenshotMarker: ScreenshotMarker | null;
   screenshotTrail: ScreenshotTrailPoint[];
-  screenshotUrlCache: Map<string, string>;
+  screenshotUrlCache: Map<string, { url: string; expiresAt: number }>;
   screenshotLoadToken: number;
   timelineRows: WebBlackboxEvent[];
   progressMarkerSource: ArchiveModel | null;
@@ -347,6 +351,7 @@ const TIMELINE_ROW_HEIGHT = 38;
 const TIMELINE_OVERSCAN = 8;
 const MAX_PROGRESS_MARKERS_PER_KIND = 120;
 const TRAIL_WINDOW_MS = 3_500;
+const SCREENSHOT_OBJECT_URL_TTL_MS = 5 * 60 * 1000;
 const PANEL_RENDER_BUCKET_MS = 120;
 const PLAYBACK_STEP_MS = 1_000;
 const TRIAGE_SLOW_REQUEST_MS = 1_000;
@@ -420,7 +425,7 @@ const state: PlayerState = {
   screenshotContext: null,
   screenshotMarker: null,
   screenshotTrail: [],
-  screenshotUrlCache: new Map<string, string>(),
+  screenshotUrlCache: new Map<string, { url: string; expiresAt: number }>(),
   screenshotLoadToken: 0,
   timelineRows: [],
   progressMarkerSource: null,
@@ -2600,6 +2605,12 @@ async function showProgressHover(
     return;
   }
 
+  if (!isReplayResourceAllowedByDefault(url)) {
+    refs.progressHoverImage.hidden = true;
+    refs.progressHoverImage.removeAttribute("src");
+    return;
+  }
+
   refs.progressHoverImage.src = url;
   refs.progressHoverImage.hidden = false;
 }
@@ -4066,6 +4077,11 @@ async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
       return;
     }
 
+    if (!isReplayResourceAllowedByDefault(url)) {
+      clearScreenshotView(i18n.messages.screenshotNoLoaded);
+      return;
+    }
+
     refs.preview.src = url;
     updateStagePlaceholder();
   }
@@ -4235,8 +4251,8 @@ function resetScreenshotResources(): void {
   state.screenshotLoadToken += 1;
   hideProgressHover();
 
-  for (const url of state.screenshotUrlCache.values()) {
-    URL.revokeObjectURL(url);
+  for (const entry of state.screenshotUrlCache.values()) {
+    URL.revokeObjectURL(entry.url);
   }
 
   state.screenshotUrlCache.clear();
@@ -4910,10 +4926,16 @@ function renderSignalEvents(
 }
 
 async function getScreenshotUrlByShotId(shotId: string): Promise<string | null> {
+  pruneExpiredScreenshotUrls();
   const cached = state.screenshotUrlCache.get(shotId);
 
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.url;
+  }
+
   if (cached) {
-    return cached;
+    URL.revokeObjectURL(cached.url);
+    state.screenshotUrlCache.delete(shotId);
   }
 
   const player = state.player;
@@ -4931,8 +4953,22 @@ async function getScreenshotUrlByShotId(shotId: string): Promise<string | null> 
   const bytes = new Uint8Array(blob.bytes.byteLength);
   bytes.set(blob.bytes);
   const url = URL.createObjectURL(new Blob([bytes], { type: blob.mime }));
-  state.screenshotUrlCache.set(shotId, url);
+  state.screenshotUrlCache.set(shotId, {
+    url,
+    expiresAt: Date.now() + SCREENSHOT_OBJECT_URL_TTL_MS
+  });
   return url;
+}
+
+function pruneExpiredScreenshotUrls(now = Date.now()): void {
+  for (const [shotId, entry] of state.screenshotUrlCache.entries()) {
+    if (entry.expiresAt > now) {
+      continue;
+    }
+
+    URL.revokeObjectURL(entry.url);
+    state.screenshotUrlCache.delete(shotId);
+  }
 }
 
 async function copySelectedRequestAsCurl(): Promise<void> {

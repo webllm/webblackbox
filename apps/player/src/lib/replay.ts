@@ -41,3 +41,21 @@ export function shouldAttachReplayBody(method: string, bodyText: string | undefi
   const normalized = method.toUpperCase();
   return normalized !== "GET" && normalized !== "HEAD";
 }
+
+export function isReplayResourceAllowedByDefault(url: string): boolean {
+  const trimmed = url.trim();
+
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  if (trimmed.startsWith("blob:")) {
+    return true;
+  }
+
+  if (/^data:image\/(?:png|jpeg|jpg|webp|gif);base64,/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}

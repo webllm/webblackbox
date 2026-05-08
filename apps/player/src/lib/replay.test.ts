@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createReplayHeaders, shouldAttachReplayBody } from "./replay.js";
+import {
+  createReplayHeaders,
+  isReplayResourceAllowedByDefault,
+  shouldAttachReplayBody
+} from "./replay.js";
 
 describe("createReplayHeaders", () => {
   it("drops forbidden and redacted headers", () => {
@@ -32,5 +36,15 @@ describe("shouldAttachReplayBody", () => {
     expect(shouldAttachReplayBody("POST", "{}")).toBe(true);
     expect(shouldAttachReplayBody("PUT", "payload")).toBe(true);
     expect(shouldAttachReplayBody("PATCH", undefined)).toBe(false);
+  });
+});
+
+describe("isReplayResourceAllowedByDefault", () => {
+  it("allows only inert local replay resources", () => {
+    expect(isReplayResourceAllowedByDefault("blob:http://localhost/shot")).toBe(true);
+    expect(isReplayResourceAllowedByDefault("data:image/png;base64,AAAA")).toBe(true);
+    expect(isReplayResourceAllowedByDefault("https://cdn.example.test/shot.png")).toBe(false);
+    expect(isReplayResourceAllowedByDefault("javascript:alert(1)")).toBe(false);
+    expect(isReplayResourceAllowedByDefault("data:text/html;base64,PHNjcmlwdA==")).toBe(false);
   });
 });
