@@ -1253,7 +1253,7 @@ async function collectArchiveFiles(
     modifiedAt: string;
   }> = [];
 
-  while (directories.length > 0 && rows.length < limit) {
+  while (directories.length > 0) {
     const currentDir = directories.shift();
 
     if (!currentDir) {
@@ -1284,15 +1284,15 @@ async function collectArchiveFiles(
         sizeBytes: fileStat.size,
         modifiedAt: fileStat.mtime.toISOString()
       });
-
-      if (rows.length >= limit) {
-        break;
-      }
     }
   }
 
   return rows
-    .sort((left, right) => Date.parse(right.modifiedAt) - Date.parse(left.modifiedAt))
+    .sort(
+      (left, right) =>
+        Date.parse(right.modifiedAt) - Date.parse(left.modifiedAt) ||
+        left.path.localeCompare(right.path)
+    )
     .slice(0, limit);
 }
 

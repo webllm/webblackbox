@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import JSZip from "jszip";
@@ -73,6 +73,26 @@ describe("session tools", () => {
       limit: 1
     });
     expect(recursive.count).toBe(1);
+  });
+
+  it("applies archive limits after sorting by modification time", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wb-mcp-list-limit-"));
+    tempDirs.push(root);
+
+    const older = join(root, "a-older.webblackbox");
+    const newer = join(root, "z-newer.webblackbox");
+    await writeFile(older, "older");
+    await writeFile(newer, "newer");
+    await utimes(older, new Date("2024-01-01T00:00:00.000Z"), new Date("2024-01-01T00:00:00.000Z"));
+    await utimes(newer, new Date("2025-01-01T00:00:00.000Z"), new Date("2025-01-01T00:00:00.000Z"));
+
+    const result = await listArchives({
+      dir: root,
+      recursive: false,
+      limit: 1
+    });
+
+    expect(result.archives.map((row) => row.path)).toEqual([newer]);
   });
 
   it("summarizes actions from a real archive fixture", async () => {
