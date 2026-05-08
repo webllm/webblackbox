@@ -186,8 +186,8 @@ describe("popup export policy form", () => {
     const maxArchiveMb = getMaxArchiveInput();
     const recentMinutes = getRecentMinutesInput();
 
-    expect(checkbox.checked).toBe(true);
-    checkbox.checked = false;
+    expect(checkbox.checked).toBe(false);
+    checkbox.checked = true;
     checkbox.dispatchEvent(new Event("change", { bubbles: true }));
 
     maxArchiveMb.value = "256";
@@ -202,11 +202,11 @@ describe("popup export policy form", () => {
     });
     await flushPopup();
 
-    expect(getCheckbox().checked).toBe(false);
+    expect(getCheckbox().checked).toBe(true);
     expect(getMaxArchiveInput().value).toBe("256");
     expect(getRecentMinutesInput().value).toBe("45");
     expect(JSON.parse(localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY) ?? "null")).toEqual({
-      includeScreenshots: false,
+      includeScreenshots: true,
       maxArchiveMb: "256",
       recentMinutes: "45"
     });
