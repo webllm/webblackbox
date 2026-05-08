@@ -247,13 +247,13 @@ import { DEFAULT_EXPORT_POLICY, DEFAULT_RECORDER_CONFIG } from "@webblackbox/pro
 // - freezeOnError: true
 // - mousemoveHz: 20, scrollHz: 15
 // - screenshotIdleMs: 8000
-// - bodyCaptureMaxBytes: 262144 (256 KiB base profile)
+// - bodyCaptureMaxBytes: 0 (response bodies disabled unless explicitly enabled)
 // - Redacts: authorization, cookie, set-cookie, proxy auth, API key, auth token, CSRF/XSRF headers
 // - Redacts cookie names such as token, session, auth, jwt, refresh_token, csrf, xsrf
 // - Blocks: .secret, [data-sensitive], [data-webblackbox-redact], password/token/secret inputs, card-number autocomplete
 //
 // Export policy defaults:
-// - includeScreenshots: true
+// - includeScreenshots: false
 // - maxArchiveBytes: 100 * 1024 * 1024
 // - recentWindowMs: 20 * 60 * 1000
 ```

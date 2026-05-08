@@ -13,7 +13,7 @@ export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
     screenshotIdleMs: 8000,
     snapshotIntervalMs: 20000,
     actionWindowMs: 1500,
-    bodyCaptureMaxBytes: 262144
+    bodyCaptureMaxBytes: 0
   },
   redaction: {
     redactHeaders: [
@@ -53,7 +53,7 @@ export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
 };
 
 export const DEFAULT_EXPORT_POLICY: ExportPolicy = {
-  includeScreenshots: true,
+  includeScreenshots: false,
   maxArchiveBytes: 100 * 1024 * 1024,
   recentWindowMs: 20 * 60 * 1000
 };
