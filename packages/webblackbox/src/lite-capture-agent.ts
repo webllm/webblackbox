@@ -104,7 +104,7 @@ const DEFAULT_SAMPLING: LiteCaptureSampling = {
   scrollHz: 15,
   domFlushMs: 100,
   snapshotIntervalMs: 20_000,
-  screenshotIdleMs: 8_000
+  screenshotIdleMs: 0
 };
 
 const INPUT_OPTIONS_TRUE: AddEventListenerOptions = {

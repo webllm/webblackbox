@@ -229,8 +229,12 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
-  it("captures a deferred start screenshot under the default lite sampling profile", async () => {
-    const { agent } = createAgent();
+  it("captures a deferred start screenshot when screenshot sampling is enabled", async () => {
+    const { agent } = createAgent({
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
 
     await vi.advanceTimersByTimeAsync(3_500);
 
@@ -240,7 +244,11 @@ describe("LiteCaptureAgent", () => {
   });
 
   it("releases screenshot capture state when snapdom does not settle", async () => {
-    const { agent } = createAgent();
+    const { agent } = createAgent({
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
     const state = agent as unknown as {
       screenshotCaptureBlocked: boolean;
       screenshotInFlight: boolean;
@@ -268,7 +276,11 @@ describe("LiteCaptureAgent", () => {
   });
 
   it("captures a stop screenshot when the session stops before the first idle screenshot lands", async () => {
-    const { agent } = createAgent();
+    const { agent } = createAgent({
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
     const captureScreenshotSpy = vi
       .spyOn(
         agent as unknown as {

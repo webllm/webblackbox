@@ -16,7 +16,7 @@
 
 ---
 
-The browser-side lite capture SDK for [WebBlackbox](https://github.com/webllm/webblackbox). Embed session recording directly in your web application — no Chrome extension required. Captures user interactions, console logs, network requests, DOM mutations, storage operations, screenshots, and more, then exports portable `.webblackbox` archives compatible with the full WebBlackbox Player.
+The browser-side lite capture SDK for [WebBlackbox](https://github.com/webllm/webblackbox). Embed session recording directly in your web application — no Chrome extension required. Captures user interactions, console logs, network requests, DOM mutations, storage operations, and opt-in screenshots, then exports portable `.webblackbox` archives compatible with the full WebBlackbox Player.
 
 ## Installation
 
@@ -91,6 +91,7 @@ Persist `derived.salt` + `derived.iterations` using your own key-management poli
 | `mousemoveHz`            | `14`    | Lower frequency than full mode (20 Hz)              |
 | `scrollHz`               | `10`    | Lower frequency than full mode (15 Hz)              |
 | `domFlushMs`             | `160`   | Longer flush interval than full mode (100 ms)       |
+| `screenshotIdleMs`       | `0`     | Disabled unless explicitly enabled                  |
 | `bodyCaptureMaxBytes`    | `0`     | Disabled — keeps lite sessions page-thread friendly |
 
 Override any of these through `options.config`.
@@ -99,7 +100,7 @@ Override any of these through `options.config`.
 
 | Setting              | Default    |
 | -------------------- | ---------- |
-| `includeScreenshots` | `true`     |
+| `includeScreenshots` | `false`    |
 | `maxArchiveBytes`    | 100 MB     |
 | `recentWindowMs`     | 20 minutes |
 

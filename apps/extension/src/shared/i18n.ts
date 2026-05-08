@@ -70,7 +70,7 @@ const EXTENSION_MESSAGES = {
     optionsSnapshotIntervalMs: "DOM Snapshot Interval (ms)",
     optionsScreenshotIdleMs: "Screenshot Idle Interval (ms)",
     optionsScreenshotIdleHelp:
-      "Lite captures idle screenshots by default. Set this to 0 to disable runtime screenshots. Full mode uses this for browser-side screenshot cadence.",
+      "Lite screenshots are disabled by default. Set a positive interval only when screenshots are explicitly allowed. Full mode uses this for browser-side screenshot cadence.",
     optionsBodyCaptureMaxBytes: "Network Body Capture Max Bytes",
     optionsBodyCaptureHelp:
       "Lite keeps page-side response-body capture disabled. In the extension, this knob only affects the capped browser-side body capture path used by full mode.",
@@ -99,7 +99,7 @@ const EXTENSION_MESSAGES = {
     optionsLiteProfileSignals:
       "click / input / scroll / pointer samples / mutation summary / browser-side network baseline",
     optionsLiteProfileHeavyCapture:
-      "idle screenshots enabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled",
+      "idle screenshots disabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled",
     optionsFullProfileSummary:
       "Browser-assisted capture with CDP screenshots, navigation, and richer diagnostics.",
     optionsFullProfileSignals:

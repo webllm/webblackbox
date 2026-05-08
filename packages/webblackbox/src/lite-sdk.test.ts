@@ -176,7 +176,7 @@ describe("WebBlackboxLiteSdk", () => {
       })
     );
 
-    const exported = await sdk.export();
+    const exported = await sdk.export({ includeScreenshots: true });
     const parsed = await readWebBlackboxArchive(exported.bytes);
 
     const clickEvent = parsed.events.find((event) => event.type === "user.click");
@@ -338,7 +338,7 @@ describe("WebBlackboxLiteSdk", () => {
       scrollHz: 10,
       domFlushMs: 160,
       snapshotIntervalMs: 30_000,
-      screenshotIdleMs: 8_000,
+      screenshotIdleMs: 0,
       bodyCaptureMaxBytes: 0
     });
 
@@ -438,7 +438,18 @@ describe("WebBlackboxLiteSdk", () => {
     const exportedDefault = await sdk.export({ stopCapture: false });
     const parsedDefault = await readWebBlackboxArchive(exportedDefault.bytes);
     expect(parsedDefault.events.some((event) => event.t < now - 20 * 60 * 1000)).toBe(false);
-    expect(parsedDefault.events.some((event) => event.type === "screen.screenshot")).toBe(true);
+    expect(parsedDefault.events.some((event) => event.type === "screen.screenshot")).toBe(false);
+
+    const exportedWithScreenshots = await sdk.export({
+      stopCapture: false,
+      includeScreenshots: true,
+      recentWindowMs: 60 * 60 * 1000
+    });
+    const parsedWithScreenshots = await readWebBlackboxArchive(exportedWithScreenshots.bytes);
+    expect(parsedWithScreenshots.events.some((event) => event.type === "screen.screenshot")).toBe(
+      true
+    );
+    expect(parsedWithScreenshots.events.some((event) => event.t < now - 20 * 60 * 1000)).toBe(true);
 
     const exportedNoScreenshot = await sdk.export({
       stopCapture: false,

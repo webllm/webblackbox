@@ -246,7 +246,7 @@ import { DEFAULT_EXPORT_POLICY, DEFAULT_RECORDER_CONFIG } from "@webblackbox/pro
 // - ringBufferMinutes: 10
 // - freezeOnError: true
 // - mousemoveHz: 20, scrollHz: 15
-// - screenshotIdleMs: 8000
+// - screenshotIdleMs: 0 (screenshots disabled unless explicitly enabled)
 // - bodyCaptureMaxBytes: 0 (response bodies disabled unless explicitly enabled)
 // - Redacts: authorization, cookie, set-cookie, proxy auth, API key, auth token, CSRF/XSRF headers
 // - Redacts cookie names such as token, session, auth, jwt, refresh_token, csrf, xsrf

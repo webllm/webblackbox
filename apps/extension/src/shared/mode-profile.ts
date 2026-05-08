@@ -14,7 +14,7 @@ export const MODE_PRODUCT_PROFILES: Record<CaptureMode, ModeProductProfile> = {
     signals:
       "click / input / scroll / pointer samples / mutation summary / browser-side network baseline",
     heavyCapture:
-      "idle screenshots enabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled"
+      "idle screenshots disabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled"
   },
   full: {
     label: "Full",
