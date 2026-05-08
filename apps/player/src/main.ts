@@ -293,6 +293,44 @@ type PlayerState = {
   preflightDismissTimer: number | null;
 };
 
+type PublicShareSummary = {
+  schemaVersion: 1;
+  source: "client";
+  analyzed: boolean;
+  encrypted: boolean;
+  manifest: {
+    mode: string;
+    chunkCodec: string;
+    recordedAt: string;
+  };
+  totals: {
+    events: number;
+    blobs?: number;
+    privacyViolations?: number;
+    errors: number;
+    requests: number;
+    actions: number;
+    durationMs: number;
+  };
+  topActionTriggers: Array<{
+    triggerType: string;
+    count: number;
+    errorRate: number;
+  }>;
+  privacy: {
+    redaction: {
+      hashSensitiveValues: boolean;
+      headerRuleCount: number;
+      cookieRuleCount: number;
+      bodyPatternCount: number;
+      blockedSelectorCount: number;
+    };
+    detected: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["detected"];
+    scanner: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["scanner"];
+    categories?: NonNullable<WebBlackboxPlayer["archive"]["privacyManifest"]>["categories"];
+  };
+};
+
 type SetPlayheadOptions = {
   fromPlayback?: boolean;
   forcePanels?: boolean;
@@ -326,6 +364,7 @@ const QUICK_TRIAGE_AUTO_DISMISS_SECONDS_STORAGE_KEY =
 const SHARE_SERVER_BASE_URL_STORAGE_KEY = "webblackbox.player.shareServerBaseUrl";
 const SHARE_SERVER_API_KEYS_STORAGE_KEY = "webblackbox.player.shareServerApiKeysByOrigin";
 const LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY = "webblackbox.player.shareServerApiKey";
+const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
 const DEFAULT_SHARE_SERVER_BASE_URL = "http://localhost:8787";
 const STAGE_HEIGHT_MIN_PX = 220;
 const STAGE_HEIGHT_BOTTOM_GUARD_PX = 280;
@@ -1743,6 +1782,13 @@ async function shareLoadedArchive(): Promise<void> {
     return;
   }
 
+  const player = state.player;
+
+  if (!player) {
+    setFeedback(i18n.messages.feedbackLoadArchiveBeforeSharing);
+    return;
+  }
+
   const shareConfig = await promptShareUploadConfig();
 
   if (!shareConfig) {
@@ -1762,7 +1808,8 @@ async function shareLoadedArchive(): Promise<void> {
 
   const headers: Record<string, string> = {
     "content-type": "application/octet-stream",
-    "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox"
+    "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox",
+    [SHARE_SUMMARY_HEADER]: encodeShareSummaryHeader(buildClientShareSummary(player))
   };
 
   if (shareConfig.apiKey.length > 0) {
@@ -1988,6 +2035,88 @@ function renderSharePrivacyPreflight(): void {
 
 function updateShareUploadConfirmState(): void {
   refs.shareUploadConfirm.disabled = !refs.shareUploadPrivacyReviewed.checked;
+}
+
+function buildClientShareSummary(player: WebBlackboxPlayer): PublicShareSummary {
+  const manifest = player.archive.manifest;
+  const derived = player.buildDerived();
+  const privacyReport = player.getPrivacyProtectionReport();
+
+  return {
+    schemaVersion: 1,
+    source: "client",
+    analyzed: true,
+    encrypted: Boolean(manifest.encryption),
+    manifest: {
+      mode: manifest.mode,
+      chunkCodec: manifest.chunkCodec,
+      recordedAt: manifest.createdAt
+    },
+    totals: {
+      events: derived.totals.events,
+      blobs: player.archive.privacyManifest?.totals.blobs,
+      privacyViolations: player.archive.privacyManifest?.totals.privacyViolations,
+      errors: derived.totals.errors,
+      requests: derived.totals.requests,
+      actions: derived.actionSpans.length,
+      durationMs: Math.round(manifest.stats.durationMs)
+    },
+    topActionTriggers: buildPublicActionTriggerSummary(player.getActionTimeline()),
+    privacy: {
+      redaction: {
+        hashSensitiveValues: privacyReport.redaction.hashSensitiveValues,
+        headerRuleCount: privacyReport.redaction.headers.length,
+        cookieRuleCount: privacyReport.redaction.cookieNames.length,
+        bodyPatternCount: privacyReport.redaction.bodyPatterns.length,
+        blockedSelectorCount: privacyReport.redaction.blockedSelectors.length
+      },
+      detected: privacyReport.detected,
+      scanner: privacyReport.scanner,
+      categories: player.archive.privacyManifest?.categories.map((category) => ({ ...category }))
+    }
+  };
+}
+
+function buildPublicActionTriggerSummary(
+  actions: ActionTimelineEntry[]
+): PublicShareSummary["topActionTriggers"] {
+  const counts = new Map<
+    string,
+    { triggerType: string; count: number; actionsWithErrors: number }
+  >();
+
+  for (const action of actions) {
+    const triggerType = action.triggerType ?? "unknown";
+    const current = counts.get(triggerType) ?? {
+      triggerType,
+      count: 0,
+      actionsWithErrors: 0
+    };
+
+    current.count += 1;
+    if (action.errorCount > 0) {
+      current.actionsWithErrors += 1;
+    }
+
+    counts.set(triggerType, current);
+  }
+
+  return [...counts.values()]
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 10)
+    .map((entry) => ({
+      triggerType: entry.triggerType,
+      count: entry.count,
+      errorRate: roundRatio(entry.count > 0 ? entry.actionsWithErrors / entry.count : 0)
+    }));
+}
+
+function encodeShareSummaryHeader(summary: PublicShareSummary): string {
+  return encodeURIComponent(JSON.stringify(summary));
+}
+
+function roundRatio(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
 }
 
 function formatSensitivePreviewReason(reason: string): string {

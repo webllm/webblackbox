@@ -58,8 +58,92 @@ describe("share-server", () => {
 
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-headers")).toBe(
-      "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename"
+      "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,x-webblackbox-share-summary"
     );
+  });
+
+  it("returns only allowlisted public metadata", async () => {
+    const server = await startShareServer();
+    const secret = "customer-alpha.internal/users/reset-token-123";
+    const summary = {
+      schemaVersion: 1,
+      source: "client",
+      analyzed: true,
+      encrypted: true,
+      manifest: {
+        origin: `https://${secret}`,
+        mode: "lite",
+        chunkCodec: "ndjson",
+        recordedAt: "2026-02-13T00:00:00.000Z"
+      },
+      totals: {
+        events: 1,
+        errors: 0,
+        requests: 0,
+        actions: 0,
+        durationMs: 0
+      },
+      topEndpoints: [
+        {
+          endpoint: `https://${secret}`,
+          method: "GET",
+          count: 1
+        }
+      ],
+      sensitivePreview: {
+        totalMatches: 1,
+        samples: [{ snippet: secret }]
+      },
+      privacy: {
+        redaction: {
+          hashSensitiveValues: true,
+          headerRuleCount: 2,
+          cookieRuleCount: 1,
+          bodyPatternCount: 3,
+          blockedSelectorCount: 4
+        },
+        detected: {
+          redactedMarkers: 1,
+          hashedSensitiveValues: 0,
+          sensitiveKeyMentions: 0
+        },
+        scanner: {
+          preEncryption: true,
+          status: "passed",
+          findingCount: 0
+        }
+      }
+    };
+
+    const uploadResponse = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "customer-alpha-reset-token-123.webblackbox",
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(summary))
+      },
+      body: Buffer.from("encrypted archive placeholder")
+    });
+    const uploadPayload = (await uploadResponse.json()) as { shareId: string };
+
+    expect(uploadResponse.status).toBe(201);
+
+    const metadataResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`,
+      {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+    const metadataText = await metadataResponse.text();
+
+    expect(metadataResponse.status).toBe(200);
+    expect(metadataText).not.toContain(secret);
+    expect(metadataText).not.toContain("topEndpoints");
+    expect(metadataText).not.toContain("sensitivePreview");
+    expect(metadataText).not.toContain("customer-alpha-reset-token-123");
   });
 });
 

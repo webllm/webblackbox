@@ -16,40 +16,50 @@ type ShareRecord = {
 };
 
 type ShareSummary = {
+  schemaVersion: 1;
+  source: "client" | "server" | "unavailable";
   analyzed: boolean;
   encrypted: boolean;
   analysisError?: string;
   manifest?: {
-    origin: string;
     mode: string;
     chunkCodec: string;
     recordedAt: string;
   };
   totals?: {
     events: number;
+    blobs?: number;
+    privacyViolations?: number;
     errors: number;
     requests: number;
     actions: number;
     durationMs: number;
   };
-  topEndpoints?: Array<{
-    endpoint: string;
-    method: string;
-    count: number;
-    failedRate: number;
-    p95DurationMs: number;
-  }>;
-  topErrorFingerprints?: Array<{
-    fingerprint: string;
-    count: number;
-  }>;
   topActionTriggers?: Array<{
     triggerType: string;
     count: number;
     errorRate: number;
   }>;
-  privacy?: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>;
-  sensitivePreview?: ReturnType<WebBlackboxPlayer["getSensitiveDataPreview"]>;
+  privacy?: {
+    redaction: {
+      hashSensitiveValues: boolean;
+      headerRuleCount: number;
+      cookieRuleCount: number;
+      bodyPatternCount: number;
+      blockedSelectorCount: number;
+    };
+    detected: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["detected"];
+    scanner: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["scanner"];
+    categories?: Array<{
+      category: string;
+      events: number;
+      low: number;
+      medium: number;
+      high: number;
+      redacted: number;
+      unredacted: number;
+    }>;
+  };
 };
 
 const DEFAULT_PORT = 8787;
@@ -73,6 +83,8 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS,
   60_000
 );
+const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
+const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
@@ -200,12 +212,28 @@ async function handleUpload(
 
   const id = randomUUID().replaceAll("-", "");
   const filenameHeader = request.headers["x-webblackbox-filename"];
-  const fileName = normalizeFileName(
-    typeof filenameHeader === "string" ? filenameHeader : `session-${id}.webblackbox`
+  const fileName = publicArchiveFileName(
+    id,
+    typeof filenameHeader === "string" ? filenameHeader : undefined
   );
   const archivePath = archivePathForId(id);
   const checksumSha256 = createHash("sha256").update(bytes).digest("hex");
-  const summary = await buildShareSummary(bytes);
+  let clientSummary: ShareSummary | null;
+
+  try {
+    clientSummary = readClientShareSummary(request);
+  } catch (error) {
+    if (error instanceof ShareSummaryHeaderError) {
+      respondJson(response, 400, {
+        error: error.message
+      });
+      return;
+    }
+
+    throw error;
+  }
+
+  const summary = clientSummary ?? (await buildShareSummary(bytes));
 
   if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
     respondJson(response, 422, {
@@ -242,14 +270,7 @@ async function handleList(response: ServerResponse): Promise<void> {
   const records = await loadAllRecords();
   const items = records
     .sort((left, right) => right.createdAt - left.createdAt)
-    .map((record) => ({
-      id: record.id,
-      createdAt: record.createdAt,
-      fileName: record.fileName,
-      sizeBytes: record.sizeBytes,
-      shareUrl: record.shareUrl,
-      summary: record.summary
-    }));
+    .map((record) => buildPublicShareMetadata(record));
 
   respondJson(response, 200, {
     items
@@ -266,7 +287,7 @@ async function handleGetMetadata(response: ServerResponse, id: string): Promise<
     return;
   }
 
-  respondJson(response, 200, record);
+  respondJson(response, 200, buildPublicShareMetadata(record));
 }
 
 async function handleDownloadArchive(response: ServerResponse, id: string): Promise<void> {
@@ -311,7 +332,8 @@ async function handleSharePage(
   }
 
   const authQuerySuffix = buildAuthQuerySuffix(requestUrl);
-  const metadataPretty = escapeHtml(JSON.stringify(record.summary, null, 2));
+  const publicMetadata = buildPublicShareMetadata(record);
+  const metadataPretty = escapeHtml(JSON.stringify(publicMetadata.summary, null, 2));
   const page = `<!doctype html>
 <html lang="en">
   <head>
@@ -333,7 +355,7 @@ async function handleSharePage(
     <main>
       <h1>WebBlackbox Share</h1>
       <p class="meta">ID: <code>${escapeHtml(record.id)}</code> · File: <code>${escapeHtml(
-        record.fileName
+        publicMetadata.fileName
       )}</code> · Size: ${formatSize(record.sizeBytes)}</p>
       <div class="actions">
         <a class="btn" href="/api/share/${encodeURIComponent(record.id)}/archive${authQuerySuffix}">Download Archive</a>
@@ -352,38 +374,47 @@ async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
     const player = await WebBlackboxPlayer.open(bytes);
     const manifest = player.archive.manifest;
     const derived = player.buildDerived();
-    const waterfall = player.getNetworkWaterfall();
     const actions = player.getActionTimeline();
-    const allEvents = player.query();
-    const errorEvents = allEvents.filter(
-      (event) => event.type.startsWith("error.") || event.lvl === "error"
-    );
+    const privacyReport = player.getPrivacyProtectionReport();
 
     return {
+      schemaVersion: 1,
+      source: "server",
       analyzed: true,
       encrypted: Boolean(manifest.encryption),
       manifest: {
-        origin: redactText(manifest.site.origin),
         mode: manifest.mode,
         chunkCodec: manifest.chunkCodec,
         recordedAt: manifest.createdAt
       },
       totals: {
         events: derived.totals.events,
+        blobs: player.archive.privacyManifest?.totals.blobs,
+        privacyViolations: player.archive.privacyManifest?.totals.privacyViolations,
         errors: derived.totals.errors,
         requests: derived.totals.requests,
         actions: derived.actionSpans.length,
         durationMs: Math.round(manifest.stats.durationMs)
       },
-      topEndpoints: collectTopEndpoints(waterfall),
-      topErrorFingerprints: collectTopErrorFingerprints(actions, errorEvents),
       topActionTriggers: collectTopActionTriggers(actions),
-      privacy: player.getPrivacyProtectionReport(),
-      sensitivePreview: player.getSensitiveDataPreview({ limit: 10 })
+      privacy: {
+        redaction: {
+          hashSensitiveValues: privacyReport.redaction.hashSensitiveValues,
+          headerRuleCount: privacyReport.redaction.headers.length,
+          cookieRuleCount: privacyReport.redaction.cookieNames.length,
+          bodyPatternCount: privacyReport.redaction.bodyPatterns.length,
+          blockedSelectorCount: privacyReport.redaction.blockedSelectors.length
+        },
+        detected: privacyReport.detected,
+        scanner: privacyReport.scanner,
+        categories: player.archive.privacyManifest?.categories.map((category) => ({ ...category }))
+      }
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
+      schemaVersion: 1,
+      source: "unavailable",
       analyzed: false,
       encrypted: message.toLowerCase().includes("encrypted"),
       analysisError: redactText(message, 240)
@@ -391,82 +422,129 @@ async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
   }
 }
 
-function collectTopEndpoints(
-  entries: ReturnType<WebBlackboxPlayer["getNetworkWaterfall"]>
-): ShareSummary["topEndpoints"] {
-  const endpointStats = new Map<
-    string,
-    {
-      endpoint: string;
-      method: string;
-      count: number;
-      failed: number;
-      durations: number[];
-    }
-  >();
+function readClientShareSummary(request: IncomingMessage): ShareSummary | null {
+  const rawHeader = request.headers[SHARE_SUMMARY_HEADER];
 
-  for (const entry of entries) {
-    const endpoint = normalizeEndpoint(entry.url);
-    const method = entry.method.toUpperCase();
-    const key = `${method} ${endpoint}`;
-    const current = endpointStats.get(key) ?? {
-      endpoint,
-      method,
-      count: 0,
-      failed: 0,
-      durations: []
-    };
-
-    current.count += 1;
-    if (entry.failed || (typeof entry.status === "number" && entry.status >= 400)) {
-      current.failed += 1;
-    }
-    if (Number.isFinite(entry.durationMs)) {
-      current.durations.push(Math.max(0, entry.durationMs));
-    }
-
-    endpointStats.set(key, current);
+  if (rawHeader === undefined) {
+    return null;
   }
 
-  return [...endpointStats.values()]
-    .sort((left, right) => right.count - left.count)
-    .slice(0, 10)
-    .map((entry) => ({
-      endpoint: entry.endpoint,
-      method: entry.method,
-      count: entry.count,
-      failedRate: roundTo(entry.count > 0 ? entry.failed / entry.count : 0, 4),
-      p95DurationMs: roundTo(percentile(entry.durations, 0.95), 1)
-    }));
+  if (typeof rawHeader !== "string") {
+    throw new ShareSummaryHeaderError("Share summary header must be a single string value.");
+  }
+
+  const raw = rawHeader.trim();
+
+  if (raw.length === 0) {
+    return null;
+  }
+
+  if (Buffer.byteLength(raw, "utf8") > MAX_SHARE_SUMMARY_HEADER_BYTES) {
+    throw new ShareSummaryHeaderError("Share summary header is too large.");
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(decodeURIComponent(raw));
+  } catch {
+    throw new ShareSummaryHeaderError("Share summary header is not valid encoded JSON.");
+  }
+
+  return normalizeClientShareSummary(parsed);
 }
 
-function collectTopErrorFingerprints(
-  actions: ReturnType<WebBlackboxPlayer["getActionTimeline"]>,
-  errorEvents: ReturnType<WebBlackboxPlayer["query"]>
-): ShareSummary["topErrorFingerprints"] {
-  const counts = new Map<string, number>();
+function normalizeClientShareSummary(value: unknown): ShareSummary {
+  const record = asRecord(value);
+  const manifest = asRecord(record.manifest);
+  const totals = asRecord(record.totals);
+  const privacy = asRecord(record.privacy);
 
-  for (const action of actions) {
-    for (const error of action.errors) {
-      const key = fingerprintError(error.type, error.message);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
+  return {
+    schemaVersion: 1,
+    source: "client",
+    analyzed: readBoolean(record.analyzed, true),
+    encrypted: readBoolean(record.encrypted, true),
+    manifest: {
+      mode: readString(manifest.mode, "unknown", 32),
+      chunkCodec: readString(manifest.chunkCodec, "unknown", 32),
+      recordedAt: readString(manifest.recordedAt, "", 64)
+    },
+    totals: {
+      events: readNonNegativeInteger(totals.events, 0),
+      blobs: readOptionalNonNegativeInteger(totals.blobs),
+      privacyViolations: readOptionalNonNegativeInteger(totals.privacyViolations),
+      errors: readNonNegativeInteger(totals.errors, 0),
+      requests: readNonNegativeInteger(totals.requests, 0),
+      actions: readNonNegativeInteger(totals.actions, 0),
+      durationMs: readNonNegativeInteger(totals.durationMs, 0)
+    },
+    topActionTriggers: normalizeActionTriggerSummaries(record.topActionTriggers),
+    privacy: normalizeSharePrivacySummary(privacy)
+  };
+}
+
+function normalizeSharePrivacySummary(value: Record<string, unknown>): ShareSummary["privacy"] {
+  const redaction = asRecord(value.redaction);
+  const detected = asRecord(value.detected);
+  const scanner = asRecord(value.scanner);
+
+  return {
+    redaction: {
+      hashSensitiveValues: readBoolean(redaction.hashSensitiveValues, true),
+      headerRuleCount: readNonNegativeInteger(redaction.headerRuleCount, 0),
+      cookieRuleCount: readNonNegativeInteger(redaction.cookieRuleCount, 0),
+      bodyPatternCount: readNonNegativeInteger(redaction.bodyPatternCount, 0),
+      blockedSelectorCount: readNonNegativeInteger(redaction.blockedSelectorCount, 0)
+    },
+    detected: {
+      redactedMarkers: readNonNegativeInteger(detected.redactedMarkers, 0),
+      hashedSensitiveValues: readNonNegativeInteger(detected.hashedSensitiveValues, 0),
+      sensitiveKeyMentions: readNonNegativeInteger(detected.sensitiveKeyMentions, 0)
+    },
+    scanner: {
+      preEncryption: readBoolean(scanner.preEncryption, false),
+      status: readScannerStatus(scanner.status),
+      findingCount: readNonNegativeInteger(scanner.findingCount, 0)
+    },
+    categories: normalizeCategorySummaries(value.categories)
+  };
+}
+
+function normalizeActionTriggerSummaries(value: unknown): ShareSummary["topActionTriggers"] {
+  if (!Array.isArray(value)) {
+    return [];
   }
 
-  if (counts.size === 0) {
-    for (const event of errorEvents) {
-      const key = fingerprintError(event.type, stringifyPayload(event.data));
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
+  return value.slice(0, 10).map((entry) => {
+    const record = asRecord(entry);
+    return {
+      triggerType: readString(record.triggerType, "unknown", 64),
+      count: readNonNegativeInteger(record.count, 0),
+      errorRate: readBoundedNumber(record.errorRate, 0, 0, 1)
+    };
+  });
+}
+
+function normalizeCategorySummaries(
+  value: unknown
+): NonNullable<ShareSummary["privacy"]>["categories"] {
+  if (!Array.isArray(value)) {
+    return [];
   }
 
-  return [...counts.entries()]
-    .map(([fingerprint, count]) => ({
-      fingerprint,
-      count
-    }))
-    .sort((left, right) => right.count - left.count)
-    .slice(0, 10);
+  return value.slice(0, 24).map((entry) => {
+    const record = asRecord(entry);
+    return {
+      category: readString(record.category, "unknown", 32),
+      events: readNonNegativeInteger(record.events, 0),
+      low: readNonNegativeInteger(record.low, 0),
+      medium: readNonNegativeInteger(record.medium, 0),
+      high: readNonNegativeInteger(record.high, 0),
+      redacted: readNonNegativeInteger(record.redacted, 0),
+      unredacted: readNonNegativeInteger(record.unredacted, 0)
+    };
+  });
 }
 
 function collectTopActionTriggers(
@@ -505,20 +583,6 @@ function collectTopActionTriggers(
     }));
 }
 
-function fingerprintError(type: string, message: string | null | undefined): string {
-  return redactText(`${type}:${message ?? ""}`, 180);
-}
-
-function normalizeEndpoint(rawUrl: string): string {
-  try {
-    const parsed = new URL(rawUrl);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    const noQuery = rawUrl.split("?")[0] ?? rawUrl;
-    return redactText(noQuery, 140);
-  }
-}
-
 function redactText(input: string, maxLength = 120): string {
   const compact = input.replace(/\s+/g, " ").trim();
   const redacted = compact
@@ -539,28 +603,6 @@ function redactText(input: string, maxLength = 120): string {
   }
 
   return `${redacted.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function stringifyPayload(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function percentile(samples: number[], p: number): number {
-  if (samples.length === 0) {
-    return 0;
-  }
-
-  const sorted = [...samples].sort((left, right) => left - right);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1));
-  return sorted[index] ?? 0;
 }
 
 function roundTo(value: number, digits: number): number {
@@ -602,6 +644,26 @@ async function loadAllRecords(): Promise<ShareRecord[]> {
 
 async function writeRecord(record: ShareRecord): Promise<void> {
   await writeFile(recordPathForId(record.id), JSON.stringify(record, null, 2));
+}
+
+function buildPublicShareMetadata(record: ShareRecord): {
+  id: string;
+  createdAt: number;
+  fileName: string;
+  sizeBytes: number;
+  checksumSha256: string;
+  shareUrl: string;
+  summary: ShareSummary;
+} {
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    fileName: record.fileName,
+    sizeBytes: record.sizeBytes,
+    checksumSha256: record.checksumSha256,
+    shareUrl: record.shareUrl,
+    summary: record.summary
+  };
 }
 
 function recordPathForId(id: string): string {
@@ -668,6 +730,54 @@ class PayloadTooLargeError extends Error {
   }
 }
 
+class ShareSummaryHeaderError extends Error {}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readString(value: unknown, fallback: string, maxLength: number): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  return redactText(value, maxLength);
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readNonNegativeInteger(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+
+  return Math.floor(value);
+}
+
+function readOptionalNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+
+  return Math.floor(value);
+}
+
+function readBoundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, value));
+}
+
+function readScannerStatus(value: unknown): "passed" | "blocked" | "unknown" {
+  return value === "passed" || value === "blocked" || value === "unknown" ? value : "unknown";
+}
+
 function requestBaseUrl(request: IncomingMessage): string {
   const host = request.headers.host;
   return host && host.length > 0 ? `http://${host}` : DEFAULT_BASE_URL;
@@ -683,10 +793,10 @@ function requestOrigin(request: IncomingMessage, requestUrl: URL): string {
   return `${protocol}://${host}`;
 }
 
-function normalizeFileName(rawName: string): string {
-  const compact = rawName.trim().replaceAll(/[^a-zA-Z0-9._-]+/g, "-");
-  const safe = compact.length > 0 ? compact : "session.webblackbox";
-  return safe.endsWith(".webblackbox") || safe.endsWith(".zip") ? safe : `${safe}.webblackbox`;
+function publicArchiveFileName(id: string, rawName: string | undefined): string {
+  const trimmed = rawName?.trim().toLowerCase() ?? "";
+  const extension = trimmed.endsWith(".zip") ? ".zip" : ".webblackbox";
+  return `webblackbox-share-${id.slice(0, 12)}${extension}`;
 }
 
 function applyCorsHeaders(
@@ -707,7 +817,7 @@ function applyCorsHeaders(
 
   response.setHeader(
     "access-control-allow-headers",
-    "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename"
+    `content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,${SHARE_SUMMARY_HEADER}`
   );
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
 }
