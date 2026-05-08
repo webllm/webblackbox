@@ -1,3 +1,5 @@
+import { sanitizeUrlForPrivacy } from "@webblackbox/protocol";
+
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 type LiteNetworkRuntimeContext = {
@@ -45,7 +47,7 @@ export function buildLiteNetworkRequestRawEvent(
       reqId: details.requestId,
       requestId: details.requestId,
       method: normalizeMethod(details.method),
-      url: details.url
+      url: sanitizeUrlForPrivacy(details.url)
     }
   };
 }
@@ -70,13 +72,13 @@ export function buildLiteNetworkResponseRawEvent(
       reqId: details.requestId,
       requestId: details.requestId,
       method: normalizeMethod(details.method),
-      url: details.url,
+      url: sanitizeUrlForPrivacy(details.url),
       status,
       statusText: parseStatusText(details.statusLine),
       duration: normalizeDuration(details.duration),
       ok: typeof status === "number" ? status >= 200 && status < 400 : undefined,
       redirected: details.redirected === true,
-      responseUrl: details.responseUrl
+      responseUrl: sanitizeOptionalUrl(details.responseUrl)
     }
   };
 }
@@ -103,12 +105,16 @@ export function buildLiteNetworkFailureRawEvent(
       reqId: details.requestId,
       requestId: details.requestId,
       method: normalizeMethod(details.method),
-      url: details.url,
+      url: sanitizeUrlForPrivacy(details.url),
       duration: normalizeDuration(details.duration),
       message,
       errorText: message
     }
   };
+}
+
+function sanitizeOptionalUrl(value: string | undefined): string | undefined {
+  return value ? sanitizeUrlForPrivacy(value) : undefined;
 }
 
 function normalizeNetworkTime(candidate?: number): { t: number; mono: number } {

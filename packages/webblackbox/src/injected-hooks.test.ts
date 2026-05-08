@@ -110,7 +110,7 @@ describe("injected-hooks", () => {
       bodyCaptureMaxBytes: 128 * 1024
     });
 
-    await window.fetch("https://example.test/api/demo", {
+    await window.fetch("https://example.test/api/demo/123?token=secret#frag", {
       method: "POST",
       body: '{"token":"abc"}'
     });
@@ -139,7 +139,7 @@ describe("injected-hooks", () => {
 
     expect(fetchStart?.payload).toMatchObject({
       method: "POST",
-      url: "https://example.test/api/demo"
+      url: "https://example.test/api/demo/:id"
     });
     expect(fetchEnd?.payload).toMatchObject({
       status: 200,

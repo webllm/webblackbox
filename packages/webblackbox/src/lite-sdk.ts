@@ -2,6 +2,7 @@ import {
   DEFAULT_EXPORT_POLICY,
   DEFAULT_RECORDER_CONFIG,
   createSessionId,
+  sanitizeUrlForPrivacy,
   type ExportPolicy,
   type RecorderConfig,
   type SessionMetadata,
@@ -485,11 +486,11 @@ function createSessionMetadata(
 
 function resolveSessionUrl(value: string | undefined): string {
   if (typeof value === "string" && value.trim().length > 0) {
-    return value;
+    return sanitizeUrlForPrivacy(value);
   }
 
   if (typeof location !== "undefined" && typeof location.href === "string") {
-    return location.href;
+    return sanitizeUrlForPrivacy(location.href);
   }
 
   return "about:blank";

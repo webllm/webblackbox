@@ -8,7 +8,7 @@ import type {
   WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { CHUNK_CODECS } from "@webblackbox/protocol";
+import { CHUNK_CODECS, sanitizeUrlForPrivacy } from "@webblackbox/protocol";
 
 import { decodeChunkEvents, encodeChunkEvents } from "./codec.js";
 import { EventChunker } from "./chunker.js";
@@ -572,7 +572,7 @@ export class FlightRecorderPipeline {
       createdAt: new Date().toISOString(),
       mode: this.options.session.mode,
       site: {
-        origin: this.options.session.url,
+        origin: sanitizeUrlForPrivacy(this.options.session.url),
         title: this.options.session.title
       },
       chunkCodec,

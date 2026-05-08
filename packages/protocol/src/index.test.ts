@@ -13,7 +13,9 @@ import {
   exportManifestSchema,
   validateEvent,
   validateMessage,
-  WEBBLACKBOX_PROTOCOL_VERSION
+  WEBBLACKBOX_PROTOCOL_VERSION,
+  routeTemplatePath,
+  sanitizeUrlForPrivacy
 } from "./index.js";
 
 describe("protocol", () => {
@@ -157,5 +159,16 @@ describe("protocol", () => {
     expect(inferBlobMime("html")).toBe("text/html");
     expect(inferBlobFileExtension("application/json")).toBe("json");
     expect(inferBlobMime("bin")).toBe("application/octet-stream");
+  });
+
+  it("sanitizes URLs by stripping query, fragment, and route identifiers", () => {
+    expect(
+      sanitizeUrlForPrivacy(
+        "https://app.example.test/users/alice@example.test/orders/123?token=secret#checkout"
+      )
+    ).toBe("https://app.example.test/users/:id/orders/:id");
+    expect(sanitizeUrlForPrivacy("/reset/abc123def456?code=oauth")).toBe("/reset/:id");
+    expect(routeTemplatePath("/tenant/acme42/cases/CASE-12345")).toBe("/tenant/:id/cases/:id");
+    expect(sanitizeUrlForPrivacy("#access_token=secret")).toBe("");
   });
 });

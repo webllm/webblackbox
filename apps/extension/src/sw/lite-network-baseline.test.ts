@@ -17,7 +17,7 @@ describe("lite-network-baseline", () => {
     const rawEvent = buildLiteNetworkRequestRawEvent(TEST_CONTEXT, {
       requestId: "123",
       method: "post",
-      url: "https://example.com/api/items",
+      url: "https://example.com/api/items/123?token=secret#frag",
       timeStamp: 101
     });
 
@@ -34,7 +34,7 @@ describe("lite-network-baseline", () => {
         reqId: "123",
         requestId: "123",
         method: "POST",
-        url: "https://example.com/api/items"
+        url: "https://example.com/api/items/:id"
       }
     });
     expect(rawEvent.payload).not.toHaveProperty("headers");

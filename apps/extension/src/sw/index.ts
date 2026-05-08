@@ -7,6 +7,7 @@ import {
   createSessionId,
   DEFAULT_EXPORT_POLICY,
   DEFAULT_RECORDER_CONFIG,
+  sanitizeUrlForPrivacy,
   type CaptureMode,
   type ExportPolicy,
   type FreezeReason,
@@ -689,7 +690,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     tabId,
     startedAt,
     mode,
-    url: tabMetadata.url,
+    url: sanitizeUrlForPrivacy(tabMetadata.url),
     title: tabMetadata.title,
     tags: [...annotation.tags]
   };
@@ -3464,7 +3465,7 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
     startedAt: runtime.startedAt,
     active,
     stoppedAt: runtime.stoppedAt,
-    url: runtime.url,
+    url: sanitizeUrlForPrivacy(runtime.url),
     title: runtime.title,
     ringBufferMinutes: runtime.config.ringBufferMinutes,
     eventCount: runtime.capturedEventCount,
@@ -3482,7 +3483,7 @@ function toSessionMetadata(runtime: SessionRuntime): SessionMetadata {
     tabId: runtime.tabId,
     startedAt: runtime.startedAt,
     mode: runtime.mode,
-    url: runtime.url,
+    url: sanitizeUrlForPrivacy(runtime.url),
     title: runtime.title,
     tags: [...runtime.tags]
   };
@@ -3501,7 +3502,10 @@ async function resolveTabSessionMetadata(
 
   try {
     const tab = await chromeApi.tabs.get(tabId);
-    const url = typeof tab?.url === "string" && tab.url.length > 0 ? tab.url : fallbackUrl;
+    const url =
+      typeof tab?.url === "string" && tab.url.length > 0
+        ? sanitizeUrlForPrivacy(tab.url)
+        : fallbackUrl;
     const title =
       typeof tab?.title === "string" && tab.title.trim().length > 0 ? tab.title.trim() : undefined;
 
@@ -3532,8 +3536,10 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
   const nextTitle = asString(payload?.title) ?? asString(payload?.documentTitle);
   let changed = false;
 
-  if (nextUrl && nextUrl !== runtime.url) {
-    runtime.url = nextUrl;
+  const sanitizedNextUrl = nextUrl ? sanitizeUrlForPrivacy(nextUrl) : undefined;
+
+  if (sanitizedNextUrl && sanitizedNextUrl !== runtime.url) {
+    runtime.url = sanitizedNextUrl;
     changed = true;
   }
 

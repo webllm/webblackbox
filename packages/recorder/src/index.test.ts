@@ -582,6 +582,28 @@ describe("recorder", () => {
     expect(bodyPayload?.truncated).toBe(true);
   });
 
+  it("strips URL query, fragment, and identifier path segments by default", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "fetch",
+      sid: "S-url-privacy",
+      tabId: 4,
+      t: Date.now(),
+      mono: 10,
+      payload: {
+        method: "GET",
+        url: "https://app.example.test/users/alice@example.test/orders/123?token=secret#frag",
+        phase: "start"
+      }
+    });
+    const payload = result.event?.data as { url?: string; reqId?: string } | undefined;
+
+    expect(payload?.url).toBe("https://app.example.test/users/:id/orders/:id");
+    expect(payload?.reqId).not.toContain("alice@example.test");
+    expect(payload?.reqId).not.toContain("token=secret");
+  });
+
   it("maps lite storage snapshot raw types", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const base = Date.now();

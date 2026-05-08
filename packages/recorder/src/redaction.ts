@@ -1,4 +1,4 @@
-import type { RedactionProfile } from "@webblackbox/protocol";
+import { sanitizeUrlForPrivacy, type RedactionProfile } from "@webblackbox/protocol";
 
 const REDACTED = "[REDACTED]";
 // Redaction runs on the synchronous ingest hot path (service worker + content/injected contexts).
@@ -29,6 +29,11 @@ export function redactPayload(input: unknown, profile: RedactionProfile): unknow
 
     for (const [key, value] of Object.entries(source)) {
       const normalizedKey = key.toLowerCase();
+
+      if (isUrlLikeField(normalizedKey) && typeof value === "string") {
+        output[key] = sanitizeUrlForPrivacy(value);
+        continue;
+      }
 
       if (profile.redactHeaders.includes(normalizedKey) || isSensitiveKey(normalizedKey, profile)) {
         output[key] =
@@ -243,6 +248,17 @@ function shouldMaskByCookieName(
 
 function isSensitiveKey(key: string, profile: RedactionProfile): boolean {
   return profile.redactBodyPatterns.some((pattern) => key.includes(pattern.toLowerCase()));
+}
+
+function isUrlLikeField(key: string): boolean {
+  return (
+    key === "url" ||
+    key === "href" ||
+    key === "responseurl" ||
+    key === "documenturl" ||
+    key === "requesturl" ||
+    key.endsWith("url")
+  );
 }
 
 function containsSensitivePattern(value: string, profile: RedactionProfile): boolean {

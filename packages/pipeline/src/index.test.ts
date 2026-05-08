@@ -146,6 +146,28 @@ describe("pipeline", () => {
     }
   });
 
+  it("sanitizes session URLs in export manifests", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-manifest-url-privacy",
+        url: "https://app.example.test/users/alice@example.test/orders/123?token=secret#frag"
+      },
+      storage,
+      maxChunkBytes: 512
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-url-privacy", "user.marker", Date.now()));
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.manifest.site.origin).toBe("https://app.example.test/users/:id/orders/:id");
+    expect(JSON.stringify(parsed.manifest)).not.toContain("alice@example.test");
+    expect(JSON.stringify(parsed.manifest)).not.toContain("token=secret");
+  });
+
   it("ingests batches without losing index coverage", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({

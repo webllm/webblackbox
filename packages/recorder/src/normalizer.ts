@@ -1,4 +1,8 @@
-import { extractRequestIdFromPayload, type WebBlackboxEventType } from "@webblackbox/protocol";
+import {
+  extractRequestIdFromPayload,
+  sanitizeUrlForPrivacy,
+  type WebBlackboxEventType
+} from "@webblackbox/protocol";
 
 import type { EventNormalizer, RawRecorderEvent } from "./types.js";
 
@@ -197,7 +201,7 @@ function normalizeContentNetworkRequestPayload(
   payload: Record<string, unknown> | null
 ): Record<string, unknown> {
   const method = (asString(payload?.method) ?? "GET").toUpperCase();
-  const url = asString(payload?.url) ?? "unknown://request";
+  const url = sanitizeUrlForPrivacy(asString(payload?.url) ?? "unknown://request");
   const reqId = readRequestId(payload) ?? buildFallbackReqId(method, url);
 
   return stripUndefined({
@@ -219,14 +223,16 @@ function normalizeContentNetworkResponsePayload(
 ): Record<string, unknown> {
   const method = asString(payload?.method);
   const url = asString(payload?.url);
+  const sanitizedUrl = url ? sanitizeUrlForPrivacy(url) : undefined;
   const reqId =
-    readRequestId(payload) ?? buildFallbackReqId(method ?? "GET", url ?? "unknown://request");
+    readRequestId(payload) ??
+    buildFallbackReqId(method ?? "GET", sanitizedUrl ?? "unknown://request");
 
   return stripUndefined({
     reqId,
     requestId: reqId,
     method: method ? method.toUpperCase() : undefined,
-    url,
+    url: sanitizedUrl,
     status: asFiniteNumber(payload?.status) ?? undefined,
     statusText: asString(payload?.statusText) ?? undefined,
     mimeType: asString(payload?.mimeType) ?? undefined,
@@ -239,7 +245,7 @@ function normalizeContentNetworkResponsePayload(
     duration: asFiniteNumber(payload?.duration) ?? undefined,
     ok: asBoolean(payload?.ok),
     redirected: asBoolean(payload?.redirected),
-    responseUrl: asString(payload?.responseUrl) ?? undefined,
+    responseUrl: sanitizeOptionalUrl(asString(payload?.responseUrl)),
     failed: asBoolean(payload?.failed)
   });
 }
@@ -249,14 +255,16 @@ function normalizeContentNetworkFailedPayload(
 ): Record<string, unknown> {
   const method = asString(payload?.method);
   const url = asString(payload?.url);
+  const sanitizedUrl = url ? sanitizeUrlForPrivacy(url) : undefined;
   const reqId =
-    readRequestId(payload) ?? buildFallbackReqId(method ?? "GET", url ?? "unknown://request");
+    readRequestId(payload) ??
+    buildFallbackReqId(method ?? "GET", sanitizedUrl ?? "unknown://request");
 
   return stripUndefined({
     reqId,
     requestId: reqId,
     method: method ? method.toUpperCase() : undefined,
-    url,
+    url: sanitizedUrl,
     duration: asFiniteNumber(payload?.duration) ?? undefined,
     message: asString(payload?.message) ?? undefined,
     errorText: asString(payload?.errorText) ?? asString(payload?.message) ?? undefined
@@ -268,7 +276,7 @@ function normalizeContentNetworkBodyPayload(
 ): Record<string, unknown> {
   const reqId =
     readRequestId(payload) ??
-    buildFallbackReqId("GET", asString(payload?.url) ?? "unknown://request");
+    buildFallbackReqId("GET", sanitizeOptionalUrl(asString(payload?.url)) ?? "unknown://request");
 
   return stripUndefined({
     reqId,
@@ -422,7 +430,7 @@ function readStackTop(stackTrace: Record<string, unknown> | null): string | unde
     return undefined;
   }
 
-  const url = asString(frame.url) ?? "(anonymous)";
+  const url = sanitizeOptionalUrl(asString(frame.url)) ?? "(anonymous)";
   const line = asFiniteNumber(frame.lineNumber);
   const col = asFiniteNumber(frame.columnNumber);
   const functionName = asString(frame.functionName) ?? "(anonymous)";
@@ -499,6 +507,10 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function sanitizeOptionalUrl(value: string | undefined): string | undefined {
+  return value ? sanitizeUrlForPrivacy(value) : undefined;
 }
 
 function compactText(value: string, maxLength: number): string {

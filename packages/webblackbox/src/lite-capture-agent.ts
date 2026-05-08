@@ -1,3 +1,4 @@
+import { sanitizeUrlForPrivacy } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 import { snapdom } from "@zumer/snapdom";
 
@@ -1018,7 +1019,7 @@ export class LiteCaptureAgent {
           attributeNames: [...summary.attributeNames]
         }
       },
-      href: location.href,
+      href: readCurrentPageUrl(),
       title: document.title
     });
   }
@@ -1027,7 +1028,7 @@ export class LiteCaptureAgent {
     const nodeCount = document.getElementsByTagName("*").length;
     const summaryMode = this.resolveDomSnapshotSummaryMode(nodeCount);
     const html = buildDomSnapshotSummaryHtml({
-      href: location.href,
+      href: readCurrentPageUrl(),
       title: document.title,
       reason,
       nodeCount,
@@ -1041,7 +1042,7 @@ export class LiteCaptureAgent {
 
     this.queueEvent("snapshot", {
       reason,
-      href: location.href,
+      href: readCurrentPageUrl(),
       title: document.title,
       nodeCount,
       htmlLength: html.length,
@@ -1726,7 +1727,7 @@ export class LiteCaptureAgent {
   private emitPressureRecoverySnapshot(): void {
     const nodeCount = document.getElementsByTagName("*").length;
     const html = buildDomSnapshotSummaryHtml({
-      href: location.href,
+      href: readCurrentPageUrl(),
       title: document.title,
       reason: "pressure-recovery",
       nodeCount,
@@ -1737,7 +1738,7 @@ export class LiteCaptureAgent {
     this.hasDomSnapshot = true;
     this.queueEvent("snapshot", {
       reason: "pressure-recovery",
-      href: location.href,
+      href: readCurrentPageUrl(),
       title: document.title,
       nodeCount,
       htmlLength: html.length,
@@ -2185,20 +2186,21 @@ function toNavigationTargetPayload(target: EventTarget | null): Record<string, u
     return toFastTargetPayload(target);
   }
 
-  const href = navigationTarget.getAttribute("href") ?? navigationTarget.href ?? undefined;
+  const href = sanitizeOptionalUrl(navigationTarget.getAttribute("href") ?? navigationTarget.href);
   const selector = buildNavigationSelector(navigationTarget, href);
 
-  return {
+  const payload: Record<string, unknown> = {
     selector,
     tag: navigationTarget.tagName,
     id: navigationTarget.id || undefined,
-    className: readClassName(navigationTarget),
-    href,
-    hash:
-      typeof navigationTarget.hash === "string" && navigationTarget.hash.length > 0
-        ? navigationTarget.hash
-        : undefined
+    className: readClassName(navigationTarget)
   };
+
+  if (href) {
+    payload.href = href;
+  }
+
+  return payload;
 }
 
 function readClassName(target: Element): string | undefined {
@@ -2379,6 +2381,21 @@ function cssEscape(value: string): string {
 
 function cssStringEscape(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function readCurrentPageUrl(): string {
+  return typeof location !== "undefined" && typeof location.href === "string"
+    ? sanitizeUrlForPrivacy(location.href)
+    : "";
+}
+
+function sanitizeOptionalUrl(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string" || value.length === 0) {
+    return undefined;
+  }
+
+  const sanitized = sanitizeUrlForPrivacy(value);
+  return sanitized.length > 0 ? sanitized : undefined;
 }
 
 function escapeHtml(value: string): string {

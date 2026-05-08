@@ -1,3 +1,5 @@
+import { sanitizeUrlForPrivacy } from "@webblackbox/protocol";
+
 type CapturePayload = Record<string, unknown>;
 
 const DEFAULT_FLAG = "__WEBBLACKBOX_INJECTED__";
@@ -136,7 +138,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
   emit("notice", {
     message: "injected-ready",
-    href: location.href
+    href: readCurrentPageUrl()
   });
 
   function emit(rawType: string, payload: CapturePayload): void {
@@ -512,7 +514,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         reqId,
         requestId: reqId,
         method: requestMeta.method,
-        url: requestMeta.url,
+        url: sanitizeOptionalUrl(requestMeta.url),
         headers: requestMeta.headers,
         postDataSize: requestMeta.postDataSize
       });
@@ -527,12 +529,12 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           reqId,
           requestId: reqId,
           method: requestMeta.method,
-          url: requestMeta.url,
+          url: sanitizeOptionalUrl(requestMeta.url),
           status: response.status,
           statusText: response.statusText,
           ok: response.ok,
           redirected: response.redirected,
-          responseUrl: response.url,
+          responseUrl: sanitizeOptionalUrl(response.url),
           mimeType: contentType,
           headers: readHeaders(response.headers),
           encodedDataLength,
@@ -547,7 +549,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           reqId,
           requestId: reqId,
           method: requestMeta.method,
-          url: requestMeta.url,
+          url: sanitizeOptionalUrl(requestMeta.url),
           duration: monotonicTime() - startedMono,
           message: error instanceof Error ? error.message : String(error),
           errorText: error instanceof Error ? error.message : String(error)
@@ -650,7 +652,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         reqId,
         requestId: reqId,
         method: xhr.__wbMethod ?? "GET",
-        url: xhr.__wbUrl ?? "unknown",
+        url: sanitizeOptionalUrl(xhr.__wbUrl) ?? "unknown",
         postDataSize: estimateBodyLength(body)
       });
 
@@ -665,7 +667,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           reqId,
           requestId: reqId,
           method: xhr.__wbMethod ?? "GET",
-          url: xhr.__wbUrl ?? "unknown",
+          url: sanitizeOptionalUrl(xhr.__wbUrl) ?? "unknown",
           duration: monotonicTime() - (xhr.__wbStartedMono ?? monotonicTime()),
           message: reason,
           errorText: reason
@@ -704,7 +706,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
             reqId,
             requestId: reqId,
             method: xhr.__wbMethod ?? "GET",
-            url: this.responseURL || xhr.__wbUrl || "unknown",
+            url: sanitizeOptionalUrl(this.responseURL || xhr.__wbUrl) ?? "unknown",
             status: this.status,
             statusText: this.statusText,
             ok: this.status >= 200 && this.status < 400,
@@ -737,7 +739,9 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
             return;
           }
 
-          const url = typeof args[0] === "string" ? args[0] : String(args[0]);
+          const url = sanitizeUrlForPrivacy(
+            typeof args[0] === "string" ? args[0] : String(args[0])
+          );
           const streamId = nextRequestId("sse");
 
           emit("sse", {
@@ -824,7 +828,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       reqId,
       requestId: reqId,
       method: requestMeta.method,
-      url: response.url || requestMeta.url,
+      url: sanitizeOptionalUrl(response.url || requestMeta.url) ?? "unknown",
       status: response.status,
       mimeType: contentType,
       encoding: "utf8",
@@ -884,7 +888,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       reqId,
       requestId: reqId,
       method: xhr.__wbMethod ?? "GET",
-      url: xhr.responseURL || xhr.__wbUrl || "unknown",
+      url: sanitizeOptionalUrl(xhr.responseURL || xhr.__wbUrl) ?? "unknown",
       status: xhr.status,
       statusText: xhr.statusText,
       mimeType: contentType,
@@ -1280,14 +1284,29 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
   function readTargetUrl(target: HTMLElement): string | undefined {
     if (target instanceof HTMLScriptElement || target instanceof HTMLImageElement) {
-      return target.src || undefined;
+      return sanitizeOptionalUrl(target.src);
     }
 
     if (target instanceof HTMLLinkElement) {
-      return target.href || undefined;
+      return sanitizeOptionalUrl(target.href);
     }
 
     return undefined;
+  }
+
+  function readCurrentPageUrl(): string {
+    return typeof location !== "undefined" && typeof location.href === "string"
+      ? sanitizeUrlForPrivacy(location.href)
+      : "";
+  }
+
+  function sanitizeOptionalUrl(value: string | undefined): string | undefined {
+    if (!value || value.length === 0) {
+      return undefined;
+    }
+
+    const sanitized = sanitizeUrlForPrivacy(value);
+    return sanitized.length > 0 ? sanitized : undefined;
   }
 
   function safeSerialize(value: unknown, depth = 0): unknown {

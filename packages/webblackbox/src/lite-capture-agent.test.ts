@@ -1186,10 +1186,10 @@ describe("LiteCaptureAgent", () => {
     expect(clickEvent?.payload?.target).toMatchObject({
       selector: "a#nav-link",
       tag: "A",
-      id: "nav-link",
-      href: "#action-target",
-      hash: "#action-target"
+      id: "nav-link"
     });
+    expect(clickEvent?.payload?.target).not.toHaveProperty("href");
+    expect(clickEvent?.payload?.target).not.toHaveProperty("hash");
     expect(clickEvent?.payload?.target).not.toHaveProperty("text");
 
     agent.dispose();
