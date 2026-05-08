@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 
@@ -8,12 +8,17 @@ import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
 type ShareRecord = {
   id: string;
   createdAt: number;
+  expiresAt: number;
+  revokedAt?: number;
   fileName: string;
   sizeBytes: number;
   checksumSha256: string;
   shareUrl: string;
   summary: ShareSummary;
 };
+
+type ShareAuditAction = "upload" | "list" | "metadata" | "download" | "page" | "revoke";
+type ShareAuditOutcome = "ok" | "not-found" | "expired" | "revoked" | "blocked" | "error";
 
 type ShareSummary = {
   schemaVersion: 1;
@@ -72,11 +77,25 @@ const DEFAULT_BASE_URL = `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
 const DATA_ROOT = resolve(process.env.WEBBLACKBOX_SHARE_DATA_DIR ?? ".webblackbox-share-data");
 const ARCHIVES_DIR = join(DATA_ROOT, "archives");
 const RECORDS_DIR = join(DATA_ROOT, "records");
+const AUDIT_DIR = join(DATA_ROOT, "audit");
+const SHARE_AUDIT_LOG_PATH = join(AUDIT_DIR, "share-access.jsonl");
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
 const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
+);
+const SHARE_DEFAULT_TTL_MS = parseDurationMs(
+  process.env.WEBBLACKBOX_SHARE_DEFAULT_TTL_MS,
+  7 * 24 * 60 * 60 * 1000
+);
+const SHARE_MAX_TTL_MS = parseDurationMs(
+  process.env.WEBBLACKBOX_SHARE_MAX_TTL_MS,
+  30 * 24 * 60 * 60 * 1000
+);
+const SHARE_RETAIN_EXPIRED_MS = parseDurationMs(
+  process.env.WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS,
+  30 * 24 * 60 * 60 * 1000
 );
 const UPLOAD_RATE_LIMIT_MAX = parseRateLimitCount(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX,
@@ -100,6 +119,7 @@ void startShareServer().catch((error) => {
 
 async function startShareServer(): Promise<void> {
   await ensureStorageLayout();
+  await pruneExpiredShareRecords(Date.now());
 
   const port = parsePort(process.env.PORT);
   const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
@@ -148,28 +168,35 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   }
 
   if (method === "GET" && pathname === "/api/share/list") {
-    await handleList(response);
+    await handleList(request, response);
     return;
   }
 
   const metadataMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/meta$/.exec(pathname);
 
   if (method === "GET" && metadataMatch?.[1]) {
-    await handleGetMetadata(response, metadataMatch[1]);
+    await handleGetMetadata(request, response, metadataMatch[1]);
     return;
   }
 
   const archiveMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/archive$/.exec(pathname);
 
   if (method === "GET" && archiveMatch?.[1]) {
-    await handleDownloadArchive(response, archiveMatch[1]);
+    await handleDownloadArchive(request, response, archiveMatch[1]);
+    return;
+  }
+
+  const revokeMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/revoke$/.exec(pathname);
+
+  if (method === "POST" && revokeMatch?.[1]) {
+    await handleRevokeShare(request, response, revokeMatch[1]);
     return;
   }
 
   const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(pathname);
 
   if (method === "GET" && sharePageMatch?.[1]) {
-    await handleSharePage(response, sharePageMatch[1], requestUrl);
+    await handleSharePage(request, response, sharePageMatch[1], requestUrl);
     return;
   }
 
@@ -242,6 +269,11 @@ async function handleUpload(
     : archiveEnvelopeSummary;
 
   if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
     respondJson(response, 422, {
       error: "Share upload blocked by privacy scanner.",
       scanner: summary.privacy.scanner
@@ -250,6 +282,11 @@ async function handleUpload(
   }
 
   if (!summary.encrypted && !ALLOW_PLAINTEXT_SHARE_UPLOADS) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
     respondJson(response, summary.analyzed ? 422 : 400, {
       error: summary.analyzed
         ? "Public share uploads require encrypted WebBlackbox archives."
@@ -258,10 +295,13 @@ async function handleUpload(
     return;
   }
 
+  const createdAt = Date.now();
+  const ttlMs = resolveShareTtlMs(request);
   const shareUrl = `${requestOrigin(request, requestUrl)}/share/${id}`;
   const record: ShareRecord = {
     id,
-    createdAt: Date.now(),
+    createdAt,
+    expiresAt: createdAt + ttlMs,
     fileName,
     sizeBytes: bytes.byteLength,
     checksumSha256,
@@ -271,47 +311,69 @@ async function handleUpload(
 
   await writeFile(archivePath, bytes);
   await writeRecord(record);
+  await writeShareAuditEvent(request, {
+    action: "upload",
+    shareId: id,
+    outcome: "ok",
+    details: {
+      sizeBytes: bytes.byteLength,
+      ttlMs
+    }
+  });
 
   respondJson(response, 201, {
     shareId: id,
     shareUrl,
+    expiresAt: record.expiresAt,
     fileName,
     sizeBytes: bytes.byteLength,
     summary
   });
 }
 
-async function handleList(response: ServerResponse): Promise<void> {
+async function handleList(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  await pruneExpiredShareRecords(Date.now());
   const records = await loadAllRecords();
   const items = records
     .sort((left, right) => right.createdAt - left.createdAt)
     .map((record) => buildPublicShareMetadata(record));
 
+  await writeShareAuditEvent(request, {
+    action: "list",
+    outcome: "ok"
+  });
   respondJson(response, 200, {
     items
   });
 }
 
-async function handleGetMetadata(response: ServerResponse, id: string): Promise<void> {
-  const record = await readRecord(id);
+async function handleGetMetadata(
+  request: IncomingMessage,
+  response: ServerResponse,
+  id: string
+): Promise<void> {
+  const record = await readAvailableShareRecord(request, response, id, "metadata");
 
   if (!record) {
-    respondJson(response, 404, {
-      error: "Share not found."
-    });
     return;
   }
 
   respondJson(response, 200, buildPublicShareMetadata(record));
+  await writeShareAuditEvent(request, {
+    action: "metadata",
+    shareId: id,
+    outcome: "ok"
+  });
 }
 
-async function handleDownloadArchive(response: ServerResponse, id: string): Promise<void> {
-  const record = await readRecord(id);
+async function handleDownloadArchive(
+  request: IncomingMessage,
+  response: ServerResponse,
+  id: string
+): Promise<void> {
+  const record = await readAvailableShareRecord(request, response, id, "download");
 
   if (!record) {
-    respondJson(response, 404, {
-      error: "Share not found."
-    });
     return;
   }
 
@@ -323,26 +385,32 @@ async function handleDownloadArchive(response: ServerResponse, id: string): Prom
       "content-disposition": `attachment; filename="${record.fileName}"`
     });
     response.end(bytes);
+    await writeShareAuditEvent(request, {
+      action: "download",
+      shareId: id,
+      outcome: "ok"
+    });
   } catch {
     respondJson(response, 404, {
       error: "Archive file not found."
+    });
+    await writeShareAuditEvent(request, {
+      action: "download",
+      shareId: id,
+      outcome: "not-found"
     });
   }
 }
 
 async function handleSharePage(
+  request: IncomingMessage,
   response: ServerResponse,
   id: string,
   requestUrl: URL
 ): Promise<void> {
-  const record = await readRecord(id);
+  const record = await readAvailableShareRecord(request, response, id, "page");
 
   if (!record) {
-    respondHtml(
-      response,
-      404,
-      "<h1>Share Not Found</h1><p>The requested WebBlackbox share does not exist.</p>"
-    );
     return;
   }
 
@@ -382,6 +450,119 @@ async function handleSharePage(
 </html>`;
 
   respondHtml(response, 200, page);
+  await writeShareAuditEvent(request, {
+    action: "page",
+    shareId: id,
+    outcome: "ok"
+  });
+}
+
+async function handleRevokeShare(
+  request: IncomingMessage,
+  response: ServerResponse,
+  id: string
+): Promise<void> {
+  const record = await readAvailableShareRecord(request, response, id, "revoke", true);
+
+  if (!record) {
+    return;
+  }
+
+  const revokedAt = Date.now();
+  const revokedRecord: ShareRecord = {
+    ...record,
+    revokedAt
+  };
+
+  await writeRecord(revokedRecord);
+  await writeShareAuditEvent(request, {
+    action: "revoke",
+    shareId: id,
+    outcome: "ok"
+  });
+  respondJson(response, 200, {
+    shareId: id,
+    revokedAt
+  });
+}
+
+async function readAvailableShareRecord(
+  request: IncomingMessage,
+  response: ServerResponse,
+  id: string,
+  action: ShareAuditAction,
+  allowRevoked = false
+): Promise<ShareRecord | null> {
+  const record = await readRecord(id);
+
+  if (!record) {
+    respondShareUnavailable(response, action, "not-found");
+    await writeShareAuditEvent(request, {
+      action,
+      shareId: id,
+      outcome: "not-found"
+    });
+    return null;
+  }
+
+  if (isShareExpired(record, Date.now())) {
+    respondShareUnavailable(response, action, "expired");
+    await writeShareAuditEvent(request, {
+      action,
+      shareId: id,
+      outcome: "expired"
+    });
+    return null;
+  }
+
+  if (!allowRevoked && record.revokedAt) {
+    respondShareUnavailable(response, action, "revoked");
+    await writeShareAuditEvent(request, {
+      action,
+      shareId: id,
+      outcome: "revoked"
+    });
+    return null;
+  }
+
+  return record;
+}
+
+function respondShareUnavailable(
+  response: ServerResponse,
+  action: ShareAuditAction,
+  outcome: "not-found" | "expired" | "revoked"
+): void {
+  if (action === "page") {
+    const title =
+      outcome === "not-found"
+        ? "Share Not Found"
+        : outcome === "expired"
+          ? "Share Expired"
+          : "Share Revoked";
+    const description =
+      outcome === "not-found"
+        ? "The requested WebBlackbox share does not exist."
+        : outcome === "expired"
+          ? "The requested WebBlackbox share has expired."
+          : "The requested WebBlackbox share has been revoked.";
+
+    respondHtml(
+      response,
+      outcome === "not-found" ? 404 : 410,
+      `<h1>${title}</h1><p>${description}</p>`
+    );
+    return;
+  }
+
+  respondJson(response, outcome === "not-found" ? 404 : 410, {
+    error:
+      outcome === "not-found"
+        ? "Share not found."
+        : outcome === "expired"
+          ? "Share has expired."
+          : "Share has been revoked."
+  });
 }
 
 async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
@@ -645,6 +826,9 @@ async function ensureStorageLayout(): Promise<void> {
   await mkdir(RECORDS_DIR, {
     recursive: true
   });
+  await mkdir(AUDIT_DIR, {
+    recursive: true
+  });
 }
 
 async function readRecord(id: string): Promise<ShareRecord | null> {
@@ -677,6 +861,9 @@ async function writeRecord(record: ShareRecord): Promise<void> {
 function buildPublicShareMetadata(record: ShareRecord): {
   id: string;
   createdAt: number;
+  expiresAt: number;
+  revokedAt?: number;
+  status: "active" | "expired" | "revoked";
   fileName: string;
   sizeBytes: number;
   checksumSha256: string;
@@ -686,12 +873,88 @@ function buildPublicShareMetadata(record: ShareRecord): {
   return {
     id: record.id,
     createdAt: record.createdAt,
+    expiresAt: resolveShareExpiresAt(record),
+    revokedAt: record.revokedAt,
+    status: resolveShareStatus(record, Date.now()),
     fileName: record.fileName,
     sizeBytes: record.sizeBytes,
     checksumSha256: record.checksumSha256,
     shareUrl: record.shareUrl,
     summary: record.summary
   };
+}
+
+function resolveShareStatus(record: ShareRecord, now: number): "active" | "expired" | "revoked" {
+  if (record.revokedAt) {
+    return "revoked";
+  }
+
+  return isShareExpired(record, now) ? "expired" : "active";
+}
+
+function isShareExpired(record: ShareRecord, now: number): boolean {
+  return resolveShareExpiresAt(record) <= now;
+}
+
+function resolveShareExpiresAt(record: ShareRecord): number {
+  return Number.isFinite(record.expiresAt)
+    ? record.expiresAt
+    : record.createdAt + SHARE_DEFAULT_TTL_MS;
+}
+
+function resolveShareTtlMs(request: IncomingMessage): number {
+  const ttlHeader = request.headers["x-webblackbox-share-ttl-ms"];
+  const requestedTtl =
+    typeof ttlHeader === "string"
+      ? parseDurationMs(ttlHeader, SHARE_DEFAULT_TTL_MS)
+      : SHARE_DEFAULT_TTL_MS;
+  return Math.min(SHARE_MAX_TTL_MS, Math.max(1_000, requestedTtl));
+}
+
+async function pruneExpiredShareRecords(now: number): Promise<void> {
+  const records = await loadAllRecords();
+  const retentionMs = Math.max(0, SHARE_RETAIN_EXPIRED_MS);
+
+  await Promise.all(
+    records.map(async (record) => {
+      const retentionDeadline = resolveShareExpiresAt(record) + retentionMs;
+
+      if (retentionDeadline > now) {
+        return;
+      }
+
+      await Promise.all([
+        rm(recordPathForId(record.id), { force: true }),
+        rm(archivePathForId(record.id), { force: true })
+      ]);
+    })
+  );
+}
+
+async function writeShareAuditEvent(
+  request: IncomingMessage,
+  input: {
+    action: ShareAuditAction;
+    outcome: ShareAuditOutcome;
+    shareId?: string;
+    details?: Record<string, number | string | boolean>;
+  }
+): Promise<void> {
+  const event = {
+    schemaVersion: 1,
+    timestamp: new Date().toISOString(),
+    action: input.action,
+    outcome: input.outcome,
+    shareId: input.shareId,
+    clientHash: hashAuditValue(resolveClientKey(request)),
+    details: input.details
+  };
+
+  await appendFile(SHARE_AUDIT_LOG_PATH, `${JSON.stringify(event)}\n`, "utf8");
+}
+
+function hashAuditValue(value: string): string {
+  return createHash("sha256").update(`webblackbox-share-audit:${value}`).digest("hex");
 }
 
 function recordPathForId(id: string): string {
@@ -845,7 +1108,7 @@ function applyCorsHeaders(
 
   response.setHeader(
     "access-control-allow-headers",
-    `content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,${SHARE_SUMMARY_HEADER}`
+    `content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,${SHARE_SUMMARY_HEADER},x-webblackbox-share-ttl-ms`
   );
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
 }
@@ -1029,6 +1292,14 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 }
 
 function parseRateLimitWindowMs(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.max(1_000, Math.floor(parsed));
+}
+
+function parseDurationMs(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback;

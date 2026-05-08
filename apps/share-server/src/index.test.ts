@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -60,7 +60,7 @@ describe("share-server", () => {
 
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-headers")).toBe(
-      "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,x-webblackbox-share-summary"
+      "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,x-webblackbox-share-summary,x-webblackbox-share-ttl-ms"
     );
   });
 
@@ -166,6 +166,70 @@ describe("share-server", () => {
       error: "Public share uploads require encrypted WebBlackbox archives."
     });
     expect(response.status).toBe(422);
+  });
+
+  it("expires shares and blocks archive download after ttl", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000"
+    });
+    const uploadPayload = await uploadEncryptedFixture(server);
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const response = await fetch(`${server.baseUrl}/api/share/${uploadPayload.shareId}/archive`, {
+      headers: {
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      error: "Share has expired."
+    });
+    expect(response.status).toBe(410);
+  });
+
+  it("revokes shares and writes redacted audit events", async () => {
+    const server = await startShareServer();
+    const uploadPayload = await uploadEncryptedFixture(server);
+
+    const revokeResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/revoke`,
+      {
+        method: "POST",
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+
+    expect(revokeResponse.status).toBe(200);
+
+    const archiveResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/archive`,
+      {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+
+    await expect(archiveResponse.json()).resolves.toEqual({
+      error: "Share has been revoked."
+    });
+    expect(archiveResponse.status).toBe(410);
+
+    const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
+    const auditEvents = auditLog
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { action: string; clientHash?: string });
+
+    expect(auditEvents.some((event) => event.action === "upload")).toBe(true);
+    expect(auditEvents.some((event) => event.action === "revoke")).toBe(true);
+    expect(auditEvents.some((event) => event.action === "download")).toBe(true);
+    expect(auditEvents.every((event) => typeof event.clientHash === "string")).toBe(true);
+    expect(auditLog).not.toContain("127.0.0.1");
+    expect(auditLog).not.toContain("webblackbox-share-");
   });
 });
 
@@ -279,6 +343,60 @@ async function reservePort(): Promise<number> {
   });
 
   return address.port;
+}
+
+async function uploadEncryptedFixture(server: RunningShareServer): Promise<{ shareId: string }> {
+  const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      "x-webblackbox-api-key": apiKey,
+      "x-webblackbox-filename": "fixture.webblackbox",
+      "x-webblackbox-share-summary": encodeURIComponent(
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "client",
+          analyzed: true,
+          encrypted: true,
+          manifest: {
+            mode: "lite",
+            chunkCodec: "ndjson",
+            recordedAt: "2026-02-13T00:00:00.000Z"
+          },
+          totals: {
+            events: 0,
+            errors: 0,
+            requests: 0,
+            actions: 0,
+            durationMs: 0
+          },
+          privacy: {
+            redaction: {
+              hashSensitiveValues: true,
+              headerRuleCount: 0,
+              cookieRuleCount: 0,
+              bodyPatternCount: 0,
+              blockedSelectorCount: 0
+            },
+            detected: {
+              redactedMarkers: 0,
+              hashedSensitiveValues: 0,
+              sensitiveKeyMentions: 0
+            },
+            scanner: {
+              preEncryption: true,
+              status: "passed",
+              findingCount: 0
+            }
+          }
+        })
+      )
+    },
+    body: Buffer.from(await createEncryptedEnvelopeArchive())
+  });
+
+  expect(response.status).toBe(201);
+  return (await response.json()) as { shareId: string };
 }
 
 async function createEncryptedEnvelopeArchive(): Promise<Uint8Array> {
