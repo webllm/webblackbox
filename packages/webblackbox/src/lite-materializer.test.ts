@@ -208,6 +208,43 @@ describe("lite-materializer", () => {
     expect(JSON.stringify(result)).not.toContain("storage-secret-token");
   });
 
+  it("drops cookie and IndexedDB names during materialization", async () => {
+    const putBlob = vi.fn(async () => "unused");
+    const context = {
+      config: cloneConfig(),
+      putBlob
+    };
+
+    const cookieResult = await materializeLiteRawEvent(
+      createRawEvent("cookieSnapshot", {
+        names: ["sessionSecret", "tenant-cookie"],
+        count: 2
+      }),
+      context
+    );
+    const idbResult = await materializeLiteRawEvent(
+      createRawEvent("indexedDbSnapshot", {
+        databaseNames: ["customer-secret-db"],
+        count: 1
+      }),
+      context
+    );
+
+    expect(putBlob).not.toHaveBeenCalled();
+    expect(cookieResult?.payload).toMatchObject({
+      count: 2,
+      mode: "counts-only",
+      redacted: true
+    });
+    expect(idbResult?.payload).toMatchObject({
+      count: 1,
+      mode: "counts-only",
+      redacted: true
+    });
+    expect(JSON.stringify(cookieResult)).not.toContain("sessionSecret");
+    expect(JSON.stringify(idbResult)).not.toContain("customer-secret-db");
+  });
+
   it("treats a zero body-capture budget as disabled", async () => {
     const config = cloneConfig();
     config.sampling.bodyCaptureMaxBytes = 0;

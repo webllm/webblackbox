@@ -530,6 +530,30 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("emits counts-only cookie snapshots", () => {
+    vi.spyOn(document, "cookie", "get").mockReturnValue("sessionSecret=cookie-secret-token");
+    const { agent, emitBatch } = createAgent();
+
+    agent.emitMarker("capture storage metadata");
+    agent.flush();
+
+    const events = emitBatch.mock.calls.flatMap((call) => {
+      const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+      return batch;
+    });
+    const cookieEvent = events.find((event) => event.rawType === "cookieSnapshot");
+
+    expect(cookieEvent?.payload).toMatchObject({
+      mode: "counts-only",
+      redacted: true
+    });
+    expect(cookieEvent?.payload).not.toHaveProperty("names");
+    expect(JSON.stringify(cookieEvent)).not.toContain("sessionSecret");
+    expect(JSON.stringify(cookieEvent)).not.toContain("cookie-secret-token");
+
+    agent.dispose();
+  });
+
   it("holds oversized mutation bursts until pressure cools, then emits a sampled summary", async () => {
     let observeCallback: MutationCallback | null = null;
     const disconnect = vi.fn();

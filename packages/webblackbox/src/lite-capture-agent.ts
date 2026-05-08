@@ -39,7 +39,6 @@ const SCREENSHOT_WEBP_QUALITY = 0.66;
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 4_000;
 const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
 const DOM_SNAPSHOT_SUMMARY_NODE_THRESHOLD = 3_500;
-const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
 const START_CAPTURE_DEFER_MS = 2_000;
 const TARGET_ENRICH_DELAY_MS = 0;
 const LONG_TASK_PRESSURE_THRESHOLD_MS = 40;
@@ -1060,21 +1059,15 @@ export class LiteCaptureAgent {
   }
 
   private emitCookieSnapshot(reason: string): void {
-    const cookieNames = document.cookie
+    const count = document.cookie
       .split(";")
       .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
-      .map((entry) => {
-        const separatorIndex = entry.indexOf("=");
-        return separatorIndex > 0 ? entry.slice(0, separatorIndex).trim() : entry;
-      })
-      .filter((entry) => entry.length > 0)
-      .slice(0, STORAGE_SNAPSHOT_MAX_ITEMS);
+      .filter((entry) => entry.length > 0).length;
 
     this.queueEvent("cookieSnapshot", {
       reason,
-      count: cookieNames.length,
-      names: cookieNames,
+      count,
+      mode: "counts-only",
       redacted: true
     });
   }
@@ -1100,16 +1093,13 @@ export class LiteCaptureAgent {
 
     try {
       const rows = await indexedDB.databases();
-      const names = rows
-        .map((entry) => entry.name)
-        .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-        .slice(0, STORAGE_SNAPSHOT_MAX_ITEMS);
 
       this.queueEvent("indexedDbSnapshot", {
         reason,
-        count: names.length,
-        databaseNames: names,
-        truncated: rows.length > names.length
+        count: rows.length,
+        mode: "counts-only",
+        redacted: true,
+        truncated: false
       });
     } catch {
       void 0;

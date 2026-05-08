@@ -17,7 +17,6 @@ const REDACTED_TOKEN = "[REDACTED]";
 const DEFAULT_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
 const DEFAULT_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const DEFAULT_DOM_SNAPSHOT_MAX_BYTES = 1_500 * 1024;
-const DEFAULT_STORAGE_SNAPSHOT_MAX_BYTES = 600 * 1024;
 
 type LiteBodyCaptureRule = {
   enabled: boolean;
@@ -88,7 +87,7 @@ export async function materializeLiteRawEvent(
     rawEvent.rawType === "indexedDbSnapshot" ||
     rawEvent.rawType === "cookieSnapshot"
   ) {
-    return materializeLiteStorageSnapshot(rawEvent, context);
+    return materializeLiteStorageSnapshot(rawEvent);
   }
 
   if (rawEvent.rawType === "networkBody") {
@@ -178,11 +177,9 @@ async function materializeLiteDomSnapshot(
 }
 
 async function materializeLiteStorageSnapshot(
-  rawEvent: RawRecorderEvent,
-  context: LiteMaterializerContext
+  rawEvent: RawRecorderEvent
 ): Promise<RawRecorderEvent | null> {
   const payload = asRecord(rawEvent.payload);
-  const maxBytes = context.limits?.storageSnapshotMaxBytes ?? DEFAULT_STORAGE_SNAPSHOT_MAX_BYTES;
 
   if (!payload) {
     return null;
@@ -208,46 +205,32 @@ async function materializeLiteStorageSnapshot(
 
   if (rawEvent.rawType === "indexedDbSnapshot") {
     const names = asStringArray(payload.databaseNames, 400);
-    const serialized = JSON.stringify(names);
-    const encoded = encodeTextWithByteLimit(serialized, maxBytes);
-    const hash =
-      encoded.bytes.byteLength > 0
-        ? await context.putBlob("application/json", encoded.bytes)
-        : undefined;
     const count = normalizeNonNegativeInt(payload.count) ?? names.length;
 
     return {
       ...rawEvent,
       payload: {
-        hash,
         count,
-        mode: "schema-only",
+        mode: "counts-only",
         redacted: true,
         reason,
-        truncated: payload.truncated === true || encoded.truncated
+        truncated: payload.truncated === true
       }
     };
   }
 
   if (rawEvent.rawType === "cookieSnapshot") {
     const names = asStringArray(payload.names, 400);
-    const serialized = JSON.stringify(names);
-    const encoded = encodeTextWithByteLimit(serialized, maxBytes);
-    const hash =
-      encoded.bytes.byteLength > 0
-        ? await context.putBlob("application/json", encoded.bytes)
-        : undefined;
     const count = normalizeNonNegativeInt(payload.count) ?? names.length;
 
     return {
       ...rawEvent,
       payload: {
-        hash,
         count,
-        mode: "sample",
+        mode: "counts-only",
         redacted: true,
         reason,
-        truncated: payload.truncated === true || encoded.truncated
+        truncated: payload.truncated === true
       }
     };
   }
