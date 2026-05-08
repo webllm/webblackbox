@@ -40,7 +40,6 @@ const SCREENSHOT_CAPTURE_TIMEOUT_MS = 4_000;
 const DOM_SNAPSHOT_MAX_HTML_CHARS = 300_000;
 const DOM_SNAPSHOT_SUMMARY_NODE_THRESHOLD = 3_500;
 const STORAGE_SNAPSHOT_MAX_ITEMS = 150;
-const STORAGE_SNAPSHOT_MAX_VALUE_CHARS = 512;
 const START_CAPTURE_DEFER_MS = 2_000;
 const TARGET_ENRICH_DELAY_MS = 0;
 const LONG_TASK_PRESSURE_THRESHOLD_MS = 40;
@@ -1082,30 +1081,15 @@ export class LiteCaptureAgent {
 
   private emitLocalStorageSnapshot(reason: string): void {
     const count = localStorage.length;
-    const maxItems = Math.min(count, STORAGE_SNAPSHOT_MAX_ITEMS);
-    const entries: Record<string, unknown> = {};
-
-    for (let index = 0; index < maxItems; index += 1) {
-      const key = localStorage.key(index);
-
-      if (!key) {
-        continue;
-      }
-
-      const value = localStorage.getItem(key) ?? "";
-      entries[key] = {
-        length: value.length,
-        sample: value.slice(0, STORAGE_SNAPSHOT_MAX_VALUE_CHARS)
-      };
-    }
 
     this.hasLocalStorageSnapshot = true;
 
     this.queueEvent("localStorageSnapshot", {
       reason,
       count,
-      truncated: count > maxItems,
-      entries
+      truncated: false,
+      mode: "counts-only",
+      redacted: true
     });
   }
 

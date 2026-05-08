@@ -192,23 +192,16 @@ async function materializeLiteStorageSnapshot(
 
   if (rawEvent.rawType === "localStorageSnapshot") {
     const entries = asRecord(payload.entries) ?? {};
-    const serialized = JSON.stringify(entries);
-    const encoded = encodeTextWithByteLimit(serialized, maxBytes);
-    const hash =
-      encoded.bytes.byteLength > 0
-        ? await context.putBlob("application/json", encoded.bytes)
-        : undefined;
     const count = normalizeNonNegativeInt(payload.count) ?? Object.keys(entries).length;
 
     return {
       ...rawEvent,
       payload: {
-        hash,
         count,
-        mode: "sample",
+        mode: "counts-only",
         redacted: true,
         reason,
-        truncated: payload.truncated === true || encoded.truncated
+        truncated: payload.truncated === true
       }
     };
   }

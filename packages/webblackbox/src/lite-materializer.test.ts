@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_RECORDER_CONFIG, type RecorderConfig } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
@@ -177,6 +177,35 @@ describe("lite-materializer", () => {
     );
 
     expect(result).toBeNull();
+  });
+
+  it("drops localStorage entry samples during materialization", async () => {
+    const putBlob = vi.fn(async () => "unused");
+
+    const result = await materializeLiteRawEvent(
+      createRawEvent("localStorageSnapshot", {
+        count: 1,
+        entries: {
+          token: {
+            length: 19,
+            sample: "storage-secret-token"
+          }
+        }
+      }),
+      {
+        config: cloneConfig(),
+        putBlob
+      }
+    );
+
+    expect(putBlob).not.toHaveBeenCalled();
+    expect(result?.payload).toMatchObject({
+      count: 1,
+      mode: "counts-only",
+      redacted: true
+    });
+    expect(result?.payload).not.toHaveProperty("hash");
+    expect(JSON.stringify(result)).not.toContain("storage-secret-token");
   });
 
   it("treats a zero body-capture budget as disabled", async () => {

@@ -502,8 +502,8 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
-  it("emits a final localStorage snapshot when stopping before idle storage capture runs", () => {
-    localStorage.setItem("demo", "value");
+  it("emits a counts-only localStorage snapshot when stopping before idle storage capture runs", () => {
+    localStorage.setItem("demo", "local-storage-secret-token");
     const { agent, emitBatch } = createAgent();
 
     agent.setRecordingStatus({
@@ -513,12 +513,19 @@ describe("LiteCaptureAgent", () => {
       mode: "lite"
     });
 
-    const emittedRawTypes = emitBatch.mock.calls.flatMap((call) => {
-      const [events] = call as [Array<{ rawType?: string }>];
-      return events.map((event) => event.rawType);
+    const events = emitBatch.mock.calls.flatMap((call) => {
+      const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+      return batch;
     });
+    const storageEvent = events.find((event) => event.rawType === "localStorageSnapshot");
 
-    expect(emittedRawTypes).toContain("localStorageSnapshot");
+    expect(storageEvent?.payload).toMatchObject({
+      count: 1,
+      mode: "counts-only",
+      redacted: true
+    });
+    expect(storageEvent?.payload).not.toHaveProperty("entries");
+    expect(JSON.stringify(storageEvent)).not.toContain("local-storage-secret-token");
 
     agent.dispose();
   });
