@@ -67,6 +67,7 @@ type SessionRuntime = {
   tabId: number;
   mode: CaptureMode;
   url: string;
+  scopeOrigin: string | null;
   title?: string;
   tags: string[];
   note?: string;
@@ -498,6 +499,14 @@ chromeApi?.commands?.onCommand.addListener((command) => {
   void relayMarkerCommand();
 });
 
+chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+  if (typeof changeInfo.url !== "string" || changeInfo.url.length === 0) {
+    return;
+  }
+
+  void handleTabUrlChanged(tabId, changeInfo.url);
+});
+
 async function handleInboundMessage(
   message: ExtensionInboundMessage,
   port?: PortLike,
@@ -704,6 +713,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     tabId,
     mode,
     url: metadata.url,
+    scopeOrigin: resolveUrlOrigin(metadata.url),
     title: metadata.title,
     tags: [...annotation.tags],
     note: annotation.note,
@@ -3563,6 +3573,13 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
   const sanitizedNextUrl = nextUrl ? sanitizeUrlForPrivacy(nextUrl) : undefined;
 
   if (sanitizedNextUrl && sanitizedNextUrl !== runtime.url) {
+    const nextOrigin = resolveUrlOrigin(sanitizedNextUrl);
+
+    if (shouldStopOnOriginChange(runtime, nextOrigin)) {
+      void stopSession(runtime.tabId);
+      return;
+    }
+
     runtime.url = sanitizedNextUrl;
     changed = true;
   }
@@ -3594,6 +3611,53 @@ function pushSessionList(): void {
     kind: "sw.session-list",
     sessions
   });
+}
+
+async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void> {
+  const runtime = sessionsByTab.get(tabId);
+
+  if (!runtime || runtime.stoppedAt) {
+    return;
+  }
+
+  const nextUrl = sanitizeUrlForPrivacy(rawUrl);
+  const nextOrigin = resolveUrlOrigin(nextUrl);
+
+  if (shouldStopOnOriginChange(runtime, nextOrigin)) {
+    await stopSession(tabId);
+    return;
+  }
+
+  if (nextUrl !== runtime.url) {
+    runtime.url = nextUrl;
+    pushSessionList();
+  }
+}
+
+function shouldStopOnOriginChange(runtime: SessionRuntime, nextOrigin: string | null): boolean {
+  return (
+    isActiveTabScopedBuild() &&
+    runtime.scopeOrigin !== null &&
+    nextOrigin !== null &&
+    nextOrigin !== runtime.scopeOrigin
+  );
+}
+
+function isActiveTabScopedBuild(): boolean {
+  const manifest = chromeApi?.runtime?.getManifest?.();
+  const permissions = new Set(manifest?.permissions ?? []);
+  const hostPermissions = manifest?.host_permissions ?? [];
+
+  return permissions.has("activeTab") && hostPermissions.length === 0;
+}
+
+function resolveUrlOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.origin === "null" ? null : url.origin;
+  } catch {
+    return null;
+  }
 }
 
 function broadcast(message: ExtensionOutboundMessage): void {

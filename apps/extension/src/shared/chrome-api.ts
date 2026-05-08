@@ -79,6 +79,7 @@ export type ChromeApi = {
     connect(connectInfo: { name: string }): PortLike;
     getManifest?: () => {
       version?: string;
+      permissions?: string[];
       content_scripts?: Array<{ js?: string[] }>;
       host_permissions?: string[];
     };
