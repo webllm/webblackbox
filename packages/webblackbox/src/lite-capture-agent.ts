@@ -190,6 +190,7 @@ export class LiteCaptureAgent {
   private mutationSummary: MutationBatchSummary = createEmptyMutationSummary();
   private selectorCache = new WeakMap<Element, string>();
   private selectorCacheSize = 0;
+  private readonly selectorSalt = createSelectorSalt();
   private droppedLowPriorityEvents = 0;
   private disposed = false;
   private pendingQuietRecoverySummary = false;
@@ -557,7 +558,7 @@ export class LiteCaptureAgent {
           monotonicTime() + Math.max(POINTERMOVE_SUPPRESS_AFTER_SCROLL_MS, scrollGapMs);
 
         const payload = {
-          target: toFastTargetPayload(event.target),
+          target: toFastTargetPayload(event.target, this.selectorSalt),
           scrollX: window.scrollX,
           scrollY: window.scrollY
         };
@@ -608,7 +609,7 @@ export class LiteCaptureAgent {
         this.queueEvent("mousemove", {
           x: event.clientX,
           y: event.clientY,
-          target: toFastTargetPayload(event.target)
+          target: toFastTargetPayload(event.target, this.selectorSalt)
         });
       },
       PASSIVE_INPUT_OPTIONS_TRUE
@@ -805,7 +806,7 @@ export class LiteCaptureAgent {
       this.selectorCacheSize = 0;
     }
 
-    const selector = safeSelector(target);
+    const selector = safeSelector(target, this.selectorSalt);
     this.selectorCache.set(target, selector);
     this.selectorCacheSize += 1;
 
@@ -1358,7 +1359,7 @@ export class LiteCaptureAgent {
 
   private queueTrailingScrollEvent(event: Event): void {
     this.pendingScrollPayload = {
-      target: toFastTargetPayload(event.target),
+      target: toFastTargetPayload(event.target, this.selectorSalt),
       scrollX: window.scrollX,
       scrollY: window.scrollY
     };
@@ -1831,34 +1832,26 @@ export class LiteCaptureAgent {
     detail: TargetPayloadDetail
   ): Record<string, unknown> {
     if (this.mode === "full" || detail === "fast") {
-      return toFastTargetPayload(target);
+      return toFastTargetPayload(target, this.selectorSalt);
     }
 
     if (detail === "navigation") {
-      return toNavigationTargetPayload(target);
+      return this.createNavigationTargetPayload(target);
     }
 
-    return this.createDeferredTargetPayload(target, detail);
+    return this.createDeferredTargetPayload(target);
   }
 
-  private createDeferredTargetPayload(
-    target: EventTarget | null,
-    detail: Extract<TargetPayloadDetail, "action" | "input">
-  ): Record<string, unknown> {
+  private createDeferredTargetPayload(target: EventTarget | null): Record<string, unknown> {
     if (!(target instanceof Element)) {
       return {};
     }
 
-    const payload = toDeferredTargetPayload(target);
+    const payload = toDeferredTargetPayload(target, this.selectorSalt);
     const cachedSelector = this.selectorCache.get(target);
 
     if (cachedSelector) {
       payload.selector = cachedSelector;
-
-      if (detail === "action") {
-        payload.text = readTargetText(target);
-      }
-
       return payload;
     }
 
@@ -1870,13 +1863,29 @@ export class LiteCaptureAgent {
       }
 
       payload.selector = this.readCachedSelector(target);
-
-      if (detail === "action") {
-        payload.text = readTargetText(target);
-      }
     }, TARGET_ENRICH_DELAY_MS);
 
     this.pendingTargetEnrichmentTimers.add(timerId);
+    return payload;
+  }
+
+  private createNavigationTargetPayload(target: EventTarget | null): Record<string, unknown> {
+    const navigationTarget = resolveNavigationTarget(target);
+
+    if (!navigationTarget) {
+      return toFastTargetPayload(target, this.selectorSalt);
+    }
+
+    const href = sanitizeOptionalUrl(
+      navigationTarget.getAttribute("href") ?? navigationTarget.href
+    );
+    const payload = toFastTargetPayload(navigationTarget, this.selectorSalt);
+    payload.selector = this.readCachedSelector(navigationTarget);
+
+    if (href) {
+      payload.href = href;
+    }
+
     return payload;
   }
 
@@ -2147,23 +2156,28 @@ function resolveContentFrameContext(scope: LiteCaptureAgentOptions["frameScope"]
   };
 }
 
-function toDeferredTargetPayload(target: Element): Record<string, unknown> {
+function toDeferredTargetPayload(target: Element, salt: string): Record<string, unknown> {
   return {
-    ...toFastTargetPayload(target),
-    dataTestId: readDataTestId(target)
+    ...toFastTargetPayload(target, salt),
+    dataTestIdToken: tokenForValue(readDataTestId(target), salt)
   };
 }
 
-function toFastTargetPayload(target: EventTarget | null): Record<string, unknown> {
+function toFastTargetPayload(target: EventTarget | null, salt: string): Record<string, unknown> {
   if (!(target instanceof Element)) {
     return {};
   }
 
-  return {
+  const classTokens = readClassTokens(target)
+    .slice(0, 3)
+    .map((className) => hashToken(className, salt));
+  const payload: Record<string, unknown> = {
     tag: target.tagName,
-    id: target.id || undefined,
-    className: readClassName(target)
+    idToken: tokenForValue(target.id, salt),
+    classTokens: classTokens.length > 0 ? classTokens : undefined
   };
+
+  return stripUndefinedRecord(payload);
 }
 
 function readDataTestId(target: Element): string | undefined {
@@ -2173,40 +2187,6 @@ function readDataTestId(target: Element): string | undefined {
     target.getAttribute("data-qa") ??
     undefined
   );
-}
-
-function readTargetText(target: Element): string | undefined {
-  return target.textContent?.trim().slice(0, 80) || undefined;
-}
-
-function toNavigationTargetPayload(target: EventTarget | null): Record<string, unknown> {
-  const navigationTarget = resolveNavigationTarget(target);
-
-  if (!navigationTarget) {
-    return toFastTargetPayload(target);
-  }
-
-  const href = sanitizeOptionalUrl(navigationTarget.getAttribute("href") ?? navigationTarget.href);
-  const selector = buildNavigationSelector(navigationTarget, href);
-
-  const payload: Record<string, unknown> = {
-    selector,
-    tag: navigationTarget.tagName,
-    id: navigationTarget.id || undefined,
-    className: readClassName(navigationTarget)
-  };
-
-  if (href) {
-    payload.href = href;
-  }
-
-  return payload;
-}
-
-function readClassName(target: Element): string | undefined {
-  return typeof target.className === "string" && target.className.length > 0
-    ? target.className.slice(0, 80)
-    : undefined;
 }
 
 function buildDomSnapshotSummaryHtml(options: {
@@ -2267,33 +2247,6 @@ function hasNavigableHref(anchor: HTMLAnchorElement): boolean {
   return typeof href === "string" && href.length > 0;
 }
 
-function buildNavigationSelector(anchor: HTMLAnchorElement, href?: string): string | undefined {
-  if (anchor.id) {
-    return `a#${cssEscape(anchor.id)}`;
-  }
-
-  if (typeof href === "string" && href.length > 0) {
-    return `a[href="${cssStringEscape(href)}"]`;
-  }
-
-  const className = readClassName(anchor);
-
-  if (className) {
-    const classTokens = className
-      .split(/\s+/)
-      .filter((token) => token.length > 0)
-      .slice(0, 2)
-      .map((token) => `.${cssEscape(token)}`)
-      .join("");
-
-    if (classTokens.length > 0) {
-      return `a${classTokens}`;
-    }
-  }
-
-  return "a";
-}
-
 function isRichTextEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -2316,7 +2269,7 @@ function isRichTextEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
-function safeSelector(target: EventTarget | null): string {
+function safeSelector(target: EventTarget | null, salt: string): string {
   if (!(target instanceof Element)) {
     return "unknown";
   }
@@ -2328,15 +2281,15 @@ function safeSelector(target: EventTarget | null): string {
     let segment = current.tagName.toLowerCase();
 
     if (current.id) {
-      segment += `#${cssEscape(current.id)}`;
+      segment += `[id:${hashToken(current.id, salt)}]`;
       segments.unshift(segment);
       break;
     }
 
-    const classNames = Array.from(current.classList).slice(0, 2);
+    const classNames = readClassTokens(current).slice(0, 2);
 
     if (classNames.length > 0) {
-      segment += classNames.map((name) => `.${cssEscape(name)}`).join("");
+      segment += classNames.map((name) => `[class:${hashToken(name, salt)}]`).join("");
     }
 
     const parent: Element | null = current.parentElement;
@@ -2371,16 +2324,50 @@ function nthOfType(node: Element): number {
   return index;
 }
 
-function cssEscape(value: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(value);
+function readClassTokens(target: Element): string[] {
+  if (target.classList.length > 0) {
+    return Array.from(target.classList).filter((token) => token.length > 0);
   }
 
-  return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return typeof target.className === "string"
+    ? target.className.split(/\s+/).filter((token) => token.length > 0)
+    : [];
 }
 
-function cssStringEscape(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+function tokenForValue(value: string | undefined | null, salt: string): string | undefined {
+  return value && value.length > 0 ? hashToken(value, salt) : undefined;
+}
+
+function hashToken(value: string, salt: string): string {
+  return `t_${hashString(`${salt}:${value}`)}`;
+}
+
+function createSelectorSalt(): string {
+  const bytes = new Uint32Array(2);
+
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    bytes[0] = Math.floor(Math.random() * 0xffffffff);
+    bytes[1] = Date.now() >>> 0;
+  }
+
+  return `${bytes[0]?.toString(36) ?? "0"}${bytes[1]?.toString(36) ?? "0"}`;
+}
+
+function hashString(value: string): string {
+  let hash = 0x811c9dc5;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  return hash.toString(36).padStart(7, "0");
+}
+
+function stripUndefinedRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 function readCurrentPageUrl(): string {

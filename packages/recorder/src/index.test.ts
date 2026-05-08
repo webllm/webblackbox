@@ -604,6 +604,28 @@ describe("recorder", () => {
     expect(payload?.reqId).not.toContain("token=secret");
   });
 
+  it("redacts raw selector strings at ingest", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "click",
+      sid: "S-selector-privacy",
+      tabId: 4,
+      t: Date.now(),
+      mono: 10,
+      payload: {
+        target: {
+          selector: "button#customer-email-alice-example-com.secret-action"
+        }
+      }
+    });
+    const payload = result.event?.data as { target?: { selector?: string } } | undefined;
+
+    expect(payload?.target?.selector).toMatch(/^selector:[a-f0-9]{12}$/);
+    expect(payload?.target?.selector).not.toContain("customer-email");
+    expect(payload?.target?.selector).not.toContain("secret-action");
+  });
+
   it("maps lite storage snapshot raw types", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const base = Date.now();

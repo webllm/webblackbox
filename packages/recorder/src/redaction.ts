@@ -35,6 +35,13 @@ export function redactPayload(input: unknown, profile: RedactionProfile): unknow
         continue;
       }
 
+      if (normalizedKey === "selector" && typeof value === "string") {
+        output[key] = profile.hashSensitiveValues
+          ? `selector:${hashValue(value).slice(0, 12)}`
+          : "[REDACTED_SELECTOR]";
+        continue;
+      }
+
       if (profile.redactHeaders.includes(normalizedKey) || isSensitiveKey(normalizedKey, profile)) {
         output[key] =
           profile.hashSensitiveValues && typeof value === "string" ? hashValue(value) : REDACTED;

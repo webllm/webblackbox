@@ -1128,18 +1128,20 @@ describe("LiteCaptureAgent", () => {
       .find((entry) => entry.rawType === "input");
 
     expect(inputEvent?.payload?.target).toMatchObject({
-      tag: "INPUT",
-      id: "field"
+      tag: "INPUT"
     });
+    expect(inputEvent?.payload?.target).toHaveProperty("idToken");
+    expect(JSON.stringify(inputEvent?.payload?.target)).not.toContain("field");
     expect(inputEvent?.payload?.target).not.toHaveProperty("selector");
 
     await vi.advanceTimersByTimeAsync(0);
 
     expect(inputEvent?.payload?.target).toMatchObject({
-      selector: "input#field",
       tag: "INPUT",
-      id: "field"
+      idToken: expect.stringMatching(/^t_[a-z0-9]+$/),
+      selector: expect.stringMatching(/^input\[id:t_[a-z0-9]+\]$/)
     });
+    expect(JSON.stringify(inputEvent?.payload?.target)).not.toContain("field");
 
     agent.dispose();
   });
@@ -1170,6 +1172,62 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("tokenizes target ids, classes, test ids, and text-derived metadata", async () => {
+    document.body.innerHTML = `
+      <button
+        id="customer-email-alice-example-com"
+        class="tenant-acme42 danger-action"
+        data-testid="delete-secret-customer"
+        type="button"
+      >Delete Alice Example</button>
+    `;
+    const { agent, emitBatch } = createAgent();
+    const target = document.querySelector("button");
+
+    if (!target) {
+      throw new Error("missing tokenized target");
+    }
+
+    target.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true
+      })
+    );
+    agent.flush();
+
+    const clickEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "click");
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    const targetPayload = clickEvent?.payload?.target as Record<string, unknown> | undefined;
+    expect(targetPayload).toMatchObject({
+      tag: "BUTTON",
+      idToken: expect.stringMatching(/^t_[a-z0-9]+$/),
+      dataTestIdToken: expect.stringMatching(/^t_[a-z0-9]+$/),
+      selector: expect.stringMatching(/^button\[id:t_[a-z0-9]+\]$/)
+    });
+    expect(targetPayload?.classTokens).toEqual([
+      expect.stringMatching(/^t_[a-z0-9]+$/),
+      expect.stringMatching(/^t_[a-z0-9]+$/)
+    ]);
+    expect(JSON.stringify(targetPayload)).not.toContain("customer-email");
+    expect(JSON.stringify(targetPayload)).not.toContain("tenant-acme42");
+    expect(JSON.stringify(targetPayload)).not.toContain("delete-secret-customer");
+    expect(JSON.stringify(targetPayload)).not.toContain("Delete Alice");
+    expect(targetPayload).not.toHaveProperty("id");
+    expect(targetPayload).not.toHaveProperty("className");
+    expect(targetPayload).not.toHaveProperty("dataTestId");
+    expect(targetPayload).not.toHaveProperty("text");
+
+    agent.dispose();
+  });
+
   it("uses lightweight navigation payloads for link clicks so navigation is not blocked", () => {
     const { agent, emitBatch } = createAgent();
 
@@ -1184,13 +1242,15 @@ describe("LiteCaptureAgent", () => {
       .find((entry) => entry.rawType === "click");
 
     expect(clickEvent?.payload?.target).toMatchObject({
-      selector: "a#nav-link",
+      selector: expect.stringMatching(/^a\[id:t_[a-z0-9]+\]$/),
       tag: "A",
-      id: "nav-link"
+      idToken: expect.stringMatching(/^t_[a-z0-9]+$/)
     });
     expect(clickEvent?.payload?.target).not.toHaveProperty("href");
     expect(clickEvent?.payload?.target).not.toHaveProperty("hash");
+    expect(clickEvent?.payload?.target).not.toHaveProperty("id");
     expect(clickEvent?.payload?.target).not.toHaveProperty("text");
+    expect(JSON.stringify(clickEvent?.payload?.target)).not.toContain("nav-link");
 
     agent.dispose();
   });
@@ -1209,17 +1269,20 @@ describe("LiteCaptureAgent", () => {
       .find((entry) => entry.rawType === "click");
 
     expect(clickEvent?.payload?.target).toMatchObject({
-      tag: "BUTTON",
-      id: "target"
+      tag: "BUTTON"
     });
+    expect(clickEvent?.payload?.target).toHaveProperty("idToken");
+    expect(JSON.stringify(clickEvent?.payload?.target)).not.toContain("target");
     expect(clickEvent?.payload?.target).not.toHaveProperty("selector");
 
     await vi.advanceTimersByTimeAsync(0);
 
     expect(clickEvent?.payload?.target).toMatchObject({
-      selector: "button#target",
-      tag: "BUTTON"
+      selector: expect.stringMatching(/^button\[id:t_[a-z0-9]+\]$/),
+      tag: "BUTTON",
+      idToken: expect.stringMatching(/^t_[a-z0-9]+$/)
     });
+    expect(JSON.stringify(clickEvent?.payload?.target)).not.toContain("target");
 
     agent.dispose();
   });
