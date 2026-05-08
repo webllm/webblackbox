@@ -250,6 +250,40 @@ describe("pipeline", () => {
     await expect(pipeline.exportBundle()).rejects.toThrow(/encryption is required/i);
   });
 
+  it("rejects explicit low-risk overrides when high-risk artifacts are present", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-low-risk-override-high-risk"
+      },
+      storage,
+      maxChunkBytes: 512,
+      capturePolicy: {
+        ...DEFAULT_CAPTURE_POLICY,
+        captureContext: "local-debug",
+        captureContextEvidenceRef: "local-attestation-1",
+        encryption: {
+          localAtRest: "required",
+          archive: "explicit-low-risk-override",
+          archiveKeyEnvelope: "none",
+          overrideReasonRef: "audit-override-1"
+        }
+      }
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-high-risk-override", "screen.screenshot", Date.now(), {
+        shotId: "shot-1"
+      })
+    );
+
+    await expect(pipeline.exportBundle()).rejects.toThrow(
+      /low-risk export override is not allowed/i
+    );
+  });
+
   it("ingests batches without losing index coverage", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({

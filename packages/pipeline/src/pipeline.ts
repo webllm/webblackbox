@@ -3,6 +3,7 @@ import type {
   ExportManifest,
   HashesManifest,
   InvertedIndexEntry,
+  PrivacyManifest,
   RedactionProfile,
   RequestIndexEntry,
   SessionMetadata,
@@ -63,6 +64,13 @@ type ResolvedExportPolicy = {
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const SCREENSHOT_EVENT_TYPE: WebBlackboxEvent["type"] = "screen.screenshot";
 const EXPORT_OVERHEAD_RESERVE_BYTES = 2 * 1024 * 1024;
+const LOW_RISK_OVERRIDE_BLOCKED_CATEGORIES = new Set([
+  "dom",
+  "screenshots",
+  "console",
+  "network",
+  "storage"
+]);
 
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
@@ -198,6 +206,7 @@ export class FlightRecorderPipeline {
         encrypted: typeof options.passphrase === "string" && options.passphrase.length > 0
       });
       assertPrivacyScannerPassed(privacyManifest.scanner);
+      assertLowRiskOverrideAllowed(privacyManifest, this.options.capturePolicy);
 
       const { bytes, integrity } = await createWebBlackboxArchive(
         {
@@ -500,6 +509,7 @@ export class FlightRecorderPipeline {
       encrypted: typeof passphrase === "string" && passphrase.length > 0
     });
     assertPrivacyScannerPassed(privacyManifest.scanner);
+    assertLowRiskOverrideAllowed(privacyManifest, this.options.capturePolicy);
 
     return createWebBlackboxArchive(
       {
@@ -698,6 +708,31 @@ function shouldIncludeEvent(event: WebBlackboxEvent, exportPolicy: ResolvedExpor
   }
 
   return true;
+}
+
+function assertLowRiskOverrideAllowed(
+  privacyManifest: PrivacyManifest,
+  policy: CapturePolicy | undefined
+): void {
+  if (policy?.encryption.archive !== "explicit-low-risk-override") {
+    return;
+  }
+
+  if (!policy.encryption.overrideReasonRef) {
+    throw new Error("Explicit low-risk export override requires an audit reason reference.");
+  }
+
+  const highRiskSummary = privacyManifest.categories.find(
+    (summary) =>
+      summary.high > 0 ||
+      (LOW_RISK_OVERRIDE_BLOCKED_CATEGORIES.has(summary.category) && summary.unredacted > 0)
+  );
+
+  if (highRiskSummary) {
+    throw new Error(
+      `Explicit low-risk export override is not allowed for high-risk ${highRiskSummary.category} artifacts.`
+    );
+  }
 }
 
 function collectBlobHashesFromEvents(events: WebBlackboxEvent[]): string[] {
