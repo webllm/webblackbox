@@ -1113,6 +1113,32 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("records input metadata without raw values", () => {
+    const { agent, emitBatch } = createAgent();
+    const field = inputTarget();
+
+    field.value = "customer-secret-token";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    agent.flush();
+
+    const inputEvent = emitBatch.mock.calls
+      .flatMap((call) => {
+        const [batch] = call as [Array<{ rawType?: string; payload?: Record<string, unknown> }>];
+        return batch;
+      })
+      .find((entry) => entry.rawType === "input");
+
+    expect(inputEvent?.payload).toMatchObject({
+      inputType: "text",
+      length: "customer-secret-token".length,
+      valueRedacted: true
+    });
+    expect(inputEvent?.payload).not.toHaveProperty("value");
+    expect(JSON.stringify(inputEvent)).not.toContain("customer-secret-token");
+
+    agent.dispose();
+  });
+
   it("uses lightweight navigation payloads for link clicks so navigation is not blocked", () => {
     const { agent, emitBatch } = createAgent();
 

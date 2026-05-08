@@ -474,16 +474,10 @@ export class LiteCaptureAgent {
 
         this.recordEditableInteraction(target);
 
-        const isSensitive =
-          target.type === "password" ||
-          target.type === "email" ||
-          target.type === "tel" ||
-          target.type === "number";
-
         this.queueEvent("input", {
           inputType: target.type,
           length: target.value.length,
-          value: isSensitive ? "[MASKED]" : target.value.slice(0, 256),
+          valueRedacted: true,
           target: this.resolveTargetPayload(target, "input")
         });
       },
