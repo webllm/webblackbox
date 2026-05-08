@@ -75,6 +75,9 @@ const RECORDS_DIR = join(DATA_ROOT, "records");
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
 const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
+const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
+  process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
+);
 const UPLOAD_RATE_LIMIT_MAX = parseRateLimitCount(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX,
   10
@@ -233,12 +236,24 @@ async function handleUpload(
     throw error;
   }
 
-  const summary = clientSummary ?? (await buildShareSummary(bytes));
+  const archiveEnvelopeSummary = await buildShareSummary(bytes);
+  const summary = clientSummary
+    ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
+    : archiveEnvelopeSummary;
 
   if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
     respondJson(response, 422, {
       error: "Share upload blocked by privacy scanner.",
       scanner: summary.privacy.scanner
+    });
+    return;
+  }
+
+  if (!summary.encrypted && !ALLOW_PLAINTEXT_SHARE_UPLOADS) {
+    respondJson(response, summary.analyzed ? 422 : 400, {
+      error: summary.analyzed
+        ? "Public share uploads require encrypted WebBlackbox archives."
+        : "Upload is not a valid encrypted WebBlackbox archive."
     });
     return;
   }
@@ -481,6 +496,19 @@ function normalizeClientShareSummary(value: unknown): ShareSummary {
     },
     topActionTriggers: normalizeActionTriggerSummaries(record.topActionTriggers),
     privacy: normalizeSharePrivacySummary(privacy)
+  };
+}
+
+function applyArchiveEnvelopeToClientSummary(
+  clientSummary: ShareSummary,
+  archiveEnvelopeSummary: ShareSummary
+): ShareSummary {
+  return {
+    ...clientSummary,
+    encrypted: archiveEnvelopeSummary.encrypted,
+    analysisError: archiveEnvelopeSummary.encrypted
+      ? undefined
+      : archiveEnvelopeSummary.analysisError
   };
 }
 

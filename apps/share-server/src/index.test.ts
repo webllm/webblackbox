@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -6,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import JSZip from "jszip";
 import { afterEach, describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
@@ -65,6 +67,7 @@ describe("share-server", () => {
   it("returns only allowlisted public metadata", async () => {
     const server = await startShareServer();
     const secret = "customer-alpha.internal/users/reset-token-123";
+    const encryptedArchive = await createEncryptedEnvelopeArchive();
     const summary = {
       schemaVersion: 1,
       source: "client",
@@ -123,7 +126,7 @@ describe("share-server", () => {
         "x-webblackbox-filename": "customer-alpha-reset-token-123.webblackbox",
         "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(summary))
       },
-      body: Buffer.from("encrypted archive placeholder")
+      body: Buffer.from(encryptedArchive)
     });
     const uploadPayload = (await uploadResponse.json()) as { shareId: string };
 
@@ -144,6 +147,25 @@ describe("share-server", () => {
     expect(metadataText).not.toContain("topEndpoints");
     expect(metadataText).not.toContain("sensitivePreview");
     expect(metadataText).not.toContain("customer-alpha-reset-token-123");
+  });
+
+  it("rejects plaintext public share uploads by default", async () => {
+    const server = await startShareServer();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "plain.webblackbox"
+      },
+      body: Buffer.from(await createPlaintextEnvelopeArchive())
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      error: "Public share uploads require encrypted WebBlackbox archives."
+    });
+    expect(response.status).toBe(422);
   });
 });
 
@@ -257,4 +279,79 @@ async function reservePort(): Promise<number> {
   });
 
   return address.port;
+}
+
+async function createEncryptedEnvelopeArchive(): Promise<Uint8Array> {
+  return createEnvelopeArchive(true);
+}
+
+async function createPlaintextEnvelopeArchive(): Promise<Uint8Array> {
+  return createEnvelopeArchive(false);
+}
+
+async function createEnvelopeArchive(encrypted: boolean): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const files: Record<string, string> = {};
+  const manifest = {
+    protocolVersion: 1,
+    createdAt: "2026-02-13T00:00:00.000Z",
+    mode: "lite",
+    site: {
+      origin: "https://fixture.example",
+      title: "Fixture"
+    },
+    chunkCodec: "ndjson",
+    redactionProfile: {
+      redactHeaders: [],
+      redactCookieNames: [],
+      redactBodyPatterns: [],
+      blockedSelectors: [],
+      hashSensitiveValues: true
+    },
+    stats: {
+      eventCount: 0,
+      chunkCount: 0,
+      blobCount: 0,
+      durationMs: 0
+    },
+    ...(encrypted
+      ? {
+          encryption: {
+            algorithm: "AES-GCM",
+            kdf: {
+              name: "PBKDF2",
+              hash: "SHA-256",
+              iterations: 250000,
+              saltBase64: "AAAAAAAAAAAAAAAAAAAAAA=="
+            },
+            files: {}
+          }
+        }
+      : {})
+  };
+
+  addJsonFile(zip, files, "manifest.json", manifest);
+  addJsonFile(zip, files, "index/time.json", []);
+  addJsonFile(zip, files, "index/req.json", []);
+  addJsonFile(zip, files, "index/inv.json", []);
+  addJsonFile(zip, files, "integrity/hashes.json", {
+    manifestSha256: files["manifest.json"],
+    files
+  });
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+function addJsonFile(
+  zip: JSZip,
+  files: Record<string, string>,
+  path: string,
+  value: unknown
+): void {
+  const content = JSON.stringify(value);
+  zip.file(path, content);
+
+  if (path !== "integrity/hashes.json") {
+    files[path] = createHash("sha256").update(content).digest("hex");
+  }
 }
