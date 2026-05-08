@@ -120,6 +120,10 @@ Archives can be encrypted with AES-GCM and PBKDF2-derived keys while keeping the
 - [Player SDK Guide](packages/player-sdk/README.md)
 - [MCP Server Guide](apps/mcp-server/README.md)
 - [Share Server Guide](apps/share-server/README.md)
+- [Privacy Model](docs/PRIVACY.md)
+- [Security Overview](docs/SECURITY.md)
+- [Enterprise Admin Guide](docs/ENTERPRISE_ADMIN.md)
+- [Chrome Web Store Disclosure Source](docs/CHROME_WEB_STORE_DISCLOSURE.md)
 - [Architecture Notes](docs/ARCHITECTURE.md)
 - [Performance Notes](docs/PERFORMANCE.md)
 
