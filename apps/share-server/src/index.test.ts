@@ -231,6 +231,31 @@ describe("share-server", () => {
     expect(auditLog).not.toContain("127.0.0.1");
     expect(auditLog).not.toContain("webblackbox-share-");
   });
+
+  it("enforces scoped API keys", async () => {
+    const uploadKey = "upload-scope-key";
+    const readKey = "read-scope-key";
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_API_KEYS: `${uploadKey}:upload;${readKey}:read`
+    });
+    const uploadPayload = await uploadEncryptedFixture(server, uploadKey);
+
+    const blockedRead = await fetch(`${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`, {
+      headers: {
+        "x-webblackbox-api-key": uploadKey
+      }
+    });
+
+    expect(blockedRead.status).toBe(401);
+
+    const allowedRead = await fetch(`${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`, {
+      headers: {
+        "x-webblackbox-api-key": readKey
+      }
+    });
+
+    expect(allowedRead.status).toBe(200);
+  });
 });
 
 async function startShareServer(
@@ -345,12 +370,15 @@ async function reservePort(): Promise<number> {
   return address.port;
 }
 
-async function uploadEncryptedFixture(server: RunningShareServer): Promise<{ shareId: string }> {
+async function uploadEncryptedFixture(
+  server: RunningShareServer,
+  credential = apiKey
+): Promise<{ shareId: string }> {
   const response = await fetch(`${server.baseUrl}/api/share/upload`, {
     method: "POST",
     headers: {
       "content-type": "application/octet-stream",
-      "x-webblackbox-api-key": apiKey,
+      "x-webblackbox-api-key": credential,
       "x-webblackbox-filename": "fixture.webblackbox",
       "x-webblackbox-share-summary": encodeURIComponent(
         JSON.stringify({

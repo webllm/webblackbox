@@ -19,6 +19,12 @@ type ShareRecord = {
 
 type ShareAuditAction = "upload" | "list" | "metadata" | "download" | "page" | "revoke";
 type ShareAuditOutcome = "ok" | "not-found" | "expired" | "revoked" | "blocked" | "error";
+type ShareApiScope = "upload" | "read" | "list" | "revoke" | "admin";
+
+type ShareApiCredential = {
+  secret: string;
+  scopes: Set<ShareApiScope>;
+};
 
 type ShareSummary = {
   schemaVersion: 1;
@@ -80,6 +86,10 @@ const RECORDS_DIR = join(DATA_ROOT, "records");
 const AUDIT_DIR = join(DATA_ROOT, "audit");
 const SHARE_AUDIT_LOG_PATH = join(AUDIT_DIR, "share-access.jsonl");
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
+const SHARE_API_CREDENTIALS = parseShareApiCredentials(
+  process.env.WEBBLACKBOX_SHARE_API_KEYS,
+  SHARE_API_KEY
+);
 const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
@@ -151,7 +161,9 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const method = request.method ?? "GET";
   const pathname = requestUrl.pathname;
 
-  if (isProtectedShareRoute(pathname) && !isAuthorizedRequest(request, requestUrl)) {
+  const requiredScope = resolveRequiredShareScope(method, pathname);
+
+  if (requiredScope && !isAuthorizedRequest(request, requestUrl, requiredScope)) {
     if (pathname.startsWith("/share/")) {
       respondHtml(response, 401, "<h1>Unauthorized</h1><p>Provide a valid share API key.</p>");
       return;
@@ -1186,26 +1198,64 @@ function buildAuthQuerySuffix(requestUrl: URL): string {
   return `?key=${encodeURIComponent(key)}`;
 }
 
-function isProtectedShareRoute(pathname: string): boolean {
-  return pathname.startsWith("/api/share/") || pathname.startsWith("/share/");
+function resolveRequiredShareScope(method: string, pathname: string): ShareApiScope | null {
+  if (method === "POST" && pathname === "/api/share/upload") {
+    return "upload";
+  }
+
+  if (method === "GET" && pathname === "/api/share/list") {
+    return "list";
+  }
+
+  if (method === "GET" && /^\/api\/share\/[a-zA-Z0-9_-]+\/meta$/.test(pathname)) {
+    return "read";
+  }
+
+  if (method === "GET" && /^\/api\/share\/[a-zA-Z0-9_-]+\/archive$/.test(pathname)) {
+    return "read";
+  }
+
+  if (method === "GET" && /^\/share\/[a-zA-Z0-9_-]+$/.test(pathname)) {
+    return "read";
+  }
+
+  if (method === "POST" && /^\/api\/share\/[a-zA-Z0-9_-]+\/revoke$/.test(pathname)) {
+    return "revoke";
+  }
+
+  return null;
 }
 
-function isAuthorizedRequest(request: IncomingMessage, requestUrl: URL): boolean {
-  if (!SHARE_API_KEY) {
+function isAuthorizedRequest(
+  request: IncomingMessage,
+  requestUrl: URL,
+  requiredScope: ShareApiScope
+): boolean {
+  if (SHARE_API_CREDENTIALS.length === 0) {
     return isLoopbackRequest(request);
   }
 
   const headerToken = readAuthTokenFromRequest(request);
-  if (headerToken && equalsSecret(headerToken, SHARE_API_KEY)) {
+  if (headerToken && isAuthorizedToken(headerToken, requiredScope)) {
     return true;
   }
 
   const queryToken = requestUrl.searchParams.get("key");
-  if (queryToken && equalsSecret(queryToken, SHARE_API_KEY)) {
+  if (queryToken && isAuthorizedToken(queryToken, requiredScope)) {
     return true;
   }
 
   return false;
+}
+
+function isAuthorizedToken(token: string, requiredScope: ShareApiScope): boolean {
+  return SHARE_API_CREDENTIALS.some((credential) => {
+    if (!equalsSecret(token, credential.secret)) {
+      return false;
+    }
+
+    return credential.scopes.has("admin") || credential.scopes.has(requiredScope);
+  });
 }
 
 function requestOriginFromUrl(request: IncomingMessage, requestUrl: URL): string {
@@ -1277,6 +1327,77 @@ function readOptionalSecret(value: string | undefined): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseShareApiCredentials(
+  rawValue: string | undefined,
+  legacyAdminKey: string | null
+): ShareApiCredential[] {
+  const credentials: ShareApiCredential[] = [];
+
+  if (legacyAdminKey) {
+    credentials.push({
+      secret: legacyAdminKey,
+      scopes: new Set(["admin"])
+    });
+  }
+
+  if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
+    return credentials;
+  }
+
+  for (const entry of rawValue.split(";")) {
+    const trimmed = entry.trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    const separatorIndex = trimmed.indexOf(":");
+    const secret = separatorIndex >= 0 ? trimmed.slice(0, separatorIndex).trim() : trimmed;
+    const rawScopes = separatorIndex >= 0 ? trimmed.slice(separatorIndex + 1).trim() : "admin";
+
+    if (!secret) {
+      continue;
+    }
+
+    const scopes = new Set<ShareApiScope>();
+
+    for (const scope of rawScopes.split(",")) {
+      const normalized = normalizeShareApiScope(scope);
+
+      if (normalized) {
+        scopes.add(normalized);
+      }
+    }
+
+    if (scopes.size === 0) {
+      scopes.add("admin");
+    }
+
+    credentials.push({
+      secret,
+      scopes
+    });
+  }
+
+  return credentials;
+}
+
+function normalizeShareApiScope(value: string): ShareApiScope | null {
+  const normalized = value.trim().toLowerCase();
+
+  if (
+    normalized === "upload" ||
+    normalized === "read" ||
+    normalized === "list" ||
+    normalized === "revoke" ||
+    normalized === "admin"
+  ) {
+    return normalized;
+  }
+
+  return null;
 }
 
 function parseRateLimitCount(value: string | undefined, fallback: number): number {
