@@ -146,6 +146,21 @@ type PipelineExportDownloadResult = {
   integrity: HashesManifest;
 };
 
+type ExportAuditEvent = {
+  schemaVersion: 1;
+  timestamp: string;
+  sid: string;
+  mode: CaptureMode;
+  outcome: "ok" | "error";
+  encrypted: boolean;
+  includeScreenshots: boolean;
+  maxArchiveBytes: number;
+  recentWindowMs: number;
+  sizeBytes?: number;
+  downloadId?: number;
+  error?: string;
+};
+
 type SessionAnnotation = {
   tags: string[];
   note?: string;
@@ -328,6 +343,8 @@ const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
 const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
 const SESSION_ANNOTATIONS_STORAGE_KEY = "webblackbox.runtime.sessionAnnotations";
+const EXPORT_AUDIT_STORAGE_KEY = "webblackbox.audit.exports";
+const EXPORT_AUDIT_MAX_EVENTS = 200;
 const STOPPED_SESSION_TTL_MS = 10 * 60_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
 const STOP_DRAIN_CONTENT_RAW_TYPES = new Set([
@@ -938,6 +955,19 @@ async function exportSession(
     });
 
     await downloadExportedBundle(exported, saveAs);
+    await appendExportAuditEvent({
+      schemaVersion: 1,
+      timestamp: new Date().toISOString(),
+      sid,
+      mode: runtime.mode,
+      outcome: "ok",
+      encrypted: typeof passphrase === "string" && passphrase.length > 0,
+      includeScreenshots: policy.includeScreenshots,
+      maxArchiveBytes: policy.maxArchiveBytes,
+      recentWindowMs: policy.recentWindowMs,
+      sizeBytes: exported.sizeBytes,
+      downloadId: exported.downloadId
+    });
     broadcast({
       kind: "sw.export-status",
       sid,
@@ -949,6 +979,18 @@ async function exportSession(
       await disposeStoppedSession(runtime);
     }
   } catch (error) {
+    await appendExportAuditEvent({
+      schemaVersion: 1,
+      timestamp: new Date().toISOString(),
+      sid,
+      mode: runtime.mode,
+      outcome: "error",
+      encrypted: typeof passphrase === "string" && passphrase.length > 0,
+      includeScreenshots: policy.includeScreenshots,
+      maxArchiveBytes: policy.maxArchiveBytes,
+      recentWindowMs: policy.recentWindowMs,
+      error: redactOperationalMessage(error instanceof Error ? error.message : String(error))
+    });
     console.warn("[WebBlackbox] export failed", error);
     broadcast({
       kind: "sw.export-status",
@@ -4057,6 +4099,30 @@ async function persistRuntimeState(): Promise<void> {
   await chromeApi.storage.local.set({
     [ACTIVE_SESSION_STORAGE_KEY]: sessions
   });
+}
+
+async function appendExportAuditEvent(event: ExportAuditEvent): Promise<void> {
+  if (!chromeApi?.storage?.local?.get || !chromeApi.storage.local.set) {
+    return;
+  }
+
+  const values = await chromeApi.storage.local.get(EXPORT_AUDIT_STORAGE_KEY);
+  const current = Array.isArray(values[EXPORT_AUDIT_STORAGE_KEY])
+    ? (values[EXPORT_AUDIT_STORAGE_KEY] as unknown[])
+    : [];
+  const events = [...current.slice(-EXPORT_AUDIT_MAX_EVENTS + 1), event];
+
+  await chromeApi.storage.local.set({
+    [EXPORT_AUDIT_STORAGE_KEY]: events
+  });
+}
+
+function redactOperationalMessage(message: string): string {
+  return message
+    .replaceAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+    .replaceAll(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [redacted-token]")
+    .replaceAll(/\b(?:https?|file):\/\/[^\s)]+/gi, "[redacted-url]")
+    .slice(0, 240);
 }
 
 async function restoreRuntimeState(): Promise<void> {
