@@ -352,10 +352,16 @@ describe("pipeline", () => {
 
     const exported = await pipeline.exportBundle();
     const parsed = await readWebBlackboxArchive(exported.bytes);
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const storedIntegrity = JSON.parse(
+      await zip.file("integrity/hashes.json")!.async("string")
+    ) as typeof exported.integrity;
 
     expect(parsed.events.length).toBeGreaterThanOrEqual(3);
     expect(parsed.manifest.protocolVersion).toBe(1);
     expect(parsed.integrity).not.toBeNull();
+    expect(exported.integrity.files["integrity/hashes.json"]).toBeUndefined();
+    expect(storedIntegrity).toEqual(exported.integrity);
   });
 
   it("reads plain archives without global Web Crypto when Node crypto is available", async () => {

@@ -84,10 +84,12 @@ export async function createWebBlackboxArchive(
   const manifestHash = fileHashes["manifest.json"] ?? "";
   const integrity: HashesManifest = {
     manifestSha256: manifestHash,
-    files: fileHashes
+    files: {
+      ...fileHashes
+    }
   };
 
-  await addJsonFile(zip, "integrity/hashes.json", integrity, fileHashes);
+  zip.file("integrity/hashes.json", JSON.stringify(integrity, null, 2));
 
   const estimatedPayloadBytes = estimateArchivePayloadBytes(input);
   const preferStore =
