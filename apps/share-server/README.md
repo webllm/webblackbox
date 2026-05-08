@@ -28,6 +28,7 @@ Set these environment variables for production-like deployments:
   - `?key=<key>` query param
 - `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
 - `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Use `*` only for trusted environments.
+- `WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES`: max accepted upload body size in bytes (default `262144000`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX`: max uploads per client in each window (default `10`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS`: upload rate limit window in ms (default `60000`).
 - `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: set `true` only behind a trusted proxy; otherwise upload rate limiting uses socket IP.

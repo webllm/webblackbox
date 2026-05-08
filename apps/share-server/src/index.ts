@@ -54,7 +54,10 @@ type ShareSummary = {
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "127.0.0.1";
-const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = parsePositiveInteger(
+  process.env.WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES,
+  250 * 1024 * 1024
+);
 const DEFAULT_BASE_URL = `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
 const DATA_ROOT = resolve(process.env.WEBBLACKBOX_SHARE_DATA_DIR ?? ".webblackbox-share-data");
 const ARCHIVES_DIR = join(DATA_ROOT, "archives");
@@ -174,7 +177,19 @@ async function handleUpload(
     return;
   }
 
-  const bytes = await readRequestBody(request, MAX_UPLOAD_BYTES);
+  let bytes: Uint8Array;
+  try {
+    bytes = await readRequestBody(request, MAX_UPLOAD_BYTES);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      respondJson(response, 413, {
+        error: `Upload payload exceeds ${error.maxBytes} bytes.`
+      });
+      return;
+    }
+
+    throw error;
+  }
 
   if (bytes.byteLength === 0) {
     respondJson(response, 400, {
@@ -633,7 +648,7 @@ async function readRequestBody(request: IncomingMessage, maxBytes: number): Prom
 
     totalBytes += chunk.byteLength;
     if (totalBytes > maxBytes) {
-      throw new Error(`Payload exceeds ${maxBytes} bytes.`);
+      throw new PayloadTooLargeError(maxBytes);
     }
 
     chunks.push(chunk);
@@ -641,6 +656,12 @@ async function readRequestBody(request: IncomingMessage, maxBytes: number): Prom
 
   const merged = Buffer.concat(chunks);
   return new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength);
+}
+
+class PayloadTooLargeError extends Error {
+  public constructor(public readonly maxBytes: number) {
+    super(`Payload exceeds ${maxBytes} bytes.`);
+  }
 }
 
 function requestBaseUrl(request: IncomingMessage): string {
@@ -854,6 +875,10 @@ function readOptionalSecret(value: string | undefined): string | null {
 }
 
 function parseRateLimitCount(value: string | undefined, fallback: number): number {
+  return parsePositiveInteger(value, fallback);
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback;
