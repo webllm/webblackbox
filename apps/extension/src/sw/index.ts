@@ -37,7 +37,14 @@ import {
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
 import { applyModeProductBoundary } from "../shared/mode-profile.js";
-import { migrateStoredRecorderConfig } from "../shared/options-storage.js";
+import {
+  applyEnterprisePolicyToRecorderConfig,
+  ENTERPRISE_POLICY_STORAGE_KEY,
+  isEnterpriseOriginAllowed,
+  migrateStoredRecorderConfig,
+  normalizeEnterprisePolicy,
+  type EnterpriseRecorderPolicy
+} from "../shared/options-storage.js";
 import {
   isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
   isMimeAllowed as isMimeAllowedUtil,
@@ -700,12 +707,22 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   const sid = createSessionId();
   const startedAt = Date.now();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
+  const sessionOrigin = resolveUrlOrigin(sanitizeUrlForPrivacy(tabMetadata.url)) ?? "";
+  const enterprisePolicy = await loadEnterprisePolicy();
+
+  if (!isEnterpriseOriginAllowed(sessionOrigin, enterprisePolicy)) {
+    throw new Error("Recording is blocked by enterprise site policy.");
+  }
+
   const loadedRecorderConfig = await loadRecorderConfig(mode);
-  const recorderConfig = withSessionCapturePolicy(loadedRecorderConfig, {
-    tabId,
-    origin: resolveUrlOrigin(sanitizeUrlForPrivacy(tabMetadata.url)) ?? "",
-    startedAt
-  });
+  const recorderConfig = applyEnterprisePolicyToRecorderConfig(
+    withSessionCapturePolicy(loadedRecorderConfig, {
+      tabId,
+      origin: sessionOrigin,
+      startedAt
+    }),
+    enterprisePolicy
+  );
   const performanceBudget = await loadPerformanceBudgetConfig();
   const annotation = getSessionAnnotation(sid);
   const metadata: SessionMetadata = {
@@ -3800,6 +3817,17 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   };
 
   return applyModeProductBoundary(mode, mergedConfig);
+}
+
+async function loadEnterprisePolicy(): Promise<EnterpriseRecorderPolicy> {
+  try {
+    const values = await chromeApi?.storage?.managed?.get(ENTERPRISE_POLICY_STORAGE_KEY);
+    const scoped = asRecord(values?.[ENTERPRISE_POLICY_STORAGE_KEY]);
+
+    return normalizeEnterprisePolicy(scoped ?? values ?? {});
+  } catch {
+    return normalizeEnterprisePolicy({});
+  }
 }
 
 function withSessionCapturePolicy(

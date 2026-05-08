@@ -196,6 +196,11 @@ export type ChromeApi = {
       ): Promise<Record<string, unknown>>;
       set(items: Record<string, unknown>): Promise<void>;
     };
+    managed?: {
+      get(
+        keys?: string[] | string | Record<string, unknown> | null
+      ): Promise<Record<string, unknown>>;
+    };
   };
   tabs?: {
     create(createProperties: { url?: string; active?: boolean }): Promise<{
