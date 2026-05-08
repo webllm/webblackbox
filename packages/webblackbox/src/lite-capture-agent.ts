@@ -1,4 +1,8 @@
-import { sanitizeUrlForPrivacy } from "@webblackbox/protocol";
+import {
+  DEFAULT_CAPTURE_POLICY,
+  sanitizeUrlForPrivacy,
+  type CapturePolicy
+} from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 import { snapdom } from "@zumer/snapdom";
 
@@ -148,6 +152,7 @@ export class LiteCaptureAgent {
   private tabId = -1;
   private mode: LiteCaptureState["mode"] = "lite";
   private sampling: LiteCaptureSampling = { ...DEFAULT_SAMPLING };
+  private capturePolicy: CapturePolicy = DEFAULT_CAPTURE_POLICY;
   private indicator: HTMLDivElement | null = null;
   private mutationObserver: MutationObserver | null = null;
   private snapshotTimer = 0;
@@ -232,6 +237,7 @@ export class LiteCaptureAgent {
     this.recordingActive = state.active;
     this.mode = state.mode ?? this.mode;
     this.sampling = sanitizeSamplingConfig(state.sampling);
+    this.capturePolicy = state.capturePolicy ?? this.capturePolicy;
 
     if (typeof state.sid === "string") {
       this.sid = state.sid;
@@ -814,19 +820,34 @@ export class LiteCaptureAgent {
   }
 
   private shouldCaptureScreenshots(): boolean {
-    return this.mode !== "full" && this.isTopLevelFrame && this.sampling.screenshotIdleMs > 0;
+    return (
+      this.mode !== "full" &&
+      this.isTopLevelFrame &&
+      this.sampling.screenshotIdleMs > 0 &&
+      this.capturePolicy.categories.screenshots !== "off"
+    );
   }
 
   private shouldCaptureMutationSignals(): boolean {
-    return this.mode !== "full" && this.isTopLevelFrame;
+    return (
+      this.mode !== "full" && this.isTopLevelFrame && this.capturePolicy.categories.dom !== "off"
+    );
   }
 
   private shouldCaptureDomSnapshots(): boolean {
-    return this.mode !== "full" && this.isTopLevelFrame;
+    return (
+      this.mode !== "full" && this.isTopLevelFrame && this.capturePolicy.categories.dom !== "off"
+    );
   }
 
   private shouldCaptureStorageSnapshots(): boolean {
-    return this.mode !== "full" && this.isTopLevelFrame;
+    return (
+      this.mode !== "full" &&
+      this.isTopLevelFrame &&
+      (this.capturePolicy.categories.storage !== "off" ||
+        this.capturePolicy.categories.indexedDb !== "off" ||
+        this.capturePolicy.categories.cookies !== "off")
+    );
   }
 
   private startMutationAndSnapshots(): void {
@@ -1055,9 +1076,17 @@ export class LiteCaptureAgent {
   }
 
   private emitStorageSnapshots(reason: string): void {
-    this.emitCookieSnapshot(reason);
-    this.emitLocalStorageSnapshot(reason);
-    void this.emitIndexedDbSnapshot(reason);
+    if (this.capturePolicy.categories.cookies !== "off") {
+      this.emitCookieSnapshot(reason);
+    }
+
+    if (this.capturePolicy.categories.storage !== "off") {
+      this.emitLocalStorageSnapshot(reason);
+    }
+
+    if (this.capturePolicy.categories.indexedDb !== "off") {
+      void this.emitIndexedDbSnapshot(reason);
+    }
   }
 
   private emitCookieSnapshot(reason: string): void {

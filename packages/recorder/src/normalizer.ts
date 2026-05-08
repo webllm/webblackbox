@@ -45,6 +45,7 @@ const CONTENT_EVENT_MAP: Record<string, WebBlackboxEventType> = {
   resourceError: "error.resource",
   longtask: "perf.longtask",
   vitals: "perf.vitals",
+  privacyViolation: "privacy.violation",
   localStorageOp: "storage.local.op",
   localStorageSnapshot: "storage.local.snapshot",
   sessionStorageOp: "storage.session.op",

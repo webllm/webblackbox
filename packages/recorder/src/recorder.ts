@@ -369,6 +369,10 @@ function classifyCategory(eventType: WebBlackboxEventType): PrivacyClassificatio
 function classifySensitivity(
   eventType: WebBlackboxEventType
 ): PrivacyClassification["sensitivity"] {
+  if (eventType === "privacy.violation") {
+    return "medium";
+  }
+
   if (
     eventType === "user.input" ||
     eventType === "dom.snapshot" ||
@@ -487,9 +491,9 @@ function hasConsoleTextPayload(payload: unknown): boolean {
   const args = row.args;
 
   return (
-    typeof row.text === "string" ||
-    typeof row.message === "string" ||
-    typeof row.stack === "string" ||
+    (typeof row.text === "string" && row.text.length > 0) ||
+    (typeof row.message === "string" && row.message.length > 0) ||
+    (typeof row.stack === "string" && row.stack.length > 0) ||
     (Array.isArray(args) && args.length > 0)
   );
 }
@@ -503,6 +507,7 @@ function hasStorageDetail(payload: unknown): boolean {
 
   return (
     hasBlobReference(row) ||
+    typeof row.key === "string" ||
     Array.isArray(row.names) ||
     Array.isArray(row.databaseNames) ||
     asRecord(row.entries) !== null

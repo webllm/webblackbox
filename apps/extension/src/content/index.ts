@@ -261,7 +261,8 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
       sid: message.sid,
       tabId: DEFAULT_TAB_ID,
       mode: message.mode,
-      sampling: message.sampling
+      sampling: message.sampling,
+      capturePolicy: message.capturePolicy
     };
 
     if (message.active) {
@@ -445,7 +446,9 @@ function syncInjectedCaptureConfig(
   message: Extract<ExtensionOutboundMessage, { kind: "sw.recording-status" }>
 ): void {
   const bodyCaptureMaxBytes =
-    message.active && message.mode === "lite"
+    message.active &&
+    message.mode === "lite" &&
+    message.capturePolicy?.categories.network === "body-allowlist"
       ? normalizeBodyCaptureBudget(message.sampling?.bodyCaptureMaxBytes)
       : 0;
 
@@ -453,7 +456,8 @@ function syncInjectedCaptureConfig(
     new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
       detail: {
         active: message.active && message.mode === "lite",
-        bodyCaptureMaxBytes
+        bodyCaptureMaxBytes,
+        capturePolicy: message.capturePolicy
       }
     })
   );

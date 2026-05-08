@@ -15,6 +15,16 @@ vi.mock("@zumer/snapdom", () => {
 import { INJECTED_MESSAGE_SOURCE } from "./injected-hooks.js";
 import { LiteCaptureAgent } from "./lite-capture-agent.js";
 import type { LiteCaptureAgentOptions, LiteCaptureState } from "./types.js";
+import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
+
+const SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
+  ...DEFAULT_CAPTURE_POLICY,
+  mode: "debug",
+  categories: {
+    ...DEFAULT_CAPTURE_POLICY.categories,
+    screenshots: "allow"
+  }
+};
 
 function createAgent(
   state: Partial<LiteCaptureState> = {},
@@ -231,6 +241,7 @@ describe("LiteCaptureAgent", () => {
 
   it("captures a deferred start screenshot when screenshot sampling is enabled", async () => {
     const { agent } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
       sampling: {
         screenshotIdleMs: 1_000
       }
@@ -245,6 +256,7 @@ describe("LiteCaptureAgent", () => {
 
   it("releases screenshot capture state when snapdom does not settle", async () => {
     const { agent } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
       sampling: {
         screenshotIdleMs: 1_000
       }
@@ -277,6 +289,7 @@ describe("LiteCaptureAgent", () => {
 
   it("captures a stop screenshot when the session stops before the first idle screenshot lands", async () => {
     const { agent } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
       sampling: {
         screenshotIdleMs: 1_000
       }
@@ -372,6 +385,7 @@ describe("LiteCaptureAgent", () => {
 
   it("defers start capture until the page is idle", async () => {
     const { agent } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
       sampling: {
         screenshotIdleMs: 1_000
       }
@@ -468,6 +482,7 @@ describe("LiteCaptureAgent", () => {
   it("keeps child-frame capture lightweight", async () => {
     const { agent, emitBatch } = createAgent(
       {
+        capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
         sampling: {
           screenshotIdleMs: 1_000
         }

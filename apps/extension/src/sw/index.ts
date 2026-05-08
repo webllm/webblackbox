@@ -5,9 +5,11 @@ import {
 } from "@webblackbox/cdp-router";
 import {
   createSessionId,
+  DEFAULT_CAPTURE_POLICY,
   DEFAULT_EXPORT_POLICY,
   DEFAULT_RECORDER_CONFIG,
   sanitizeUrlForPrivacy,
+  type CapturePolicy,
   type CaptureMode,
   type ExportPolicy,
   type FreezeReason,
@@ -441,7 +443,8 @@ function syncContentPortRecordingState(port: PortLike): void {
       active: true,
       sid: runtime.sid,
       mode: runtime.mode,
-      sampling
+      sampling,
+      capturePolicy: runtime.config.capturePolicy
     });
   } catch (error) {
     logPortSendFailure("sw.recording-status", error, {
@@ -614,7 +617,8 @@ async function handleInboundMessage(
       active: true,
       sid: runtime.sid,
       mode: runtime.mode,
-      sampling
+      sampling,
+      capturePolicy: runtime.config.capturePolicy
     };
   }
 
@@ -691,7 +695,12 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   const sid = createSessionId();
   const startedAt = Date.now();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
-  const recorderConfig = await loadRecorderConfig(mode);
+  const loadedRecorderConfig = await loadRecorderConfig(mode);
+  const recorderConfig = withSessionCapturePolicy(loadedRecorderConfig, {
+    tabId,
+    origin: resolveUrlOrigin(sanitizeUrlForPrivacy(tabMetadata.url)) ?? "",
+    startedAt
+  });
   const performanceBudget = await loadPerformanceBudgetConfig();
   const annotation = getSessionAnnotation(sid);
   const metadata: SessionMetadata = {
@@ -806,15 +815,22 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     await ensureInjectedHooks(tabId);
   }
 
-  if (mode === "full") {
+  if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
     await attachCdp(runtime);
   }
 
   const sampling = toStatusSampling(runtime);
 
   await setRecordingBadge();
-  await notifyTabStatus(tabId, true, sid, mode, sampling);
-  broadcast({ kind: "sw.recording-status", active: true, sid, mode, sampling });
+  await notifyTabStatus(tabId, true, sid, mode, sampling, recorderConfig.capturePolicy);
+  broadcast({
+    kind: "sw.recording-status",
+    active: true,
+    sid,
+    mode,
+    sampling,
+    capturePolicy: recorderConfig.capturePolicy
+  });
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
@@ -842,8 +858,21 @@ async function stopSession(tabId: number): Promise<void> {
     await setRecordingBadge();
   }
 
-  await notifyTabStatus(tabId, false, runtime.sid, runtime.mode, toStatusSampling(runtime));
-  broadcast({ kind: "sw.recording-status", active: false, sid: runtime.sid, mode: runtime.mode });
+  await notifyTabStatus(
+    tabId,
+    false,
+    runtime.sid,
+    runtime.mode,
+    toStatusSampling(runtime),
+    runtime.config.capturePolicy
+  );
+  broadcast({
+    kind: "sw.recording-status",
+    active: false,
+    sid: runtime.sid,
+    mode: runtime.mode,
+    capturePolicy: runtime.config.capturePolicy
+  });
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
@@ -1345,6 +1374,10 @@ function shouldCaptureActionScreenshot(
   }
 
   if (!ACTION_SCREENSHOT_RAW_TYPES.has(rawEvent.rawType)) {
+    return false;
+  }
+
+  if (runtime.config.capturePolicy?.categories.screenshots === "off") {
     return false;
   }
 
@@ -2133,6 +2166,10 @@ function shouldCaptureResponseBody(
     return false;
   }
 
+  if (runtime.config.capturePolicy?.categories.network !== "body-allowlist") {
+    return false;
+  }
+
   if (runtime.responseBodyCaptures >= FULL_MODE_BODY_CAPTURE_MAX_PER_SESSION) {
     return false;
   }
@@ -2199,6 +2236,13 @@ function shouldCaptureIncidentArtifacts(runtime: SessionRuntime): boolean {
     return false;
   }
 
+  if (
+    runtime.config.capturePolicy?.categories.screenshots === "off" &&
+    runtime.config.capturePolicy?.categories.cdp !== "full"
+  ) {
+    return false;
+  }
+
   const now = Date.now();
 
   if (now - runtime.lastIncidentCaptureAt < FULL_MODE_INCIDENT_CAPTURE_COOLDOWN_MS) {
@@ -2218,6 +2262,10 @@ async function captureIncidentArtifacts(runtime: SessionRuntime, reason: string)
 
 function shouldCaptureNavigationSnapshot(runtime: SessionRuntime): boolean {
   if (runtime.stopping) {
+    return false;
+  }
+
+  if (runtime.config.capturePolicy?.categories.dom !== "allow") {
     return false;
   }
 
@@ -2271,6 +2319,10 @@ async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string)
 
 async function captureScreenshot(runtime: SessionRuntime, reason: string): Promise<void> {
   if (!runtime.cdpRouter) {
+    return;
+  }
+
+  if (runtime.config.capturePolicy?.categories.screenshots === "off") {
     return;
   }
 
@@ -2336,6 +2388,10 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
     return;
   }
 
+  if (runtime.config.capturePolicy?.categories.dom !== "allow") {
+    return;
+  }
+
   const snapshot = await sendCdpCommand<Record<string, unknown>>(
     runtime,
     { tabId: runtime.tabId },
@@ -2380,11 +2436,16 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     return;
   }
 
-  const cookies = await sendCdpCommand<{ cookies?: unknown[] }>(
-    runtime,
-    { tabId: runtime.tabId },
-    "Storage.getCookies"
-  );
+  const policy = runtime.config.capturePolicy;
+
+  const cookies =
+    policy?.categories.cookies === "names-only"
+      ? await sendCdpCommand<{ cookies?: unknown[] }>(
+          runtime,
+          { tabId: runtime.tabId },
+          "Storage.getCookies"
+        )
+      : null;
 
   if (cookies?.cookies) {
     const cookieNames = cookies.cookies
@@ -2412,7 +2473,10 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     });
   }
 
-  const localStorageData = await evaluateExpression(runtime, FULL_MODE_LOCAL_STORAGE_SNAPSHOT_EXPR);
+  const localStorageData =
+    policy?.categories.storage === "allow" || policy?.categories.storage === "lengths-only"
+      ? await evaluateExpression(runtime, FULL_MODE_LOCAL_STORAGE_SNAPSHOT_EXPR)
+      : null;
 
   if (typeof localStorageData === "string") {
     const bytes = new TextEncoder().encode(localStorageData);
@@ -2436,7 +2500,10 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     });
   }
 
-  const origin = await evaluateExpression(runtime, "location.origin");
+  const origin =
+    policy?.categories.indexedDb === "names-only"
+      ? await evaluateExpression(runtime, "location.origin")
+      : null;
 
   if (typeof origin === "string") {
     const dbNames = await sendCdpCommand<{ databaseNames?: string[] }>(
@@ -2472,6 +2539,10 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
 
 async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Promise<void> {
   if (!runtime.cdpRouter) {
+    return;
+  }
+
+  if (runtime.config.capturePolicy?.categories.cdp !== "full") {
     return;
   }
 
@@ -2514,6 +2585,10 @@ async function captureAdvancedProfiles(runtime: SessionRuntime, reason: string):
 
 async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promise<void> {
   if (!runtime.cdpRouter) {
+    return;
+  }
+
+  if (runtime.config.capturePolicy?.categories.cdp !== "full") {
     return;
   }
 
@@ -2566,6 +2641,13 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
 
 async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
   if (!runtime.cdpRouter) {
+    return;
+  }
+
+  if (
+    runtime.config.capturePolicy?.mode !== "lab" ||
+    runtime.config.capturePolicy.categories.heapProfiles !== "lab-only"
+  ) {
     return;
   }
 
@@ -3037,7 +3119,10 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
       sampling.screenshotIdleMs,
       DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
     ),
-    bodyCaptureMaxBytes: normalizeBodyCaptureMaxBytesUtil(sampling.bodyCaptureMaxBytes, 0)
+    bodyCaptureMaxBytes:
+      runtime.config.capturePolicy?.categories.network === "body-allowlist"
+        ? normalizeBodyCaptureMaxBytesUtil(sampling.bodyCaptureMaxBytes, 0)
+        : 0
   };
 }
 
@@ -3710,6 +3795,39 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   return applyModeProductBoundary(mode, mergedConfig);
 }
 
+function withSessionCapturePolicy(
+  config: typeof DEFAULT_RECORDER_CONFIG,
+  context: {
+    tabId: number;
+    origin: string;
+    startedAt: number;
+  }
+): typeof DEFAULT_RECORDER_CONFIG {
+  const basePolicy =
+    config.capturePolicy ?? DEFAULT_RECORDER_CONFIG.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
+  const allowedOrigins = context.origin ? [context.origin] : [];
+  const capturePolicy: CapturePolicy = {
+    ...basePolicy,
+    consent: {
+      ...basePolicy.consent,
+      grantedAt: new Date(context.startedAt).toISOString()
+    },
+    scope: {
+      ...basePolicy.scope,
+      tabId: context.tabId,
+      origin: context.origin,
+      allowedOrigins,
+      stopOnOriginChange: true
+    },
+    redaction: config.redaction
+  };
+
+  return {
+    ...config,
+    capturePolicy
+  };
+}
+
 async function loadPerformanceBudgetConfig(): Promise<PerformanceBudgetConfig> {
   const storedValues = await chromeApi?.storage?.local?.get(OPTIONS_STORAGE_KEY);
   const stored = asRecord(storedValues?.[OPTIONS_STORAGE_KEY]);
@@ -3983,7 +4101,8 @@ async function notifyTabStatus(
   active: boolean,
   sid?: string,
   mode?: CaptureMode,
-  sampling?: RecordingSampling
+  sampling?: RecordingSampling,
+  capturePolicy?: CapturePolicy
 ): Promise<void> {
   if (!chromeApi?.tabs?.sendMessage) {
     return;
@@ -3995,7 +4114,8 @@ async function notifyTabStatus(
       active,
       sid,
       mode,
-      sampling
+      sampling,
+      capturePolicy
     })
     .catch(() => undefined);
 }

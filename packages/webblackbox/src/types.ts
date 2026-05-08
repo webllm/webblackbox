@@ -1,4 +1,5 @@
 import type {
+  CapturePolicy,
   ExportPolicy,
   HashesManifest,
   RecorderConfig,
@@ -25,6 +26,7 @@ export type LiteCaptureState = {
   tabId?: number;
   mode?: SessionMetadata["mode"] | "freeze";
   sampling?: Partial<LiteCaptureSampling>;
+  capturePolicy?: CapturePolicy;
 };
 
 /**

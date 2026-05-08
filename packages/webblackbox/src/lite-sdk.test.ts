@@ -136,11 +136,16 @@ describe("WebBlackboxLiteSdk", () => {
     });
 
     expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledTimes(1);
-    expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledWith({
-      flag: "__WB_TEST_FLAG__",
-      active: false,
-      bodyCaptureMaxBytes: 0
-    });
+    expect(mockRuntime.installInjectedLiteCaptureHooksMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        flag: "__WB_TEST_FLAG__",
+        active: false,
+        bodyCaptureMaxBytes: 0,
+        capturePolicy: expect.objectContaining({
+          mode: "private"
+        })
+      })
+    );
 
     await sdk.start();
     const agent = mockRuntime.instances.at(-1);

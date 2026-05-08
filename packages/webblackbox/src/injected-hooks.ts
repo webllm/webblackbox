@@ -1,4 +1,8 @@
-import { sanitizeUrlForPrivacy } from "@webblackbox/protocol";
+import {
+  DEFAULT_CAPTURE_POLICY,
+  sanitizeUrlForPrivacy,
+  type CapturePolicy
+} from "@webblackbox/protocol";
 
 type CapturePayload = Record<string, unknown>;
 
@@ -22,6 +26,7 @@ export const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
 export type InjectedCaptureConfig = {
   active?: boolean;
   bodyCaptureMaxBytes?: number;
+  capturePolicy?: CapturePolicy;
 };
 
 /** Message contract emitted by injected hooks into the page window. */
@@ -60,6 +65,8 @@ export type InjectedHooksOptions = {
   active?: boolean;
   /** Per-response capture budget; `0` disables response-body sampling. */
   bodyCaptureMaxBytes?: number;
+  /** Active capture policy used to keep page-world hooks fail-closed. */
+  capturePolicy?: CapturePolicy;
   /** Disables fetch/xhr/EventSource monkeypatching when browser-side capture is available. */
   captureNetwork?: boolean;
 };
@@ -81,15 +88,17 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   let bodyWindowBytes = 0;
   let emitFlushTimer = 0;
   let captureActive = options.active !== false;
+  let capturePolicy = options.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
   const pendingCaptureEvents: Array<{
     rawType: string;
     payload: CapturePayload;
     t: number;
     mono: number;
   }> = [];
-  let networkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
+  let configuredNetworkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
     options.bodyCaptureMaxBytes
   );
+  let networkBodyCaptureMaxBytes = resolveNetworkBodyCaptureMaxBytes();
   const captureNetwork = options.captureNetwork !== false;
 
   if (windowFlags[flag]) {
@@ -101,6 +110,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
     if (Object.prototype.hasOwnProperty.call(options, "bodyCaptureMaxBytes")) {
       detail.bodyCaptureMaxBytes = options.bodyCaptureMaxBytes;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(options, "capturePolicy")) {
+      detail.capturePolicy = options.capturePolicy;
     }
 
     if (Object.keys(detail).length > 0) {
@@ -123,9 +136,17 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       captureActive = detail.active;
     }
 
-    networkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
-      detail?.bodyCaptureMaxBytes
-    );
+    if (detail?.capturePolicy) {
+      capturePolicy = detail.capturePolicy;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(detail ?? {}, "bodyCaptureMaxBytes")) {
+      configuredNetworkBodyCaptureMaxBytes = normalizeConfiguredBodyCaptureMaxBytes(
+        detail?.bodyCaptureMaxBytes
+      );
+    }
+
+    networkBodyCaptureMaxBytes = resolveNetworkBodyCaptureMaxBytes();
   });
 
   installConsoleHooks();
@@ -159,6 +180,15 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     }
 
     schedulePendingCaptureFlush();
+  }
+
+  function emitPrivacyViolation(blockedRawType: string, reason: string): void {
+    emit("privacyViolation", {
+      blockedRawType,
+      reason,
+      policyMode: capturePolicy.mode,
+      redacted: true
+    });
   }
 
   function schedulePendingCaptureFlush(): void {
@@ -291,14 +321,29 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         }
 
         const level = consoleMethodToLevel(method);
+        const basePayload = {
+          source: "injected",
+          method,
+          level,
+          redacted: capturePolicy.categories.console !== "allow"
+        };
+
+        if (capturePolicy.categories.console === "off") {
+          emitPrivacyViolation("console", "console-disabled");
+          return Reflect.apply(original, console, args);
+        }
+
+        if (capturePolicy.categories.console === "metadata") {
+          emit("console", basePayload);
+          return Reflect.apply(original, console, args);
+        }
+
         const serializedArgs = args.slice(0, 10).map((value) => safeSerialize(value));
         const includeStack =
           method === "error" || method === "warn" || method === "assert" || method === "trace";
 
         emit("console", {
-          source: "injected",
-          method,
-          level,
+          ...basePayload,
           args: serializedArgs,
           text: formatConsoleText(serializedArgs),
           stackTop: includeStack ? readStackTop() : undefined
@@ -393,9 +438,25 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         return;
       }
 
+      if (capturePolicy.categories.console === "off") {
+        emitPrivacyViolation("pageError", "console-disabled");
+        return;
+      }
+
+      if (capturePolicy.categories.console === "metadata") {
+        emit("pageError", {
+          filename: sanitizeOptionalUrl(event.filename),
+          lineno: event.lineno,
+          colno: event.colno,
+          messageRedacted: true,
+          stackRedacted: true
+        });
+        return;
+      }
+
       emit("pageError", {
         message: event.message,
-        filename: event.filename,
+        filename: sanitizeOptionalUrl(event.filename),
         lineno: event.lineno,
         colno: event.colno,
         stack: event.error instanceof Error ? event.error.stack : undefined
@@ -404,6 +465,18 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
     window.addEventListener("unhandledrejection", (event) => {
       if (!captureActive) {
+        return;
+      }
+
+      if (capturePolicy.categories.console === "off") {
+        emitPrivacyViolation("unhandledrejection", "console-disabled");
+        return;
+      }
+
+      if (capturePolicy.categories.console === "metadata") {
+        emit("unhandledrejection", {
+          reasonRedacted: true
+        });
         return;
       }
 
@@ -421,11 +494,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       localStorage.setItem = (key: string, value: string) => {
         if (captureActive) {
-          emit("localStorageOp", {
-            op: "setItem",
-            key,
-            valueLength: value.length
-          });
+          emitStorageOperation("localStorageOp", "setItem", key, value.length);
         }
 
         localSetItem(key, value);
@@ -433,10 +502,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       localStorage.removeItem = (key: string) => {
         if (captureActive) {
-          emit("localStorageOp", {
-            op: "removeItem",
-            key
-          });
+          emitStorageOperation("localStorageOp", "removeItem", key);
         }
 
         localRemoveItem(key);
@@ -444,9 +510,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       localStorage.clear = () => {
         if (captureActive) {
-          emit("localStorageOp", {
-            op: "clear"
-          });
+          emitStorageOperation("localStorageOp", "clear");
         }
 
         localClear();
@@ -462,11 +526,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       sessionStorage.setItem = (key: string, value: string) => {
         if (captureActive) {
-          emit("sessionStorageOp", {
-            op: "setItem",
-            key,
-            valueLength: value.length
-          });
+          emitStorageOperation("sessionStorageOp", "setItem", key, value.length);
         }
 
         sessionSetItem(key, value);
@@ -474,10 +534,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       sessionStorage.removeItem = (key: string) => {
         if (captureActive) {
-          emit("sessionStorageOp", {
-            op: "removeItem",
-            key
-          });
+          emitStorageOperation("sessionStorageOp", "removeItem", key);
         }
 
         sessionRemoveItem(key);
@@ -485,9 +542,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
       sessionStorage.clear = () => {
         if (captureActive) {
-          emit("sessionStorageOp", {
-            op: "clear"
-          });
+          emitStorageOperation("sessionStorageOp", "clear");
         }
 
         sessionClear();
@@ -495,6 +550,39 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     } catch {
       emit("notice", { message: "sessionStorage-hook-failed" });
     }
+  }
+
+  function emitStorageOperation(
+    rawType: "localStorageOp" | "sessionStorageOp",
+    op: string,
+    key?: string,
+    valueLength?: number
+  ): void {
+    const mode = capturePolicy.categories.storage;
+
+    if (mode === "off") {
+      emitPrivacyViolation(rawType, "storage-disabled");
+      return;
+    }
+
+    const payload: CapturePayload = {
+      op,
+      redacted: mode !== "allow"
+    };
+
+    if (key && (mode === "allow" || mode === "names-only")) {
+      payload.key = key;
+    } else if (key) {
+      payload.keyRedacted = true;
+    }
+
+    if (typeof valueLength === "number" && (mode === "allow" || mode === "lengths-only")) {
+      payload.valueLength = valueLength;
+    } else if (typeof valueLength === "number") {
+      payload.valueLengthRedacted = true;
+    }
+
+    emit(rawType, payload);
   }
 
   function installNetworkHooks(): void {
@@ -515,7 +603,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
         requestId: reqId,
         method: requestMeta.method,
         url: sanitizeOptionalUrl(requestMeta.url),
-        headers: requestMeta.headers,
+        headers: shouldCaptureNetworkHeaders() ? requestMeta.headers : undefined,
         postDataSize: requestMeta.postDataSize
       });
 
@@ -536,7 +624,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           redirected: response.redirected,
           responseUrl: sanitizeOptionalUrl(response.url),
           mimeType: contentType,
-          headers: readHeaders(response.headers),
+          headers: shouldCaptureNetworkHeaders() ? readHeaders(response.headers) : undefined,
           encodedDataLength,
           duration: monotonicTime() - startedMono
         });
@@ -710,7 +798,9 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
             status: this.status,
             statusText: this.statusText,
             ok: this.status >= 200 && this.status < 400,
-            headers: parseXhrResponseHeaders(this.getAllResponseHeaders()),
+            headers: shouldCaptureNetworkHeaders()
+              ? parseXhrResponseHeaders(this.getAllResponseHeaders())
+              : undefined,
             mimeType: contentType,
             encodedDataLength: parseHeaderInt(this.getResponseHeader("content-length")),
             failed: Boolean(xhr.__wbFailed),
@@ -752,6 +842,9 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
           });
 
           this.addEventListener("message", (event) => {
+            const data =
+              typeof event.data === "string" ? event.data.slice(0, 800) : safeSerialize(event.data);
+
             emit("sse", {
               phase: "message",
               url,
@@ -759,10 +852,12 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
               requestId: streamId,
               eventType: event.type,
               lastEventId: event.lastEventId,
-              data:
-                typeof event.data === "string"
-                  ? event.data.slice(0, 800)
-                  : safeSerialize(event.data)
+              ...(capturePolicy.categories.network === "body-allowlist"
+                ? { data }
+                : {
+                    dataRedacted: true,
+                    dataSize: typeof event.data === "string" ? event.data.length : undefined
+                  })
             });
           });
 
@@ -1099,6 +1194,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     );
   }
 
+  function shouldCaptureNetworkHeaders(): boolean {
+    return capturePolicy.categories.network !== "metadata";
+  }
+
   function nextRequestId(prefix: "fetch" | "xhr" | "sse"): string {
     networkRequestSeq += 1;
     return `${prefix}-${Date.now().toString(36)}-${networkRequestSeq.toString(36)}`;
@@ -1113,6 +1212,12 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       4 * 1024,
       Math.min(8 * 1024 * 1024, Math.round(candidate ?? NETWORK_BODY_CAPTURE_DEFAULT_MAX_BYTES))
     );
+  }
+
+  function resolveNetworkBodyCaptureMaxBytes(): number {
+    return capturePolicy.categories.network === "body-allowlist"
+      ? configuredNetworkBodyCaptureMaxBytes
+      : 0;
   }
 
   function resolveFetchRequestMeta(args: Parameters<typeof fetch>): {

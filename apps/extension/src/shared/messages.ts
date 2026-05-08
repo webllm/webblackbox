@@ -1,5 +1,6 @@
 import type {
   CaptureMode,
+  CapturePolicy,
   ExportPolicy,
   FreezeReason,
   SamplingProfile
@@ -90,6 +91,7 @@ export type RecordingStatusMessage = {
     | "screenshotIdleMs"
     | "bodyCaptureMaxBytes"
   >;
+  capturePolicy?: CapturePolicy;
 };
 
 export type FreezeNoticeMessage = {

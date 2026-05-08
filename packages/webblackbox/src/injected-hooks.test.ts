@@ -2,6 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
+
 import {
   INJECTED_CAPTURE_CONFIG_EVENT,
   INJECTED_MESSAGE_SOURCE,
@@ -15,6 +17,17 @@ type CaptureEventMessage = {
   payload: Record<string, unknown>;
   t: number;
   mono: number;
+};
+
+const DETAILED_TEST_CAPTURE_POLICY: CapturePolicy = {
+  ...DEFAULT_CAPTURE_POLICY,
+  mode: "debug",
+  categories: {
+    ...DEFAULT_CAPTURE_POLICY.categories,
+    console: "allow",
+    network: "body-allowlist",
+    storage: "allow"
+  }
 };
 
 function delay(ms: number): Promise<void> {
@@ -88,9 +101,11 @@ describe("injected-hooks", () => {
     expect(event?.payload).toMatchObject({
       source: "injected",
       method: "info",
-      level: "info"
+      level: "info",
+      redacted: true
     });
-    expect(String((event?.payload as { text?: unknown }).text ?? "")).toContain(markerText);
+    expect((event?.payload as { text?: unknown }).text).toBeUndefined();
+    expect((event?.payload as { args?: unknown }).args).toBeUndefined();
   });
 
   it("captures fetch start/end and sampled response body", async () => {
@@ -107,7 +122,8 @@ describe("injected-hooks", () => {
 
     installInjectedLiteCaptureHooks({
       flag,
-      bodyCaptureMaxBytes: 128 * 1024
+      bodyCaptureMaxBytes: 128 * 1024,
+      capturePolicy: DETAILED_TEST_CAPTURE_POLICY
     });
 
     await window.fetch("https://example.test/api/demo/123?token=secret#frag", {
@@ -177,7 +193,8 @@ describe("injected-hooks", () => {
     window.dispatchEvent(
       new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
         detail: {
-          bodyCaptureMaxBytes: 64 * 1024
+          bodyCaptureMaxBytes: 64 * 1024,
+          capturePolicy: DETAILED_TEST_CAPTURE_POLICY
         }
       })
     );
@@ -268,7 +285,7 @@ describe("injected-hooks", () => {
 
   it("serializes invalid Date values without throwing", async () => {
     const flag = "__WB_TEST_INJECTED_INVALID_DATE__";
-    installInjectedLiteCaptureHooks({ flag });
+    installInjectedLiteCaptureHooks({ flag, capturePolicy: DETAILED_TEST_CAPTURE_POLICY });
 
     expect(() => {
       console.log(new Date("this-is-not-a-date"));
@@ -287,7 +304,7 @@ describe("injected-hooks", () => {
 
   it("handles objects with throwing getters without breaking console", async () => {
     const flag = "__WB_TEST_INJECTED_THROWING_GETTER__";
-    installInjectedLiteCaptureHooks({ flag });
+    installInjectedLiteCaptureHooks({ flag, capturePolicy: DETAILED_TEST_CAPTURE_POLICY });
 
     const value: Record<string, unknown> = {};
     Object.defineProperty(value, "boom", {

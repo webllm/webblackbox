@@ -120,7 +120,8 @@ export class WebBlackboxLiteSdk {
       installInjectedLiteCaptureHooks({
         flag: options.injectHookFlag,
         active: false,
-        bodyCaptureMaxBytes: this.config.sampling.bodyCaptureMaxBytes
+        bodyCaptureMaxBytes: this.config.sampling.bodyCaptureMaxBytes,
+        capturePolicy: this.config.capturePolicy
       });
     }
   }
@@ -186,7 +187,8 @@ export class WebBlackboxLiteSdk {
       sid: this.sid,
       tabId: this.tabId,
       mode: "lite",
-      sampling: this.config.sampling
+      sampling: this.config.sampling,
+      capturePolicy: this.config.capturePolicy
     });
   }
 
@@ -206,7 +208,8 @@ export class WebBlackboxLiteSdk {
         sid: this.sid,
         tabId: this.tabId,
         mode: "lite",
-        sampling: this.config.sampling
+        sampling: this.config.sampling,
+        capturePolicy: this.config.capturePolicy
       });
     }
 
@@ -440,7 +443,8 @@ export class WebBlackboxLiteSdk {
       new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
         detail: {
           active,
-          bodyCaptureMaxBytes: active ? this.config.sampling.bodyCaptureMaxBytes : 0
+          bodyCaptureMaxBytes: active ? this.config.sampling.bodyCaptureMaxBytes : 0,
+          capturePolicy: this.config.capturePolicy
         }
       })
     );
