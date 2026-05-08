@@ -55,10 +55,12 @@ const REQUIRED_BUILD_FILES = [
   "icon/128.png"
 ];
 
+export const EXTENSION_MANIFEST_PROFILES = ["dev", "store-safe"];
+
 // Cookie snapshots are collected through the CDP Storage domain via `debugger`,
 // and persistent host access comes from `<all_urls>`, so neither `cookies`
-// nor `activeTab` belongs in the required permission set.
-const PERMISSIONS = [
+// nor `activeTab` belongs in the dev/enterprise permission set.
+const DEV_PERMISSIONS = [
   "debugger",
   "downloads",
   "offscreen",
@@ -67,6 +69,7 @@ const PERMISSIONS = [
   "tabs",
   "webRequest"
 ];
+const STORE_SAFE_PERMISSIONS = ["activeTab", "downloads", "offscreen", "scripting", "storage"];
 const URL_MATCHES = ["<all_urls>"];
 const ARCHIVE_FIXED_DATE = new Date("1980-01-01T00:00:00.000Z");
 const ARCHIVE_EXCLUDED_FILE_NAMES = new Set([".DS_Store"]);
@@ -84,8 +87,10 @@ async function readAppPackage() {
   return readJson(packageJsonPath);
 }
 
-export function createExtensionManifest({ version, release = false }) {
-  return {
+export function createExtensionManifest({ version, release = false, profile = "dev" }) {
+  const normalizedProfile = normalizeManifestProfile(profile);
+  const storeSafe = normalizedProfile === "store-safe";
+  const manifest = {
     manifest_version: 3,
     default_locale: EXTENSION_DEFAULT_LOCALE,
     name: EXTENSION_NAME,
@@ -93,8 +98,8 @@ export function createExtensionManifest({ version, release = false }) {
     version,
     ...(release ? {} : { key: EXTENSION_DEVELOPMENT_KEY }),
     minimum_chrome_version: EXTENSION_MINIMUM_CHROME_VERSION,
-    permissions: [...PERMISSIONS],
-    host_permissions: [...URL_MATCHES],
+    permissions: storeSafe ? [...STORE_SAFE_PERMISSIONS] : [...DEV_PERMISSIONS],
+    ...(storeSafe ? {} : { host_permissions: [...URL_MATCHES] }),
     background: {
       service_worker: "sw.js",
       type: "module"
@@ -116,14 +121,6 @@ export function createExtensionManifest({ version, release = false }) {
       }
     },
     options_page: "options.html",
-    content_scripts: [
-      {
-        matches: [...URL_MATCHES],
-        js: ["content.js"],
-        all_frames: true,
-        run_at: "document_start"
-      }
-    ],
     web_accessible_resources: [
       {
         resources: ["content-agent.js", "injected.js"],
@@ -143,10 +140,28 @@ export function createExtensionManifest({ version, release = false }) {
       }
     }
   };
+
+  if (!storeSafe) {
+    manifest.content_scripts = [
+      {
+        matches: [...URL_MATCHES],
+        js: ["content.js"],
+        all_frames: true,
+        run_at: "document_start"
+      }
+    ];
+  }
+
+  return manifest;
 }
 
-export function validateExtensionManifest(manifest, { version, release = false } = {}) {
+export function validateExtensionManifest(
+  manifest,
+  { version, release = false, profile = "dev" } = {}
+) {
   const issues = [];
+  const normalizedProfile = normalizeManifestProfile(profile);
+  const storeSafe = normalizedProfile === "store-safe";
 
   if (manifest?.manifest_version !== 3) {
     issues.push("manifest_version must be 3.");
@@ -191,7 +206,13 @@ export function validateExtensionManifest(manifest, { version, release = false }
   }
 
   validateUniqueStringArray(manifest?.permissions, "permissions", issues);
-  validateUniqueStringArray(manifest?.host_permissions, "host_permissions", issues);
+
+  if (storeSafe) {
+    validateStoreSafeManifest(manifest, issues);
+  } else {
+    validateUniqueStringArray(manifest?.host_permissions, "host_permissions", issues);
+    validateDevManifest(manifest, issues);
+  }
 
   return issues;
 }
@@ -206,7 +227,7 @@ export async function copyPublicAssets(outputDir) {
   );
 }
 
-export async function writeGeneratedManifest(outputDir, { release = false } = {}) {
+export async function writeGeneratedManifest(outputDir, { release = false, profile = "dev" } = {}) {
   const appPackage = await readAppPackage();
   const version =
     typeof appPackage?.version === "string" && appPackage.version.length > 0
@@ -217,8 +238,8 @@ export async function writeGeneratedManifest(outputDir, { release = false } = {}
     throw new Error(`Missing version in ${packageJsonPath}`);
   }
 
-  const manifest = createExtensionManifest({ version, release });
-  const issues = validateExtensionManifest(manifest, { version, release });
+  const manifest = createExtensionManifest({ version, release, profile });
+  const issues = validateExtensionManifest(manifest, { version, release, profile });
 
   if (issues.length > 0) {
     throw new Error(`Generated manifest is invalid:\n- ${issues.join("\n- ")}`);
@@ -228,13 +249,18 @@ export async function writeGeneratedManifest(outputDir, { release = false } = {}
   return manifest;
 }
 
-export async function assertExtensionBuild(outputDir, { version, release = false } = {}) {
+export async function assertExtensionBuild(outputDir, { version, release = false, profile } = {}) {
   await Promise.all(
     REQUIRED_BUILD_FILES.map((file) => access(resolve(outputDir, file), constants.R_OK))
   );
 
   const manifest = await readJson(resolve(outputDir, "manifest.json"));
-  const issues = validateExtensionManifest(manifest, { version, release });
+  const resolvedProfile = profile ?? inferManifestProfile(manifest);
+  const issues = validateExtensionManifest(manifest, {
+    version,
+    release,
+    profile: resolvedProfile
+  });
 
   if (issues.length > 0) {
     throw new Error(`Build output manifest is invalid:\n- ${issues.join("\n- ")}`);
@@ -243,10 +269,14 @@ export async function assertExtensionBuild(outputDir, { version, release = false
   return manifest;
 }
 
-export async function prepareBuildOutput({ outputDir = buildDir, release = false } = {}) {
+export async function prepareBuildOutput({
+  outputDir = buildDir,
+  release = false,
+  profile = "dev"
+} = {}) {
   await copyPublicAssets(outputDir);
-  const manifest = await writeGeneratedManifest(outputDir, { release });
-  await assertExtensionBuild(outputDir, { version: manifest.version, release });
+  const manifest = await writeGeneratedManifest(outputDir, { release, profile });
+  await assertExtensionBuild(outputDir, { version: manifest.version, release, profile });
   return manifest;
 }
 
@@ -259,15 +289,28 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
       ? sourceManifest.version
       : null;
   const sourceReleaseBuild = !Object.hasOwn(sourceManifest ?? {}, "key");
+  const sourceProfile = inferManifestProfile(sourceManifest);
 
   if (!version) {
     throw new Error(`Missing manifest version in ${resolve(sourceDir, "manifest.json")}`);
   }
 
-  await assertExtensionBuild(sourceDir, { version, release: sourceReleaseBuild });
+  await assertExtensionBuild(sourceDir, {
+    version,
+    release: sourceReleaseBuild,
+    profile: sourceProfile
+  });
 
-  const releaseManifest = createExtensionManifest({ version, release: true });
-  const releaseIssues = validateExtensionManifest(releaseManifest, { version, release: true });
+  const releaseManifest = createExtensionManifest({
+    version,
+    release: true,
+    profile: sourceProfile
+  });
+  const releaseIssues = validateExtensionManifest(releaseManifest, {
+    version,
+    release: true,
+    profile: sourceProfile
+  });
 
   if (releaseIssues.length > 0) {
     throw new Error(`Release manifest is invalid:\n- ${releaseIssues.join("\n- ")}`);
@@ -348,6 +391,83 @@ function validateUniqueStringArray(value, fieldName, issues) {
 
     seen.add(entry);
   }
+}
+
+function validateStoreSafeManifest(manifest, issues) {
+  const permissions = new Set(manifest?.permissions ?? []);
+
+  if (permissions.has("debugger")) {
+    issues.push("Store-safe manifest must not request the debugger permission.");
+  }
+
+  if (permissions.has("tabs") || permissions.has("webRequest")) {
+    issues.push("Store-safe manifest must not request persistent tabs or webRequest access.");
+  }
+
+  if (!permissions.has("activeTab")) {
+    issues.push("Store-safe manifest must request activeTab for user-gesture scoped capture.");
+  }
+
+  if (Array.isArray(manifest?.host_permissions) && manifest.host_permissions.length > 0) {
+    issues.push("Store-safe manifest must not declare persistent host_permissions.");
+  }
+
+  if (Array.isArray(manifest?.content_scripts) && manifest.content_scripts.length > 0) {
+    issues.push("Store-safe manifest must not declare static content_scripts.");
+  }
+}
+
+function validateDevManifest(manifest, issues) {
+  const permissions = new Set(manifest?.permissions ?? []);
+
+  for (const permission of DEV_PERMISSIONS) {
+    if (!permissions.has(permission)) {
+      issues.push(`Dev manifest must include '${permission}' permission.`);
+    }
+  }
+
+  if (!Array.isArray(manifest?.host_permissions)) {
+    return;
+  }
+
+  if (!manifest.host_permissions.includes("<all_urls>")) {
+    issues.push("Dev manifest must include <all_urls> host permission.");
+  }
+
+  const contentScripts = Array.isArray(manifest?.content_scripts) ? manifest.content_scripts : [];
+  const hasAllSitesContentScript = contentScripts.some(
+    (entry) =>
+      Array.isArray(entry?.matches) &&
+      entry.matches.includes("<all_urls>") &&
+      Array.isArray(entry?.js) &&
+      entry.js.includes("content.js")
+  );
+
+  if (!hasAllSitesContentScript) {
+    issues.push("Dev manifest must include the all-sites content script.");
+  }
+}
+
+function normalizeManifestProfile(profile) {
+  if (EXTENSION_MANIFEST_PROFILES.includes(profile)) {
+    return profile;
+  }
+
+  throw new Error(`Unknown extension manifest profile: ${profile}`);
+}
+
+function inferManifestProfile(manifest) {
+  const permissions = new Set(manifest?.permissions ?? []);
+  const hasHostPermissions =
+    Array.isArray(manifest?.host_permissions) && manifest.host_permissions.length > 0;
+  const hasContentScripts =
+    Array.isArray(manifest?.content_scripts) && manifest.content_scripts.length > 0;
+
+  if (!permissions.has("debugger") && !hasHostPermissions && !hasContentScripts) {
+    return "store-safe";
+  }
+
+  return "dev";
 }
 
 async function removeStaleArchives(directory, slug, keepPath) {

@@ -26,6 +26,29 @@ describe("extension build manifest", () => {
     expect(validateExtensionManifest(manifest, { version: "1.2.3" })).toEqual([]);
   });
 
+  it("creates a store-safe manifest without broad capture permissions", () => {
+    const manifest = createExtensionManifest({
+      version: "1.2.3",
+      release: true,
+      profile: "store-safe"
+    });
+
+    expect(manifest).not.toHaveProperty("key");
+    expect(manifest.permissions).toContain("activeTab");
+    expect(manifest.permissions).not.toContain("debugger");
+    expect(manifest.permissions).not.toContain("tabs");
+    expect(manifest.permissions).not.toContain("webRequest");
+    expect(manifest).not.toHaveProperty("host_permissions");
+    expect(manifest).not.toHaveProperty("content_scripts");
+    expect(
+      validateExtensionManifest(manifest, {
+        version: "1.2.3",
+        release: true,
+        profile: "store-safe"
+      })
+    ).toEqual([]);
+  });
+
   it("creates a release manifest without the development key", () => {
     const manifest = createExtensionManifest({ version: "1.2.3", release: true });
 
@@ -74,6 +97,38 @@ describe("extension build manifest", () => {
       expect(packagedManifest.version).toBe("1.2.3");
       expect(packagedManifest).not.toHaveProperty("key");
       expect(zip.file("popup.js")).toBeTruthy();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("packages store-safe archives without reintroducing broad permissions", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-store-test-"));
+    const sourceDir = resolve(root, "build");
+    const archivePath = resolve(root, "archive.zip");
+
+    try {
+      await writeBuildFixture(
+        sourceDir,
+        createExtensionManifest({
+          version: "1.2.3",
+          profile: "store-safe"
+        })
+      );
+
+      const archive = await createChromeArchive({
+        sourceDir,
+        outputPath: archivePath
+      });
+
+      const zip = await JSZip.loadAsync(await readFile(archive.path));
+      const packagedManifest = JSON.parse(await zip.file("manifest.json").async("text"));
+
+      expect(packagedManifest).not.toHaveProperty("key");
+      expect(packagedManifest.permissions).not.toContain("debugger");
+      expect(packagedManifest.permissions).not.toContain("webRequest");
+      expect(packagedManifest).not.toHaveProperty("host_permissions");
+      expect(packagedManifest).not.toHaveProperty("content_scripts");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

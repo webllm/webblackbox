@@ -7,17 +7,22 @@ const outputDir = options.outputDir ? resolve(process.cwd(), options.outputDir) 
 
 const manifest = await prepareBuildOutput({
   outputDir,
-  release: options.release
+  release: options.release,
+  profile: options.profile
 });
 
 const result = {
   ok: true,
   outputDir,
   release: options.release,
+  profile: options.profile,
   manifest: {
     version: manifest.version,
     hasKey: Object.hasOwn(manifest, "key"),
-    csp: manifest.content_security_policy?.extension_pages ?? null
+    csp: manifest.content_security_policy?.extension_pages ?? null,
+    permissions: manifest.permissions ?? [],
+    hostPermissions: manifest.host_permissions ?? [],
+    hasStaticContentScripts: Array.isArray(manifest.content_scripts)
   }
 };
 
@@ -31,16 +36,21 @@ if (options.packageArchive) {
 console.info(JSON.stringify(result, null, 2));
 
 function parseArgs(args) {
-  const knownFlags = new Set(["--package", "--release", "--output", "--output-dir"]);
+  const knownFlags = new Set(["--package", "--profile", "--release", "--output", "--output-dir"]);
   const release = args.includes("--release");
   const packageArchive = args.includes("--package");
   const outputDir = readFlagValue(args, "--output-dir");
   const outputPath = readFlagValue(args, "--output");
+  const profile = readFlagValue(args, "--profile") ?? "dev";
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
 
-    if (arg.startsWith("--output=") || arg.startsWith("--output-dir=")) {
+    if (
+      arg.startsWith("--output=") ||
+      arg.startsWith("--output-dir=") ||
+      arg.startsWith("--profile=")
+    ) {
       continue;
     }
 
@@ -48,7 +58,10 @@ function parseArgs(args) {
       throw new Error(`Unknown argument: ${arg}`);
     }
 
-    if ((arg === "--output" || arg === "--output-dir") && !args[index + 1]?.startsWith("--")) {
+    if (
+      (arg === "--output" || arg === "--output-dir" || arg === "--profile") &&
+      !args[index + 1]?.startsWith("--")
+    ) {
       index += 1;
     }
   }
@@ -56,6 +69,7 @@ function parseArgs(args) {
   return {
     release,
     packageArchive,
+    profile,
     outputDir,
     outputPath
   };
