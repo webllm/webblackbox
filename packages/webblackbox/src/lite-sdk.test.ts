@@ -108,11 +108,22 @@ function createNoisyPayload(size: number, seed: number): string {
   return output;
 }
 
-const HIGH_FIDELITY_TEST_POLICY: CapturePolicy = {
+const LOCAL_DEBUG_TEST_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
+  captureContext: "local-debug",
+  captureContextEvidenceRef: "test-fixture",
+  encryption: {
+    localAtRest: "required",
+    archive: "synthetic-local-debug-exempt",
+    archiveKeyEnvelope: "none"
+  }
+};
+
+const HIGH_FIDELITY_TEST_POLICY: CapturePolicy = {
+  ...LOCAL_DEBUG_TEST_POLICY,
   mode: "debug",
   categories: {
-    ...DEFAULT_CAPTURE_POLICY.categories,
+    ...LOCAL_DEBUG_TEST_POLICY.categories,
     dom: "allow",
     screenshots: "allow",
     network: "body-allowlist",
@@ -225,7 +236,10 @@ describe("WebBlackboxLiteSdk", () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-rrweb",
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
     });
 
     await sdk.start();
@@ -250,6 +264,26 @@ describe("WebBlackboxLiteSdk", () => {
     expect(rrwebEvent).toBeDefined();
     expect((rrwebEvent?.data as { schema?: unknown }).schema).toBe("rrweb-lite/v1");
 
+    await sdk.dispose();
+  });
+
+  it("requires encryption for default real-user exports", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-real-user-export",
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    await sdk.start();
+    sdk.ingestRawEvent(
+      createRawEvent("click", {
+        target: {
+          selector: "button#export"
+        }
+      })
+    );
+
+    await expect(sdk.export()).rejects.toThrow(/must be encrypted|required by the active/i);
     await sdk.dispose();
   });
 
@@ -290,7 +324,10 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-tab-id",
       tabId: -42,
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
     });
 
     expect(sdk.getSessionMetadata().tabId).toBe(0);
@@ -318,7 +355,10 @@ describe("WebBlackboxLiteSdk", () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-agent-batch",
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
     });
 
     await sdk.start();
@@ -497,7 +537,10 @@ describe("WebBlackboxLiteSdk", () => {
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-export-size-cap",
       injectHooks: false,
-      useDefaultPlugins: false
+      useDefaultPlugins: false,
+      config: {
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
     });
 
     await sdk.start();

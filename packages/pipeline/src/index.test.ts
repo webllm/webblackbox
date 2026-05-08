@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 
-import type { SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
+import {
+  DEFAULT_CAPTURE_POLICY,
+  type SessionMetadata,
+  type WebBlackboxEvent
+} from "@webblackbox/protocol";
 
 import { readWebBlackboxArchive } from "./exporter.js";
 import { FlightRecorderPipeline } from "./pipeline.js";
@@ -226,6 +230,24 @@ describe("pipeline", () => {
     );
 
     await expect(pipeline.exportBundle()).rejects.toThrow(/Privacy scanner blocked export/i);
+  });
+
+  it("requires encryption for real-user capture policies", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-real-user-encryption"
+      },
+      storage,
+      maxChunkBytes: 512,
+      capturePolicy: DEFAULT_CAPTURE_POLICY
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-real-user", "user.click", Date.now()));
+
+    await expect(pipeline.exportBundle()).rejects.toThrow(/encryption is required/i);
   });
 
   it("ingests batches without losing index coverage", async () => {

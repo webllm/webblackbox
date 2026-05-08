@@ -178,6 +178,7 @@ export class FlightRecorderPipeline {
   }
 
   public async exportBundle(options: ExportBundleOptions = {}): Promise<ExportResult> {
+    this.assertExportEncryptionPolicy(options);
     await this.flush();
     const hasCustomSelection =
       options.includeScreenshots === false ||
@@ -258,6 +259,28 @@ export class FlightRecorderPipeline {
       bytes,
       integrity
     };
+  }
+
+  private assertExportEncryptionPolicy(options: ExportBundleOptions): void {
+    const policy = this.options.capturePolicy;
+
+    if (!policy) {
+      return;
+    }
+
+    const hasPassphrase = typeof options.passphrase === "string" && options.passphrase.length > 0;
+
+    if (policy.encryption.archive === "required" && !hasPassphrase) {
+      throw new Error("Export encryption is required by the active capture policy.");
+    }
+
+    if (
+      policy.captureContext === "real-user" &&
+      policy.encryption.archive !== "synthetic-local-debug-exempt" &&
+      !hasPassphrase
+    ) {
+      throw new Error("Real-user archives must be encrypted before export or share.");
+    }
   }
 
   private async listSessionBlobs(): Promise<StoredBlob[]> {
