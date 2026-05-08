@@ -7,6 +7,7 @@ import type {
   ExportManifest,
   HashesManifest,
   InvertedIndexEntry,
+  PrivacyManifest,
   RequestIndexEntry,
   WebBlackboxEvent,
   WebBlackboxEventType
@@ -147,6 +148,7 @@ export type PlayerArchive = {
   requestIndex: RequestIndexEntry[];
   invertedIndex: InvertedIndexEntry[];
   integrity: HashesManifest;
+  privacyManifest: PrivacyManifest | null;
 };
 
 /** Explainable privacy posture for export/share preflight review. */
@@ -164,6 +166,11 @@ export type PrivacyProtectionReport = {
     redactedMarkers: number;
     hashedSensitiveValues: number;
     sensitiveKeyMentions: number;
+  };
+  scanner: {
+    preEncryption: boolean;
+    status: "passed" | "blocked" | "unknown";
+    findingCount: number;
   };
 };
 
@@ -560,6 +567,11 @@ export class WebBlackboxPlayer {
     const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
     await assertArchiveFileIntegrity(zip, integrity, "index/inv.json");
     const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
+    const privacyManifest = await readOptionalIntegrityJson<PrivacyManifest>(
+      zip,
+      integrity,
+      "privacy/manifest.json"
+    );
     const eventChunks = await readEventChunkSources(
       zip,
       archiveKey,
@@ -579,7 +591,8 @@ export class WebBlackboxPlayer {
         timeIndex,
         requestIndex,
         invertedIndex,
-        integrity
+        integrity,
+        privacyManifest
       },
       eventChunks,
       archiveKey,
@@ -910,7 +923,18 @@ export class WebBlackboxPlayer {
         blockedSelectors: [...profile.blockedSelectors].sort(),
         strategy: describeRedactionStrategy(profile)
       },
-      detected: counters
+      detected: counters,
+      scanner: this.archive.privacyManifest
+        ? {
+            preEncryption: this.archive.privacyManifest.scanner.preEncryption,
+            status: this.archive.privacyManifest.scanner.status,
+            findingCount: this.archive.privacyManifest.scanner.findings.length
+          }
+        : {
+            preEncryption: false,
+            status: "unknown",
+            findingCount: 0
+          }
     };
   }
 
@@ -3392,6 +3416,19 @@ function updateActionStats(span: ActionSpan, event: WebBlackboxEvent): void {
 async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   const content = await readZipFileText(zip, path);
   return JSON.parse(content) as TValue;
+}
+
+async function readOptionalIntegrityJson<TValue>(
+  zip: JSZip,
+  integrity: HashesManifest,
+  path: string
+): Promise<TValue | null> {
+  if (!zip.file(path)) {
+    return null;
+  }
+
+  await assertArchiveFileIntegrity(zip, integrity, path);
+  return readJson<TValue>(zip, path);
 }
 
 async function readZipFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {

@@ -145,7 +145,11 @@ type SessionAnnotation = {
 };
 
 type SessionPipelineClient = {
-  start: (session: SessionMetadata, redactionProfile: RedactionProfile) => Promise<void>;
+  start: (
+    session: SessionMetadata,
+    redactionProfile: RedactionProfile,
+    capturePolicy?: CapturePolicy
+  ) => Promise<void>;
   ingest: (event: WebBlackboxEvent) => Promise<void>;
   ingestBatch: (events: WebBlackboxEvent[]) => Promise<void>;
   flush: () => Promise<void>;
@@ -166,6 +170,7 @@ type OffscreenPipelineRequest = {
   sid: string;
   session?: SessionMetadata;
   redactionProfile?: RedactionProfile;
+  capturePolicy?: CapturePolicy;
   event?: WebBlackboxEvent;
   events?: WebBlackboxEvent[];
   mime?: string;
@@ -715,7 +720,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
 
   const recorderPlugins = createDefaultRecorderPlugins();
   const pipeline = createOffscreenPipelineClient(sid);
-  await pipeline.start(metadata, recorderConfig.redaction);
+  await pipeline.start(metadata, recorderConfig.redaction, recorderConfig.capturePolicy);
 
   const runtime: SessionRuntime = {
     sid,
@@ -1609,12 +1614,13 @@ async function drainPipelineBufferBatches(
 
 function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
   return {
-    start: async (session, redactionProfile) => {
+    start: async (session, redactionProfile, capturePolicy) => {
       await requestOffscreenPipeline<void>({
         op: "start",
         sid,
         session,
-        redactionProfile
+        redactionProfile,
+        capturePolicy
       });
     },
     ingest: async (event) => {
@@ -1865,7 +1871,8 @@ async function recoverOffscreenSession(sid: string): Promise<void> {
       op: "start",
       sid,
       session: toSessionMetadata(runtime),
-      redactionProfile: runtime.config.redaction
+      redactionProfile: runtime.config.redaction,
+      capturePolicy: runtime.config.capturePolicy
     });
     notifyOffscreenPipelineStatus();
   })()

@@ -201,6 +201,31 @@ describe("pipeline", () => {
     expect(parsed.manifest.site.origin).toBe("https://app.example.test/users/:id/orders/:id");
     expect(JSON.stringify(parsed.manifest)).not.toContain("alice@example.test");
     expect(JSON.stringify(parsed.manifest)).not.toContain("token=secret");
+    expect(parsed.privacyManifest?.scanner.preEncryption).toBe(true);
+    expect(parsed.privacyManifest?.scanner.status).toBe("passed");
+    expect(parsed.privacyManifest?.totals.events).toBe(1);
+    expect(parsed.integrity?.files["privacy/manifest.json"]).toMatch(/[a-f0-9]{64}/);
+  });
+
+  it("blocks export when the plaintext scanner finds raw secrets", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-scanner-block"
+      },
+      storage,
+      maxChunkBytes: 512
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-secret", "console.entry", Date.now(), {
+        text: "Authorization: Bearer wbb_test_provider_token_000000000000"
+      })
+    );
+
+    await expect(pipeline.exportBundle()).rejects.toThrow(/Privacy scanner blocked export/i);
   });
 
   it("ingests batches without losing index coverage", async () => {
@@ -571,6 +596,8 @@ describe("pipeline", () => {
 
     expect(parsed.events.length).toBeGreaterThanOrEqual(2);
     expect(parsed.manifest.encryption?.algorithm).toBe("AES-GCM");
+    expect(parsed.privacyManifest?.scanner.preEncryption).toBe(true);
+    expect(parsed.privacyManifest?.encryption.archive).toBe("encrypted");
     expect(
       Object.keys(parsed.manifest.encryption?.files ?? {}).some((path) =>
         path.startsWith("events/")

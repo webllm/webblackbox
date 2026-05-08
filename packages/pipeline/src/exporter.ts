@@ -9,6 +9,7 @@ import type {
   ExportManifest,
   HashesManifest,
   InvertedIndexEntry,
+  PrivacyManifest,
   RequestIndexEntry,
   WebBlackboxEvent
 } from "@webblackbox/protocol";
@@ -24,6 +25,7 @@ export type ExportBundleInput = {
   timeIndex: ChunkTimeIndexEntry[];
   requestIndex: RequestIndexEntry[];
   invertedIndex: InvertedIndexEntry[];
+  privacyManifest: PrivacyManifest;
 };
 
 export type ExportBundleOutput = {
@@ -63,6 +65,7 @@ export async function createWebBlackboxArchive(
   await addJsonFile(zip, "index/time.json", input.timeIndex, fileHashes);
   await addJsonFile(zip, "index/req.json", input.requestIndex, fileHashes);
   await addJsonFile(zip, "index/inv.json", input.invertedIndex, fileHashes);
+  await addJsonFile(zip, "privacy/manifest.json", input.privacyManifest, fileHashes);
 
   for (const blob of input.blobs) {
     const extension = inferBlobFileExtension(blob.mime);
@@ -121,6 +124,7 @@ function estimateArchivePayloadBytes(input: ExportBundleInput): number {
   total += new TextEncoder().encode(JSON.stringify(input.timeIndex)).byteLength;
   total += new TextEncoder().encode(JSON.stringify(input.requestIndex)).byteLength;
   total += new TextEncoder().encode(JSON.stringify(input.invertedIndex)).byteLength;
+  total += new TextEncoder().encode(JSON.stringify(input.privacyManifest)).byteLength;
 
   return total;
 }
@@ -131,6 +135,7 @@ export type ParsedWebBlackboxArchive = {
   timeIndex: ChunkTimeIndexEntry[];
   requestIndex: RequestIndexEntry[];
   invertedIndex: InvertedIndexEntry[];
+  privacyManifest: PrivacyManifest | null;
   integrity: HashesManifest | null;
 };
 
@@ -148,6 +153,7 @@ export async function readWebBlackboxArchive(
   const timeIndex = await readJson<ChunkTimeIndexEntry[]>(zip, "index/time.json");
   const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
   const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
+  const privacyManifest = await readOptionalJson<PrivacyManifest>(zip, "privacy/manifest.json");
 
   const eventEntries = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
@@ -177,6 +183,7 @@ export async function readWebBlackboxArchive(
     timeIndex,
     requestIndex,
     invertedIndex,
+    privacyManifest,
     integrity
   };
 }
@@ -197,6 +204,17 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
 
   if (!file) {
     throw new Error(`Archive is missing required file: ${path}`);
+  }
+
+  const content = await file.async("string");
+  return JSON.parse(content) as TValue;
+}
+
+async function readOptionalJson<TValue>(zip: JSZip, path: string): Promise<TValue | null> {
+  const file = zip.file(path);
+
+  if (!file) {
+    return null;
   }
 
   const content = await file.async("string");

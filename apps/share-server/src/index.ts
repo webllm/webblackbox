@@ -211,6 +211,15 @@ async function handleUpload(
   const archivePath = archivePathForId(id);
   const checksumSha256 = createHash("sha256").update(bytes).digest("hex");
   const summary = await buildShareSummary(bytes, passphrase);
+
+  if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
+    respondJson(response, 422, {
+      error: "Share upload blocked by privacy scanner.",
+      scanner: summary.privacy.scanner
+    });
+    return;
+  }
+
   const shareUrl = `${requestOrigin(request, requestUrl)}/share/${id}`;
   const record: ShareRecord = {
     id,

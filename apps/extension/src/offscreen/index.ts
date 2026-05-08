@@ -1,5 +1,10 @@
 import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/pipeline";
-import type { RedactionProfile, SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
+import type {
+  CapturePolicy,
+  RedactionProfile,
+  SessionMetadata,
+  WebBlackboxEvent
+} from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
@@ -12,6 +17,7 @@ type OffscreenPipelineRequest = {
   sid: string;
   session?: SessionMetadata;
   redactionProfile?: RedactionProfile;
+  capturePolicy?: CapturePolicy;
   event?: WebBlackboxEvent;
   events?: WebBlackboxEvent[];
   mime?: string;
@@ -125,7 +131,8 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       session: message.session,
       storage,
       maxChunkBytes: 512 * 1024,
-      redactionProfile: message.redactionProfile
+      redactionProfile: message.redactionProfile,
+      capturePolicy: message.capturePolicy
     });
 
     await pipeline.start();

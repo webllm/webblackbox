@@ -14,6 +14,7 @@ import {
   extractRequestIdFromPayload,
   exportManifestSchema,
   privacyClassificationSchema,
+  privacyManifestSchema,
   validateEvent,
   validateMessage,
   WEBBLACKBOX_PROTOCOL_VERSION,
@@ -136,6 +137,43 @@ describe("protocol", () => {
         redacted: true
       }).success
     ).toBe(true);
+  });
+
+  it("validates archive privacy manifests", () => {
+    const result = privacyManifestSchema.safeParse({
+      schemaVersion: 1,
+      generatedAt: "2026-02-13T00:00:00.000Z",
+      effectivePolicy: DEFAULT_CAPTURE_POLICY,
+      consent: DEFAULT_CAPTURE_POLICY.consent,
+      categories: [
+        {
+          category: "network",
+          events: 2,
+          low: 0,
+          medium: 1,
+          high: 1,
+          redacted: 2,
+          unredacted: 0
+        }
+      ],
+      scanner: {
+        scannedAt: "2026-02-13T00:00:00.000Z",
+        preEncryption: true,
+        status: "passed",
+        findings: []
+      },
+      encryption: {
+        archive: "encrypted",
+        algorithm: "AES-GCM"
+      },
+      totals: {
+        events: 2,
+        blobs: 0,
+        privacyViolations: 0
+      }
+    });
+
+    expect(result.success).toBe(true);
   });
 
   it("extracts request ids from payloads and event refs", () => {

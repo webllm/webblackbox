@@ -4,4 +4,5 @@ export * from "./exporter.js";
 export * from "./hash.js";
 export * from "./indexer.js";
 export * from "./pipeline.js";
+export * from "./privacy.js";
 export * from "./storage.js";

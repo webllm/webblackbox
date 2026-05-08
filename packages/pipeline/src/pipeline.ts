@@ -1,4 +1,5 @@
 import type {
+  CapturePolicy,
   ExportManifest,
   HashesManifest,
   InvertedIndexEntry,
@@ -15,6 +16,7 @@ import { EventChunker } from "./chunker.js";
 import { createWebBlackboxArchive } from "./exporter.js";
 import { sha256Hex } from "./hash.js";
 import { EventIndexer } from "./indexer.js";
+import { assertPrivacyScannerPassed, buildPrivacyManifest } from "./privacy.js";
 import type { PipelineStorage, StoredBlob, StoredChunk } from "./storage.js";
 
 export type FlightRecorderPipelineOptions = {
@@ -23,6 +25,7 @@ export type FlightRecorderPipelineOptions = {
   maxChunkBytes?: number;
   chunkCodec?: (typeof CHUNK_CODECS)[number];
   redactionProfile?: RedactionProfile;
+  capturePolicy?: CapturePolicy;
 };
 
 export type ExportResult = {
@@ -186,6 +189,14 @@ export class FlightRecorderPipeline {
       const chunks = await this.options.storage.listChunks(this.options.session.sid);
       const blobs = await this.listReferencedSessionBlobsFromChunks(chunks);
       const manifest = this.buildManifest(chunks, blobs.length);
+      const events = await this.decodeEventsFromChunks(chunks);
+      const privacyManifest = await buildPrivacyManifest({
+        events,
+        blobs,
+        capturePolicy: this.options.capturePolicy,
+        encrypted: typeof options.passphrase === "string" && options.passphrase.length > 0
+      });
+      assertPrivacyScannerPassed(privacyManifest.scanner);
 
       const { bytes, integrity } = await createWebBlackboxArchive(
         {
@@ -194,7 +205,8 @@ export class FlightRecorderPipeline {
           blobs,
           timeIndex: indexes.time,
           requestIndex: indexes.request,
-          invertedIndex: indexes.inverted
+          invertedIndex: indexes.inverted,
+          privacyManifest
         },
         {
           passphrase: options.passphrase
@@ -457,6 +469,14 @@ export class FlightRecorderPipeline {
   ): Promise<Awaited<ReturnType<typeof createWebBlackboxArchive>>> {
     const exportData = this.buildExportSnapshot(selectedChunks, blobsByHash);
     const manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
+    const events = selectedChunks.flatMap((chunk) => chunk.events);
+    const privacyManifest = await buildPrivacyManifest({
+      events,
+      blobs: exportData.blobs,
+      capturePolicy: this.options.capturePolicy,
+      encrypted: typeof passphrase === "string" && passphrase.length > 0
+    });
+    assertPrivacyScannerPassed(privacyManifest.scanner);
 
     return createWebBlackboxArchive(
       {
@@ -465,7 +485,8 @@ export class FlightRecorderPipeline {
         blobs: exportData.blobs,
         timeIndex: exportData.indexes.time,
         requestIndex: exportData.indexes.request,
-        invertedIndex: exportData.indexes.inverted
+        invertedIndex: exportData.indexes.inverted,
+        privacyManifest
       },
       {
         passphrase
@@ -565,6 +586,16 @@ export class FlightRecorderPipeline {
     }
 
     return indexer.snapshot();
+  }
+
+  private async decodeEventsFromChunks(chunks: StoredChunk[]): Promise<WebBlackboxEvent[]> {
+    const events: WebBlackboxEvent[] = [];
+
+    for (const chunk of chunks) {
+      events.push(...(await decodeChunkEvents(chunk.bytes, chunk.meta.codec)));
+    }
+
+    return events;
   }
 
   private buildManifest(chunks: StoredChunk[], blobCount: number): ExportManifest {

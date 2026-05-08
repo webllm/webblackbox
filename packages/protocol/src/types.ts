@@ -234,6 +234,62 @@ export type ExportEncryption = {
   >;
 };
 
+export type PrivacyScannerFindingKind =
+  | "jwt"
+  | "bearer-token"
+  | "api-key"
+  | "oauth-code"
+  | "session-cookie"
+  | "email"
+  | "phone"
+  | "credit-card"
+  | "ssn"
+  | "private-key"
+  | "long-secret";
+
+export type PrivacyScannerFinding = {
+  kind: PrivacyScannerFindingKind;
+  severity: "high";
+  path: string;
+  matchCount: number;
+  sampleSha256: string;
+};
+
+export type PrivacyScannerResult = {
+  scannedAt: string;
+  preEncryption: boolean;
+  status: "passed" | "blocked";
+  findings: PrivacyScannerFinding[];
+};
+
+export type PrivacyManifestCategorySummary = {
+  category: PrivacyDataCategory;
+  events: number;
+  low: number;
+  medium: number;
+  high: number;
+  redacted: number;
+  unredacted: number;
+};
+
+export type PrivacyManifest = {
+  schemaVersion: 1;
+  generatedAt: string;
+  effectivePolicy?: CapturePolicy;
+  consent?: CaptureConsent;
+  categories: PrivacyManifestCategorySummary[];
+  scanner: PrivacyScannerResult;
+  encryption: {
+    archive: "encrypted" | "plaintext";
+    algorithm?: ExportEncryption["algorithm"];
+  };
+  totals: {
+    events: number;
+    blobs: number;
+    privacyViolations: number;
+  };
+};
+
 export type ExportManifest = {
   protocolVersion: 1;
   createdAt: string;

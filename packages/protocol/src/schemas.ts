@@ -277,6 +277,73 @@ export const exportEncryptionSchema = z
   })
   .strict();
 
+export const privacyScannerFindingSchema = z
+  .object({
+    kind: z.enum([
+      "jwt",
+      "bearer-token",
+      "api-key",
+      "oauth-code",
+      "session-cookie",
+      "email",
+      "phone",
+      "credit-card",
+      "ssn",
+      "private-key",
+      "long-secret"
+    ]),
+    severity: z.literal("high"),
+    path: z.string().min(1),
+    matchCount: z.number().int().positive(),
+    sampleSha256: z.string().regex(/^[a-f0-9]{64}$/)
+  })
+  .strict();
+
+export const privacyScannerResultSchema = z
+  .object({
+    scannedAt: z.string().datetime(),
+    preEncryption: z.boolean(),
+    status: z.enum(["passed", "blocked"]),
+    findings: z.array(privacyScannerFindingSchema)
+  })
+  .strict();
+
+export const privacyManifestCategorySummarySchema = z
+  .object({
+    category: privacyClassificationSchema.shape.category,
+    events: z.number().int().nonnegative(),
+    low: z.number().int().nonnegative(),
+    medium: z.number().int().nonnegative(),
+    high: z.number().int().nonnegative(),
+    redacted: z.number().int().nonnegative(),
+    unredacted: z.number().int().nonnegative()
+  })
+  .strict();
+
+export const privacyManifestSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    generatedAt: z.string().datetime(),
+    effectivePolicy: capturePolicySchema.optional(),
+    consent: captureConsentSchema.optional(),
+    categories: z.array(privacyManifestCategorySummarySchema),
+    scanner: privacyScannerResultSchema,
+    encryption: z
+      .object({
+        archive: z.enum(["encrypted", "plaintext"]),
+        algorithm: z.literal("AES-GCM").optional()
+      })
+      .strict(),
+    totals: z
+      .object({
+        events: z.number().int().nonnegative(),
+        blobs: z.number().int().nonnegative(),
+        privacyViolations: z.number().int().nonnegative()
+      })
+      .strict()
+  })
+  .strict();
+
 export const exportManifestSchema = z
   .object({
     protocolVersion: z.literal(WEBBLACKBOX_PROTOCOL_VERSION),
