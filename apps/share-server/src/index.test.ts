@@ -48,6 +48,19 @@ describe("share-server", () => {
     });
     expect(response.status).toBe(413);
   });
+
+  it("does not advertise passphrase upload headers", async () => {
+    const server = await startShareServer();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "OPTIONS"
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-headers")).toBe(
+      "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename"
+    );
+  });
 });
 
 async function startShareServer(

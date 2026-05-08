@@ -49,7 +49,6 @@ type PlayerMessages = {
   copy: string;
   copied: string;
   close: string;
-  showPassphrase: string;
   preflightErrors: string;
   preflightFailedReqs: string;
   preflightSlowReqs: string;
@@ -122,10 +121,8 @@ type PlayerMessages = {
   shareArchiveTitle: string;
   shareArchiveDescription: string;
   shareServerUrl: string;
-  shareOptionalPassphrase: string;
   shareOptionalApiKey: string;
   sharePlaceholderServerUrl: string;
-  sharePlaceholderPublicMetadata: string;
   sharePlaceholderApiKeyRequired: string;
   sharePrivacyPreflightTitle: string;
   sharePrivacyPreflightDescription: string;
@@ -326,7 +323,6 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     copy: "Copy",
     copied: "Copied",
     close: "Close",
-    showPassphrase: "Show passphrase",
     preflightErrors: "Errors",
     preflightFailedReqs: "Failed reqs",
     preflightSlowReqs: "Slow reqs",
@@ -400,10 +396,8 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     shareArchiveDescription:
       "Upload the loaded archive to a share server and copy the generated link.",
     shareServerUrl: "Share server URL",
-    shareOptionalPassphrase: "Optional passphrase",
     shareOptionalApiKey: "Optional API key",
     sharePlaceholderServerUrl: "https://share.example.com",
-    sharePlaceholderPublicMetadata: "Leave empty for public metadata only",
     sharePlaceholderApiKeyRequired: "Required when server auth is enabled",
     sharePrivacyPreflightTitle: "Privacy Preflight",
     sharePrivacyPreflightDescription:
@@ -639,7 +633,6 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     copy: "复制",
     copied: "已复制",
     close: "关闭",
-    showPassphrase: "显示口令",
     preflightErrors: "错误",
     preflightFailedReqs: "失败请求",
     preflightSlowReqs: "慢请求",
@@ -712,10 +705,8 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     shareArchiveTitle: "分享归档",
     shareArchiveDescription: "将当前归档上传到分享服务并复制生成的链接。",
     shareServerUrl: "分享服务 URL",
-    shareOptionalPassphrase: "可选口令",
     shareOptionalApiKey: "可选 API Key",
     sharePlaceholderServerUrl: "https://share.example.com",
-    sharePlaceholderPublicMetadata: "留空则仅公开元数据",
     sharePlaceholderApiKeyRequired: "当服务启用鉴权时必填",
     sharePrivacyPreflightTitle: "隐私预检",
     sharePrivacyPreflightDescription: "上传前审核脱敏覆盖范围和检测到的敏感信号。",

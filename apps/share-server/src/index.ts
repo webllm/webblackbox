@@ -200,17 +200,12 @@ async function handleUpload(
 
   const id = randomUUID().replaceAll("-", "");
   const filenameHeader = request.headers["x-webblackbox-filename"];
-  const passphraseHeader = request.headers["x-webblackbox-passphrase"];
   const fileName = normalizeFileName(
     typeof filenameHeader === "string" ? filenameHeader : `session-${id}.webblackbox`
   );
-  const passphrase =
-    typeof passphraseHeader === "string" && passphraseHeader.trim().length > 0
-      ? passphraseHeader.trim()
-      : undefined;
   const archivePath = archivePathForId(id);
   const checksumSha256 = createHash("sha256").update(bytes).digest("hex");
-  const summary = await buildShareSummary(bytes, passphrase);
+  const summary = await buildShareSummary(bytes);
 
   if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
     respondJson(response, 422, {
@@ -352,9 +347,9 @@ async function handleSharePage(
   respondHtml(response, 200, page);
 }
 
-async function buildShareSummary(bytes: Uint8Array, passphrase?: string): Promise<ShareSummary> {
+async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
   try {
-    const player = await WebBlackboxPlayer.open(bytes, passphrase ? { passphrase } : undefined);
+    const player = await WebBlackboxPlayer.open(bytes);
     const manifest = player.archive.manifest;
     const derived = player.buildDerived();
     const waterfall = player.getNetworkWaterfall();
@@ -712,7 +707,7 @@ function applyCorsHeaders(
 
   response.setHeader(
     "access-control-allow-headers",
-    "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename,x-webblackbox-passphrase"
+    "content-type,authorization,x-webblackbox-api-key,x-webblackbox-filename"
   );
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
 }

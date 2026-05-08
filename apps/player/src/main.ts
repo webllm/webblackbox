@@ -505,9 +505,7 @@ const refs = {
   loadShareUrl: getElement<HTMLButtonElement>("load-share-url"),
   shareUploadDialog: getElement<HTMLDialogElement>("share-upload-dialog"),
   shareUploadBaseUrl: getElement<HTMLInputElement>("share-upload-base-url"),
-  shareUploadPassphrase: getElement<HTMLInputElement>("share-upload-passphrase"),
   shareUploadApiKey: getElement<HTMLInputElement>("share-upload-api-key"),
-  shareUploadShowPassphrase: getElement<HTMLInputElement>("share-upload-show-passphrase"),
   shareUploadPrivacyReviewed: getElement<HTMLInputElement>("share-upload-privacy-reviewed"),
   shareUploadConfirm: getElement<HTMLButtonElement>("share-upload-confirm"),
   sharePrivacyProfile: getElement<HTMLElement>("share-privacy-profile"),
@@ -1103,10 +1101,6 @@ function bindGlobalActions(): void {
 
   refs.loadShareUrl.addEventListener("click", () => {
     void loadArchiveFromSharePrompt();
-  });
-
-  refs.shareUploadShowPassphrase.addEventListener("change", () => {
-    refs.shareUploadPassphrase.type = refs.shareUploadShowPassphrase.checked ? "text" : "password";
   });
 
   refs.shareUploadPrivacyReviewed.addEventListener("change", () => {
@@ -1770,11 +1764,7 @@ async function shareLoadedArchive(): Promise<void> {
     "content-type": "application/octet-stream",
     "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox"
   };
-  const passphrase = shareConfig.passphrase.trim();
 
-  if (passphrase.length > 0) {
-    headers["x-webblackbox-passphrase"] = passphrase;
-  }
   if (shareConfig.apiKey.length > 0) {
     headers["x-webblackbox-api-key"] = shareConfig.apiKey;
   }
@@ -1897,13 +1887,9 @@ async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
 
 async function promptShareUploadConfig(): Promise<{
   baseUrl: string;
-  passphrase: string;
   apiKey: string;
 } | null> {
   refs.shareUploadBaseUrl.value = state.shareServerBaseUrl;
-  refs.shareUploadPassphrase.value = "";
-  refs.shareUploadShowPassphrase.checked = false;
-  refs.shareUploadPassphrase.type = "password";
   refs.shareUploadPrivacyReviewed.checked = false;
   renderSharePrivacyPreflight();
   updateShareUploadConfirmState();
@@ -1933,7 +1919,6 @@ async function promptShareUploadConfig(): Promise<{
 
   return {
     baseUrl: refs.shareUploadBaseUrl.value.trim(),
-    passphrase: refs.shareUploadPassphrase.value,
     apiKey: refs.shareUploadApiKey.value.trim()
   };
 }

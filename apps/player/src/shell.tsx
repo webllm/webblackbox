@@ -648,16 +648,6 @@ export function PlayerShell({ locale = "en" }: PlayerShellProps = {}): React.JSX
             />
           </label>
           <label className="share-dialog-field">
-            <span>{messages.shareOptionalPassphrase}</span>
-            <Input
-              id="share-upload-passphrase"
-              className="share-dialog-input"
-              type="password"
-              placeholder={messages.sharePlaceholderPublicMetadata}
-              autoComplete="off"
-            />
-          </label>
-          <label className="share-dialog-field">
             <span>{messages.shareOptionalApiKey}</span>
             <Input
               id="share-upload-api-key"
@@ -666,10 +656,6 @@ export function PlayerShell({ locale = "en" }: PlayerShellProps = {}): React.JSX
               placeholder={messages.sharePlaceholderApiKeyRequired}
               autoComplete="off"
             />
-          </label>
-          <label className="share-dialog-toggle">
-            <Checkbox id="share-upload-show-passphrase" />
-            {messages.showPassphrase}
           </label>
           <section id="share-privacy-preflight" className="share-privacy-preflight">
             <header className="share-privacy-head">
