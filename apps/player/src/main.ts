@@ -2641,7 +2641,7 @@ function buildProgressHoverSummary(
       continue;
     }
 
-    if (event.type.startsWith("error.")) {
+    if (isErrorEvent(event)) {
       errors += 1;
     }
 
@@ -2776,7 +2776,7 @@ function buildErrorHoverTag(model: ArchiveModel, mono: number): ProgressHoverTag
       break;
     }
 
-    if (!event.type.startsWith("error.")) {
+    if (!isErrorEvent(event)) {
       continue;
     }
 
@@ -4207,7 +4207,7 @@ function matchesTypeFilter(event: WebBlackboxEvent, filterType: TimelineFilter):
   }
 
   if (filterType === "errors") {
-    return event.type.startsWith("error.");
+    return isErrorEvent(event);
   }
 
   if (filterType === "network") {
@@ -4219,10 +4219,14 @@ function matchesTypeFilter(event: WebBlackboxEvent, filterType: TimelineFilter):
   }
 
   if (filterType === "console") {
-    return event.type.startsWith("console.") || event.type.startsWith("error.");
+    return event.type.startsWith("console.") || isErrorEvent(event);
   }
 
   return true;
+}
+
+function isErrorEvent(event: WebBlackboxEvent): boolean {
+  return event.type.startsWith("error.") || event.lvl === "error";
 }
 
 function matchesActionTypeFilter(action: ActionTimelineEntry, filterType: TimelineFilter): boolean {
@@ -4326,7 +4330,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     eventById.set(event.id, event);
     eventScopeById.set(event.id, scope);
 
-    if (event.type.startsWith("error.")) {
+    if (isErrorEvent(event)) {
       errorCount += 1;
       consoleSignals.push(event);
       consoleSignalSearchText.push(buildConsoleSignalSearchText(event));
@@ -4627,7 +4631,7 @@ function buildProgressMarkers(
   };
 
   for (const event of events) {
-    if (event.type.startsWith("error.")) {
+    if (isErrorEvent(event)) {
       buckets.error.push(event.mono);
       continue;
     }

@@ -399,6 +399,24 @@ describe("WebBlackboxPlayer", () => {
     );
   });
 
+  it("counts level-error events in derived totals, action spans, and reports", async () => {
+    const bytes = await createLevelErrorFixtureArchive();
+    const player = await WebBlackboxPlayer.open(bytes);
+    const derived = player.buildDerived();
+    const action = derived.actionSpans.find((span) => span.actId === "A-1");
+    const timeline = player.getActionTimeline().find((entry) => entry.actId === "A-1");
+    const report = player.generateBugReport({
+      maxItems: 5
+    });
+
+    expect(derived.totals.errors).toBe(2);
+    expect(action?.errorCount).toBe(1);
+    expect(timeline?.errorCount).toBe(1);
+    expect(timeline?.errors.map((entry) => entry.eventId)).toContain("E-6");
+    expect(report).toContain("E-6");
+    expect(report).toContain("console exploded");
+  });
+
   it("builds action timeline with request, error, and screenshot context", async () => {
     const bytes = await createRichFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
@@ -731,6 +749,54 @@ async function createFixtureArchive(): Promise<Uint8Array> {
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
 
+  await writeIntegrityManifest(zip);
+
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function createLevelErrorFixtureArchive(): Promise<Uint8Array> {
+  const bytes = await createFixtureArchive();
+  const zip = await JSZip.loadAsync(bytes);
+  const eventPath = "events/chunk-000001.ndjson";
+  const eventFile = zip.file(eventPath);
+  const manifestFile = zip.file("manifest.json");
+
+  if (!eventFile || !manifestFile) {
+    throw new Error("Missing fixture archive files");
+  }
+
+  const events = (await eventFile.async("string"))
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as WebBlackboxEvent);
+
+  events.push({
+    v: 1,
+    sid: "S-1",
+    tab: 1,
+    t: 1005,
+    mono: 6,
+    type: "console.entry",
+    id: "E-6",
+    lvl: "error",
+    ref: {
+      act: "A-1"
+    },
+    data: {
+      level: "error",
+      text: "console exploded"
+    }
+  });
+
+  const manifest = JSON.parse(await manifestFile.async("string")) as ExportManifest;
+  manifest.stats = {
+    ...manifest.stats,
+    eventCount: events.length,
+    durationMs: 5
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file(eventPath, events.map((event) => JSON.stringify(event)).join("\n"));
   await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });

@@ -878,7 +878,7 @@ export class WebBlackboxPlayer {
 
     const totals = {
       events: scoped.length,
-      errors: scoped.filter((event) => event.type.startsWith("error.")).length,
+      errors: scoped.filter(isErrorEvent).length,
       requests: scoped.filter((event) => event.type === "network.request").length
     };
 
@@ -1360,9 +1360,7 @@ export class WebBlackboxPlayer {
       leftSid: leftSessionId,
       rightSid: rightSessionId,
       eventDelta: rightEvents.length - leftEvents.length,
-      errorDelta:
-        rightEvents.filter((event) => event.type.startsWith("error.")).length -
-        leftEvents.filter((event) => event.type.startsWith("error.")).length,
+      errorDelta: rightEvents.filter(isErrorEvent).length - leftEvents.filter(isErrorEvent).length,
       requestDelta:
         rightEvents.filter((event) => event.type === "network.request").length -
         leftEvents.filter((event) => event.type === "network.request").length,
@@ -1495,7 +1493,7 @@ export class WebBlackboxPlayer {
   public generateBugReport(options: BugReportOptions = {}): string {
     const maxItems = Math.max(5, options.maxItems ?? 20);
     const scoped = this.query({ range: options.range });
-    const errors = scoped.filter((event) => event.type.startsWith("error.")).slice(0, maxItems);
+    const errors = scoped.filter(isErrorEvent).slice(0, maxItems);
     const markers = scoped.filter((event) => event.type === "user.marker").slice(0, maxItems);
     const failedRequests = this.getNetworkWaterfall(options.range)
       .filter((entry) => entry.failed || (entry.status !== undefined && entry.status >= 400))
@@ -3386,7 +3384,7 @@ function updateActionStats(span: ActionSpan, event: WebBlackboxEvent): void {
     span.requestCount += 1;
   }
 
-  if (event.type.startsWith("error.")) {
+  if (isErrorEvent(event)) {
     span.errorCount += 1;
   }
 }
