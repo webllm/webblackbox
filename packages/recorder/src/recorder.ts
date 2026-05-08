@@ -1,8 +1,12 @@
 import {
+  DEFAULT_CAPTURE_POLICY,
   EventIdFactory,
+  type CapturePolicy,
   type FreezeReason,
+  type PrivacyClassification,
   type RecorderConfig,
-  type WebBlackboxEvent
+  type WebBlackboxEvent,
+  type WebBlackboxEventType
 } from "@webblackbox/protocol";
 
 import { ActionSpanTracker } from "./action-span.js";
@@ -70,6 +74,7 @@ export class WebBlackboxRecorder {
       mono: nextRawEvent.mono,
       type: normalized.eventType,
       id: this.idFactory.next(),
+      privacy: classifyPrivacy(normalized.eventType, redactedPayload, this.config.capturePolicy),
       data: redactedPayload
     };
 
@@ -167,4 +172,137 @@ function normalizeTabId(value: number): number {
   }
 
   return Math.max(0, Math.round(value));
+}
+
+function classifyPrivacy(
+  eventType: WebBlackboxEventType,
+  payload: unknown,
+  policy: CapturePolicy | undefined
+): PrivacyClassification {
+  const effectivePolicy = policy ?? DEFAULT_CAPTURE_POLICY;
+  const category = classifyCategory(eventType);
+  const sensitivity = classifySensitivity(eventType);
+
+  return {
+    category,
+    sensitivity,
+    redacted:
+      isRedactedByPolicy(eventType, category, effectivePolicy) || hasRedactionSignal(payload)
+  };
+}
+
+function classifyCategory(eventType: WebBlackboxEventType): PrivacyClassification["category"] {
+  if (eventType === "user.input") {
+    return "inputs";
+  }
+
+  if (eventType.startsWith("user.")) {
+    return "actions";
+  }
+
+  if (eventType.startsWith("dom.")) {
+    return "dom";
+  }
+
+  if (eventType.startsWith("screen.")) {
+    return "screenshots";
+  }
+
+  if (eventType.startsWith("console.") || eventType.startsWith("error.")) {
+    return "console";
+  }
+
+  if (eventType.startsWith("network.")) {
+    return "network";
+  }
+
+  if (eventType.startsWith("storage.")) {
+    return "storage";
+  }
+
+  if (eventType.startsWith("perf.")) {
+    return "performance";
+  }
+
+  return "system";
+}
+
+function classifySensitivity(
+  eventType: WebBlackboxEventType
+): PrivacyClassification["sensitivity"] {
+  if (
+    eventType === "user.input" ||
+    eventType === "dom.snapshot" ||
+    eventType === "network.body" ||
+    eventType === "screen.screenshot" ||
+    eventType.startsWith("storage.")
+  ) {
+    return "high";
+  }
+
+  if (
+    eventType.startsWith("dom.") ||
+    eventType.startsWith("console.") ||
+    eventType.startsWith("error.") ||
+    eventType.startsWith("network.")
+  ) {
+    return "medium";
+  }
+
+  return "low";
+}
+
+function isRedactedByPolicy(
+  eventType: WebBlackboxEventType,
+  category: PrivacyClassification["category"],
+  policy: CapturePolicy
+): boolean {
+  switch (category) {
+    case "actions":
+      return policy.categories.actions !== "allow";
+    case "inputs":
+      return policy.categories.inputs !== "allow";
+    case "dom":
+      return policy.categories.dom !== "allow";
+    case "screenshots":
+      return policy.categories.screenshots !== "allow";
+    case "console":
+      return policy.categories.console !== "allow";
+    case "network":
+      return eventType === "network.body"
+        ? policy.categories.network !== "body-allowlist"
+        : policy.categories.network === "metadata";
+    case "storage":
+      if (eventType.startsWith("storage.cookie.")) {
+        return policy.categories.cookies !== "names-only";
+      }
+
+      if (eventType.startsWith("storage.idb.")) {
+        return policy.categories.indexedDb !== "names-only";
+      }
+
+      return policy.categories.storage !== "allow";
+    case "performance":
+    case "system":
+      return false;
+  }
+}
+
+function hasRedactionSignal(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+
+  const row = payload as Record<string, unknown>;
+  const target = row.target;
+
+  return (
+    row.redacted === true ||
+    row.valueRedacted === true ||
+    row.selectorRedacted === true ||
+    (target !== null &&
+      typeof target === "object" &&
+      !Array.isArray(target) &&
+      (target as Record<string, unknown>).selectorRedacted === true)
+  );
 }

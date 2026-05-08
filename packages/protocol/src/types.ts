@@ -32,6 +32,25 @@ export type EventReference = {
   prev?: string;
 };
 
+export type PrivacyDataCategory =
+  | "actions"
+  | "inputs"
+  | "dom"
+  | "screenshots"
+  | "console"
+  | "network"
+  | "storage"
+  | "performance"
+  | "system";
+
+export type PrivacySensitivity = "low" | "medium" | "high";
+
+export type PrivacyClassification = {
+  category: PrivacyDataCategory;
+  sensitivity: PrivacySensitivity;
+  redacted: boolean;
+};
+
 export type WebBlackboxEvent<TData = unknown> = {
   v: 1;
   sid: string;
@@ -47,6 +66,7 @@ export type WebBlackboxEvent<TData = unknown> = {
   id: string;
   lvl?: EventLevel;
   ref?: EventReference;
+  privacy?: PrivacyClassification;
   data: TData;
 };
 
@@ -73,6 +93,62 @@ export type RedactionProfile = {
   hashSensitiveValues: boolean;
 };
 
+export type CaptureContext = "real-user" | "synthetic" | "local-debug";
+
+export type CaptureConsent = {
+  id: string;
+  provenance: "self-recording" | "support-assisted" | "enterprise-admin-policy";
+  purpose: "debugging" | "support" | "qa" | "incident-response" | "other";
+  grantedBy?: string;
+  grantedAt: string;
+  expiresAt?: string;
+  revocationRef?: string;
+};
+
+export type CaptureScope = {
+  tabId: number;
+  origin: string;
+  allowedOrigins: string[];
+  deniedOrigins: string[];
+  includeSubframes: boolean;
+  stopOnOriginChange: boolean;
+  excludedUrlPatterns: string[];
+};
+
+export type CapturePolicy = {
+  schemaVersion: 2;
+  mode: "private" | "debug" | "lab";
+  captureContext: CaptureContext;
+  captureContextEvidenceRef?: string;
+  consent: CaptureConsent;
+  unmaskPolicySource: "none" | "extension-managed" | "enterprise" | "signed-site-owner";
+  scope: CaptureScope;
+  categories: {
+    actions: "metadata" | "masked" | "allow";
+    inputs: "none" | "length-only" | "masked" | "allow";
+    dom: "off" | "wireframe" | "masked" | "allow";
+    screenshots: "off" | "masked" | "allow";
+    console: "off" | "metadata" | "sanitized" | "allow";
+    network: "metadata" | "headers-allowlist" | "body-allowlist";
+    storage: "off" | "counts-only" | "names-only" | "lengths-only" | "allow";
+    indexedDb: "off" | "counts-only" | "names-only";
+    cookies: "off" | "count-only" | "names-only";
+    cdp: "off" | "safe-subset" | "full";
+    heapProfiles: "off" | "lab-only";
+  };
+  redaction: RedactionProfile;
+  encryption: {
+    localAtRest: "required";
+    archive: "required" | "synthetic-local-debug-exempt" | "explicit-low-risk-override";
+    archiveKeyEnvelope: "passphrase" | "enterprise-managed" | "client-side-share-fragment" | "none";
+    overrideReasonRef?: string;
+  };
+  retention: {
+    localTtlMs: number;
+    shareTtlMs?: number;
+  };
+};
+
 export type SiteCapturePolicy = {
   originPattern: string;
   mode: CaptureMode;
@@ -91,6 +167,7 @@ export type RecorderConfig = {
   freezeOnLongTaskSpike: boolean;
   sampling: SamplingProfile;
   redaction: RedactionProfile;
+  capturePolicy?: CapturePolicy;
   sitePolicies: SiteCapturePolicy[];
 };
 

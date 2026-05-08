@@ -38,6 +38,24 @@ export const eventReferenceSchema = z
   })
   .strict();
 
+export const privacyClassificationSchema = z
+  .object({
+    category: z.enum([
+      "actions",
+      "inputs",
+      "dom",
+      "screenshots",
+      "console",
+      "network",
+      "storage",
+      "performance",
+      "system"
+    ]),
+    sensitivity: z.enum(["low", "medium", "high"]),
+    redacted: z.boolean()
+  })
+  .strict();
+
 export const eventEnvelopeSchema = z
   .object({
     v: z.literal(WEBBLACKBOX_PROTOCOL_VERSION),
@@ -54,6 +72,7 @@ export const eventEnvelopeSchema = z
     id: z.string().min(1),
     lvl: eventLevelSchema.optional(),
     ref: eventReferenceSchema.optional(),
+    privacy: privacyClassificationSchema.optional(),
     data: z.unknown()
   })
   .strict();
@@ -92,6 +111,77 @@ export const siteCapturePolicySchema = z
   })
   .strict();
 
+export const captureConsentSchema = z
+  .object({
+    id: z.string().min(1),
+    provenance: z.enum(["self-recording", "support-assisted", "enterprise-admin-policy"]),
+    purpose: z.enum(["debugging", "support", "qa", "incident-response", "other"]),
+    grantedBy: z.string().min(1).optional(),
+    grantedAt: z.string().datetime(),
+    expiresAt: z.string().datetime().optional(),
+    revocationRef: z.string().min(1).optional()
+  })
+  .strict();
+
+export const captureScopeSchema = z
+  .object({
+    tabId: z.number().int().nonnegative(),
+    origin: z.string(),
+    allowedOrigins: stringArray,
+    deniedOrigins: stringArray,
+    includeSubframes: z.boolean(),
+    stopOnOriginChange: z.boolean(),
+    excludedUrlPatterns: stringArray
+  })
+  .strict();
+
+export const capturePolicySchema = z
+  .object({
+    schemaVersion: z.literal(2),
+    mode: z.enum(["private", "debug", "lab"]),
+    captureContext: z.enum(["real-user", "synthetic", "local-debug"]),
+    captureContextEvidenceRef: z.string().min(1).optional(),
+    consent: captureConsentSchema,
+    unmaskPolicySource: z.enum(["none", "extension-managed", "enterprise", "signed-site-owner"]),
+    scope: captureScopeSchema,
+    categories: z
+      .object({
+        actions: z.enum(["metadata", "masked", "allow"]),
+        inputs: z.enum(["none", "length-only", "masked", "allow"]),
+        dom: z.enum(["off", "wireframe", "masked", "allow"]),
+        screenshots: z.enum(["off", "masked", "allow"]),
+        console: z.enum(["off", "metadata", "sanitized", "allow"]),
+        network: z.enum(["metadata", "headers-allowlist", "body-allowlist"]),
+        storage: z.enum(["off", "counts-only", "names-only", "lengths-only", "allow"]),
+        indexedDb: z.enum(["off", "counts-only", "names-only"]),
+        cookies: z.enum(["off", "count-only", "names-only"]),
+        cdp: z.enum(["off", "safe-subset", "full"]),
+        heapProfiles: z.enum(["off", "lab-only"])
+      })
+      .strict(),
+    redaction: redactionProfileSchema,
+    encryption: z
+      .object({
+        localAtRest: z.literal("required"),
+        archive: z.enum(["required", "synthetic-local-debug-exempt", "explicit-low-risk-override"]),
+        archiveKeyEnvelope: z.enum([
+          "passphrase",
+          "enterprise-managed",
+          "client-side-share-fragment",
+          "none"
+        ]),
+        overrideReasonRef: z.string().min(1).optional()
+      })
+      .strict(),
+    retention: z
+      .object({
+        localTtlMs: z.number().int().positive(),
+        shareTtlMs: z.number().int().positive().optional()
+      })
+      .strict()
+  })
+  .strict();
+
 export const recorderConfigSchema = z
   .object({
     mode: captureModeSchema,
@@ -101,6 +191,7 @@ export const recorderConfigSchema = z
     freezeOnLongTaskSpike: z.boolean(),
     sampling: samplingProfileSchema,
     redaction: redactionProfileSchema,
+    capturePolicy: capturePolicySchema.optional(),
     sitePolicies: z.array(siteCapturePolicySchema)
   })
   .strict();

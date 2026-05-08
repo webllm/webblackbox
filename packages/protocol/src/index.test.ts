@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   createSessionId,
+  DEFAULT_CAPTURE_POLICY,
   DEFAULT_RECORDER_CONFIG,
   EventIdFactory,
+  capturePolicySchema,
   eventEnvelopeSchema,
   inferBlobFileExtension,
   inferBlobMime,
@@ -11,6 +13,7 @@ import {
   extractRequestId,
   extractRequestIdFromPayload,
   exportManifestSchema,
+  privacyClassificationSchema,
   validateEvent,
   validateMessage,
   WEBBLACKBOX_PROTOCOL_VERSION,
@@ -74,6 +77,18 @@ describe("protocol", () => {
     );
   });
 
+  it("ships a private capture policy with audit and encryption defaults", () => {
+    expect(capturePolicySchema.safeParse(DEFAULT_CAPTURE_POLICY).success).toBe(true);
+    expect(DEFAULT_RECORDER_CONFIG.capturePolicy).toEqual(DEFAULT_CAPTURE_POLICY);
+    expect(DEFAULT_CAPTURE_POLICY.schemaVersion).toBe(2);
+    expect(DEFAULT_CAPTURE_POLICY.captureContext).toBe("real-user");
+    expect(DEFAULT_CAPTURE_POLICY.consent.provenance).toBe("self-recording");
+    expect(DEFAULT_CAPTURE_POLICY.scope.stopOnOriginChange).toBe(true);
+    expect(DEFAULT_CAPTURE_POLICY.categories.inputs).toBe("length-only");
+    expect(DEFAULT_CAPTURE_POLICY.categories.screenshots).toBe("off");
+    expect(DEFAULT_CAPTURE_POLICY.encryption.archive).toBe("required");
+  });
+
   it("parses export manifest schema", () => {
     const result = exportManifestSchema.safeParse({
       protocolVersion: 1,
@@ -105,10 +120,22 @@ describe("protocol", () => {
       mono: 12.5,
       type: "user.marker",
       id: "E-2",
+      privacy: {
+        category: "actions",
+        sensitivity: "low",
+        redacted: true
+      },
       data: { message: "bug" }
     });
 
     expect(parsed.success).toBe(true);
+    expect(
+      privacyClassificationSchema.safeParse({
+        category: "network",
+        sensitivity: "high",
+        redacted: true
+      }).success
+    ).toBe(true);
   });
 
   it("extracts request ids from payloads and event refs", () => {

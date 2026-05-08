@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { RecorderConfig } from "@webblackbox/protocol";
+import { DEFAULT_CAPTURE_POLICY, type RecorderConfig } from "@webblackbox/protocol";
 
 import { EventRingBuffer } from "./ring-buffer.js";
 import { createDefaultRecorderPlugins } from "./plugins.js";
@@ -29,6 +29,7 @@ const TEST_CONFIG: RecorderConfig = {
     blockedSelectors: [".secret", "[data-sensitive]", "input[type='password']"],
     hashSensitiveValues: true
   },
+  capturePolicy: DEFAULT_CAPTURE_POLICY,
   sitePolicies: []
 };
 
@@ -624,6 +625,51 @@ describe("recorder", () => {
     expect(payload?.target?.selector).toMatch(/^selector:[a-f0-9]{12}$/);
     expect(payload?.target?.selector).not.toContain("customer-email");
     expect(payload?.target?.selector).not.toContain("secret-action");
+  });
+
+  it("classifies privacy risk on stored events", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const input = recorder.ingest({
+      source: "content",
+      rawType: "input",
+      sid: "S-privacy-class",
+      tabId: 4,
+      t: Date.now(),
+      mono: 10,
+      payload: {
+        inputType: "text",
+        length: 12,
+        valueRedacted: true
+      }
+    });
+    const body = recorder.ingest({
+      source: "content",
+      rawType: "networkBody",
+      sid: "S-privacy-class",
+      tabId: 4,
+      t: Date.now(),
+      mono: 12,
+      payload: {
+        reqId: "R-private-body",
+        contentHash: "blob-redacted-body",
+        mimeType: "application/json",
+        size: 128,
+        sampledSize: 0,
+        redacted: true,
+        truncated: true
+      }
+    });
+
+    expect(input.event?.privacy).toEqual({
+      category: "inputs",
+      sensitivity: "high",
+      redacted: true
+    });
+    expect(body.event?.privacy).toEqual({
+      category: "network",
+      sensitivity: "high",
+      redacted: true
+    });
   });
 
   it("maps lite storage snapshot raw types", () => {
