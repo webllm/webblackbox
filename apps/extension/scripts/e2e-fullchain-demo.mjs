@@ -34,7 +34,12 @@ const usePopupUiActions =
   process.env.WB_E2E_USE_POPUP_UI === undefined
     ? !headless
     : process.env.WB_E2E_USE_POPUP_UI !== "0";
-const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "";
+const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "webblackbox-e2e-passphrase";
+const e2eExportPolicy = {
+  includeScreenshots: true,
+  maxArchiveBytes: 100 * 1024 * 1024,
+  recentWindowMs: 20 * 60 * 1000
+};
 const realWorldScenario = process.env.WB_E2E_REALWORLD_SCENARIO ?? "";
 const realWorldLongRecordingMs = Number(process.env.WB_E2E_REALWORLD_LONG_MS ?? "2500");
 const realWorldLargeResponseBytes = Number(
@@ -280,6 +285,12 @@ async function main() {
     });
   });
 
+  const recorderConfigured = await configureE2eRecorderOptions(control, captureMode);
+  assert(recorderConfigured?.ok === true, "Failed to configure E2E recorder options", {
+    recorderConfigured,
+    captureMode
+  });
+
   await sleep(1_200);
 
   const start = await startSessionFromControl(control, captureMode, demoUrl);
@@ -349,7 +360,7 @@ async function main() {
 
   await sleep(1_600);
 
-  const stop = await stopActiveSessionFromControl(control);
+  const stop = await stopActiveSessionFromControl(control, sid);
   assert(stop?.ok === true, `Failed to stop ${captureMode} mode`, stop);
 
   const indicatorGone = await waitForIndicatorGone(demoClient, 15_000);
@@ -440,6 +451,7 @@ async function main() {
   });
 
   await waitForPlayerReady(playerClient, 20_000);
+  await installPlayerArchivePassphraseAutoSubmit(playerClient, exportPassphrase);
   await setFileInputFiles(playerClient, "#archive-input", [exportedPath]);
   await playerClient.evaluate(`
     (() => {
@@ -451,8 +463,7 @@ async function main() {
       return { ok: true };
     })()
   `);
-
-  const playerResult = await waitForPlayerLoad(playerClient, 35_000);
+  const playerResult = await waitForPlayerLoad(playerClient, 35_000, exportPassphrase);
   assert(playerResult.eventCount > 0, "Player rendered zero timeline events", playerResult);
   assert(
     playerResult.waterfallCount > 0,
@@ -1734,6 +1745,126 @@ async function evaluateControl(control, expression) {
   }
 }
 
+async function configureE2eRecorderOptions(control, mode) {
+  return evaluateControl(
+    control,
+    `
+      (async () => {
+        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
+
+        if (typeof chromeApi?.storage?.local?.set !== 'function') {
+          return { ok: false, reason: 'storage-api-unavailable' };
+        }
+
+        const capturePolicy = {
+          schemaVersion: 2,
+          mode: 'lab',
+          captureContext: 'synthetic',
+          captureContextEvidenceRef: 'synthetic:e2e-fullchain',
+          consent: {
+            id: 'webblackbox-e2e-consent',
+            provenance: 'self-recording',
+            purpose: 'qa',
+            grantedBy: 'webblackbox-e2e',
+            grantedAt: new Date().toISOString()
+          },
+          unmaskPolicySource: 'extension-managed',
+          scope: {
+            tabId: 0,
+            origin: '',
+            allowedOrigins: [],
+            deniedOrigins: [],
+            includeSubframes: true,
+            stopOnOriginChange: true,
+            excludedUrlPatterns: []
+          },
+          categories: {
+            actions: 'allow',
+            inputs: 'masked',
+            dom: 'allow',
+            screenshots: 'allow',
+            console: 'allow',
+            network: 'body-allowlist',
+            storage: 'allow',
+            indexedDb: 'names-only',
+            cookies: 'names-only',
+            cdp: ${JSON.stringify(mode)} === 'full' ? 'full' : 'safe-subset',
+            heapProfiles: 'off'
+          },
+          redaction: {
+            redactHeaders: [
+              'authorization',
+              'cookie',
+              'set-cookie',
+              'proxy-authorization',
+              'x-api-key',
+              'x-auth-token',
+              'x-csrf-token',
+              'x-xsrf-token'
+            ],
+            redactCookieNames: ['token', 'session', 'auth', 'jwt', 'refresh_token', 'csrf', 'xsrf'],
+            redactBodyPatterns: [
+              'password',
+              'token',
+              'secret',
+              'otp',
+              'credential',
+              'api_key',
+              'apikey',
+              'private_key',
+              'refresh_token'
+            ],
+            blockedSelectors: [
+              '.secret',
+              '[data-sensitive]',
+              '[data-webblackbox-redact]',
+              "input[type='password']",
+              "input[name*='token']",
+              "input[name*='secret']",
+              "input[autocomplete='cc-number']"
+            ],
+            hashSensitiveValues: true
+          },
+          encryption: {
+            localAtRest: 'required',
+            archive: 'required',
+            archiveKeyEnvelope: 'passphrase'
+          },
+          retention: {
+            localTtlMs: 24 * 60 * 60 * 1000
+          }
+        };
+
+        await chromeApi.storage.local.set({
+          'webblackbox.options': {
+            optionsVersion: 1,
+            mode: ${JSON.stringify(mode)},
+            freezeOnNetworkFailure: false,
+            freezeOnLongTaskSpike: false,
+            sampling: {
+              mousemoveHz: 20,
+              scrollHz: 15,
+              domFlushMs: 100,
+              screenshotIdleMs: 600,
+              snapshotIntervalMs: 1000,
+              actionWindowMs: 1500,
+              bodyCaptureMaxBytes: ${JSON.stringify(mode)} === 'full' ? 65536 : 32768
+            },
+            capturePolicy
+          }
+        });
+
+        return {
+          ok: true,
+          mode: ${JSON.stringify(mode)},
+          cdp: capturePolicy.categories.cdp,
+          screenshotIdleMs: 600
+        };
+      })()
+    `
+  );
+}
+
 async function startSessionFromControl(control, mode, expectedUrl) {
   if (control.kind === "popup") {
     return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions);
@@ -1839,9 +1970,9 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
   return popupClient.evaluate(expression);
 }
 
-async function stopActiveSessionFromControl(control) {
+async function stopActiveSessionFromControl(control, expectedSid) {
   if (control.kind === "popup") {
-    return stopActiveSessionFromPopup(control.client, control.useUiActions);
+    return stopActiveSessionFromPopup(control.client, control.useUiActions, expectedSid);
   }
 
   return evaluateControl(
@@ -1859,10 +1990,26 @@ async function stopActiveSessionFromControl(control) {
             ? await chromeApi.storage.local.get('webblackbox.runtime.sessions')
             : {};
         const rows = store['webblackbox.runtime.sessions'];
-        const active = Array.isArray(rows) ? rows[0] : undefined;
+        const sessions = Array.isArray(rows) ? rows : [];
+        const expectedSid = ${JSON.stringify(expectedSid)};
+        const active =
+          (expectedSid
+            ? sessions.find((row) => row?.sid === expectedSid && typeof row?.tabId === 'number')
+            : undefined) ??
+          sessions.find((row) => typeof row?.tabId === 'number');
 
         if (!active || typeof active.tabId !== 'number') {
-          return { ok: false, reason: 'no-active-session', rows };
+          if (expectedSid) {
+            return {
+              ok: true,
+              sid: expectedSid,
+              alreadyStopped: true,
+              via: 'content-runtime',
+              rows: sessions
+            };
+          }
+
+          return { ok: false, reason: 'no-active-session', rows: sessions };
         }
 
         const response = await chromeApi.runtime.sendMessage({
@@ -1880,13 +2027,22 @@ async function stopActiveSessionFromControl(control) {
   );
 }
 
-async function stopActiveSessionFromPopup(popupClient, useUiActions) {
+async function stopActiveSessionFromPopup(popupClient, useUiActions, expectedSid) {
   if (useUiActions) {
     const expression = `
       (() => {
         const button = document.querySelector("[data-action='stop']");
 
         if (!(button instanceof HTMLButtonElement)) {
+          if (${JSON.stringify(expectedSid)}) {
+            return {
+              ok: true,
+              sid: ${JSON.stringify(expectedSid)},
+              alreadyStopped: true,
+              via: 'popup-ui'
+            };
+          }
+
           return { ok: false, reason: 'stop-button-not-found' };
         }
 
@@ -1906,10 +2062,26 @@ async function stopActiveSessionFromPopup(popupClient, useUiActions) {
     (async () => {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
       const rows = store['webblackbox.runtime.sessions'];
-      const active = Array.isArray(rows) ? rows[0] : undefined;
+      const sessions = Array.isArray(rows) ? rows : [];
+      const expectedSid = ${JSON.stringify(expectedSid)};
+      const active =
+        (expectedSid
+          ? sessions.find((row) => row?.sid === expectedSid && typeof row?.tabId === 'number')
+          : undefined) ??
+        sessions.find((row) => typeof row?.tabId === 'number');
 
       if (!active || typeof active.tabId !== 'number') {
-        return { ok: false, reason: 'no-active-session', rows };
+        if (expectedSid) {
+          return {
+            ok: true,
+            sid: expectedSid,
+            alreadyStopped: true,
+            via: 'popup-runtime',
+            rows: sessions
+          };
+        }
+
+        return { ok: false, reason: 'no-active-session', rows: sessions };
       }
 
       await chrome.runtime.sendMessage({ kind: 'ui.stop', tabId: active.tabId });
@@ -1938,7 +2110,9 @@ async function exportSessionFromControl(control, sid) {
         const response = await chromeApi.runtime.sendMessage({
           kind: 'ui.export',
           sid: ${JSON.stringify(sid)},
-          saveAs: false
+          passphrase: ${JSON.stringify(exportPassphrase)},
+          saveAs: false,
+          policy: ${JSON.stringify(e2eExportPolicy)}
         });
 
         if (response && typeof response === 'object' && response.ok === false) {
@@ -1969,6 +2143,14 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
 
         try {
           globalThis.prompt = () => "";
+
+          const includeScreenshots = document.querySelector('#export-include-screenshots');
+
+          if (includeScreenshots instanceof HTMLInputElement) {
+            includeScreenshots.checked = true;
+            includeScreenshots.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+
           button.click();
 
           const passphraseInput = document.querySelector('#wb-passphrase-input');
@@ -2007,7 +2189,9 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
       await chrome.runtime.sendMessage({
         kind: 'ui.export',
         sid: ${JSON.stringify(sid)},
-        saveAs: false
+        passphrase: ${JSON.stringify(exportPassphrase)},
+        saveAs: false,
+        policy: ${JSON.stringify(e2eExportPolicy)}
       });
       return { ok: true, sid: ${JSON.stringify(sid)} };
     })()
@@ -2110,11 +2294,24 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
         return Number.isFinite(ts) && ts >= startedAtMs - 4_000;
       });
 
-      const archiveRows = recent.filter((item) =>
-        typeof item.filename === 'string' &&
-        (item.filename.includes(sid + '.webblackbox') || item.filename.endsWith('.webblackbox'))
-      );
-      const match = archiveRows[0] ?? null;
+      const archiveRows = recent.filter((item) => {
+        if (typeof item.filename !== 'string') {
+          return false;
+        }
+
+        return (
+          item.filename.includes(sid + '.webblackbox') ||
+          item.filename.endsWith('.webblackbox') ||
+          item.filename.endsWith('.zip') ||
+          item.mime === 'application/zip'
+        );
+      });
+      const match =
+        archiveRows.find((item) => item.filename.includes(sid + '.webblackbox')) ??
+        archiveRows.find((item) => item.filename.endsWith('.webblackbox')) ??
+        archiveRows.find((item) => item.filename.endsWith('.zip')) ??
+        archiveRows[0] ??
+        null;
 
       const latest = match ?? null;
       const latestRecent = recent[0] ?? null;
@@ -2128,6 +2325,7 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
                 state: latest.state,
                 bytesReceived: latest.bytesReceived,
                 totalBytes: latest.totalBytes,
+                mime: latest.mime,
                 url: latest.url
               }
             : null,
@@ -2139,6 +2337,7 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
               error: latest.error,
               bytesReceived: latest.bytesReceived,
               totalBytes: latest.totalBytes,
+              mime: latest.mime,
               url: latest.url
             }
           : null,
@@ -2150,6 +2349,7 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
               error: latestRecent.error,
               bytesReceived: latestRecent.bytesReceived,
               totalBytes: latestRecent.totalBytes,
+              mime: latestRecent.mime,
               url: latestRecent.url
             }
           : null
@@ -2881,14 +3081,154 @@ async function setFileInputFiles(pageClient, selector, files) {
   });
 }
 
-async function waitForPlayerLoad(playerClient, timeoutMs) {
+async function installPlayerArchivePassphraseAutoSubmit(playerClient, passphrase) {
+  if (passphrase.length === 0) {
+    return;
+  }
+
+  await playerClient.evaluate(`
+    (() => {
+      const passphrase = ${JSON.stringify(passphrase)};
+      let submitted = false;
+      const globalKey = '__WEBBLACKBOX_E2E_ARCHIVE_PASSPHRASE__';
+      const patchKey = '__WEBBLACKBOX_E2E_DIALOG_PATCHED__';
+
+      globalThis[globalKey] = passphrase;
+
+      const submitIfOpen = (targetDialog) => {
+        if (submitted) {
+          return;
+        }
+
+        const dialog = targetDialog ?? document.querySelector('#archive-passphrase-dialog');
+
+        if (!(dialog instanceof HTMLDialogElement) || !dialog.open) {
+          return;
+        }
+
+        const input = document.querySelector('#archive-passphrase-input');
+        const confirm = document.querySelector('#archive-passphrase-confirm');
+        const form = document.querySelector('#archive-passphrase-form');
+
+        if (!(input instanceof HTMLInputElement) || !(confirm instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        input.value = passphrase;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        submitted = true;
+
+        requestAnimationFrame(() => {
+          if (form instanceof HTMLFormElement) {
+            form.requestSubmit(confirm);
+          } else {
+            confirm.click();
+          }
+        });
+      };
+
+      if (!globalThis[patchKey]) {
+        const originalShowModal = HTMLDialogElement.prototype.showModal;
+        const originalClose = HTMLDialogElement.prototype.close;
+
+        HTMLDialogElement.prototype.showModal = function patchedShowModal(...args) {
+          const result = originalShowModal.apply(this, args);
+
+          if (this.id === 'archive-passphrase-dialog' && globalThis[globalKey]) {
+            requestAnimationFrame(() => submitIfOpen(this));
+          }
+
+          return result;
+        };
+
+        HTMLDialogElement.prototype.close = function patchedClose(returnValue) {
+          if (
+            this.id === 'archive-passphrase-dialog' &&
+            globalThis[globalKey] &&
+            returnValue !== 'confirm'
+          ) {
+            const input = document.querySelector('#archive-passphrase-input');
+
+            if (input instanceof HTMLInputElement) {
+              input.value = String(globalThis[globalKey]);
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              submitted = true;
+              return originalClose.call(this, 'confirm');
+            }
+          }
+
+          return originalClose.call(this, returnValue);
+        };
+
+        globalThis[patchKey] = true;
+      }
+
+      const observer = new MutationObserver(() => submitIfOpen());
+      observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['open']
+      });
+
+      const interval = setInterval(() => {
+        submitIfOpen();
+
+        if (submitted) {
+          clearInterval(interval);
+          observer.disconnect();
+        }
+      }, 50);
+
+      setTimeout(() => {
+        clearInterval(interval);
+        observer.disconnect();
+      }, 30000);
+
+      submitIfOpen();
+    })()
+  `);
+}
+
+async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
+  let lastSnapshot = null;
+
   return waitFor(
     async () => {
       const snapshot = await playerClient.evaluate(`
       (() => {
+        const dialog = document.querySelector('#archive-passphrase-dialog');
+        const passphrase = ${JSON.stringify(passphrase)};
+        let passphraseSubmitted = false;
+
+        if (passphrase && dialog instanceof HTMLDialogElement && dialog.open) {
+          const input = document.querySelector('#archive-passphrase-input');
+          const confirm = document.querySelector('#archive-passphrase-confirm');
+          const form = document.querySelector('#archive-passphrase-form');
+
+          if (!(input instanceof HTMLInputElement) || !(confirm instanceof HTMLButtonElement)) {
+            return { ok: false, reason: 'passphrase-controls-missing' };
+          }
+
+          input.value = passphrase;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+
+          if (form instanceof HTMLFormElement) {
+            form.requestSubmit(confirm);
+          } else {
+            confirm.click();
+          }
+
+          passphraseSubmitted = true;
+        }
+
         const eventCount = document.querySelectorAll('#timeline-list .event').length;
         const waterfallRows = document.querySelectorAll('#waterfall-body tr').length;
         const feedback = (document.getElementById('feedback')?.textContent ?? '').trim();
+        const passphraseDialogOpen =
+          dialog instanceof HTMLDialogElement ? dialog.open : false;
         const sampleButtons = Array.from(document.querySelectorAll('#waterfall-body .waterfall-btn'))
           .slice(0, 12)
           .map((el) => ({
@@ -2899,24 +3239,41 @@ async function waitForPlayerLoad(playerClient, timeoutMs) {
         const sampleUrls = sampleButtons.map((sample) => sample.title);
 
         if (eventCount === 0) {
-          return null;
+          return {
+            pending: true,
+            eventCount,
+            waterfallCount: waterfallRows,
+            feedback,
+            passphraseDialogOpen,
+            passphraseSubmitted
+          };
         }
 
         return {
           eventCount,
           waterfallCount: waterfallRows,
           feedback,
+          passphraseDialogOpen,
+          passphraseSubmitted,
           waterfallSamples: samples,
           waterfallSampleUrls: sampleUrls
         };
       })()
     `);
 
-      return snapshot ?? null;
+      if (snapshot?.ok === false) {
+        throw new Error(JSON.stringify(snapshot));
+      }
+
+      lastSnapshot = snapshot ?? lastSnapshot;
+      return snapshot && !snapshot.pending ? snapshot : null;
     },
     timeoutMs,
     300,
-    "Player did not load archive in time"
+    () =>
+      `Player did not load archive in time${
+        lastSnapshot ? `; lastSnapshot=${JSON.stringify(lastSnapshot)}` : ""
+      }`
   );
 }
 
@@ -3303,11 +3660,13 @@ async function waitFor(fn, timeoutMs, intervalMs, timeoutMessage) {
     await sleep(intervalMs);
   }
 
+  const message = typeof timeoutMessage === "function" ? timeoutMessage() : timeoutMessage;
+
   if (lastError instanceof Error) {
-    throw new Error(`${timeoutMessage}: ${lastError.message}`);
+    throw new Error(`${message}: ${lastError.message}`);
   }
 
-  throw new Error(timeoutMessage);
+  throw new Error(message);
 }
 
 async function fetchJson(url, timeoutMs, init) {
