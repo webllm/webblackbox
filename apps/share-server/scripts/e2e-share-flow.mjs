@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -53,16 +53,19 @@ async function main() {
     headers: {
       "content-type": "application/octet-stream",
       "x-webblackbox-api-key": apiKey,
-      "x-webblackbox-filename": "share-flow.webblackbox"
+      "x-webblackbox-filename": "share-flow.webblackbox",
+      "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
     },
     body: archive
   });
 
   assert(typeof upload.shareId === "string", "Upload did not return shareId", upload);
+  assert(upload.summary?.encrypted === true, "Upload summary is not encrypted", upload);
   assert(upload.summary?.privacy, "Upload summary missing privacy preflight", upload);
   assert(
-    upload.summary?.sensitivePreview?.totalMatches >= 1,
-    "Upload summary missing sensitive preview",
+    upload.summary?.privacy?.scanner?.preEncryption === true &&
+      upload.summary?.privacy?.scanner?.status === "passed",
+    "Upload summary missing passed privacy scanner status",
     upload
   );
 
@@ -72,7 +75,9 @@ async function main() {
     }
   });
   assert(
-    meta.summary?.privacy?.redaction?.headers?.includes("authorization"),
+    meta.summary?.encrypted === true &&
+      meta.summary?.privacy?.redaction?.headerRuleCount >= 1 &&
+      meta.summary?.privacy?.detected?.redactedMarkers >= 1,
     "Metadata redaction summary missing",
     meta
   );
@@ -96,7 +101,11 @@ async function waitForServer() {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${baseUrl}/api/share/list?key=${encodeURIComponent(apiKey)}`);
+      const response = await fetch(`${baseUrl}/api/share/list`, {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      });
       if (response.ok) {
         return;
       }
@@ -119,6 +128,7 @@ async function fetchJson(url, init = {}) {
 
 async function createFixtureArchive() {
   const zip = new JSZip();
+  const privateFiles = {};
   const events = [
     {
       v: 1,
@@ -138,6 +148,16 @@ async function createFixtureArchive() {
       }
     }
   ];
+  privateFiles["index/time.json"] = JSON.stringify([]);
+  privateFiles["index/req.json"] = JSON.stringify([{ reqId: "R-share", eventIds: ["E-share-1"] }]);
+  privateFiles["index/inv.json"] = JSON.stringify([]);
+  privateFiles["events/chunk-share.ndjson"] = events
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+
+  const encryptedFiles = Object.fromEntries(
+    Object.keys(privateFiles).map((path) => [path, { ivBase64: toBase64(randomBytes(12)) }])
+  );
   const manifest = {
     protocolVersion: 1,
     createdAt: new Date(0).toISOString(),
@@ -158,16 +178,76 @@ async function createFixtureArchive() {
       chunkCount: 1,
       blobCount: 0,
       durationMs: 1
+    },
+    encryption: {
+      algorithm: "AES-GCM",
+      kdf: {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        iterations: 250000,
+        saltBase64: "AAAAAAAAAAAAAAAAAAAAAA=="
+      },
+      files: encryptedFiles
     }
   };
 
   zip.file("manifest.json", JSON.stringify(manifest));
-  zip.file("index/time.json", JSON.stringify([]));
-  zip.file("index/req.json", JSON.stringify([{ reqId: "R-share", eventIds: ["E-share-1"] }]));
-  zip.file("index/inv.json", JSON.stringify([]));
-  zip.file("events/chunk-share.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
+  for (const [path, content] of Object.entries(privateFiles)) {
+    zip.file(path, randomBytes(Math.max(32, Buffer.byteLength(content) + 16)));
+  }
   await writeIntegrity(zip);
   return zip.generateAsync({ type: "uint8array" });
+}
+
+function buildPassedShareSummary() {
+  return {
+    schemaVersion: 1,
+    source: "client",
+    analyzed: true,
+    encrypted: true,
+    manifest: {
+      mode: "lite",
+      chunkCodec: "none",
+      recordedAt: new Date(0).toISOString()
+    },
+    totals: {
+      events: 1,
+      errors: 0,
+      requests: 1,
+      actions: 0,
+      durationMs: 1
+    },
+    privacy: {
+      redaction: {
+        hashSensitiveValues: true,
+        headerRuleCount: 1,
+        cookieRuleCount: 1,
+        bodyPatternCount: 1,
+        blockedSelectorCount: 1
+      },
+      detected: {
+        redactedMarkers: 1,
+        hashedSensitiveValues: 0,
+        sensitiveKeyMentions: 1
+      },
+      scanner: {
+        preEncryption: true,
+        status: "passed",
+        findingCount: 0
+      },
+      categories: [
+        {
+          category: "network",
+          events: 1,
+          low: 0,
+          medium: 1,
+          high: 0,
+          redacted: 1,
+          unredacted: 0
+        }
+      ]
+    }
+  };
 }
 
 async function writeIntegrity(zip) {
@@ -193,6 +273,10 @@ function assert(condition, message, details) {
   if (!condition) {
     throw new Error(`${message}${details ? ` | ${JSON.stringify(details)}` : ""}`);
   }
+}
+
+function toBase64(bytes) {
+  return Buffer.from(bytes).toString("base64");
 }
 
 async function cleanup() {
