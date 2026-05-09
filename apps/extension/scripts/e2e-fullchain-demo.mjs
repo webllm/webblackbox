@@ -487,8 +487,7 @@ async function main() {
           "console.entry",
           "network.request",
           "dom.snapshot",
-          "storage.local.snapshot",
-          "screen.screenshot"
+          "storage.local.snapshot"
         ]
       : ["user.click", "screen.screenshot", "console.entry"];
 
@@ -501,12 +500,18 @@ async function main() {
       ? await verifyPlayerScreenshotMarker(playerClient, 20_000)
       : {
           ok: true,
-          reason: "lite-runtime-screenshot-checked-via-event-type"
+          skipped: "lite-screenshot-not-required"
         };
   if (captureMode === "full") {
     assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
   }
-  const hoverResponseResult = await verifyPlayerProgressHoverResponse(playerClient, 20_000);
+  const hoverResponseResult =
+    captureMode === "full"
+      ? await verifyPlayerProgressHoverResponse(playerClient, 20_000)
+      : {
+          ok: true,
+          skipped: "lite-response-body-preview-not-required"
+        };
   assert(
     hoverResponseResult.ok,
     "Player hover response controls are not working",
@@ -1785,7 +1790,7 @@ async function configureE2eRecorderOptions(control, mode) {
             actions: 'allow',
             inputs: 'masked',
             dom: 'allow',
-            screenshots: 'allow',
+            screenshots: ${JSON.stringify(mode)} === 'full' ? 'allow' : 'off',
             console: 'allow',
             network: 'body-allowlist',
             storage: 'allow',
@@ -1848,7 +1853,7 @@ async function configureE2eRecorderOptions(control, mode) {
               mousemoveHz: 20,
               scrollHz: 15,
               domFlushMs: 100,
-              screenshotIdleMs: 600,
+              screenshotIdleMs: ${JSON.stringify(mode)} === 'full' ? 600 : 0,
               snapshotIntervalMs: 1000,
               actionWindowMs: 1500,
               bodyCaptureMaxBytes: ${JSON.stringify(mode)} === 'full' ? 65536 : 32768
@@ -1861,7 +1866,8 @@ async function configureE2eRecorderOptions(control, mode) {
           ok: true,
           mode: ${JSON.stringify(mode)},
           cdp: capturePolicy.categories.cdp,
-          screenshotIdleMs: 600
+          screenshots: capturePolicy.categories.screenshots,
+          screenshotIdleMs: ${JSON.stringify(mode)} === 'full' ? 600 : 0
         };
       })()
     `
