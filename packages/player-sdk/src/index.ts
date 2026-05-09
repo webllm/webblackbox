@@ -561,16 +561,33 @@ export class WebBlackboxPlayer {
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
     const encryptedFiles = manifest.encryption?.files ?? {};
-    await assertArchiveFileIntegrity(zip, integrity, "index/time.json");
-    const timeIndex = await readJson<ChunkTimeIndexEntry[]>(zip, "index/time.json");
-    await assertArchiveFileIntegrity(zip, integrity, "index/req.json");
-    const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
-    await assertArchiveFileIntegrity(zip, integrity, "index/inv.json");
-    const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
-    const privacyManifest = await readOptionalIntegrityJson<PrivacyManifest>(
+    const timeIndex = await readIntegrityArchiveJson<ChunkTimeIndexEntry[]>(
       zip,
       integrity,
-      "privacy/manifest.json"
+      "index/time.json",
+      archiveKey,
+      encryptedFiles
+    );
+    const requestIndex = await readIntegrityArchiveJson<RequestIndexEntry[]>(
+      zip,
+      integrity,
+      "index/req.json",
+      archiveKey,
+      encryptedFiles
+    );
+    const invertedIndex = await readIntegrityArchiveJson<InvertedIndexEntry[]>(
+      zip,
+      integrity,
+      "index/inv.json",
+      archiveKey,
+      encryptedFiles
+    );
+    const privacyManifest = await readOptionalIntegrityArchiveJson<PrivacyManifest>(
+      zip,
+      integrity,
+      "privacy/manifest.json",
+      archiveKey,
+      encryptedFiles
     );
     const eventChunks = await readEventChunkSources(
       zip,
@@ -3418,17 +3435,31 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   return JSON.parse(content) as TValue;
 }
 
-async function readOptionalIntegrityJson<TValue>(
+async function readIntegrityArchiveJson<TValue>(
   zip: JSZip,
   integrity: HashesManifest,
-  path: string
+  path: string,
+  archiveKey: CryptoKey | null,
+  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
+): Promise<TValue> {
+  const rawBytes = await readZipFileBytes(zip, path);
+  await assertArchiveFileIntegrity(zip, integrity, path, rawBytes);
+  const bytes = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
+  return JSON.parse(new TextDecoder().decode(bytes)) as TValue;
+}
+
+async function readOptionalIntegrityArchiveJson<TValue>(
+  zip: JSZip,
+  integrity: HashesManifest,
+  path: string,
+  archiveKey: CryptoKey | null,
+  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
 ): Promise<TValue | null> {
   if (!zip.file(path)) {
     return null;
   }
 
-  await assertArchiveFileIntegrity(zip, integrity, path);
-  return readJson<TValue>(zip, path);
+  return readIntegrityArchiveJson<TValue>(zip, integrity, path, archiveKey, encryptedFiles);
 }
 
 async function readZipFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {

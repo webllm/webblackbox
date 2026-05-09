@@ -62,10 +62,10 @@ export async function createWebBlackboxArchive(
     fileHashes[path] = await sha256Hex(bytes);
   }
 
-  await addJsonFile(zip, "index/time.json", input.timeIndex, fileHashes);
-  await addJsonFile(zip, "index/req.json", input.requestIndex, fileHashes);
-  await addJsonFile(zip, "index/inv.json", input.invertedIndex, fileHashes);
-  await addJsonFile(zip, "privacy/manifest.json", input.privacyManifest, fileHashes);
+  await addJsonFile(zip, "index/time.json", input.timeIndex, fileHashes, encryption);
+  await addJsonFile(zip, "index/req.json", input.requestIndex, fileHashes, encryption);
+  await addJsonFile(zip, "index/inv.json", input.invertedIndex, fileHashes, encryption);
+  await addJsonFile(zip, "privacy/manifest.json", input.privacyManifest, fileHashes, encryption);
 
   for (const blob of input.blobs) {
     const extension = inferBlobFileExtension(blob.mime);
@@ -150,10 +150,30 @@ export async function readWebBlackboxArchive(
 
   const manifest = await readJson<ExportManifest>(zip, "manifest.json");
   const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
-  const timeIndex = await readJson<ChunkTimeIndexEntry[]>(zip, "index/time.json");
-  const requestIndex = await readJson<RequestIndexEntry[]>(zip, "index/req.json");
-  const invertedIndex = await readJson<InvertedIndexEntry[]>(zip, "index/inv.json");
-  const privacyManifest = await readOptionalJson<PrivacyManifest>(zip, "privacy/manifest.json");
+  const timeIndex = await readArchiveJson<ChunkTimeIndexEntry[]>(
+    zip,
+    "index/time.json",
+    manifest,
+    archiveKey
+  );
+  const requestIndex = await readArchiveJson<RequestIndexEntry[]>(
+    zip,
+    "index/req.json",
+    manifest,
+    archiveKey
+  );
+  const invertedIndex = await readArchiveJson<InvertedIndexEntry[]>(
+    zip,
+    "index/inv.json",
+    manifest,
+    archiveKey
+  );
+  const privacyManifest = await readOptionalArchiveJson<PrivacyManifest>(
+    zip,
+    "privacy/manifest.json",
+    manifest,
+    archiveKey
+  );
 
   const eventEntries = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
@@ -192,11 +212,13 @@ async function addJsonFile(
   zip: JSZip,
   path: string,
   value: unknown,
-  fileHashes: Record<string, string>
+  fileHashes: Record<string, string>,
+  encryption: ArchiveEncryptionState | null = null
 ): Promise<void> {
-  const content = JSON.stringify(value, null, 2);
-  zip.file(path, content);
-  fileHashes[path] = await sha256Hex(content);
+  const content = new TextEncoder().encode(JSON.stringify(value, null, 2));
+  const bytes = encryption ? await encryptForArchive(path, content, encryption) : content;
+  zip.file(path, bytes);
+  fileHashes[path] = await sha256Hex(bytes);
 }
 
 async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
@@ -210,15 +232,38 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   return JSON.parse(content) as TValue;
 }
 
-async function readOptionalJson<TValue>(zip: JSZip, path: string): Promise<TValue | null> {
-  const file = zip.file(path);
+async function readArchiveJson<TValue>(
+  zip: JSZip,
+  path: string,
+  manifest: ExportManifest,
+  archiveKey: CryptoKey | null
+): Promise<TValue> {
+  const content = await readArchiveFileText(zip, path, manifest, archiveKey);
+  return JSON.parse(content) as TValue;
+}
 
-  if (!file) {
+async function readOptionalArchiveJson<TValue>(
+  zip: JSZip,
+  path: string,
+  manifest: ExportManifest,
+  archiveKey: CryptoKey | null
+): Promise<TValue | null> {
+  if (!zip.file(path)) {
     return null;
   }
 
-  const content = await file.async("string");
-  return JSON.parse(content) as TValue;
+  return readArchiveJson<TValue>(zip, path, manifest, archiveKey);
+}
+
+async function readArchiveFileText(
+  zip: JSZip,
+  path: string,
+  manifest: ExportManifest,
+  archiveKey: CryptoKey | null
+): Promise<string> {
+  const bytes = await readFileBytes(zip, path);
+  const decrypted = await decryptArchiveFile(path, bytes, manifest, archiveKey);
+  return new TextDecoder().decode(decrypted);
 }
 
 async function verifyArchiveIntegrity(zip: JSZip, integrity: HashesManifest): Promise<void> {

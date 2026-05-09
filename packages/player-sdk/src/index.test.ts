@@ -2007,7 +2007,7 @@ async function createEncryptedArchive(source: Uint8Array, passphrase: string): P
   const files: Record<string, { ivBase64: string }> = {};
 
   for (const path of Object.keys(zip.files)) {
-    if (!path.startsWith("events/") && !path.startsWith("blobs/")) {
+    if (!isEncryptedArchivePrivatePath(path)) {
       continue;
     }
 
@@ -2040,6 +2040,17 @@ async function createEncryptedArchive(source: Uint8Array, passphrase: string): P
   zip.file("manifest.json", JSON.stringify(manifest, null, 2));
   await writeIntegrityManifest(zip);
   return zip.generateAsync({ type: "uint8array" });
+}
+
+function isEncryptedArchivePrivatePath(path: string): boolean {
+  return (
+    path.startsWith("events/") ||
+    path.startsWith("blobs/") ||
+    path === "index/time.json" ||
+    path === "index/req.json" ||
+    path === "index/inv.json" ||
+    path === "privacy/manifest.json"
+  );
 }
 
 async function deriveArchiveKey(

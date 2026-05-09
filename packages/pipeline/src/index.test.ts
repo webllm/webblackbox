@@ -658,9 +658,21 @@ describe("pipeline", () => {
     const parsed = await readWebBlackboxArchive(exported.bytes, {
       passphrase: "secret-passphrase"
     });
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const rawInvertedIndex = await zip.file("index/inv.json")?.async("uint8array");
+    const rawPrivacyManifest = await zip.file("privacy/manifest.json")?.async("uint8array");
+    const rawInvertedText = new TextDecoder().decode(rawInvertedIndex ?? new Uint8Array());
+    const rawPrivacyText = new TextDecoder().decode(rawPrivacyManifest ?? new Uint8Array());
 
     expect(parsed.events.length).toBeGreaterThanOrEqual(2);
     expect(parsed.manifest.encryption?.algorithm).toBe("AES-GCM");
+    expect(parsed.manifest.encryption?.files["index/time.json"]).toBeDefined();
+    expect(parsed.manifest.encryption?.files["index/req.json"]).toBeDefined();
+    expect(parsed.manifest.encryption?.files["index/inv.json"]).toBeDefined();
+    expect(parsed.manifest.encryption?.files["privacy/manifest.json"]).toBeDefined();
+    expect(rawInvertedText).not.toContain("network.request");
+    expect(rawInvertedText).not.toContain("E-enc-2");
+    expect(rawPrivacyText).not.toContain("local-download");
     expect(parsed.privacyManifest?.scanner.preEncryption).toBe(true);
     expect(parsed.privacyManifest?.encryption.archive).toBe("encrypted");
     expect(parsed.privacyManifest?.transfer).toMatchObject({
