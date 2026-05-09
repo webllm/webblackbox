@@ -21,6 +21,11 @@ const DEFAULT_SCREENSHOT_INTERVAL = 120;
 const DEFAULT_BLOB_POOL = 24;
 const DEFAULT_BLOB_BYTES = 24 * 1024;
 const EVENT_STEP_MS = 120;
+const FULL_EXPORT_OPTIONS = {
+  includeScreenshots: true,
+  maxArchiveBytes: null,
+  recentWindowMs: null
+} as const;
 
 type PipelineBenchmarkReport = {
   eventCount: number;
@@ -285,7 +290,7 @@ async function run(): Promise<void> {
   const storedBlobs = await storage.listBlobs();
 
   const fullExportStart = performance.now();
-  const fullExport = await pipeline.exportBundle();
+  const fullExport = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
   const fullExportMs = performance.now() - fullExportStart;
 
   const fullParseStart = performance.now();
