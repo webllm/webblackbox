@@ -115,7 +115,8 @@ describe("injected-hooks", () => {
       return new Response('{"ok":true,"token":"abc"}', {
         status: 200,
         headers: {
-          "content-type": "application/json"
+          "content-type": "application/json",
+          "x-user-email": "alice@example.test"
         }
       });
     }) as typeof fetch;
@@ -128,6 +129,11 @@ describe("injected-hooks", () => {
 
     await window.fetch("https://example.test/api/demo/123?token=secret#frag", {
       method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-user-email": "alice@example.test",
+        authorization: "Bearer abc"
+      },
       body: '{"token":"abc"}'
     });
 
@@ -155,12 +161,21 @@ describe("injected-hooks", () => {
 
     expect(fetchStart?.payload).toMatchObject({
       method: "POST",
-      url: "https://example.test/api/demo/:id"
+      url: "https://example.test/api/demo/:id",
+      headers: {
+        "content-type": "application/json"
+      }
     });
+    expect(JSON.stringify(fetchStart?.payload)).not.toContain("alice@example.test");
+    expect(JSON.stringify(fetchStart?.payload)).not.toContain("Bearer abc");
     expect(fetchEnd?.payload).toMatchObject({
       status: 200,
-      ok: true
+      ok: true,
+      headers: {
+        "content-type": "application/json"
+      }
     });
+    expect(JSON.stringify(fetchEnd?.payload)).not.toContain("alice@example.test");
     expect(networkBody?.payload).toMatchObject({
       source: "fetch",
       method: "POST",

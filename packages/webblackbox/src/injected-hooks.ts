@@ -16,6 +16,20 @@ const SAFE_SERIALIZE_MAX_DEPTH = 3;
 const SAFE_SERIALIZE_MAX_PROPERTIES = 24;
 const SAFE_SERIALIZE_MAX_STRING_CHARS = 1_200;
 const EMIT_FLUSH_MAX_EVENTS = 24;
+const NETWORK_HEADER_ALLOWLIST = new Set([
+  "accept",
+  "accept-language",
+  "cache-control",
+  "content-encoding",
+  "content-language",
+  "content-length",
+  "content-type",
+  "etag",
+  "expires",
+  "last-modified",
+  "pragma",
+  "vary"
+]);
 
 /** `window.postMessage` source tag used by injected lite capture hooks. */
 export const INJECTED_MESSAGE_SOURCE = "webblackbox-injected";
@@ -1243,7 +1257,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     ).toUpperCase();
     const headerSource =
       requestInit.headers ?? (request instanceof Request ? request.headers : undefined);
-    const headers = headerSource ? toHeaderRecord(headerSource) : undefined;
+    const headers = headerSource ? toAllowlistedHeaderRecord(headerSource) : undefined;
     const bodyCandidate = requestInit.body;
     const postDataSize = estimateBodyLength(bodyCandidate);
 
@@ -1255,13 +1269,17 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
     };
   }
 
-  function toHeaderRecord(rawHeaders: HeadersInit): Record<string, string> | undefined {
+  function toAllowlistedHeaderRecord(rawHeaders: HeadersInit): Record<string, string> | undefined {
     const headers = new Headers(rawHeaders);
     const output: Record<string, string> = {};
     let count = 0;
 
     headers.forEach((value, key) => {
       if (count >= 64) {
+        return;
+      }
+
+      if (!NETWORK_HEADER_ALLOWLIST.has(key.toLowerCase())) {
         return;
       }
 
@@ -1273,7 +1291,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   }
 
   function readHeaders(headers: Headers): Record<string, string> | undefined {
-    return toHeaderRecord(headers);
+    return toAllowlistedHeaderRecord(headers);
   }
 
   function parseXhrResponseHeaders(value: string): Record<string, string> | undefined {
@@ -1299,6 +1317,10 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
       const entry = line.slice(separatorIndex + 1).trim();
 
       if (!key) {
+        continue;
+      }
+
+      if (!NETWORK_HEADER_ALLOWLIST.has(key)) {
         continue;
       }
 
