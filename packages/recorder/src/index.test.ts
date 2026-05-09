@@ -10,6 +10,7 @@ import { EventRingBuffer } from "./ring-buffer.js";
 import { createDefaultRecorderPlugins } from "./plugins.js";
 import { WebBlackboxRecorder } from "./recorder.js";
 import { redactPayload } from "./redaction.js";
+import type { RawRecorderEvent } from "./types.js";
 
 const TEST_CAPTURE_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
@@ -55,6 +56,30 @@ const TEST_CONFIG: RecorderConfig = {
   capturePolicy: TEST_CAPTURE_POLICY,
   sitePolicies: []
 };
+
+function createPolicy(overrides: Partial<CapturePolicy> = {}): CapturePolicy {
+  return {
+    ...TEST_CAPTURE_POLICY,
+    ...overrides,
+    categories: {
+      ...TEST_CAPTURE_POLICY.categories,
+      ...overrides.categories
+    }
+  };
+}
+
+function createRawEvent(overrides: Partial<RawRecorderEvent> = {}): RawRecorderEvent {
+  return {
+    source: "content",
+    rawType: "click",
+    sid: "S-policy",
+    tabId: 1,
+    t: Date.now(),
+    mono: 1,
+    payload: {},
+    ...overrides
+  };
+}
 
 describe("recorder", () => {
   it("redacts configured sensitive headers", () => {
@@ -737,6 +762,273 @@ describe("recorder", () => {
     expect(payload?.contentHash).toBeUndefined();
   });
 
+  it("emits a privacy violation when capture policy is missing", () => {
+    const recorder = new WebBlackboxRecorder({
+      ...TEST_CONFIG,
+      capturePolicy: undefined
+    });
+    const result = recorder.ingest(
+      createRawEvent({
+        rawType: "click",
+        payload: {
+          selector: "button.submit"
+        }
+      })
+    );
+    const payload = result.event?.data as
+      | {
+          blockedType?: string;
+          reason?: string;
+          policyMode?: string;
+        }
+      | undefined;
+
+    expect(result.event?.type).toBe("privacy.violation");
+    expect(payload).toMatchObject({
+      blockedType: "user.click",
+      reason: "missing-capture-policy",
+      policyMode: "missing"
+    });
+  });
+
+  it("maps capture policy category gates to redacted violations", () => {
+    const cases: Array<{
+      raw: RawRecorderEvent;
+      policy: CapturePolicy;
+      reason: string;
+      blockedType: string;
+    }> = [
+      {
+        raw: createRawEvent({
+          rawType: "screenshot",
+          payload: {
+            contentHash: "shot-hash"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            screenshots: "off"
+          }
+        }),
+        reason: "screenshots-disabled",
+        blockedType: "screen.screenshot"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "snapshot",
+          payload: {
+            html: "<main>blocked</main>"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            dom: "off"
+          }
+        }),
+        reason: "dom-disabled",
+        blockedType: "dom.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "snapshot",
+          payload: {
+            contentHash: "dom-blob"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            dom: "masked"
+          }
+        }),
+        reason: "dom-raw-snapshot-disabled",
+        blockedType: "dom.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "input",
+          payload: {
+            value: "secret"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            inputs: "none"
+          }
+        }),
+        reason: "inputs-disabled",
+        blockedType: "user.input"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "input",
+          payload: {
+            text: "raw input"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            inputs: "length-only"
+          }
+        }),
+        reason: "raw-input-value-disabled",
+        blockedType: "user.input"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "console",
+          payload: {
+            text: "debug payload"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            console: "off"
+          }
+        }),
+        reason: "console-disabled",
+        blockedType: "console.entry"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "console",
+          payload: {
+            args: ["debug payload"]
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            console: "metadata"
+          }
+        }),
+        reason: "console-payload-disabled",
+        blockedType: "console.entry"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "localStorageSnapshot",
+          payload: {
+            count: 2
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            storage: "off"
+          }
+        }),
+        reason: "storage-disabled",
+        blockedType: "storage.local.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "localStorageSnapshot",
+          payload: {
+            key: "session"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            storage: "counts-only"
+          }
+        }),
+        reason: "storage-detail-disabled",
+        blockedType: "storage.local.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "indexedDbSnapshot",
+          payload: {
+            databaseNames: ["app-db"]
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            indexedDb: "counts-only"
+          }
+        }),
+        reason: "storage-detail-disabled",
+        blockedType: "storage.idb.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          rawType: "cookieSnapshot",
+          payload: {
+            names: ["session"]
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            cookies: "off"
+          }
+        }),
+        reason: "storage-disabled",
+        blockedType: "storage.cookie.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          source: "system",
+          rawType: "cdp.perf.heap.snapshot"
+        }),
+        policy: createPolicy({
+          mode: "debug",
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            heapProfiles: "lab-only"
+          }
+        }),
+        reason: "heap-profile-disabled",
+        blockedType: "perf.heap.snapshot"
+      },
+      {
+        raw: createRawEvent({
+          source: "system",
+          rawType: "cdp.perf.trace"
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            cdp: "safe-subset"
+          }
+        }),
+        reason: "cdp-profile-disabled",
+        blockedType: "perf.trace"
+      }
+    ];
+
+    for (const entry of cases) {
+      const recorder = new WebBlackboxRecorder({
+        ...TEST_CONFIG,
+        capturePolicy: entry.policy
+      });
+      const result = recorder.ingest(entry.raw);
+      const payload = result.event?.data as
+        | {
+            blockedType?: string;
+            reason?: string;
+            policyMode?: string;
+          }
+        | undefined;
+
+      expect(payload).toMatchObject({
+        blockedType: entry.blockedType,
+        reason: entry.reason,
+        policyMode: entry.policy.mode
+      });
+      expect(result.event?.type).toBe("privacy.violation");
+      expect(result.event?.privacy?.redacted).toBe(true);
+    }
+  });
+
   it("maps lite storage snapshot raw types", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const base = Date.now();
@@ -910,6 +1202,98 @@ describe("recorder", () => {
     expect(errorPayload?.aiRootCause?.suspects?.some((suspect) => suspect.type === "network")).toBe(
       true
     );
+  });
+
+  it("reports performance, dom, and fallback root-cause suspects", () => {
+    const recorder = new WebBlackboxRecorder(
+      TEST_CONFIG,
+      {},
+      undefined,
+      createDefaultRecorderPlugins()
+    );
+    const base = Date.now();
+
+    recorder.ingest(
+      createRawEvent({
+        rawType: "longtask",
+        sid: "S-root-cause",
+        tabId: 9,
+        t: base,
+        mono: 100,
+        payload: {
+          duration: "150"
+        }
+      })
+    );
+    recorder.ingest(
+      createRawEvent({
+        rawType: "mutation",
+        sid: "S-root-cause",
+        tabId: 9,
+        t: base + 1,
+        mono: 120,
+        payload: {
+          count: "80"
+        }
+      })
+    );
+    const relatedError = recorder.ingest(
+      createRawEvent({
+        rawType: "pageError",
+        sid: "S-root-cause",
+        tabId: 9,
+        t: base + 2,
+        mono: 200,
+        payload: {
+          message: "render failed"
+        }
+      })
+    );
+    const relatedPayload = relatedError.event?.data as
+      | {
+          aiRootCause?: {
+            suspects?: Array<{ type?: string }>;
+          };
+        }
+      | undefined;
+    const suspectTypes =
+      relatedPayload?.aiRootCause?.suspects?.map((suspect) => suspect.type).sort() ?? [];
+
+    expect(suspectTypes).toContain("performance");
+    expect(suspectTypes).toContain("dom");
+
+    const fallbackRecorder = new WebBlackboxRecorder(
+      TEST_CONFIG,
+      {},
+      undefined,
+      createDefaultRecorderPlugins()
+    );
+    const fallbackError = fallbackRecorder.ingest(
+      createRawEvent({
+        rawType: "pageError",
+        sid: "S-root-cause-fallback",
+        tabId: 10,
+        t: base + 3,
+        mono: 1_000,
+        payload: {
+          message: "standalone"
+        }
+      })
+    );
+    const fallbackPayload = fallbackError.event?.data as
+      | {
+          aiRootCause?: {
+            suspects?: Array<{ type?: string; eventId?: string }>;
+          };
+        }
+      | undefined;
+
+    expect(fallbackPayload?.aiRootCause?.suspects).toEqual([
+      {
+        type: "runtime",
+        reason: "No strong precursor signal was found; inspect nearby console and runtime events."
+      }
+    ]);
   });
 
   it("isolates plugin hook exceptions without dropping ingest flow", () => {
