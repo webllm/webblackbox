@@ -302,7 +302,7 @@ async function main() {
     });
   }
 
-  const stop = await stopActiveSessionFromPopup(popupClient);
+  const stop = await stopActiveSessionFromPopup(popupClient, active.sid);
   assert(stop?.ok === true, "Failed to stop full mode session.", stop);
 
   const indicatorGone = await waitForIndicatorGone(pageClient, 15_000);
@@ -804,15 +804,30 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl) {
   return popupClient.evaluate(expression);
 }
 
-async function stopActiveSessionFromPopup(popupClient) {
+async function stopActiveSessionFromPopup(popupClient, expectedSid) {
   const expression = `
     (async () => {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
       const rows = store['webblackbox.runtime.sessions'];
-      const active = Array.isArray(rows) ? rows[0] : undefined;
+      const sessions = Array.isArray(rows) ? rows : [];
+      const expectedSid = ${JSON.stringify(expectedSid)};
+      const active =
+        (expectedSid
+          ? sessions.find((row) => row?.sid === expectedSid && typeof row?.tabId === 'number')
+          : undefined) ??
+        sessions.find((row) => typeof row?.tabId === 'number');
 
       if (!active || typeof active.tabId !== 'number') {
-        return { ok: false, reason: 'no-active-session', rows };
+        if (expectedSid) {
+          return {
+            ok: true,
+            sid: expectedSid,
+            alreadyStopped: true,
+            rows: sessions
+          };
+        }
+
+        return { ok: false, reason: 'no-active-session', rows: sessions };
       }
 
       await chrome.runtime.sendMessage({ kind: 'ui.stop', tabId: active.tabId });
