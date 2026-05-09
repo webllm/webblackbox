@@ -17,6 +17,8 @@ The dev/enterprise profile can enable deeper diagnostics, including CDP, but the
 
 Real-user archives require export encryption. Public share uploads require encrypted `.webblackbox` archives and never accept passphrases. Client-side share metadata is limited to an allowlisted public summary.
 
+Plaintext synthetic or local-debug export exemptions require a trusted `captureContextEvidenceRef`, such as `synthetic-fixture:<id>`, `ci-run:<id>`, or `local-attestation:<id>`.
+
 ## Player Safety
 
 The player treats archives as untrusted input. It does not load captured external resources by default, limits replay resources to inert local object/data URLs, revokes screenshot object URLs after a short TTL, and serves player/share views with no-referrer and restrictive CSP controls.

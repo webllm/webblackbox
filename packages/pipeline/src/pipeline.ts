@@ -71,6 +71,8 @@ const LOW_RISK_OVERRIDE_BLOCKED_CATEGORIES = new Set([
   "network",
   "storage"
 ]);
+const LOCAL_DEBUG_EVIDENCE_PATTERN = /^local-attestation:[A-Za-z0-9][A-Za-z0-9._:-]{7,}$/;
+const SYNTHETIC_EVIDENCE_PATTERN = /^(?:synthetic-fixture|ci-run):[A-Za-z0-9][A-Za-z0-9._:-]{7,}$/;
 
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
@@ -295,6 +297,14 @@ export class FlightRecorderPipeline {
 
     if (policy.encryption.archive === "required" && !hasPassphrase) {
       throw new Error("Export encryption is required by the active capture policy.");
+    }
+
+    if (
+      !hasPassphrase &&
+      (policy.encryption.archive === "synthetic-local-debug-exempt" ||
+        policy.encryption.archive === "explicit-low-risk-override")
+    ) {
+      assertTrustedPlaintextExemptionEvidence(policy);
     }
 
     if (
@@ -759,6 +769,33 @@ function assertLowRiskOverrideAllowed(
       `Explicit low-risk export override is not allowed for high-risk ${highRiskSummary.category} artifacts.`
     );
   }
+}
+
+function assertTrustedPlaintextExemptionEvidence(policy: CapturePolicy): void {
+  if (policy.captureContext === "real-user") {
+    throw new Error("Plaintext export exemptions are not allowed for real-user capture context.");
+  }
+
+  const evidenceRef = policy.captureContextEvidenceRef?.trim();
+
+  if (!evidenceRef || !isTrustedCaptureContextEvidenceRef(policy.captureContext, evidenceRef)) {
+    throw new Error("Plaintext export exemption requires trusted capture context evidence.");
+  }
+}
+
+function isTrustedCaptureContextEvidenceRef(
+  context: CapturePolicy["captureContext"],
+  evidenceRef: string
+): boolean {
+  if (context === "local-debug") {
+    return LOCAL_DEBUG_EVIDENCE_PATTERN.test(evidenceRef);
+  }
+
+  if (context === "synthetic") {
+    return SYNTHETIC_EVIDENCE_PATTERN.test(evidenceRef);
+  }
+
+  return false;
 }
 
 function buildExportTransferPolicy(input: {

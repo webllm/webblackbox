@@ -111,7 +111,7 @@ function createNoisyPayload(size: number, seed: number): string {
 const LOCAL_DEBUG_TEST_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
   captureContext: "local-debug",
-  captureContextEvidenceRef: "test-fixture",
+  captureContextEvidenceRef: "local-attestation:test-fixture-0001",
   encryption: {
     localAtRest: "required",
     archive: "synthetic-local-debug-exempt",

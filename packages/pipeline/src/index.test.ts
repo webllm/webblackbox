@@ -259,6 +259,66 @@ describe("pipeline", () => {
     await expect(pipeline.exportBundle()).rejects.toThrow(/encryption is required/i);
   });
 
+  it("rejects plaintext capture-context exemptions without trusted evidence", async () => {
+    for (const evidenceRef of [undefined, "local-attestation-1"]) {
+      const storage = new MemoryPipelineStorage();
+      const pipeline = new FlightRecorderPipeline({
+        session: {
+          ...SESSION,
+          sid: `S-plaintext-evidence-${evidenceRef ?? "missing"}`
+        },
+        storage,
+        maxChunkBytes: 512,
+        capturePolicy: {
+          ...DEFAULT_CAPTURE_POLICY,
+          captureContext: "local-debug",
+          ...(evidenceRef ? { captureContextEvidenceRef: evidenceRef } : {}),
+          encryption: {
+            localAtRest: "required",
+            archive: "synthetic-local-debug-exempt",
+            archiveKeyEnvelope: "none"
+          }
+        }
+      });
+
+      await pipeline.start();
+      await pipeline.ingest(createEvent(`E-${evidenceRef ?? "missing"}`, "user.click", Date.now()));
+
+      await expect(pipeline.exportBundle()).rejects.toThrow(/trusted capture context evidence/i);
+    }
+  });
+
+  it("allows plaintext synthetic exemptions with trusted evidence", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-trusted-synthetic-exemption"
+      },
+      storage,
+      maxChunkBytes: 512,
+      capturePolicy: {
+        ...DEFAULT_CAPTURE_POLICY,
+        captureContext: "synthetic",
+        captureContextEvidenceRef: "synthetic-fixture:pipeline-export-0001",
+        encryption: {
+          localAtRest: "required",
+          archive: "synthetic-local-debug-exempt",
+          archiveKeyEnvelope: "none"
+        }
+      }
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-trusted-synthetic", "user.click", Date.now()));
+
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.manifest.encryption).toBeUndefined();
+    expect(parsed.privacyManifest?.transfer?.archiveKeyEnvelope).toBe("none");
+  });
+
   it("rejects explicit low-risk overrides when high-risk artifacts are present", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
@@ -271,7 +331,7 @@ describe("pipeline", () => {
       capturePolicy: {
         ...DEFAULT_CAPTURE_POLICY,
         captureContext: "local-debug",
-        captureContextEvidenceRef: "local-attestation-1",
+        captureContextEvidenceRef: "local-attestation:low-risk-override-0001",
         encryption: {
           localAtRest: "required",
           archive: "explicit-low-risk-override",
