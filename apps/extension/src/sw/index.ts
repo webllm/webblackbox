@@ -70,6 +70,12 @@ import {
   upsertRequestMeta,
   type RequestMetaEntry
 } from "./request-meta.js";
+import {
+  FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS,
+  buildLocalStorageSnapshotExpression,
+  parseStorageSnapshotMeta,
+  type LocalStorageSnapshotMode
+} from "./storage-snapshot.js";
 
 type SessionRuntime = {
   sid: string;
@@ -323,21 +329,6 @@ const LITE_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
 const LITE_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const LITE_DOM_SNAPSHOT_MAX_BYTES = 1_500 * 1024;
 const LITE_STORAGE_SNAPSHOT_MAX_BYTES = 600 * 1024;
-const FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS = 300;
-const FULL_MODE_LOCAL_STORAGE_SNAPSHOT_EXPR = `(() => {
-  const count = localStorage.length;
-  const maxItems = Math.min(count, ${FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS});
-  const entries = [];
-  for (let index = 0; index < maxItems; index += 1) {
-    const key = localStorage.key(index);
-    if (!key) {
-      continue;
-    }
-    const value = localStorage.getItem(key) ?? "";
-    entries.push([key, value.length]);
-  }
-  return JSON.stringify({ count, truncated: count > maxItems, entries });
-})()`;
 const CPU_PROFILE_SAMPLE_MS = 350;
 const HEAP_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const OPTIONS_STORAGE_KEY = "webblackbox.options";
@@ -2539,10 +2530,10 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     });
   }
 
-  const localStorageData =
-    policy?.categories.storage === "allow" || policy?.categories.storage === "lengths-only"
-      ? await evaluateExpression(runtime, FULL_MODE_LOCAL_STORAGE_SNAPSHOT_EXPR)
-      : null;
+  const localStorageMode = resolveLocalStorageSnapshotMode(policy);
+  const localStorageData = localStorageMode
+    ? await evaluateExpression(runtime, buildLocalStorageSnapshotExpression(localStorageMode))
+    : null;
 
   if (typeof localStorageData === "string") {
     const bytes = new TextEncoder().encode(localStorageData);
@@ -2561,6 +2552,8 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
         count: parsed?.count,
         sampledCount: parsed?.sampledCount,
         truncated: parsed?.truncated,
+        mode: localStorageMode,
+        redacted: localStorageMode !== "allow",
         reason
       }
     });
@@ -2601,6 +2594,16 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       });
     }
   }
+}
+
+function resolveLocalStorageSnapshotMode(
+  policy: CapturePolicy | undefined
+): LocalStorageSnapshotMode | null {
+  if (policy?.categories.storage === "allow" || policy?.categories.storage === "lengths-only") {
+    return policy.categories.storage;
+  }
+
+  return null;
 }
 
 async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Promise<void> {
@@ -3005,28 +3008,6 @@ function asStringArray(value: unknown, limit: number): string[] {
   }
 
   return output;
-}
-
-function parseStorageSnapshotMeta(
-  serialized: string
-): { count?: number; sampledCount?: number; truncated?: boolean } | null {
-  try {
-    const parsed = JSON.parse(serialized) as {
-      count?: unknown;
-      entries?: unknown;
-      truncated?: unknown;
-    };
-    const count = normalizeNonNegativeInt(parsed.count);
-    const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
-
-    return {
-      count,
-      sampledCount: entries.length,
-      truncated: parsed.truncated === true
-    };
-  } catch {
-    return null;
-  }
 }
 
 function encodeTextWithByteLimit(
