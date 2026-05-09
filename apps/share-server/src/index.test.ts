@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -208,6 +208,33 @@ describe("share-server", () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe("Encrypted WebBlackbox archive is missing encrypted file metadata.");
     expect(payload.missingEncryptedPaths).toContain("index/time.json");
+  });
+
+  it("rejects encrypted public share uploads with plaintext private files", async () => {
+    const server = await startShareServer();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "encrypted.webblackbox",
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      },
+      body: Buffer.from(
+        await createEncryptedEnvelopeArchive({
+          privateFileMode: "plaintext"
+        })
+      )
+    });
+    const payload = (await response.json()) as {
+      error: string;
+      plaintextEncryptedPaths: string[];
+    };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Encrypted WebBlackbox archive contains plaintext private files.");
+    expect(payload.plaintextEncryptedPaths).toContain("index/time.json");
   });
 
   it("expires shares and blocks archive download after ttl", async () => {
@@ -486,6 +513,7 @@ function buildPassedShareSummary(): unknown {
 async function createEncryptedEnvelopeArchive(
   options: {
     completeEncryptionMap?: boolean;
+    privateFileMode?: "ciphertext" | "plaintext";
   } = {}
 ): Promise<Uint8Array> {
   return createEnvelopeArchive(true, options);
@@ -499,6 +527,7 @@ async function createEnvelopeArchive(
   encrypted: boolean,
   options: {
     completeEncryptionMap?: boolean;
+    privateFileMode?: "ciphertext" | "plaintext";
   } = {}
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -506,9 +535,9 @@ async function createEnvelopeArchive(
   const encryptedFiles =
     encrypted && options.completeEncryptionMap !== false
       ? {
-          "index/time.json": { ivBase64: "AAAAAAAAAAAAAAAA" },
-          "index/req.json": { ivBase64: "AAAAAAAAAAAAAAAA" },
-          "index/inv.json": { ivBase64: "AAAAAAAAAAAAAAAA" }
+          "index/time.json": { ivBase64: toBase64(randomBytes(12)) },
+          "index/req.json": { ivBase64: toBase64(randomBytes(12)) },
+          "index/inv.json": { ivBase64: toBase64(randomBytes(12)) }
         }
       : {};
   const manifest = {
@@ -550,9 +579,9 @@ async function createEnvelopeArchive(
   };
 
   addJsonFile(zip, files, "manifest.json", manifest);
-  addJsonFile(zip, files, "index/time.json", []);
-  addJsonFile(zip, files, "index/req.json", []);
-  addJsonFile(zip, files, "index/inv.json", []);
+  addPrivateFile(zip, files, "index/time.json", [], encrypted, options.privateFileMode);
+  addPrivateFile(zip, files, "index/req.json", [], encrypted, options.privateFileMode);
+  addPrivateFile(zip, files, "index/inv.json", [], encrypted, options.privateFileMode);
   addJsonFile(zip, files, "integrity/hashes.json", {
     manifestSha256: files["manifest.json"],
     files
@@ -573,4 +602,26 @@ function addJsonFile(
   if (path !== "integrity/hashes.json") {
     files[path] = createHash("sha256").update(content).digest("hex");
   }
+}
+
+function addPrivateFile(
+  zip: JSZip,
+  files: Record<string, string>,
+  path: string,
+  value: unknown,
+  encrypted: boolean,
+  mode: "ciphertext" | "plaintext" = "ciphertext"
+): void {
+  const content = Buffer.from(JSON.stringify(value));
+  const bytes =
+    encrypted && mode === "ciphertext"
+      ? randomBytes(Math.max(32, content.byteLength + 16))
+      : content;
+
+  zip.file(path, bytes);
+  files[path] = createHash("sha256").update(bytes).digest("hex");
+}
+
+function toBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64");
 }

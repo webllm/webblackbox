@@ -31,6 +31,8 @@ type ArchiveEnvelopeSummary = {
   encrypted: boolean;
   encryptedPrivatePathsComplete: boolean;
   missingEncryptedPaths: string[];
+  encryptedPrivatePathsConfidential: boolean;
+  plaintextEncryptedPaths: string[];
   analysisError?: string;
 };
 
@@ -125,6 +127,7 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
 );
 const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
 const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
+const AES_GCM_IV_BYTES = 12;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
@@ -298,6 +301,19 @@ async function handleUpload(
     respondJson(response, 400, {
       error: "Encrypted WebBlackbox archive is missing encrypted file metadata.",
       missingEncryptedPaths: archiveEnvelope.missingEncryptedPaths.slice(0, 12)
+    });
+    return;
+  }
+
+  if (archiveEnvelope.encrypted && !archiveEnvelope.encryptedPrivatePathsConfidential) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 400, {
+      error: "Encrypted WebBlackbox archive contains plaintext private files.",
+      plaintextEncryptedPaths: archiveEnvelope.plaintextEncryptedPaths.slice(0, 12)
     });
     return;
   }
@@ -695,17 +711,24 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
     const missingEncryptedPaths = encrypted
       ? privatePaths.filter((path) => !isEncryptedFileMeta(encryptedFiles[path]))
       : [];
+    const plaintextEncryptedPaths = encrypted
+      ? await collectPlaintextEncryptedPrivatePaths(zip, privatePaths, encryptedFiles)
+      : [];
 
     return {
       encrypted,
       encryptedPrivatePathsComplete: encrypted && missingEncryptedPaths.length === 0,
-      missingEncryptedPaths
+      missingEncryptedPaths,
+      encryptedPrivatePathsConfidential: encrypted && plaintextEncryptedPaths.length === 0,
+      plaintextEncryptedPaths
     };
   } catch (error) {
     return {
       encrypted: false,
       encryptedPrivatePathsComplete: false,
       missingEncryptedPaths: [],
+      encryptedPrivatePathsConfidential: false,
+      plaintextEncryptedPaths: [],
       analysisError: redactText(error instanceof Error ? error.message : String(error), 240)
     };
   }
@@ -728,7 +751,117 @@ function isArchivePrivatePath(path: string): boolean {
 
 function isEncryptedFileMeta(value: unknown): boolean {
   const record = asRecord(value);
-  return typeof record.ivBase64 === "string" && record.ivBase64.trim().length > 0;
+  if (typeof record.ivBase64 !== "string") {
+    return false;
+  }
+
+  const iv = decodeBase64Strict(record.ivBase64.trim());
+  return iv !== null && iv.byteLength === AES_GCM_IV_BYTES;
+}
+
+async function collectPlaintextEncryptedPrivatePaths(
+  zip: JSZip,
+  privatePaths: string[],
+  encryptedFiles: Record<string, unknown>
+): Promise<string[]> {
+  const plaintextPaths: string[] = [];
+
+  for (const path of privatePaths) {
+    if (!isEncryptedFileMeta(encryptedFiles[path])) {
+      continue;
+    }
+
+    const file = zip.file(path);
+    if (!file) {
+      continue;
+    }
+
+    const bytes = await file.async("uint8array");
+    if (looksLikePlaintextPrivateArchiveFile(path, bytes)) {
+      plaintextPaths.push(path);
+    }
+  }
+
+  return plaintextPaths;
+}
+
+function looksLikePlaintextPrivateArchiveFile(path: string, bytes: Uint8Array): boolean {
+  if (path === "index/time.json" || path === "index/req.json" || path === "index/inv.json") {
+    return isPlainJsonBytes(bytes);
+  }
+
+  if (path === "privacy/manifest.json") {
+    return isPlainJsonBytes(bytes);
+  }
+
+  if (path.startsWith("events/") && path.endsWith(".ndjson")) {
+    return isPlainNdjsonBytes(bytes);
+  }
+
+  return false;
+}
+
+function isPlainJsonBytes(bytes: Uint8Array): boolean {
+  const text = decodeUtf8Strict(bytes);
+  if (!text) {
+    return false;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+    return false;
+  }
+
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isPlainNdjsonBytes(bytes: Uint8Array): boolean {
+  const text = decodeUtf8Strict(bytes);
+  if (!text) {
+    return false;
+  }
+
+  const lines = text
+    .trim()
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
+    return false;
+  }
+
+  try {
+    for (const line of lines.slice(0, 32)) {
+      JSON.parse(line);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function decodeUtf8Strict(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function decodeBase64Strict(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    return null;
+  }
+
+  const decoded = Buffer.from(value, "base64");
+  const normalizedInput = value.replace(/=+$/, "");
+  const normalizedOutput = decoded.toString("base64").replace(/=+$/, "");
+
+  return normalizedInput === normalizedOutput ? decoded : null;
 }
 
 async function readZipText(zip: JSZip, path: string): Promise<string> {
