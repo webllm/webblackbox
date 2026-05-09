@@ -20,7 +20,7 @@ Captured sessions remain local until the user exports or shares an archive. Loca
 
 ## Export And Share
 
-Real-user archives must be encrypted before export or share. The public share server stores encrypted archive bytes and redacted public metadata. It does not receive archive passphrases or decryption keys, and it rejects encrypted uploads that leave private archive indexes or privacy manifests in plaintext.
+Real-user archives must be encrypted before export or share. The public share server stores encrypted archive bytes and redacted public metadata. It does not receive archive passphrases or decryption keys, and it rejects encrypted uploads that leave private archive files, including event chunks, blobs, indexes, or privacy manifests, in plaintext.
 
 Public share links expire, can be revoked, and generate redacted audit events. Audit records do not include captured payloads, passphrases, API keys, raw URLs, raw selectors, or archive plaintext.
 
