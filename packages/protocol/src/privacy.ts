@@ -71,8 +71,12 @@ function sanitizeAbsoluteUrl(value: string): string {
     return `${url.protocol}${routeTemplatePath(url.pathname)}`;
   }
 
-  if (url.protocol === "chrome-extension:" || url.protocol === "file:") {
+  if (url.protocol === "chrome-extension:") {
     return `${url.protocol}${routeTemplatePath(url.pathname)}`;
+  }
+
+  if (url.protocol === "file:") {
+    return `${url.protocol}[redacted]`;
   }
 
   return `${url.protocol}[redacted]`;

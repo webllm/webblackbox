@@ -245,5 +245,8 @@ describe("protocol", () => {
     expect(sanitizeUrlForPrivacy("/reset/abc123def456?code=oauth")).toBe("/reset/:id");
     expect(routeTemplatePath("/tenant/acme42/cases/CASE-12345")).toBe("/tenant/:id/cases/:id");
     expect(sanitizeUrlForPrivacy("#access_token=secret")).toBe("");
+    expect(sanitizeUrlForPrivacy("file:///Users/alice/secret-project/index.html")).toBe(
+      "file:[redacted]"
+    );
   });
 });
