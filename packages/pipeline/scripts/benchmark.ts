@@ -1,6 +1,11 @@
 import { performance } from "node:perf_hooks";
 
-import type { SessionMetadata, WebBlackboxEvent } from "@webblackbox/protocol";
+import type {
+  PrivacyClassification,
+  PrivacyDataCategory,
+  SessionMetadata,
+  WebBlackboxEvent
+} from "@webblackbox/protocol";
 
 import {
   FlightRecorderPipeline,
@@ -129,7 +134,7 @@ function createEvent(
   screenshotInterval: number,
   blobBytes: number
 ): WebBlackboxEvent {
-  const base: Omit<WebBlackboxEvent, "type" | "id" | "data"> = {
+  const base: Omit<WebBlackboxEvent, "type" | "id" | "data" | "privacy"> = {
     v: 1,
     sid: sessionId,
     tab: 1,
@@ -144,6 +149,7 @@ function createEvent(
       ...base,
       type: "screen.screenshot",
       id: `E-shot-${index}`,
+      privacy: createBenchmarkPrivacy("screenshots", true),
       data: {
         shotId,
         format: "webp",
@@ -157,6 +163,7 @@ function createEvent(
       ...base,
       type: "network.request",
       id: `E-req-${index}`,
+      privacy: createBenchmarkPrivacy("network"),
       data: {
         reqId: `R-${Math.floor(index / 2)}`,
         method: "POST",
@@ -174,6 +181,7 @@ function createEvent(
       ...base,
       type: "network.response",
       id: `E-res-${index}`,
+      privacy: createBenchmarkPrivacy("network"),
       data: {
         reqId: `R-${Math.floor((index - 1) / 2)}`,
         status: index % 9 === 0 ? 500 : 200,
@@ -188,6 +196,7 @@ function createEvent(
       ...base,
       type: "console.entry",
       id: `E-log-${index}`,
+      privacy: createBenchmarkPrivacy("console"),
       data: {
         level: index % 12 === 0 ? "error" : "log",
         text: textPool[(index + 13) % textPool.length] ?? "",
@@ -200,11 +209,23 @@ function createEvent(
     ...base,
     type: "user.click",
     id: `E-click-${index}`,
+    privacy: createBenchmarkPrivacy("actions"),
     data: {
       selector: "#save",
       x: index % 1400,
       y: index % 900
     }
+  };
+}
+
+function createBenchmarkPrivacy(
+  category: PrivacyDataCategory,
+  highSensitivity = false
+): PrivacyClassification {
+  return {
+    category,
+    sensitivity: highSensitivity ? "high" : "low",
+    redacted: true
   };
 }
 
