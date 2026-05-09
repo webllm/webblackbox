@@ -69,6 +69,7 @@ Headers:
 Body:
 
 - Raw encrypted `.webblackbox` bytes. Public deployments do not accept plaintext uploads by default.
+- Encrypted uploads must include encryption metadata for every private archive path: `events/*`, `blobs/*`, `index/time.json`, `index/req.json`, `index/inv.json`, and `privacy/manifest.json` when present. Legacy encrypted archives that left private indexes in plaintext must be re-exported with the current exporter before public share upload.
 
 Response:
 

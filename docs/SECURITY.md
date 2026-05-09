@@ -15,9 +15,9 @@ The dev/enterprise profile can enable deeper diagnostics, including CDP, but the
 
 ## Encryption
 
-Real-user archives require export encryption. Public share uploads require encrypted `.webblackbox` archives and never accept passphrases. Client-side share metadata is limited to an allowlisted public summary.
+Real-user archives require export encryption. Public share uploads require encrypted `.webblackbox` archives and never accept passphrases. Private archive paths include event chunks, blobs, indexes, and `privacy/manifest.json`; older encrypted archives with plaintext private indexes must be re-exported before public sharing. Client-side share metadata is limited to an allowlisted public summary.
 
-Plaintext synthetic or local-debug export exemptions require a trusted `captureContextEvidenceRef`, such as `synthetic-fixture:<id>`, `ci-run:<id>`, or `local-attestation:<id>`.
+Plaintext synthetic or local-debug export exemptions require a well-formed `captureContextEvidenceRef` that is also allowlisted by the trusted pipeline/embedder configuration. A capture policy cannot make its own plaintext exemption trusted.
 
 ## Player Safety
 
