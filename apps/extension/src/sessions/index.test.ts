@@ -102,4 +102,58 @@ describe("sessions page rendering", () => {
     expect(tagChip?.textContent).toBe(`#${hostileText}`);
     expect(document.getElementById("pwned")).toBeNull();
   });
+
+  it("requires a passphrase before exporting a session", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importSessionsModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-export",
+          tabId: 7,
+          mode: "lite",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushSessions();
+
+    document.querySelector<HTMLButtonElement>("button[data-export]")?.click();
+    await flushSessions();
+
+    document
+      .querySelector<HTMLFormElement>("form.wb-prompt-card")
+      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushSessions();
+
+    expect(port.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "ui.export"
+      })
+    );
+
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!passphraseInput) {
+      throw new Error("missing passphrase input");
+    }
+
+    passphraseInput.value = "session-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    document
+      .querySelector<HTMLFormElement>("form.wb-prompt-card")
+      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushSessions();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.export",
+      sid: "sid-export",
+      passphrase: "session-secret"
+    });
+  });
 });

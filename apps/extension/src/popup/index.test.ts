@@ -253,19 +253,62 @@ describe("popup export policy form", () => {
       throw new Error("missing export prompt");
     }
 
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!passphraseInput) {
+      throw new Error("missing passphrase input");
+    }
+
+    passphraseInput.value = "export-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
     promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await flushPopup();
 
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.export",
       sid: "sid-1",
-      passphrase: undefined,
+      passphrase: "export-secret",
       policy: {
         includeScreenshots: false,
         maxArchiveBytes: 256 * 1024 * 1024,
         recentWindowMs: 45 * 60 * 1000
       }
     });
+  });
+
+  it("does not submit an export with an empty passphrase", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-empty-passphrase",
+          tabId: 17,
+          mode: "lite",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushPopup();
+
+    getExportButton().click();
+    await flushPopup();
+
+    document
+      .querySelector<HTMLFormElement>("form.wb-prompt-card")
+      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushPopup();
+
+    expect(port.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "ui.export"
+      })
+    );
   });
 
   it("opens the sessions and options pages from the popup", async () => {

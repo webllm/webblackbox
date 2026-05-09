@@ -352,6 +352,7 @@ function openPassphraseDialog(): Promise<string | null> {
     input.type = "password";
     input.className = "wb-input wb-prompt-field";
     input.autocomplete = "off";
+    input.required = true;
 
     const actions = document.createElement("div");
     actions.className = "wb-confirm-actions";
@@ -385,9 +386,20 @@ function openPassphraseDialog(): Promise<string | null> {
     };
 
     cancelButton?.addEventListener("click", () => finish(null));
+    input.addEventListener("input", () => {
+      input.setCustomValidity("");
+    });
     form?.addEventListener("submit", (event) => {
       event.preventDefault();
-      finish(input?.value ?? "");
+      const passphrase = input.value.trim();
+
+      if (!passphrase) {
+        input.setCustomValidity(t("popupPassphraseRequired"));
+        input.reportValidity();
+        return;
+      }
+
+      finish(passphrase);
     });
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) {
