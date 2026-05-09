@@ -200,7 +200,7 @@ const EXTENSION_MESSAGES = {
     optionsSnapshotIntervalMs: "DOM 快照间隔（毫秒）",
     optionsScreenshotIdleMs: "空闲截图间隔（毫秒）",
     optionsScreenshotIdleHelp:
-      "轻量模式默认会在空闲时截图。设为 0 可关闭运行时截图。完整模式会将其用于浏览器侧截图节奏。",
+      "轻量模式默认关闭空闲截图。仅在明确允许截图时设置为正数。完整模式会将其用于浏览器侧截图节奏。",
     optionsBodyCaptureMaxBytes: "网络响应体采集上限（字节）",
     optionsBodyCaptureHelp:
       "轻量模式会关闭页面侧响应体采集。在扩展中，这个参数只影响完整模式使用的浏览器侧限量响应体采集路径。",
@@ -227,7 +227,7 @@ const EXTENSION_MESSAGES = {
     optionsLiteProfileSummary: "页面侧轻量信号，结合浏览器侧网络元数据。",
     optionsLiteProfileSignals: "点击 / 输入 / 滚动 / 指针采样 / 变更摘要 / 浏览器侧网络基线",
     optionsLiteProfileHeavyCapture:
-      "默认启用空闲截图，运行时 DOM 快照保持摘要模式，页面侧响应体采集关闭",
+      "默认关闭空闲截图，运行时 DOM 快照保持摘要模式，页面侧响应体采集关闭",
     optionsFullProfileSummary: "浏览器辅助采集，提供 CDP 截图、导航与更丰富的诊断信息。",
     optionsFullProfileSignals: "CDP 网络 / 导航 / 运行时错误，加上页面侧交互提示",
     optionsFullProfileHeavyCapture:
