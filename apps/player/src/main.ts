@@ -2526,14 +2526,24 @@ function renderProgressMarkers(model: ArchiveModel): void {
     return;
   }
 
-  refs.playbackMarkers.innerHTML = model.progressMarkers
-    .map((marker) => {
-      const ratio = (marker.mono - model.minMono) / model.durationMono;
-      const left = (Math.min(1, Math.max(0, ratio)) * 100).toFixed(3);
-      const tip = `${i18n.formatMarkerKind(marker.kind)} @ ${formatMono(marker.mono - model.minMono)}`;
-      return `<button type="button" class="progress-marker progress-marker-${marker.kind}" data-marker-mono="${marker.mono}" data-marker-kind="${marker.kind}" style="left:${left}%;" title="${escapeHtml(tip)}"></button>`;
-    })
-    .join("");
+  const fragment = document.createDocumentFragment();
+
+  for (const marker of model.progressMarkers) {
+    const ratio = (marker.mono - model.minMono) / model.durationMono;
+    const left = (Math.min(1, Math.max(0, ratio)) * 100).toFixed(3);
+    const tip = `${i18n.formatMarkerKind(marker.kind)} @ ${formatMono(marker.mono - model.minMono)}`;
+    const button = document.createElement("button");
+
+    button.type = "button";
+    button.className = `progress-marker progress-marker-${marker.kind}`;
+    button.dataset.markerMono = String(marker.mono);
+    button.dataset.markerKind = marker.kind;
+    button.style.left = `${left}%`;
+    button.title = tip;
+    fragment.append(button);
+  }
+
+  refs.playbackMarkers.replaceChildren(fragment);
 }
 
 async function handleProgressHoverFromPointer(event: PointerEvent): Promise<void> {
