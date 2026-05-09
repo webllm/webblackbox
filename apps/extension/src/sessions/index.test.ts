@@ -143,7 +143,7 @@ describe("sessions page rendering", () => {
       throw new Error("missing passphrase input");
     }
 
-    passphraseInput.value = "session-secret";
+    passphraseInput.value = " session-secret ";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
     document
       .querySelector<HTMLFormElement>("form.wb-prompt-card")
@@ -153,7 +153,7 @@ describe("sessions page rendering", () => {
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.export",
       sid: "sid-export",
-      passphrase: "session-secret"
+      passphrase: " session-secret "
     });
   });
 });

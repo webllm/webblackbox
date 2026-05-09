@@ -259,7 +259,7 @@ describe("popup export policy form", () => {
       throw new Error("missing passphrase input");
     }
 
-    passphraseInput.value = "export-secret";
+    passphraseInput.value = " export-secret ";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
     promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await flushPopup();
@@ -267,7 +267,7 @@ describe("popup export policy form", () => {
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.export",
       sid: "sid-1",
-      passphrase: "export-secret",
+      passphrase: " export-secret ",
       policy: {
         includeScreenshots: false,
         maxArchiveBytes: 256 * 1024 * 1024,

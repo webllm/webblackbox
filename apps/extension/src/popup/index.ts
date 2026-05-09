@@ -283,7 +283,7 @@ function bindActions(
     postUiMessage({
       kind: "ui.export",
       sid: exportSession.sid,
-      passphrase: passphrase.trim() || undefined,
+      passphrase,
       policy
     });
   });
@@ -391,9 +391,9 @@ function openPassphraseDialog(): Promise<string | null> {
     });
     form?.addEventListener("submit", (event) => {
       event.preventDefault();
-      const passphrase = input.value.trim();
+      const passphrase = input.value;
 
-      if (!passphrase) {
+      if (!passphrase.trim()) {
         input.setCustomValidity(t("popupPassphraseRequired"));
         input.reportValidity();
         return;

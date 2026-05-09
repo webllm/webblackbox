@@ -325,7 +325,7 @@ function bindActions(container: HTMLElement): void {
       postUiMessage({
         kind: "ui.export",
         sid,
-        passphrase: passphrase.trim() || undefined
+        passphrase
       });
     });
   });
@@ -463,9 +463,9 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      const passphrase = input.value.trim();
+      const passphrase = input.value;
 
-      if (!passphrase) {
+      if (!passphrase.trim()) {
         input.setCustomValidity(t("popupPassphraseRequired"));
         input.reportValidity();
         return;
