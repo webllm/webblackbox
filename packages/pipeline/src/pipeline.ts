@@ -10,7 +10,7 @@ import type {
   WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { CHUNK_CODECS, sanitizeUrlForPrivacy } from "@webblackbox/protocol";
+import { CHUNK_CODECS, DEFAULT_EXPORT_POLICY, sanitizeUrlForPrivacy } from "@webblackbox/protocol";
 
 import { decodeChunkEvents, encodeChunkEvents } from "./codec.js";
 import { EventChunker } from "./chunker.js";
@@ -38,8 +38,8 @@ export type ExportResult = {
 export type ExportBundleOptions = {
   passphrase?: string;
   includeScreenshots?: boolean;
-  maxArchiveBytes?: number;
-  recentWindowMs?: number;
+  maxArchiveBytes?: number | null;
+  recentWindowMs?: number | null;
 };
 
 type PreparedExportChunk = {
@@ -190,14 +190,21 @@ export class FlightRecorderPipeline {
   public async exportBundle(options: ExportBundleOptions = {}): Promise<ExportResult> {
     this.assertExportEncryptionPolicy(options);
     await this.flush();
+    const rawChunks = await this.options.storage.listChunks(this.options.session.sid);
+    const exportPolicy = resolveExportPolicy(options, {
+      latestEventTimestamp: rawChunks[rawChunks.length - 1]?.meta.tEnd,
+      sessionStartedAt: this.options.session.startedAt,
+      sessionEndedAt: this.options.session.endedAt
+    });
     const hasCustomSelection =
-      options.includeScreenshots === false ||
-      typeof options.maxArchiveBytes === "number" ||
-      typeof options.recentWindowMs === "number";
+      !exportPolicy.includeScreenshots ||
+      exportPolicy.maxArchiveBytes !== null ||
+      exportPolicy.recentWindowMs !== null;
 
     if (!hasCustomSelection) {
-      const indexes = await this.finalizeIndexes();
-      const chunks = await this.options.storage.listChunks(this.options.session.sid);
+      const indexes = await this.buildIndexesFromChunks(rawChunks);
+      await this.options.storage.putIndexes(this.options.session.sid, indexes);
+      const chunks = rawChunks;
       const blobs = await this.listReferencedSessionBlobsFromChunks(chunks);
       const manifest = this.buildManifest(chunks, blobs.length);
       const events = await this.decodeEventsFromChunks(chunks);
@@ -210,9 +217,9 @@ export class FlightRecorderPipeline {
         transfer: buildExportTransferPolicy({
           capturePolicy: this.options.capturePolicy,
           encrypted,
-          includeScreenshots: true,
-          maxArchiveBytes: null,
-          recentWindowMs: null
+          includeScreenshots: exportPolicy.includeScreenshots,
+          maxArchiveBytes: exportPolicy.maxArchiveBytes,
+          recentWindowMs: exportPolicy.recentWindowMs
         })
       });
       assertPrivacyScannerPassed(privacyManifest.scanner);
@@ -242,12 +249,6 @@ export class FlightRecorderPipeline {
       };
     }
 
-    const rawChunks = await this.options.storage.listChunks(this.options.session.sid);
-    const exportPolicy = resolveExportPolicy(options, {
-      latestEventTimestamp: rawChunks[rawChunks.length - 1]?.meta.tEnd,
-      sessionStartedAt: this.options.session.startedAt,
-      sessionEndedAt: this.options.session.endedAt
-    });
     const prepared = await this.prepareExportChunks(rawChunks, exportPolicy);
     const blobsByHash = await this.listSessionBlobMap();
     let selected = this.selectChunksBySize(prepared, blobsByHash, exportPolicy.maxArchiveBytes);
@@ -706,9 +707,20 @@ function resolveExportPolicy(
     sessionEndedAt?: number;
   }
 ): ResolvedExportPolicy {
-  const includeScreenshots = options.includeScreenshots !== false;
-  const maxArchiveBytes = normalizeBoundedPositiveInt(options.maxArchiveBytes);
-  const recentWindowMs = normalizeBoundedPositiveInt(options.recentWindowMs);
+  const includeScreenshots =
+    typeof options.includeScreenshots === "boolean"
+      ? options.includeScreenshots
+      : DEFAULT_EXPORT_POLICY.includeScreenshots;
+  const maxArchiveBytes =
+    options.maxArchiveBytes === null
+      ? null
+      : normalizeBoundedPositiveInt(
+          options.maxArchiveBytes ?? DEFAULT_EXPORT_POLICY.maxArchiveBytes
+        );
+  const recentWindowMs =
+    options.recentWindowMs === null
+      ? null
+      : normalizeBoundedPositiveInt(options.recentWindowMs ?? DEFAULT_EXPORT_POLICY.recentWindowMs);
   const anchorTimestamp =
     typeof context.sessionEndedAt === "number"
       ? Math.max(

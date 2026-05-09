@@ -23,6 +23,11 @@ const SESSION: SessionMetadata = {
   url: "https://example.com",
   tags: []
 };
+const FULL_EXPORT_OPTIONS = {
+  includeScreenshots: true,
+  maxArchiveBytes: null,
+  recentWindowMs: null
+} as const;
 
 function createEvent(
   id: string,
@@ -171,7 +176,7 @@ describe("pipeline", () => {
       await pipeline.flush();
 
       const chunks = await storage.listChunks(`S-codec-${codec}`);
-      const exported = await pipeline.exportBundle();
+      const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
       const parsed = await readWebBlackboxArchive(exported.bytes);
       const runtimeCodec = chunks[0]?.meta.codec ?? "none";
 
@@ -211,13 +216,49 @@ describe("pipeline", () => {
       destination: "local-download",
       archiveKeyEnvelope: "none",
       encrypted: false,
-      includeScreenshots: true,
-      maxArchiveBytes: null,
-      recentWindowMs: null,
+      includeScreenshots: false,
+      maxArchiveBytes: 100 * 1024 * 1024,
+      recentWindowMs: 20 * 60 * 1000,
       shareEligible: false
     });
     expect(parsed.privacyManifest?.totals.events).toBe(1);
     expect(parsed.integrity?.files["privacy/manifest.json"]).toMatch(/[a-f0-9]{64}/);
+  });
+
+  it("applies the default export policy when no options are passed", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-default-export-policy"
+      },
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    const now = Date.now();
+    const shotHash = await pipeline.putBlob("image/webp", new Uint8Array([1, 2, 3, 4]));
+
+    await pipeline.ingest(createEvent("E-default-old", "user.click", now - 50 * 60 * 1000));
+    await pipeline.ingest(
+      createEvent("E-default-shot", "screen.screenshot", now - 5 * 60 * 1000, {
+        shotId: shotHash,
+        format: "webp",
+        size: 4
+      })
+    );
+    await pipeline.ingest(createEvent("E-default-marker", "user.marker", now, { message: "m" }));
+
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.events.map((event) => event.id)).toEqual(["E-default-marker"]);
+    expect(parsed.privacyManifest?.transfer).toMatchObject({
+      includeScreenshots: false,
+      maxArchiveBytes: 100 * 1024 * 1024,
+      recentWindowMs: 20 * 60 * 1000
+    });
   });
 
   it("blocks export when the plaintext scanner finds raw secrets", async () => {
@@ -348,7 +389,7 @@ describe("pipeline", () => {
       })
     );
 
-    await expect(pipeline.exportBundle()).rejects.toThrow(
+    await expect(pipeline.exportBundle(FULL_EXPORT_OPTIONS)).rejects.toThrow(
       /low-risk export override is not allowed/i
     );
   });
@@ -462,7 +503,7 @@ describe("pipeline", () => {
 
     await recoveredPipeline.start();
 
-    const exported = await recoveredPipeline.exportBundle();
+    const exported = await recoveredPipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const parsed = await readWebBlackboxArchive(exported.bytes);
     const zip = await JSZip.loadAsync(exported.bytes);
     const blobPaths = Object.keys(zip.files).filter((path) => path.startsWith("blobs/"));
@@ -536,7 +577,7 @@ describe("pipeline", () => {
       })
     );
 
-    const exported = await pipeline.exportBundle();
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const zip = await JSZip.loadAsync(exported.bytes);
     const blobPaths = Object.keys(zip.files).filter((path) => path.startsWith("blobs/"));
 
@@ -557,7 +598,7 @@ describe("pipeline", () => {
     await pipeline.ingest(createEvent("E-2", "network.request", 20));
     await pipeline.ingest(createEvent("E-3", "network.response", 30));
 
-    const exported = await pipeline.exportBundle();
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const parsed = await readWebBlackboxArchive(exported.bytes);
     const zip = await JSZip.loadAsync(exported.bytes);
     const storedIntegrity = JSON.parse(
@@ -582,7 +623,7 @@ describe("pipeline", () => {
     await pipeline.start();
     await pipeline.ingest(createEvent("E-plain-read", "user.click", 10));
 
-    const exported = await pipeline.exportBundle();
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const originalCrypto = (globalThis as unknown as { crypto?: Crypto }).crypto;
 
     Object.defineProperty(globalThis, "crypto", {
@@ -614,7 +655,7 @@ describe("pipeline", () => {
     await pipeline.start();
     await pipeline.ingest(createEvent("E-integrity-1", "user.click", 10));
 
-    const exported = await pipeline.exportBundle();
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const zip = await JSZip.loadAsync(exported.bytes);
     zip.file(
       "events/C-000001.ndjson",
@@ -646,7 +687,7 @@ describe("pipeline", () => {
     await pipeline.start();
     await pipeline.ingest(createEvent("E-integrity-extra", "user.click", 10));
 
-    const exported = await pipeline.exportBundle();
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const zip = await JSZip.loadAsync(exported.bytes);
     zip.file(
       "events/C-999999.ndjson",
@@ -711,7 +752,10 @@ describe("pipeline", () => {
     await pipeline.ingest(createEvent("E-enc-1", "user.click", 100));
     await pipeline.ingest(createEvent("E-enc-2", "network.request", 120));
 
-    const exported = await pipeline.exportBundle({ passphrase: "secret-passphrase" });
+    const exported = await pipeline.exportBundle({
+      ...FULL_EXPORT_OPTIONS,
+      passphrase: "secret-passphrase"
+    });
 
     await expect(readWebBlackboxArchive(exported.bytes)).rejects.toThrow(/encrypted/i);
 
@@ -783,7 +827,7 @@ describe("pipeline", () => {
     expect(rawBlob).toBeDefined();
     expect(Array.from(rawBlob?.bytes ?? [])).not.toEqual([1, 2, 3, 4]);
 
-    const exported = await pipeline.exportBundle();
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
     const parsed = await readWebBlackboxArchive(exported.bytes);
     expect(parsed.events.map((event) => event.id)).toEqual(
       expect.arrayContaining(["E-atrest-1", "E-atrest-2"])
