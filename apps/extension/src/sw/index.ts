@@ -56,6 +56,7 @@ import {
   resolveLiteBodyCaptureRule as resolveLiteBodyCaptureRuleUtil,
   transformResponseBodyForCapture
 } from "./body-capture-utils.js";
+import { shouldStopForCaptureScopeOriginChange } from "./capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
 import {
   buildLiteNetworkFailureRawEvent,
@@ -3767,12 +3768,12 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
 }
 
 function shouldStopOnOriginChange(runtime: SessionRuntime, nextOrigin: string | null): boolean {
-  return (
-    isActiveTabScopedBuild() &&
-    runtime.scopeOrigin !== null &&
-    nextOrigin !== null &&
-    nextOrigin !== runtime.scopeOrigin
-  );
+  return shouldStopForCaptureScopeOriginChange({
+    scopeOrigin: runtime.scopeOrigin,
+    nextOrigin,
+    stopOnOriginChange: runtime.config.capturePolicy?.scope.stopOnOriginChange === true,
+    activeTabScopedBuild: isActiveTabScopedBuild()
+  });
 }
 
 function isActiveTabScopedBuild(): boolean {
