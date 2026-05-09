@@ -14,6 +14,8 @@ const require = createRequire(import.meta.url);
 const tsxCli = require.resolve("tsx/cli");
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const apiKey = "share-test-key";
+const BLOB_FIXTURE_PATH =
+  "blobs/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json";
 
 type RunningShareServer = {
   baseUrl: string;
@@ -235,6 +237,33 @@ describe("share-server", () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe("Encrypted WebBlackbox archive contains plaintext private files.");
     expect(payload.plaintextEncryptedPaths).toContain("index/time.json");
+  });
+
+  it("rejects encrypted public share uploads with plaintext private blobs", async () => {
+    const server = await startShareServer();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "encrypted.webblackbox",
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      },
+      body: Buffer.from(
+        await createEncryptedEnvelopeArchive({
+          blobFileMode: "plaintext"
+        })
+      )
+    });
+    const payload = (await response.json()) as {
+      error: string;
+      plaintextEncryptedPaths: string[];
+    };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Encrypted WebBlackbox archive contains plaintext private files.");
+    expect(payload.plaintextEncryptedPaths).toContain(BLOB_FIXTURE_PATH);
   });
 
   it("expires shares and blocks archive download after ttl", async () => {
@@ -581,6 +610,7 @@ async function createEncryptedEnvelopeArchive(
   options: {
     completeEncryptionMap?: boolean;
     privateFileMode?: "ciphertext" | "plaintext";
+    blobFileMode?: "ciphertext" | "plaintext";
   } = {}
 ): Promise<Uint8Array> {
   return createEnvelopeArchive(true, options);
@@ -595,6 +625,7 @@ async function createEnvelopeArchive(
   options: {
     completeEncryptionMap?: boolean;
     privateFileMode?: "ciphertext" | "plaintext";
+    blobFileMode?: "ciphertext" | "plaintext";
   } = {}
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -604,7 +635,8 @@ async function createEnvelopeArchive(
       ? {
           "index/time.json": { ivBase64: toBase64(randomBytes(12)) },
           "index/req.json": { ivBase64: toBase64(randomBytes(12)) },
-          "index/inv.json": { ivBase64: toBase64(randomBytes(12)) }
+          "index/inv.json": { ivBase64: toBase64(randomBytes(12)) },
+          [BLOB_FIXTURE_PATH]: { ivBase64: toBase64(randomBytes(12)) }
         }
       : {};
   const manifest = {
@@ -649,6 +681,14 @@ async function createEnvelopeArchive(
   addPrivateFile(zip, files, "index/time.json", [], encrypted, options.privateFileMode);
   addPrivateFile(zip, files, "index/req.json", [], encrypted, options.privateFileMode);
   addPrivateFile(zip, files, "index/inv.json", [], encrypted, options.privateFileMode);
+  addPrivateFile(
+    zip,
+    files,
+    BLOB_FIXTURE_PATH,
+    { token: "blob-secret-token" },
+    encrypted,
+    options.blobFileMode
+  );
   addJsonFile(zip, files, "integrity/hashes.json", {
     manifestSha256: files["manifest.json"],
     files

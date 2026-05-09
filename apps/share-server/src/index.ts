@@ -766,7 +766,11 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
 }
 
 function collectArchivePrivatePaths(zip: JSZip): string[] {
-  return Object.keys(zip.files).filter(isArchivePrivatePath).sort();
+  return Object.entries(zip.files)
+    .filter(([, file]) => !file.dir)
+    .map(([path]) => path)
+    .filter(isArchivePrivatePath)
+    .sort();
 }
 
 function isArchivePrivatePath(path: string): boolean {
@@ -829,7 +833,33 @@ function looksLikePlaintextPrivateArchiveFile(path: string, bytes: Uint8Array): 
     return isPlainNdjsonBytes(bytes);
   }
 
+  if (path.startsWith("blobs/")) {
+    return looksLikePlaintextBlobFile(path, bytes);
+  }
+
   return false;
+}
+
+function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array): boolean {
+  const normalizedPath = path.toLowerCase();
+
+  if (normalizedPath.endsWith(".json")) {
+    return isPlainJsonBytes(bytes);
+  }
+
+  if (normalizedPath.endsWith(".html")) {
+    return isPlainHtmlBytes(bytes);
+  }
+
+  if (normalizedPath.endsWith(".png")) {
+    return hasPngSignature(bytes);
+  }
+
+  if (normalizedPath.endsWith(".webp")) {
+    return hasWebpSignature(bytes);
+  }
+
+  return isPlainJsonBytes(bytes) || isPlainHtmlBytes(bytes);
 }
 
 function isPlainJsonBytes(bytes: Uint8Array): boolean {
@@ -873,6 +903,49 @@ function isPlainNdjsonBytes(bytes: Uint8Array): boolean {
   } catch {
     return false;
   }
+}
+
+function isPlainHtmlBytes(bytes: Uint8Array): boolean {
+  const text = decodeUtf8Strict(bytes);
+  if (!text) {
+    return false;
+  }
+
+  const trimmed = text.trim().toLowerCase();
+  return (
+    trimmed.startsWith("<!doctype html") ||
+    trimmed.startsWith("<html") ||
+    trimmed.includes("<script") ||
+    trimmed.includes("<body")
+  );
+}
+
+function hasPngSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  );
+}
+
+function hasWebpSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  );
 }
 
 function decodeUtf8Strict(bytes: Uint8Array): string | null {
