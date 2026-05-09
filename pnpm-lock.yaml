@@ -154,7 +154,6 @@ importers:
       '@webblackbox/player-sdk':
         specifier: workspace:*
         version: link:../../packages/player-sdk
-    devDependencies:
       jszip:
         specifier: ^3.10.1
         version: 3.10.1

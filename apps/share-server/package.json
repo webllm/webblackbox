@@ -15,9 +15,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@webblackbox/player-sdk": "workspace:*"
-  },
-  "devDependencies": {
+    "@webblackbox/player-sdk": "workspace:*",
     "jszip": "^3.10.1"
   }
 }

@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/pro
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 
+import JSZip from "jszip";
 import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
 
 type ShareRecord = {
@@ -24,6 +25,13 @@ type ShareApiScope = "upload" | "read" | "list" | "revoke" | "admin";
 type ShareApiCredential = {
   secret: string;
   scopes: Set<ShareApiScope>;
+};
+
+type ArchiveEnvelopeSummary = {
+  encrypted: boolean;
+  encryptedPrivatePathsComplete: boolean;
+  missingEncryptedPaths: string[];
+  analysisError?: string;
 };
 
 type ShareSummary = {
@@ -275,10 +283,24 @@ async function handleUpload(
     throw error;
   }
 
-  const archiveEnvelopeSummary = await buildShareSummary(bytes);
+  const archiveEnvelope = await inspectArchiveEnvelope(bytes);
+  const archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
   const summary = clientSummary
     ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
     : archiveEnvelopeSummary;
+
+  if (archiveEnvelope.encrypted && !archiveEnvelope.encryptedPrivatePathsComplete) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 400, {
+      error: "Encrypted WebBlackbox archive is missing encrypted file metadata.",
+      missingEncryptedPaths: archiveEnvelope.missingEncryptedPaths.slice(0, 12)
+    });
+    return;
+  }
 
   if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
     await writeShareAuditEvent(request, {
@@ -289,6 +311,35 @@ async function handleUpload(
     respondJson(response, 422, {
       error: "Share upload blocked by privacy scanner.",
       scanner: summary.privacy.scanner
+    });
+    return;
+  }
+
+  if (archiveEnvelope.encrypted && !clientSummary) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 422, {
+      error: "Encrypted public share uploads require a passed client privacy preflight summary."
+    });
+    return;
+  }
+
+  if (
+    archiveEnvelope.encrypted &&
+    clientSummary &&
+    !hasPassedClientPrivacyPreflight(clientSummary)
+  ) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 422, {
+      error: "Encrypted public share uploads require a passed client privacy preflight summary.",
+      scanner: clientSummary.privacy?.scanner
     });
     return;
   }
@@ -577,7 +628,10 @@ function respondShareUnavailable(
   });
 }
 
-async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
+async function buildShareSummary(
+  bytes: Uint8Array,
+  envelope: ArchiveEnvelopeSummary
+): Promise<ShareSummary> {
   try {
     const player = await WebBlackboxPlayer.open(bytes);
     const manifest = player.archive.manifest;
@@ -589,7 +643,7 @@ async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
       schemaVersion: 1,
       source: "server",
       analyzed: true,
-      encrypted: Boolean(manifest.encryption),
+      encrypted: envelope.encrypted || Boolean(manifest.encryption),
       manifest: {
         mode: manifest.mode,
         chunkCodec: manifest.chunkCodec,
@@ -624,10 +678,67 @@ async function buildShareSummary(bytes: Uint8Array): Promise<ShareSummary> {
       schemaVersion: 1,
       source: "unavailable",
       analyzed: false,
-      encrypted: message.toLowerCase().includes("encrypted"),
+      encrypted: envelope.encrypted,
       analysisError: redactText(message, 240)
     };
   }
+}
+
+async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelopeSummary> {
+  try {
+    const zip = await JSZip.loadAsync(bytes);
+    const manifest = asRecord(JSON.parse(await readZipText(zip, "manifest.json")));
+    const encryption = asRecord(manifest.encryption);
+    const encrypted = Object.keys(encryption).length > 0;
+    const encryptedFiles = asRecord(encryption.files);
+    const privatePaths = collectArchivePrivatePaths(zip);
+    const missingEncryptedPaths = encrypted
+      ? privatePaths.filter((path) => !isEncryptedFileMeta(encryptedFiles[path]))
+      : [];
+
+    return {
+      encrypted,
+      encryptedPrivatePathsComplete: encrypted && missingEncryptedPaths.length === 0,
+      missingEncryptedPaths
+    };
+  } catch (error) {
+    return {
+      encrypted: false,
+      encryptedPrivatePathsComplete: false,
+      missingEncryptedPaths: [],
+      analysisError: redactText(error instanceof Error ? error.message : String(error), 240)
+    };
+  }
+}
+
+function collectArchivePrivatePaths(zip: JSZip): string[] {
+  return Object.keys(zip.files).filter(isArchivePrivatePath).sort();
+}
+
+function isArchivePrivatePath(path: string): boolean {
+  return (
+    path.startsWith("events/") ||
+    path.startsWith("blobs/") ||
+    path === "index/time.json" ||
+    path === "index/req.json" ||
+    path === "index/inv.json" ||
+    path === "privacy/manifest.json"
+  );
+}
+
+function isEncryptedFileMeta(value: unknown): boolean {
+  const record = asRecord(value);
+  return typeof record.ivBase64 === "string" && record.ivBase64.trim().length > 0;
+}
+
+async function readZipText(zip: JSZip, path: string): Promise<string> {
+  const file = zip.file(path);
+
+  if (!file) {
+    throw new Error(`Archive is missing required file: ${path}`);
+  }
+
+  return file.async("string");
 }
 
 function readClientShareSummary(request: IncomingMessage): ShareSummary | null {
@@ -703,6 +814,11 @@ function applyArchiveEnvelopeToClientSummary(
       ? undefined
       : archiveEnvelopeSummary.analysisError
   };
+}
+
+function hasPassedClientPrivacyPreflight(summary: ShareSummary): boolean {
+  const scanner = summary.privacy?.scanner;
+  return summary.analyzed && scanner?.preEncryption === true && scanner.status === "passed";
 }
 
 function normalizeSharePrivacySummary(value: Record<string, unknown>): ShareSummary["privacy"] {

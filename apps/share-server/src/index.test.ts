@@ -168,6 +168,48 @@ describe("share-server", () => {
     expect(response.status).toBe(422);
   });
 
+  it("rejects encrypted public share uploads without a passed client privacy preflight", async () => {
+    const server = await startShareServer();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "encrypted.webblackbox"
+      },
+      body: Buffer.from(await createEncryptedEnvelopeArchive())
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      error: "Encrypted public share uploads require a passed client privacy preflight summary."
+    });
+    expect(response.status).toBe(422);
+  });
+
+  it("rejects encrypted public share uploads with incomplete encrypted file metadata", async () => {
+    const server = await startShareServer();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "encrypted.webblackbox",
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      },
+      body: Buffer.from(await createEncryptedEnvelopeArchive({ completeEncryptionMap: false }))
+    });
+    const payload = (await response.json()) as {
+      error: string;
+      missingEncryptedPaths: string[];
+    };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Encrypted WebBlackbox archive is missing encrypted file metadata.");
+    expect(payload.missingEncryptedPaths).toContain("index/time.json");
+  });
+
   it("expires shares and blocks archive download after ttl", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000"
@@ -392,45 +434,7 @@ async function uploadEncryptedFixture(
       "content-type": "application/octet-stream",
       "x-webblackbox-api-key": credential,
       "x-webblackbox-filename": "fixture.webblackbox",
-      "x-webblackbox-share-summary": encodeURIComponent(
-        JSON.stringify({
-          schemaVersion: 1,
-          source: "client",
-          analyzed: true,
-          encrypted: true,
-          manifest: {
-            mode: "lite",
-            chunkCodec: "ndjson",
-            recordedAt: "2026-02-13T00:00:00.000Z"
-          },
-          totals: {
-            events: 0,
-            errors: 0,
-            requests: 0,
-            actions: 0,
-            durationMs: 0
-          },
-          privacy: {
-            redaction: {
-              hashSensitiveValues: true,
-              headerRuleCount: 0,
-              cookieRuleCount: 0,
-              bodyPatternCount: 0,
-              blockedSelectorCount: 0
-            },
-            detected: {
-              redactedMarkers: 0,
-              hashedSensitiveValues: 0,
-              sensitiveKeyMentions: 0
-            },
-            scanner: {
-              preEncryption: true,
-              status: "passed",
-              findingCount: 0
-            }
-          }
-        })
-      )
+      "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
     },
     body: Buffer.from(await createEncryptedEnvelopeArchive())
   });
@@ -439,17 +443,74 @@ async function uploadEncryptedFixture(
   return (await response.json()) as { shareId: string };
 }
 
-async function createEncryptedEnvelopeArchive(): Promise<Uint8Array> {
-  return createEnvelopeArchive(true);
+function buildPassedShareSummary(): unknown {
+  return {
+    schemaVersion: 1,
+    source: "client",
+    analyzed: true,
+    encrypted: true,
+    manifest: {
+      mode: "lite",
+      chunkCodec: "ndjson",
+      recordedAt: "2026-02-13T00:00:00.000Z"
+    },
+    totals: {
+      events: 0,
+      errors: 0,
+      requests: 0,
+      actions: 0,
+      durationMs: 0
+    },
+    privacy: {
+      redaction: {
+        hashSensitiveValues: true,
+        headerRuleCount: 0,
+        cookieRuleCount: 0,
+        bodyPatternCount: 0,
+        blockedSelectorCount: 0
+      },
+      detected: {
+        redactedMarkers: 0,
+        hashedSensitiveValues: 0,
+        sensitiveKeyMentions: 0
+      },
+      scanner: {
+        preEncryption: true,
+        status: "passed",
+        findingCount: 0
+      }
+    }
+  };
+}
+
+async function createEncryptedEnvelopeArchive(
+  options: {
+    completeEncryptionMap?: boolean;
+  } = {}
+): Promise<Uint8Array> {
+  return createEnvelopeArchive(true, options);
 }
 
 async function createPlaintextEnvelopeArchive(): Promise<Uint8Array> {
   return createEnvelopeArchive(false);
 }
 
-async function createEnvelopeArchive(encrypted: boolean): Promise<Uint8Array> {
+async function createEnvelopeArchive(
+  encrypted: boolean,
+  options: {
+    completeEncryptionMap?: boolean;
+  } = {}
+): Promise<Uint8Array> {
   const zip = new JSZip();
   const files: Record<string, string> = {};
+  const encryptedFiles =
+    encrypted && options.completeEncryptionMap !== false
+      ? {
+          "index/time.json": { ivBase64: "AAAAAAAAAAAAAAAA" },
+          "index/req.json": { ivBase64: "AAAAAAAAAAAAAAAA" },
+          "index/inv.json": { ivBase64: "AAAAAAAAAAAAAAAA" }
+        }
+      : {};
   const manifest = {
     protocolVersion: 1,
     createdAt: "2026-02-13T00:00:00.000Z",
@@ -482,7 +543,7 @@ async function createEnvelopeArchive(encrypted: boolean): Promise<Uint8Array> {
               iterations: 250000,
               saltBase64: "AAAAAAAAAAAAAAAAAAAAAA=="
             },
-            files: {}
+            files: encryptedFiles
           }
         }
       : {})
