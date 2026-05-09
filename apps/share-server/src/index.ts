@@ -859,7 +859,7 @@ function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array): boolean {
     return hasWebpSignature(bytes);
   }
 
-  return isPlainJsonBytes(bytes) || isPlainHtmlBytes(bytes);
+  return isPlainJsonBytes(bytes) || isPlainHtmlBytes(bytes) || isPlainTextBytes(bytes);
 }
 
 function isPlainJsonBytes(bytes: Uint8Array): boolean {
@@ -918,6 +918,30 @@ function isPlainHtmlBytes(bytes: Uint8Array): boolean {
     trimmed.includes("<script") ||
     trimmed.includes("<body")
   );
+}
+
+function isPlainTextBytes(bytes: Uint8Array): boolean {
+  const text = decodeUtf8Strict(bytes);
+  if (!text) {
+    return false;
+  }
+
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  let printable = 0;
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const code = trimmed.charCodeAt(index);
+
+    if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f)) {
+      printable += 1;
+    }
+  }
+
+  return printable / trimmed.length >= 0.9;
 }
 
 function hasPngSignature(bytes: Uint8Array): boolean {
