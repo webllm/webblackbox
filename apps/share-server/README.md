@@ -25,9 +25,9 @@ Set these environment variables for production-like deployments:
 
 - `WEBBLACKBOX_SHARE_API_KEY`: API key for `/api/share/*` and `/share/*` routes. If unset, protected routes are limited to loopback clients (`127.0.0.1` / `::1`). When set, clients can authenticate with either:
   - `x-webblackbox-api-key: <key>`, or
-  - `authorization: Bearer <key>`, or
-  - `?key=<key>` query param
+  - `authorization: Bearer <key>`
 - `WEBBLACKBOX_SHARE_API_KEYS`: semicolon-separated scoped keys for rotation and least privilege. Format: `secret:scope,scope;next-secret:scope`. Supported scopes are `upload`, `read`, `list`, `revoke`, and `admin`. `admin` covers all scopes. Keep an old key and a new key configured during rotation, then remove the old key after clients are updated.
+- `WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY`: optional browser bootstrap for `GET /share/:id?key=<key>`. Keep this disabled in production unless the key is short-lived; when enabled, the server redirects to a clean URL and uses a short HttpOnly read-session cookie for page links.
 - `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
 - `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Use `*` only for trusted environments.
 - `WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES`: max accepted upload body size in bytes (default `262144000`).

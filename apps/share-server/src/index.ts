@@ -26,6 +26,15 @@ type ShareApiCredential = {
   secret: string;
   scopes: Set<ShareApiScope>;
 };
+type ShareAuthorizationSource = "loopback" | "token" | "query" | "read-session";
+type ShareAuthorizationResult = {
+  authorized: boolean;
+  source?: ShareAuthorizationSource;
+};
+type ShareReadSession = {
+  shareId: string;
+  expiresAt: number;
+};
 
 type ArchiveEnvelopeSummary = {
   encrypted: boolean;
@@ -102,6 +111,7 @@ const SHARE_API_CREDENTIALS = parseShareApiCredentials(
 );
 const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
+const ALLOW_QUERY_API_KEY = parseBooleanFlag(process.env.WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
 );
@@ -128,9 +138,13 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
 const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
 const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
 const AES_GCM_IV_BYTES = 12;
+const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
+const SHARE_READ_SESSION_TTL_MS = 10 * 60 * 1000;
+const MAX_SHARE_READ_SESSIONS = 4096;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
+const shareReadSessions = new Map<string, ShareReadSession>();
 let rateLimitCleanupCounter = 0;
 
 void startShareServer().catch((error) => {
@@ -174,15 +188,34 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
 
   const requiredScope = resolveRequiredShareScope(method, pathname);
 
-  if (requiredScope && !isAuthorizedRequest(request, requestUrl, requiredScope)) {
-    if (pathname.startsWith("/share/")) {
-      respondHtml(response, 401, "<h1>Unauthorized</h1><p>Provide a valid share API key.</p>");
+  if (requiredScope) {
+    const authorization = authorizeRequest(request, requestUrl, method, pathname, requiredScope);
+    if (!authorization.authorized) {
+      if (pathname.startsWith("/share/")) {
+        respondHtml(response, 401, "<h1>Unauthorized</h1><p>Provide a valid share API key.</p>");
+        return;
+      }
+      respondJson(response, 401, {
+        error: "Unauthorized."
+      });
       return;
     }
-    respondJson(response, 401, {
-      error: "Unauthorized."
-    });
-    return;
+
+    const readShareId = requiredScope === "read" ? extractReadShareId(pathname) : null;
+    if (readShareId && authorization.source === "query") {
+      issueShareReadSessionCookie(response, readShareId);
+      redirectToUrlWithoutQueryKey(response, requestUrl);
+      return;
+    }
+
+    if (
+      readShareId &&
+      method === "GET" &&
+      /^\/share\/[a-zA-Z0-9_-]+$/.test(pathname) &&
+      authorization.source !== "read-session"
+    ) {
+      issueShareReadSessionCookie(response, readShareId);
+    }
   }
 
   if (method === "POST" && pathname === "/api/share/upload") {
@@ -219,7 +252,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(pathname);
 
   if (method === "GET" && sharePageMatch?.[1]) {
-    await handleSharePage(request, response, sharePageMatch[1], requestUrl);
+    await handleSharePage(request, response, sharePageMatch[1]);
     return;
   }
 
@@ -484,8 +517,7 @@ async function handleDownloadArchive(
 async function handleSharePage(
   request: IncomingMessage,
   response: ServerResponse,
-  id: string,
-  requestUrl: URL
+  id: string
 ): Promise<void> {
   const record = await readAvailableShareRecord(request, response, id, "page");
 
@@ -493,7 +525,6 @@ async function handleSharePage(
     return;
   }
 
-  const authQuerySuffix = buildAuthQuerySuffix(requestUrl);
   const publicMetadata = buildPublicShareMetadata(record);
   const metadataPretty = escapeHtml(JSON.stringify(publicMetadata.summary, null, 2));
   const page = `<!doctype html>
@@ -520,8 +551,8 @@ async function handleSharePage(
         publicMetadata.fileName
       )}</code> · Size: ${formatSize(record.sizeBytes)}</p>
       <div class="actions">
-        <a class="btn" href="/api/share/${encodeURIComponent(record.id)}/archive${authQuerySuffix}">Download Archive</a>
-        <a class="btn secondary" href="/api/share/${encodeURIComponent(record.id)}/meta${authQuerySuffix}">View Metadata JSON</a>
+        <a class="btn" href="/api/share/${encodeURIComponent(record.id)}/archive">Download Archive</a>
+        <a class="btn secondary" href="/api/share/${encodeURIComponent(record.id)}/meta">View Metadata JSON</a>
       </div>
       <pre>${metadataPretty}</pre>
     </main>
@@ -1441,15 +1472,6 @@ function resolveAllowedOrigin(
   return originHeader === SHARE_ALLOWED_ORIGIN ? SHARE_ALLOWED_ORIGIN : null;
 }
 
-function buildAuthQuerySuffix(requestUrl: URL): string {
-  const key = requestUrl.searchParams.get("key");
-  if (!key) {
-    return "";
-  }
-
-  return `?key=${encodeURIComponent(key)}`;
-}
-
 function resolveRequiredShareScope(method: string, pathname: string): ShareApiScope | null {
   if (method === "POST" && pathname === "/api/share/upload") {
     return "upload";
@@ -1478,26 +1500,52 @@ function resolveRequiredShareScope(method: string, pathname: string): ShareApiSc
   return null;
 }
 
-function isAuthorizedRequest(
+function authorizeRequest(
   request: IncomingMessage,
   requestUrl: URL,
+  method: string,
+  pathname: string,
   requiredScope: ShareApiScope
-): boolean {
+): ShareAuthorizationResult {
   if (SHARE_API_CREDENTIALS.length === 0) {
-    return isLoopbackRequest(request);
+    return isLoopbackRequest(request)
+      ? {
+          authorized: true,
+          source: "loopback"
+        }
+      : {
+          authorized: false
+        };
   }
 
   const headerToken = readAuthTokenFromRequest(request);
   if (headerToken && isAuthorizedToken(headerToken, requiredScope)) {
-    return true;
+    return {
+      authorized: true,
+      source: "token"
+    };
   }
 
-  const queryToken = requestUrl.searchParams.get("key");
-  if (queryToken && isAuthorizedToken(queryToken, requiredScope)) {
-    return true;
+  if (requiredScope === "read" && isAuthorizedShareReadSession(request, pathname)) {
+    return {
+      authorized: true,
+      source: "read-session"
+    };
   }
 
-  return false;
+  if (ALLOW_QUERY_API_KEY && isQueryApiKeyAllowedRoute(method, pathname)) {
+    const queryToken = requestUrl.searchParams.get("key");
+    if (queryToken && isAuthorizedToken(queryToken, requiredScope)) {
+      return {
+        authorized: true,
+        source: "query"
+      };
+    }
+  }
+
+  return {
+    authorized: false
+  };
 }
 
 function isAuthorizedToken(token: string, requiredScope: ShareApiScope): boolean {
@@ -1508,6 +1556,101 @@ function isAuthorizedToken(token: string, requiredScope: ShareApiScope): boolean
 
     return credential.scopes.has("admin") || credential.scopes.has(requiredScope);
   });
+}
+
+function isQueryApiKeyAllowedRoute(method: string, pathname: string): boolean {
+  return method === "GET" && /^\/share\/[a-zA-Z0-9_-]+$/.test(pathname);
+}
+
+function extractReadShareId(pathname: string): string | null {
+  const pageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(pathname);
+  if (pageMatch?.[1]) {
+    return pageMatch[1];
+  }
+
+  const apiMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/(?:meta|archive)$/.exec(pathname);
+  return apiMatch?.[1] ?? null;
+}
+
+function isAuthorizedShareReadSession(request: IncomingMessage, pathname: string): boolean {
+  const shareId = extractReadShareId(pathname);
+  if (!shareId) {
+    return false;
+  }
+
+  const token = readCookie(request, SHARE_READ_SESSION_COOKIE);
+  if (!token) {
+    return false;
+  }
+
+  const session = shareReadSessions.get(token);
+  if (!session) {
+    return false;
+  }
+
+  if (session.expiresAt <= Date.now()) {
+    shareReadSessions.delete(token);
+    return false;
+  }
+
+  return session.shareId === shareId;
+}
+
+function issueShareReadSessionCookie(response: ServerResponse, shareId: string): void {
+  pruneShareReadSessions(Date.now());
+
+  const token = randomUUID().replaceAll("-", "");
+  const maxAgeSeconds = Math.max(1, Math.floor(SHARE_READ_SESSION_TTL_MS / 1000));
+  shareReadSessions.set(token, {
+    shareId,
+    expiresAt: Date.now() + SHARE_READ_SESSION_TTL_MS
+  });
+
+  response.setHeader(
+    "set-cookie",
+    `${SHARE_READ_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`
+  );
+}
+
+function pruneShareReadSessions(now: number): void {
+  for (const [token, session] of shareReadSessions) {
+    if (session.expiresAt <= now || shareReadSessions.size > MAX_SHARE_READ_SESSIONS) {
+      shareReadSessions.delete(token);
+    }
+  }
+}
+
+function redirectToUrlWithoutQueryKey(response: ServerResponse, requestUrl: URL): void {
+  const cleanUrl = new URL(requestUrl.toString());
+  cleanUrl.searchParams.delete("key");
+  const location = `${cleanUrl.pathname}${cleanUrl.search}`;
+
+  response.writeHead(303, {
+    location,
+    "cache-control": "no-store"
+  });
+  response.end();
+}
+
+function readCookie(request: IncomingMessage, name: string): string | null {
+  const header = request.headers.cookie;
+  if (typeof header !== "string" || header.length === 0) {
+    return null;
+  }
+
+  for (const part of header.split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (rawName === name) {
+      const value = rawValue.join("=");
+      try {
+        return value ? decodeURIComponent(value) : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
 }
 
 function requestOriginFromUrl(request: IncomingMessage, requestUrl: URL): string {

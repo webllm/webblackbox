@@ -330,12 +330,73 @@ describe("share-server", () => {
     const server = await startShareServer();
     const uploadPayload = await uploadEncryptedFixture(server);
 
-    const response = await fetch(`${server.baseUrl}/share/${uploadPayload.shareId}?key=${apiKey}`);
+    const response = await fetch(`${server.baseUrl}/share/${uploadPayload.shareId}`, {
+      headers: {
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+    const html = await response.text();
+    const cookie = readSetCookiePair(response);
 
     expect(response.status).toBe(200);
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(html).not.toContain("?key=");
+    expect(html).not.toContain(apiKey);
+    expect(cookie).toMatch(/^webblackbox_share_read=/);
+
+    const archiveResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/archive`,
+      {
+        headers: {
+          cookie
+        }
+      }
+    );
+    expect(archiveResponse.status).toBe(200);
+  });
+
+  it("rejects query API keys by default", async () => {
+    const server = await startShareServer();
+    const uploadPayload = await uploadEncryptedFixture(server);
+
+    const response = await fetch(`${server.baseUrl}/share/${uploadPayload.shareId}?key=${apiKey}`, {
+      redirect: "manual"
+    });
+
+    expect(response.status).toBe(401);
+  });
+
+  it("supports opt-in query API key bootstrap without propagating the key", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY: "true"
+    });
+    const uploadPayload = await uploadEncryptedFixture(server);
+
+    const redirectResponse = await fetch(
+      `${server.baseUrl}/share/${uploadPayload.shareId}?key=${apiKey}`,
+      {
+        redirect: "manual"
+      }
+    );
+    const cookie = readSetCookiePair(redirectResponse);
+
+    expect(redirectResponse.status).toBe(303);
+    expect(redirectResponse.headers.get("location")).toBe(`/share/${uploadPayload.shareId}`);
+    expect(redirectResponse.headers.get("location")).not.toContain(apiKey);
+    expect(cookie).toMatch(/^webblackbox_share_read=/);
+
+    const pageResponse = await fetch(`${server.baseUrl}/share/${uploadPayload.shareId}`, {
+      headers: {
+        cookie
+      }
+    });
+    const html = await pageResponse.text();
+
+    expect(pageResponse.status).toBe(200);
+    expect(html).not.toContain("?key=");
+    expect(html).not.toContain(apiKey);
   });
 });
 
@@ -404,9 +465,11 @@ async function waitForShareServer(server: RunningShareServer): Promise<void> {
     }
 
     try {
-      const response = await fetch(
-        `${server.baseUrl}/api/share/list?key=${encodeURIComponent(apiKey)}`
-      );
+      const response = await fetch(`${server.baseUrl}/api/share/list`, {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      });
 
       if (response.ok) {
         return;
@@ -449,6 +512,10 @@ async function reservePort(): Promise<number> {
   });
 
   return address.port;
+}
+
+function readSetCookiePair(response: Response): string {
+  return response.headers.get("set-cookie")?.split(";")[0] ?? "";
 }
 
 async function uploadEncryptedFixture(
