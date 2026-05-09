@@ -4,6 +4,8 @@ const UUID_SEGMENT_PATTERN =
 const HEX_SEGMENT_PATTERN = /^[0-9a-f]{8,}$/i;
 const BASE64URL_SEGMENT_PATTERN = /^[a-z\d_-]{16,}$/i;
 const EMAIL_LIKE_PATTERN = /^[^\s/@]+@[^\s/@]+\.[^\s/@]+$/;
+const SECRET_PREFIX_SEGMENT_PATTERN =
+  /^(?:sk|pk)_(?:live|test)_[a-z\d_-]{8,}$|^gh[pousr]_[a-z\d_]{8,}$|^github_pat_[a-z\d_]{8,}$/i;
 
 const SENSITIVE_SEGMENT_WORDS = [
   "token",
@@ -117,6 +119,10 @@ function templatePathSegment(segment: string): string {
 
   if (UUID_SEGMENT_PATTERN.test(normalized) || HEX_SEGMENT_PATTERN.test(normalized)) {
     return ":id";
+  }
+
+  if (SECRET_PREFIX_SEGMENT_PATTERN.test(normalized)) {
+    return ":token";
   }
 
   if (SENSITIVE_SEGMENT_WORDS.some((word) => normalized !== word && normalized.includes(word))) {

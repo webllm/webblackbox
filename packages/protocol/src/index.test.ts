@@ -248,5 +248,6 @@ describe("protocol", () => {
     expect(sanitizeUrlForPrivacy("file:///Users/alice/secret-project/index.html")).toBe(
       "file:[redacted]"
     );
+    expect(sanitizeUrlForPrivacy("/v1/items/wbb_test_provider_token_000000000000")).toBe("/v1/items/:token");
   });
 });
