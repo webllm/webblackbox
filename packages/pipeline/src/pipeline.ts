@@ -27,6 +27,7 @@ export type FlightRecorderPipelineOptions = {
   chunkCodec?: (typeof CHUNK_CODECS)[number];
   redactionProfile?: RedactionProfile;
   capturePolicy?: CapturePolicy;
+  trustedPlaintextExemptionEvidenceRefs?: readonly string[];
 };
 
 export type ExportResult = {
@@ -305,7 +306,10 @@ export class FlightRecorderPipeline {
       (policy.encryption.archive === "synthetic-local-debug-exempt" ||
         policy.encryption.archive === "explicit-low-risk-override")
     ) {
-      assertTrustedPlaintextExemptionEvidence(policy);
+      assertTrustedPlaintextExemptionEvidence(
+        policy,
+        this.options.trustedPlaintextExemptionEvidenceRefs
+      );
     }
 
     if (
@@ -783,19 +787,26 @@ function assertLowRiskOverrideAllowed(
   }
 }
 
-function assertTrustedPlaintextExemptionEvidence(policy: CapturePolicy): void {
+function assertTrustedPlaintextExemptionEvidence(
+  policy: CapturePolicy,
+  trustedEvidenceRefs: readonly string[] | undefined
+): void {
   if (policy.captureContext === "real-user") {
     throw new Error("Plaintext export exemptions are not allowed for real-user capture context.");
   }
 
   const evidenceRef = policy.captureContextEvidenceRef?.trim();
 
-  if (!evidenceRef || !isTrustedCaptureContextEvidenceRef(policy.captureContext, evidenceRef)) {
+  if (
+    !evidenceRef ||
+    !isWellFormedCaptureContextEvidenceRef(policy.captureContext, evidenceRef) ||
+    !trustedEvidenceRefs?.includes(evidenceRef)
+  ) {
     throw new Error("Plaintext export exemption requires trusted capture context evidence.");
   }
 }
 
-function isTrustedCaptureContextEvidenceRef(
+function isWellFormedCaptureContextEvidenceRef(
   context: CapturePolicy["captureContext"],
   evidenceRef: string
 ): boolean {

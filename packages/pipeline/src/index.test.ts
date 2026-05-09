@@ -28,6 +28,8 @@ const FULL_EXPORT_OPTIONS = {
   maxArchiveBytes: null,
   recentWindowMs: null
 } as const;
+const TRUSTED_SYNTHETIC_EVIDENCE_REF = "synthetic-fixture:pipeline-export-0001";
+const TRUSTED_LOCAL_DEBUG_EVIDENCE_REF = "local-attestation:low-risk-override-0001";
 
 function createEvent(
   id: string,
@@ -301,7 +303,11 @@ describe("pipeline", () => {
   });
 
   it("rejects plaintext capture-context exemptions without trusted evidence", async () => {
-    for (const evidenceRef of [undefined, "local-attestation-1"]) {
+    for (const evidenceRef of [
+      undefined,
+      "local-attestation-1",
+      "local-attestation:forged-local-debug-0001"
+    ]) {
       const storage = new MemoryPipelineStorage();
       const pipeline = new FlightRecorderPipeline({
         session: {
@@ -338,10 +344,11 @@ describe("pipeline", () => {
       },
       storage,
       maxChunkBytes: 512,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_SYNTHETIC_EVIDENCE_REF],
       capturePolicy: {
         ...DEFAULT_CAPTURE_POLICY,
         captureContext: "synthetic",
-        captureContextEvidenceRef: "synthetic-fixture:pipeline-export-0001",
+        captureContextEvidenceRef: TRUSTED_SYNTHETIC_EVIDENCE_REF,
         encryption: {
           localAtRest: "required",
           archive: "synthetic-local-debug-exempt",
@@ -369,10 +376,11 @@ describe("pipeline", () => {
       },
       storage,
       maxChunkBytes: 512,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       capturePolicy: {
         ...DEFAULT_CAPTURE_POLICY,
         captureContext: "local-debug",
-        captureContextEvidenceRef: "local-attestation:low-risk-override-0001",
+        captureContextEvidenceRef: TRUSTED_LOCAL_DEBUG_EVIDENCE_REF,
         encryption: {
           localAtRest: "required",
           archive: "explicit-low-risk-override",

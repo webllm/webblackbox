@@ -87,6 +87,7 @@ export type WebBlackboxLiteSdkOptions = {
   sampling?: Partial<LiteCaptureSampling>;
   showIndicator?: boolean;
   maxChunkBytes?: number;
+  trustedPlaintextExemptionEvidenceRefs?: readonly string[];
   indexedDbName?: string;
   storage?: "memory" | "indexeddb";
   pipelineStorage?: PipelineStorage;

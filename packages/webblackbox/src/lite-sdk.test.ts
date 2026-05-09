@@ -108,10 +108,11 @@ function createNoisyPayload(size: number, seed: number): string {
   return output;
 }
 
+const TRUSTED_LOCAL_DEBUG_EVIDENCE_REF = "local-attestation:test-fixture-0001";
 const LOCAL_DEBUG_TEST_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
   captureContext: "local-debug",
-  captureContextEvidenceRef: "local-attestation:test-fixture-0001",
+  captureContextEvidenceRef: TRUSTED_LOCAL_DEBUG_EVIDENCE_REF,
   encryption: {
     localAtRest: "required",
     archive: "synthetic-local-debug-exempt",
@@ -184,6 +185,7 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-export",
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: HIGH_FIDELITY_TEST_POLICY
       }
@@ -237,6 +239,7 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-rrweb",
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: LOCAL_DEBUG_TEST_POLICY
       }
@@ -292,6 +295,7 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-dom-html",
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: HIGH_FIDELITY_TEST_POLICY
       }
@@ -325,6 +329,7 @@ describe("WebBlackboxLiteSdk", () => {
       tabId: -42,
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: LOCAL_DEBUG_TEST_POLICY
       }
@@ -356,6 +361,7 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-agent-batch",
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: LOCAL_DEBUG_TEST_POLICY
       }
@@ -446,6 +452,7 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-export-policy",
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: HIGH_FIDELITY_TEST_POLICY
       }
@@ -538,6 +545,7 @@ describe("WebBlackboxLiteSdk", () => {
       sid: "S-sdk-export-size-cap",
       injectHooks: false,
       useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
       config: {
         capturePolicy: LOCAL_DEBUG_TEST_POLICY
       }
