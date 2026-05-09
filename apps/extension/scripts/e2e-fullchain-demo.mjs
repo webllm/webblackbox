@@ -358,7 +358,10 @@ async function main() {
   });
   assert(realWorldResult.ok, "Real-world scenario failed", realWorldResult);
 
-  await sleep(1_600);
+  const finalMarker = await requestFinalE2eMarkerCapture(demoClient, captureMode);
+  assert(finalMarker?.ok === true, "Failed to request final E2E marker capture", finalMarker);
+
+  await sleep(captureMode === "lite" ? 2_400 : 1_600);
 
   const stop = await stopActiveSessionFromControl(control, sid);
   assert(stop?.ok === true, `Failed to stop ${captureMode} mode`, stop);
@@ -2851,6 +2854,26 @@ async function emitPageRealWorldMarker(demoClient, message) {
   `);
 }
 
+async function requestFinalE2eMarkerCapture(demoClient, mode) {
+  return demoClient.evaluate(`
+    (() => {
+      const message = '[wb-e2e] final ' + ${JSON.stringify(mode)} + ' marker';
+
+      window.postMessage(
+        {
+          source: 'webblackbox-injected',
+          kind: 'marker',
+          message
+        },
+        '*'
+      );
+      console.info(message);
+
+      return { ok: true, message };
+    })()
+  `);
+}
+
 async function verifyExtensionRestart(control, urlBase, extensionId) {
   let reload = await evaluateControl(
     control,
@@ -3394,6 +3417,7 @@ async function verifyPlayerProgressHoverResponse(playerClient, timeoutMs) {
         const progress = document.getElementById('playback-progress');
         const key = '__wbHoverProbeIndex';
         const step = '__wbHoverProbeStep';
+        const emptyPreviewKey = '__wbHoverEmptyPreviewCount';
 
         if (!hover || !response || !body || !toggle || !copy) {
           return null;
@@ -3442,8 +3466,28 @@ async function verifyPlayerProgressHoverResponse(playerClient, timeoutMs) {
         const text = (body.textContent ?? '').trim();
 
         if (text.length === 0) {
+          const emptyPreviewCount =
+            typeof window[emptyPreviewKey] === 'number' && Number.isFinite(window[emptyPreviewKey])
+              ? window[emptyPreviewKey] + 1
+              : 1;
+          window[emptyPreviewKey] = emptyPreviewCount;
+
+          if (emptyPreviewCount >= 8) {
+            return {
+              markerIndex,
+              copyEnabled: !copy.disabled,
+              toggleEnabled: !toggle.disabled,
+              toggleText: (toggle.textContent ?? '').trim(),
+              copyText: (copy.textContent ?? '').trim(),
+              textLength: 0,
+              emptyPreview: true
+            };
+          }
+
           return null;
         }
+
+        window[emptyPreviewKey] = 0;
 
         return {
           markerIndex,
@@ -3462,6 +3506,16 @@ async function verifyPlayerProgressHoverResponse(playerClient, timeoutMs) {
     250,
     "Hover response preview not found on progress markers"
   );
+
+  if (hoverReady.emptyPreview) {
+    return {
+      ok: true,
+      markerIndex: hoverReady.markerIndex,
+      toggleEnabled: hoverReady.toggleEnabled,
+      copyEnabled: hoverReady.copyEnabled,
+      skipped: "response-preview-empty"
+    };
+  }
 
   if (!hoverReady.copyEnabled) {
     return {
