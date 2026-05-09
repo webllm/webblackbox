@@ -104,8 +104,7 @@ export function applyEnterprisePolicyToRecorderConfig(
               : [...basePolicy.scope.allowedOrigins],
           deniedOrigins: [...new Set([...basePolicy.scope.deniedOrigins, ...policy.siteDenylist])]
         },
-        categories: {
-          ...basePolicy.categories,
+        categories: applyDataCategoryCaps(basePolicy.categories, {
           ...policy.dataCategoryCaps,
           ...(policy.disableLabMode
             ? {
@@ -113,11 +112,8 @@ export function applyEnterprisePolicyToRecorderConfig(
                 heapProfiles: "off" as const
               }
             : {})
-        },
-        retention: {
-          ...basePolicy.retention,
-          ...policy.retention
-        }
+        }),
+        retention: applyRetentionCaps(basePolicy.retention, policy.retention)
       }
     : undefined;
 
@@ -227,6 +223,79 @@ function normalizePositiveInteger(value: unknown): number | undefined {
   }
 
   return Math.floor(value);
+}
+
+function applyDataCategoryCaps(
+  categories: CapturePolicy["categories"],
+  caps: EnterpriseRecorderPolicy["dataCategoryCaps"]
+): CapturePolicy["categories"] {
+  return {
+    actions: capEnum(categories.actions, caps.actions, ["metadata", "masked", "allow"]),
+    inputs: capEnum(categories.inputs, caps.inputs, ["none", "length-only", "masked", "allow"]),
+    dom: capEnum(categories.dom, caps.dom, ["off", "wireframe", "masked", "allow"]),
+    screenshots: capEnum(categories.screenshots, caps.screenshots, ["off", "masked", "allow"]),
+    console: capEnum(categories.console, caps.console, ["off", "metadata", "sanitized", "allow"]),
+    network: capEnum(categories.network, caps.network, [
+      "metadata",
+      "headers-allowlist",
+      "body-allowlist"
+    ]),
+    storage: capEnum(categories.storage, caps.storage, [
+      "off",
+      "counts-only",
+      "names-only",
+      "lengths-only",
+      "allow"
+    ]),
+    indexedDb: capEnum(categories.indexedDb, caps.indexedDb, ["off", "counts-only", "names-only"]),
+    cookies: capEnum(categories.cookies, caps.cookies, ["off", "count-only", "names-only"]),
+    cdp: capEnum(categories.cdp, caps.cdp, ["off", "safe-subset", "full"]),
+    heapProfiles: capEnum(categories.heapProfiles, caps.heapProfiles, ["off", "lab-only"])
+  };
+}
+
+function capEnum<TValue extends string>(
+  current: TValue,
+  cap: TValue | undefined,
+  orderedValues: readonly TValue[]
+): TValue {
+  if (!cap) {
+    return current;
+  }
+
+  const currentIndex = orderedValues.indexOf(current);
+  const capIndex = orderedValues.indexOf(cap);
+
+  if (currentIndex < 0 || capIndex < 0) {
+    return current;
+  }
+
+  return capIndex < currentIndex ? cap : current;
+}
+
+function applyRetentionCaps(
+  retention: CapturePolicy["retention"],
+  caps: EnterpriseRecorderPolicy["retention"]
+): CapturePolicy["retention"] {
+  return {
+    localTtlMs: capPositiveInteger(retention.localTtlMs, caps.localTtlMs) ?? retention.localTtlMs,
+    shareTtlMs: capPositiveInteger(retention.shareTtlMs, caps.shareTtlMs)
+  };
+}
+
+function capPositiveInteger(
+  current: number | undefined,
+  cap: number | undefined
+): number | undefined {
+  if (typeof cap !== "number") {
+    return current;
+  }
+
+  if (typeof current !== "number") {
+    return cap;
+  }
+
+  return Math.min(current, cap);
 }
 
 function matchesOriginPattern(origin: string, pattern: string): boolean {

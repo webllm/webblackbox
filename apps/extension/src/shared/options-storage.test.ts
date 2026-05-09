@@ -108,4 +108,41 @@ describe("enterprise recorder policy", () => {
     expect(config.capturePolicy?.categories.heapProfiles).toBe("off");
     expect(config.capturePolicy?.retention.localTtlMs).toBe(60000);
   });
+
+  it("does not broaden safer defaults when managed caps are more permissive", () => {
+    const config = applyEnterprisePolicyToRecorderConfig(
+      DEFAULT_RECORDER_CONFIG,
+      normalizeEnterprisePolicy({
+        dataCategoryCaps: {
+          screenshots: "allow",
+          network: "body-allowlist",
+          storage: "allow",
+          cdp: "full",
+          heapProfiles: "lab-only"
+        },
+        retention: {
+          localTtlMs: DEFAULT_RECORDER_CONFIG.capturePolicy!.retention.localTtlMs * 2
+        }
+      })
+    );
+
+    expect(config.capturePolicy?.categories.screenshots).toBe(
+      DEFAULT_RECORDER_CONFIG.capturePolicy?.categories.screenshots
+    );
+    expect(config.capturePolicy?.categories.network).toBe(
+      DEFAULT_RECORDER_CONFIG.capturePolicy?.categories.network
+    );
+    expect(config.capturePolicy?.categories.storage).toBe(
+      DEFAULT_RECORDER_CONFIG.capturePolicy?.categories.storage
+    );
+    expect(config.capturePolicy?.categories.cdp).toBe(
+      DEFAULT_RECORDER_CONFIG.capturePolicy?.categories.cdp
+    );
+    expect(config.capturePolicy?.categories.heapProfiles).toBe(
+      DEFAULT_RECORDER_CONFIG.capturePolicy?.categories.heapProfiles
+    );
+    expect(config.capturePolicy?.retention.localTtlMs).toBe(
+      DEFAULT_RECORDER_CONFIG.capturePolicy?.retention.localTtlMs
+    );
+  });
 });
