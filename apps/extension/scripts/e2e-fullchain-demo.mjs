@@ -385,10 +385,10 @@ async function main() {
       : { ok: true, text: "Export triggered (runtime fallback)." };
   assert(exportStatus?.ok, "Export status indicates failure", exportStatus);
 
-  const downloadRecord =
-    control.kind === "popup"
-      ? await waitForExportedDownload(control.client, sid, exportStartedAtMs, downloadTimeoutMs)
-      : await waitForExportedArchiveFile(sid, exportStartedAtMs, downloadTimeoutMs);
+  const downloadClient = control.kind === "popup" ? control.client : state.swClient;
+  const downloadRecord = downloadClient
+    ? await waitForExportedDownload(downloadClient, sid, exportStartedAtMs, downloadTimeoutMs)
+    : await waitForExportedArchiveFile(sid, exportStartedAtMs, downloadTimeoutMs);
   assert(typeof downloadRecord?.filename === "string", "Download record missing filename", {
     downloadRecord
   });
@@ -2110,12 +2110,14 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
         return Number.isFinite(ts) && ts >= startedAtMs - 4_000;
       });
 
-      const match = recent.find((item) =>
+      const archiveRows = recent.filter((item) =>
         typeof item.filename === 'string' &&
         (item.filename.includes(sid + '.webblackbox') || item.filename.endsWith('.webblackbox'))
       );
+      const match = archiveRows[0] ?? null;
 
-      const latest = match ?? recent[0] ?? null;
+      const latest = match ?? null;
+      const latestRecent = recent[0] ?? null;
 
       return {
         complete:
@@ -2138,6 +2140,17 @@ async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs)
               bytesReceived: latest.bytesReceived,
               totalBytes: latest.totalBytes,
               url: latest.url
+            }
+          : null,
+        latestRecent: latestRecent
+          ? {
+              id: latestRecent.id,
+              filename: latestRecent.filename,
+              state: latestRecent.state,
+              error: latestRecent.error,
+              bytesReceived: latestRecent.bytesReceived,
+              totalBytes: latestRecent.totalBytes,
+              url: latestRecent.url
             }
           : null
       };
