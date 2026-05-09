@@ -240,13 +240,7 @@ function applyDataCategoryCaps(
       "headers-allowlist",
       "body-allowlist"
     ]),
-    storage: capEnum(categories.storage, caps.storage, [
-      "off",
-      "counts-only",
-      "names-only",
-      "lengths-only",
-      "allow"
-    ]),
+    storage: capStorageCategory(categories.storage, caps.storage),
     indexedDb: capEnum(categories.indexedDb, caps.indexedDb, ["off", "counts-only", "names-only"]),
     cookies: capEnum(categories.cookies, caps.cookies, ["off", "count-only", "names-only"]),
     cdp: capEnum(categories.cdp, caps.cdp, ["off", "safe-subset", "full"]),
@@ -271,6 +265,33 @@ function capEnum<TValue extends string>(
   }
 
   return capIndex < currentIndex ? cap : current;
+}
+
+function capStorageCategory(
+  current: CapturePolicy["categories"]["storage"],
+  cap: CapturePolicy["categories"]["storage"] | undefined
+): CapturePolicy["categories"]["storage"] {
+  if (!cap || cap === "allow") {
+    return current;
+  }
+
+  if (current === "allow") {
+    return cap;
+  }
+
+  if (current === "off" || cap === "off") {
+    return "off";
+  }
+
+  if (current === "counts-only" || cap === "counts-only") {
+    return "counts-only";
+  }
+
+  if (current === cap) {
+    return current;
+  }
+
+  return "counts-only";
 }
 
 function applyRetentionCaps(

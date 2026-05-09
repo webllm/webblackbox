@@ -145,4 +145,44 @@ describe("enterprise recorder policy", () => {
       DEFAULT_RECORDER_CONFIG.capturePolicy?.retention.localTtlMs
     );
   });
+
+  it("intersects storage name and length caps without introducing new detail", () => {
+    const lengthsOnlyConfig = applyEnterprisePolicyToRecorderConfig(
+      {
+        ...DEFAULT_RECORDER_CONFIG,
+        capturePolicy: {
+          ...DEFAULT_RECORDER_CONFIG.capturePolicy!,
+          categories: {
+            ...DEFAULT_RECORDER_CONFIG.capturePolicy!.categories,
+            storage: "lengths-only"
+          }
+        }
+      },
+      normalizeEnterprisePolicy({
+        dataCategoryCaps: {
+          storage: "names-only"
+        }
+      })
+    );
+    const namesOnlyConfig = applyEnterprisePolicyToRecorderConfig(
+      {
+        ...DEFAULT_RECORDER_CONFIG,
+        capturePolicy: {
+          ...DEFAULT_RECORDER_CONFIG.capturePolicy!,
+          categories: {
+            ...DEFAULT_RECORDER_CONFIG.capturePolicy!.categories,
+            storage: "names-only"
+          }
+        }
+      },
+      normalizeEnterprisePolicy({
+        dataCategoryCaps: {
+          storage: "lengths-only"
+        }
+      })
+    );
+
+    expect(lengthsOnlyConfig.capturePolicy?.categories.storage).toBe("counts-only");
+    expect(namesOnlyConfig.capturePolicy?.categories.storage).toBe("counts-only");
+  });
 });
