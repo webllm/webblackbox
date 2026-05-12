@@ -36,7 +36,7 @@ import {
   normalizePerformanceBudget,
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
-import { applyModeProductBoundary } from "../shared/mode-profile.js";
+import { applyModeProductBoundary, shouldInjectPageHooksForMode } from "../shared/mode-profile.js";
 import {
   applyEnterprisePolicyToRecorderConfig,
   ENTERPRISE_POLICY_STORAGE_KEY,
@@ -3175,7 +3175,7 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
 }
 
 function shouldInjectHooksForMode(mode: CaptureMode): boolean {
-  return mode === "lite";
+  return shouldInjectPageHooksForMode(mode);
 }
 
 function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDownloadResult {

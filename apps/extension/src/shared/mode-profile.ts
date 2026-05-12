@@ -1,4 +1,9 @@
-import type { CaptureMode, RecorderConfig } from "@webblackbox/protocol";
+import {
+  DEFAULT_CAPTURE_POLICY,
+  type CaptureMode,
+  type CapturePolicy,
+  type RecorderConfig
+} from "@webblackbox/protocol";
 
 export type ModeProductProfile = {
   label: string;
@@ -43,5 +48,31 @@ export function applyModeProductBoundary(
     next.sampling.bodyCaptureMaxBytes = 0;
   }
 
+  if (mode === "full") {
+    next.capturePolicy = applyFullModeCapturePolicy(config.capturePolicy);
+  }
+
   return next;
+}
+
+export function shouldInjectPageHooksForMode(mode: CaptureMode): boolean {
+  return mode === "lite" || mode === "full";
+}
+
+function applyFullModeCapturePolicy(policy: CapturePolicy | undefined): CapturePolicy {
+  const basePolicy = policy ?? DEFAULT_CAPTURE_POLICY;
+
+  return {
+    ...basePolicy,
+    mode: basePolicy.mode === "lab" ? "lab" : "debug",
+    unmaskPolicySource:
+      basePolicy.unmaskPolicySource === "none"
+        ? "extension-managed"
+        : basePolicy.unmaskPolicySource,
+    categories: {
+      ...basePolicy.categories,
+      screenshots: "allow",
+      cdp: basePolicy.categories.cdp === "full" ? "full" : "safe-subset"
+    }
+  };
 }
