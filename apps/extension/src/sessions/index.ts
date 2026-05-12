@@ -325,7 +325,8 @@ function bindActions(container: HTMLElement): void {
       postUiMessage({
         kind: "ui.export",
         sid,
-        passphrase
+        passphrase,
+        saveAs: false
       });
     });
   });

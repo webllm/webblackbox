@@ -284,6 +284,7 @@ describe("popup export policy form", () => {
       kind: "ui.export",
       sid: "sid-1",
       passphrase: " export-secret ",
+      saveAs: false,
       policy: {
         includeScreenshots: false,
         maxArchiveBytes: 256 * 1024 * 1024,
@@ -340,7 +341,8 @@ describe("popup export policy form", () => {
       expect.objectContaining({
         kind: "ui.export",
         sid: "sid-export-runtime",
-        passphrase: "export-secret"
+        passphrase: "export-secret",
+        saveAs: false
       })
     );
 

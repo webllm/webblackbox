@@ -535,6 +535,7 @@ async function exportSessionFromPopup(
       kind: "ui.export",
       sid,
       passphrase,
+      saveAs: false,
       policy
     });
     state.pendingExportSid = undefined;

@@ -153,7 +153,8 @@ describe("sessions page rendering", () => {
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.export",
       sid: "sid-export",
-      passphrase: " session-secret "
+      passphrase: " session-secret ",
+      saveAs: false
     });
   });
 });
