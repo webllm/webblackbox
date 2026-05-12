@@ -1,5 +1,11 @@
 # @webblackbox/extension
 
+## 0.4.7
+
+### Patch Changes
+
+- Handled passphrase export button clicks directly so Chrome popup form submission quirks cannot leave the export dialog inert.
+
 ## 0.4.6
 
 ### Patch Changes
