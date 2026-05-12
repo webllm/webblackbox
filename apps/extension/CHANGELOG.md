@@ -1,5 +1,11 @@
 # @webblackbox/extension
 
+## 0.4.6
+
+### Patch Changes
+
+- Forced Chrome install/update detection onto a new extension package version after the popup export reliability fixes.
+
 ## 0.4.5
 
 ### Patch Changes
