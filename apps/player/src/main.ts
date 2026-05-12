@@ -14,6 +14,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
+import { hasPlaybackEvents } from "./lib/archive-health.js";
 import { toArrayBuffer } from "./lib/binary.js";
 import { formatCompareSummary } from "./lib/compare-summary.js";
 import { escapeHtml, getElement } from "./lib/dom.js";
@@ -1534,7 +1535,10 @@ async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): P
 
     await renderAll({ forcePanels: true, forceScreenshot: true });
     showQuickTriagePanel(model, sourceName);
-    setFeedback(i18n.t("feedbackArchiveLoaded", { sourceName }));
+    const feedbackKey = hasPlaybackEvents(model.events)
+      ? "feedbackArchiveLoaded"
+      : "feedbackArchiveLoadedWithoutPlayback";
+    setFeedback(i18n.t(feedbackKey, { sourceName }));
   } catch (error) {
     hideQuickTriagePanel();
     setFeedback(

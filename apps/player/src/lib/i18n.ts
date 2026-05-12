@@ -250,6 +250,7 @@ type PlayerMessages = {
   feedbackQuickTriageDismissed: string;
   feedbackNoSupportedArchive: string;
   feedbackArchiveLoaded: string;
+  feedbackArchiveLoadedWithoutPlayback: string;
   feedbackArchiveLoadFailed: string;
   feedbackCompareLoaded: string;
   feedbackCompareLoadFailed: string;
@@ -530,6 +531,8 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     feedbackQuickTriageDismissed: "Quick triage dismissed.",
     feedbackNoSupportedArchive: "No supported archive found in drop payload.",
     feedbackArchiveLoaded: "Loaded {sourceName}",
+    feedbackArchiveLoadedWithoutPlayback:
+      "Loaded {sourceName}, but it contains only recorder metadata. No playback events or screenshots were found.",
     feedbackArchiveLoadFailed: "Failed to load {sourceName}: {error}",
     feedbackCompareLoaded: "Loaded comparison archive: {fileName}",
     feedbackCompareLoadFailed: "Failed to load comparison archive {fileName}: {error}",
@@ -836,6 +839,8 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     feedbackQuickTriageDismissed: "已关闭快速分诊。",
     feedbackNoSupportedArchive: "拖放内容中没有找到受支持的归档。",
     feedbackArchiveLoaded: "已加载 {sourceName}",
+    feedbackArchiveLoadedWithoutPlayback:
+      "已加载 {sourceName}，但归档内只有记录器元数据，没有可播放事件或截图。",
     feedbackArchiveLoadFailed: "加载 {sourceName} 失败：{error}",
     feedbackCompareLoaded: "已加载对比归档：{fileName}",
     feedbackCompareLoadFailed: "加载对比归档 {fileName} 失败：{error}",
