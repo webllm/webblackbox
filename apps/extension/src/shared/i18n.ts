@@ -59,6 +59,9 @@ const EXTENSION_MESSAGES = {
     popupExportFailed: "Export failed: {error}",
     popupExportTimedOut:
       "Export did not finish within 2 minutes. Check Chrome downloads or reload the extension and retry.",
+    popupExportPrivacyWarningTitle: "Privacy warning",
+    popupExportPrivacyWarningAlert:
+      "Export completed, but the privacy scanner found {count} possible sensitive item(s): {summary}. Review the archive before sharing.",
     popupStartFailed: "Start failed: {error}",
     popupRingBuffer: "Ring buffer",
     popupArchivePolicyTitle: "Archive Policy",
@@ -191,6 +194,9 @@ const EXTENSION_MESSAGES = {
     popupExported: "已导出：{name}",
     popupExportFailed: "导出失败：{error}",
     popupExportTimedOut: "导出 2 分钟内未完成。请检查 Chrome 下载列表，或重新加载扩展后重试。",
+    popupExportPrivacyWarningTitle: "隐私告警",
+    popupExportPrivacyWarningAlert:
+      "导出已完成，但隐私扫描发现 {count} 个可能的敏感项：{summary}。分享前请先检查归档内容。",
     popupStartFailed: "启动失败：{error}",
     popupRingBuffer: "环形缓冲区",
     popupArchivePolicyTitle: "归档策略",

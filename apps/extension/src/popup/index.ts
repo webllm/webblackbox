@@ -9,6 +9,7 @@ import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import {
   PORT_NAMES,
+  type ExportPrivacyWarning,
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type SessionListItem
@@ -45,9 +46,11 @@ const state: {
   recording: { active: boolean; sid?: string; mode?: string };
   pendingStart?: { tabId: number; mode: CaptureMode; requestedAt: number };
   pendingExportSid?: string;
+  exportPrivacyWarning?: ExportPrivacyWarning;
   exportPolicyForm: PopupExportPolicyForm;
   exportStatus?: string;
   exportStatusIsError?: boolean;
+  lastPrivacyAlertKey?: string;
   lastFreeze?: { sid: string; reason: FreezeReason; at: number };
 } = {
   tabId: null,
@@ -55,9 +58,11 @@ const state: {
   recording: { active: false },
   pendingStart: undefined,
   pendingExportSid: undefined,
+  exportPrivacyWarning: undefined,
   exportPolicyForm: toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY),
   exportStatus: undefined,
   exportStatusIsError: false,
+  lastPrivacyAlertKey: undefined,
   lastFreeze: undefined
 };
 
@@ -248,6 +253,10 @@ function render(container: HTMLElement): void {
   exportStatus.className = exportStatusClass;
   exportStatus.textContent = state.exportStatus ?? "";
   section.append(exportStatus);
+
+  if (state.exportPrivacyWarning) {
+    section.append(createPrivacyWarningSection(state.exportPrivacyWarning));
+  }
 
   const hint = document.createElement("p");
   hint.className = "wb-popup__hint";
@@ -566,6 +575,7 @@ async function exportSessionFromPopup(
   policy: ExportPolicy
 ): Promise<void> {
   state.pendingExportSid = sid;
+  state.exportPrivacyWarning = undefined;
   state.exportStatusIsError = false;
   state.exportStatus = t("popupExporting");
   render(container);
@@ -587,6 +597,7 @@ async function exportSessionFromPopup(
       state.exportStatus = t("popupExported", {
         name: response.fileName ?? sid
       });
+      applyExportPrivacyWarning(response.privacyWarning);
       render(container);
       return;
     }
@@ -602,8 +613,36 @@ async function exportSessionFromPopup(
   }
 }
 
-function isSuccessfulExportResponse(value: unknown): value is { ok: true; fileName?: string } {
+function isSuccessfulExportResponse(value: unknown): value is {
+  ok: true;
+  fileName?: string;
+  privacyWarning?: ExportPrivacyWarning;
+} {
   return value !== null && typeof value === "object" && (value as { ok?: unknown }).ok === true;
+}
+
+function applyExportPrivacyWarning(warning: ExportPrivacyWarning | undefined): void {
+  state.exportPrivacyWarning = warning;
+
+  if (!warning) {
+    return;
+  }
+
+  const alertKey = `${warning.findingCount}:${warning.summary}`;
+
+  if (state.lastPrivacyAlertKey === alertKey) {
+    return;
+  }
+
+  state.lastPrivacyAlertKey = alertKey;
+  window.alert(formatExportPrivacyWarning(warning));
+}
+
+function formatExportPrivacyWarning(warning: ExportPrivacyWarning): string {
+  return t("popupExportPrivacyWarningAlert", {
+    count: warning.findingCount,
+    summary: warning.summary || t("unknownError")
+  });
 }
 
 function applyMessage(message: ExtensionOutboundMessage): void {
@@ -633,6 +672,7 @@ function applyMessage(message: ExtensionOutboundMessage): void {
     }
 
     state.exportStatusIsError = !message.ok;
+    state.exportPrivacyWarning = undefined;
     state.exportStatus = message.ok
       ? t("popupExported", {
           name: message.fileName ?? message.sid
@@ -640,6 +680,11 @@ function applyMessage(message: ExtensionOutboundMessage): void {
       : t("popupExportFailed", {
           error: message.error ?? t("unknownError")
         });
+
+    if (message.ok) {
+      applyExportPrivacyWarning(message.privacyWarning);
+    }
+
     return;
   }
 
@@ -650,6 +695,21 @@ function applyMessage(message: ExtensionOutboundMessage): void {
       at: Date.now()
     };
   }
+}
+
+function createPrivacyWarningSection(warning: ExportPrivacyWarning): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "wb-popup__privacy-warning";
+  section.setAttribute("role", "alert");
+
+  const title = document.createElement("strong");
+  title.textContent = t("popupExportPrivacyWarningTitle");
+
+  const body = document.createElement("p");
+  body.textContent = formatExportPrivacyWarning(warning);
+
+  section.append(title, body);
+  return section;
 }
 
 async function getActiveTabId(): Promise<number | null> {

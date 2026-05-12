@@ -14,6 +14,9 @@ import {
   type ExportPolicy,
   type FreezeReason,
   type HashesManifest,
+  type PrivacyScannerFinding,
+  type PrivacyScannerFindingKind,
+  type PrivacyScannerResult,
   type RedactionProfile,
   type SessionMetadata,
   type WebBlackboxEvent
@@ -27,6 +30,7 @@ import {
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import {
   PORT_NAMES,
+  type ExportPrivacyWarning,
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type SessionListItem
@@ -152,6 +156,7 @@ type PipelineExportDownloadResult = {
   downloadUrl: string;
   downloadId?: number;
   integrity: HashesManifest;
+  privacyScanner?: PrivacyScannerResult;
 };
 
 type ExportAuditEvent = {
@@ -916,7 +921,10 @@ async function exportSession(
   passphrase: string | undefined,
   saveAs = true,
   policy: ExportPolicy = DEFAULT_EXPORT_POLICY
-): Promise<{ ok: true; fileName: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; fileName: string; privacyWarning?: ExportPrivacyWarning }
+  | { ok: false; error: string }
+> {
   const runtime = sessionsBySid.get(sid);
 
   if (!runtime) {
@@ -951,6 +959,7 @@ async function exportSession(
     });
 
     await downloadExportedBundle(exported, saveAs);
+    const privacyWarning = buildExportPrivacyWarning(exported.privacyScanner);
     await appendExportAuditEvent({
       schemaVersion: 1,
       timestamp: new Date().toISOString(),
@@ -968,7 +977,8 @@ async function exportSession(
       kind: "sw.export-status",
       sid,
       ok: true,
-      fileName: exported.fileName
+      fileName: exported.fileName,
+      privacyWarning
     });
 
     if (runtime.stoppedAt) {
@@ -977,7 +987,8 @@ async function exportSession(
 
     return {
       ok: true,
-      fileName: exported.fileName
+      fileName: exported.fileName,
+      privacyWarning
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -3225,7 +3236,109 @@ function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDown
     sizeBytes: Math.round(sizeBytes),
     downloadUrl,
     downloadId: asFiniteNumber(row.downloadId) ?? undefined,
-    integrity: normalizeHashesManifest(row.integrity)
+    integrity: normalizeHashesManifest(row.integrity),
+    privacyScanner: normalizePrivacyScannerResult(row.privacyScanner)
+  };
+}
+
+function normalizePrivacyScannerResult(raw: unknown): PrivacyScannerResult | undefined {
+  const row = asRecord(raw);
+
+  if (!row) {
+    return undefined;
+  }
+
+  const status = row.status === "blocked" ? "blocked" : row.status === "passed" ? "passed" : null;
+  const scannedAt = typeof row.scannedAt === "string" ? row.scannedAt : new Date().toISOString();
+  const preEncryption = row.preEncryption === true;
+  const findings = Array.isArray(row.findings)
+    ? row.findings.map(normalizePrivacyScannerFinding).filter((finding) => finding !== null)
+    : [];
+
+  if (!status) {
+    return undefined;
+  }
+
+  return {
+    scannedAt,
+    preEncryption,
+    status,
+    findings
+  };
+}
+
+function normalizePrivacyScannerFinding(raw: unknown): PrivacyScannerFinding | null {
+  const row = asRecord(raw);
+
+  if (!row) {
+    return null;
+  }
+
+  const kind = normalizePrivacyScannerFindingKind(row.kind);
+  const path = typeof row.path === "string" && row.path.length > 0 ? row.path : null;
+  const matchCount = asFiniteNumber(row.matchCount);
+  const sampleSha256 =
+    typeof row.sampleSha256 === "string" && /^[a-f0-9]{64}$/u.test(row.sampleSha256)
+      ? row.sampleSha256
+      : "0".repeat(64);
+
+  if (!kind || !path || matchCount === null || matchCount <= 0) {
+    return null;
+  }
+
+  return {
+    kind,
+    severity: "high",
+    path,
+    matchCount: Math.round(matchCount),
+    sampleSha256
+  };
+}
+
+function normalizePrivacyScannerFindingKind(raw: unknown): PrivacyScannerFindingKind | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+
+  switch (raw) {
+    case "jwt":
+    case "bearer-token":
+    case "api-key":
+    case "oauth-code":
+    case "session-cookie":
+    case "email":
+    case "phone":
+    case "credit-card":
+    case "ssn":
+    case "private-key":
+    case "long-secret":
+      return raw;
+    default:
+      return null;
+  }
+}
+
+function buildExportPrivacyWarning(
+  scanner: PrivacyScannerResult | undefined
+): ExportPrivacyWarning | undefined {
+  if (scanner?.status !== "blocked" || scanner.findings.length === 0) {
+    return undefined;
+  }
+
+  const findings = scanner.findings.slice(0, 8).map((finding) => ({
+    kind: finding.kind,
+    path: finding.path,
+    matchCount: finding.matchCount
+  }));
+  const summary = findings
+    .slice(0, 5)
+    .map((finding) => `${finding.kind} in ${finding.path}`)
+    .join(", ");
+
+  return {
+    findingCount: scanner.findings.length,
+    summary,
+    findings
   };
 }
 

@@ -1,6 +1,7 @@
 import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/pipeline";
 import type {
   CapturePolicy,
+  PrivacyScannerResult,
   RedactionProfile,
   SessionMetadata,
   WebBlackboxEvent
@@ -198,7 +199,12 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       maxArchiveBytes: message.maxArchiveBytes,
       recentWindowMs: message.recentWindowMs
     });
-    return downloadExportedBundle(exported.fileName, exported.bytes, exported.integrity);
+    return downloadExportedBundle(
+      exported.fileName,
+      exported.bytes,
+      exported.integrity,
+      exported.privacyManifest.scanner
+    );
   }
 
   if (message.op === "close") {
@@ -262,12 +268,14 @@ function postServiceWorkerKeepalive(): void {
 async function downloadExportedBundle(
   fileName: string,
   bytes: Uint8Array,
-  integrity: unknown
+  integrity: unknown,
+  privacyScanner: PrivacyScannerResult
 ): Promise<{
   fileName: string;
   sizeBytes: number;
   downloadUrl: string;
   integrity: unknown;
+  privacyScanner: PrivacyScannerResult;
 }> {
   const blobPart: BlobPart =
     bytes.byteOffset === 0 &&
@@ -284,7 +292,8 @@ async function downloadExportedBundle(
     fileName,
     sizeBytes: bytes.byteLength,
     downloadUrl,
-    integrity
+    integrity,
+    privacyScanner
   };
 }
 

@@ -3,6 +3,7 @@ import type {
   CapturePolicy,
   ExportPolicy,
   FreezeReason,
+  PrivacyScannerFindingKind,
   SamplingProfile
 } from "@webblackbox/protocol";
 
@@ -129,6 +130,17 @@ export type ExportStatusMessage = {
   ok: boolean;
   fileName?: string;
   error?: string;
+  privacyWarning?: ExportPrivacyWarning;
+};
+
+export type ExportPrivacyWarning = {
+  findingCount: number;
+  summary: string;
+  findings: Array<{
+    kind: PrivacyScannerFindingKind;
+    path: string;
+    matchCount: number;
+  }>;
 };
 
 export type PipelineStatusMessage = {

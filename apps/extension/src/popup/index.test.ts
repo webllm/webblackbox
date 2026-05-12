@@ -3,6 +3,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
+const EXPORT_PRIVACY_WARNING = {
+  findingCount: 2,
+  summary: "email in event:E-1, jwt in event:E-2",
+  findings: [
+    {
+      kind: "email",
+      path: "event:E-1",
+      matchCount: 1
+    },
+    {
+      kind: "jwt",
+      path: "event:E-2",
+      matchCount: 1
+    }
+  ]
+};
 
 type PortMessageHandler = (message: unknown) => void;
 
@@ -378,6 +394,66 @@ describe("popup export policy form", () => {
 
     expect(getStatusLine().textContent).toBe("Exported: sid-export-runtime.webblackbox");
     expect(getExportButton().disabled).toBe(false);
+  });
+
+  it("alerts and keeps the download success visible when export privacy findings are present", async () => {
+    const port = new FakePort();
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => undefined);
+    const sendMessage = vi.fn(async () => ({
+      ok: true,
+      fileName: "sid-export-warning.webblackbox",
+      privacyWarning: EXPORT_PRIVACY_WARNING
+    }));
+    installChromeStub(port, { sendMessage });
+
+    await importPopupModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-export-warning",
+          tabId: 17,
+          mode: "full",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushPopup();
+
+    getExportButton().click();
+    await flushPopup();
+
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!passphraseInput) {
+      throw new Error("missing passphrase input");
+    }
+
+    passphraseInput.value = "export-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    getPassphraseSubmitButton().click();
+    await flushPopup();
+
+    expect(getStatusLine().textContent).toBe("Exported: sid-export-warning.webblackbox");
+    expect(alertSpy).toHaveBeenCalledWith(
+      "Export completed, but the privacy scanner found 2 possible sensitive item(s): email in event:E-1, jwt in event:E-2. Review the archive before sharing."
+    );
+    expect(document.querySelector(".wb-popup__privacy-warning")?.textContent).toContain(
+      "email in event:E-1, jwt in event:E-2"
+    );
+
+    port.emit({
+      kind: "sw.export-status",
+      sid: "sid-export-warning",
+      ok: true,
+      fileName: "sid-export-warning.webblackbox",
+      privacyWarning: EXPORT_PRIVACY_WARNING
+    });
+    await flushPopup();
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
   });
 
   it("shows a retryable failure when the export acknowledgement stalls", async () => {

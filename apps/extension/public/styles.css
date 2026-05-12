@@ -732,3 +732,23 @@ main {
 .wb-prompt-field {
   margin-top: -2px;
 }
+
+.wb-popup__privacy-warning {
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(173, 97, 0, 0.34);
+  border-radius: 9px;
+  background: rgba(255, 248, 224, 0.95);
+  color: #4d2d00;
+  padding: 9px 10px;
+}
+
+.wb-popup__privacy-warning strong {
+  font-size: 12px;
+}
+
+.wb-popup__privacy-warning p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+}
