@@ -43,6 +43,7 @@ const state: {
   sessions: SessionListItem[];
   recording: { active: boolean; sid?: string; mode?: string };
   pendingStart?: { tabId: number; mode: CaptureMode; requestedAt: number };
+  pendingExportSid?: string;
   exportPolicyForm: PopupExportPolicyForm;
   exportStatus?: string;
   exportStatusIsError?: boolean;
@@ -52,6 +53,7 @@ const state: {
   sessions: [],
   recording: { active: false },
   pendingStart: undefined,
+  pendingExportSid: undefined,
   exportPolicyForm: toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY),
   exportStatus: undefined,
   exportStatusIsError: false,
@@ -86,7 +88,7 @@ function postUiMessage(message: ExtensionInboundMessage): void {
   }
 }
 
-async function sendUiMessage(message: ExtensionInboundMessage): Promise<void> {
+async function sendUiMessage(message: ExtensionInboundMessage): Promise<unknown> {
   if (typeof chromeApi?.runtime?.sendMessage === "function") {
     const response = await chromeApi.runtime.sendMessage(message);
 
@@ -94,10 +96,11 @@ async function sendUiMessage(message: ExtensionInboundMessage): Promise<void> {
       throw new Error(response.error);
     }
 
-    return;
+    return response;
   }
 
   postUiMessage(message);
+  return undefined;
 }
 
 function render(container: HTMLElement): void {
@@ -120,6 +123,7 @@ function render(container: HTMLElement): void {
   const exportSession = activeSession ?? tabSessions[0] ?? sortedSessions[0];
   const activeOnCurrentTab = activeSession && activeSession.tabId === state.tabId;
   const pendingOnCurrentTab = pendingStart && pendingStart.tabId === state.tabId;
+  const exportDisabled = !exportSession || Boolean(state.pendingExportSid);
   const status = activeSession
     ? activeOnCurrentTab
       ? t("popupStatusRecordingCurrent", {
@@ -206,7 +210,7 @@ function render(container: HTMLElement): void {
       startDisabled
     ),
     createActionButton(t("popupStop"), "wb-btn wb-btn--muted", "stop", !activeSession),
-    createActionButton(t("popupExport"), "wb-btn wb-btn--accent", "export", !exportSession)
+    createActionButton(t("popupExport"), "wb-btn wb-btn--accent", "export", exportDisabled)
   );
   section.append(actions);
 
@@ -298,12 +302,7 @@ function bindActions(
 
     const policy = readExportPolicyFromForm(container);
 
-    postUiMessage({
-      kind: "ui.export",
-      sid: exportSession.sid,
-      passphrase,
-      policy
-    });
+    await exportSessionFromPopup(container, exportSession.sid, passphrase, policy);
   });
 
   container.querySelector("[data-action='open-sessions']")?.addEventListener("click", () => {
@@ -520,6 +519,50 @@ function isRejectedRuntimeResponse(value: unknown): value is { ok: false; error:
   );
 }
 
+async function exportSessionFromPopup(
+  container: HTMLElement,
+  sid: string,
+  passphrase: string,
+  policy: ExportPolicy
+): Promise<void> {
+  state.pendingExportSid = sid;
+  state.exportStatusIsError = false;
+  state.exportStatus = t("popupExporting");
+  render(container);
+
+  try {
+    const response = await sendUiMessage({
+      kind: "ui.export",
+      sid,
+      passphrase,
+      policy
+    });
+    state.pendingExportSid = undefined;
+
+    if (isSuccessfulExportResponse(response)) {
+      state.exportStatusIsError = false;
+      state.exportStatus = t("popupExported", {
+        name: response.fileName ?? sid
+      });
+      render(container);
+      return;
+    }
+
+    render(container);
+  } catch (error) {
+    state.pendingExportSid = undefined;
+    state.exportStatusIsError = true;
+    state.exportStatus = t("popupExportFailed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    render(container);
+  }
+}
+
+function isSuccessfulExportResponse(value: unknown): value is { ok: true; fileName?: string } {
+  return value !== null && typeof value === "object" && (value as { ok?: unknown }).ok === true;
+}
+
 function applyMessage(message: ExtensionOutboundMessage): void {
   if (message.kind === "sw.session-list") {
     state.sessions = message.sessions;
@@ -542,6 +585,10 @@ function applyMessage(message: ExtensionOutboundMessage): void {
   }
 
   if (message.kind === "sw.export-status") {
+    if (state.pendingExportSid === message.sid) {
+      state.pendingExportSid = undefined;
+    }
+
     state.exportStatusIsError = !message.ok;
     state.exportStatus = message.ok
       ? t("popupExported", {

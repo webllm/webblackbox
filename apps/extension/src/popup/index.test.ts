@@ -36,7 +36,12 @@ class FakePort {
   }
 }
 
-function installChromeStub(port: FakePort): void {
+function installChromeStub(
+  port: FakePort,
+  options: {
+    sendMessage?: ReturnType<typeof vi.fn>;
+  } = {}
+): void {
   const query = vi.fn(async () => [
     {
       id: 17,
@@ -61,7 +66,8 @@ function installChromeStub(port: FakePort): void {
         getURL,
         getManifest: vi.fn(() => ({
           version: "0.1.1"
-        }))
+        })),
+        ...(options.sendMessage ? { sendMessage: options.sendMessage } : {})
       },
       tabs: {
         create,
@@ -115,6 +121,16 @@ function getExportButton(): HTMLButtonElement {
   }
 
   return button;
+}
+
+function getStatusLine(): HTMLElement {
+  const status = document.querySelector<HTMLElement>(".wb-popup__status");
+
+  if (!status) {
+    throw new Error("missing status line");
+  }
+
+  return status;
 }
 
 function getStartLiteButton(): HTMLButtonElement {
@@ -274,6 +290,68 @@ describe("popup export policy form", () => {
         recentWindowMs: 45 * 60 * 1000
       }
     });
+  });
+
+  it("shows export progress and uses runtime acknowledgement when available", async () => {
+    const port = new FakePort();
+    let resolveExport: (value: unknown) => void = () => undefined;
+    const sendMessage = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveExport = resolve;
+        })
+    );
+    installChromeStub(port, { sendMessage });
+
+    await importPopupModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-export-runtime",
+          tabId: 17,
+          mode: "full",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushPopup();
+
+    getExportButton().click();
+    await flushPopup();
+
+    const promptForm = document.querySelector<HTMLFormElement>("form.wb-prompt-card");
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!promptForm || !passphraseInput) {
+      throw new Error("missing export prompt");
+    }
+
+    passphraseInput.value = "export-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushPopup();
+
+    expect(getStatusLine().textContent).toBe("Exporting...");
+    expect(getExportButton().disabled).toBe(true);
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "ui.export",
+        sid: "sid-export-runtime",
+        passphrase: "export-secret"
+      })
+    );
+
+    resolveExport({
+      ok: true,
+      fileName: "sid-export-runtime.webblackbox"
+    });
+    await flushPopup();
+
+    expect(getStatusLine().textContent).toBe("Exported: sid-export-runtime.webblackbox");
+    expect(getExportButton().disabled).toBe(false);
   });
 
   it("does not submit an export with an empty passphrase", async () => {

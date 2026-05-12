@@ -561,13 +561,12 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "ui.export") {
-    await exportSession(
+    return exportSession(
       message.sid,
       message.passphrase,
       message.saveAs,
       resolveExportPolicy(message.policy)
     );
-    return;
   }
 
   if (message.kind === "ui.delete") {
@@ -917,18 +916,22 @@ async function exportSession(
   passphrase: string | undefined,
   saveAs = true,
   policy: ExportPolicy = DEFAULT_EXPORT_POLICY
-): Promise<void> {
+): Promise<{ ok: true; fileName: string } | { ok: false; error: string }> {
   const runtime = sessionsBySid.get(sid);
 
   if (!runtime) {
+    const error = "Session not found for export.";
     console.warn("[WebBlackbox] export ignored; unknown session", sid);
     broadcast({
       kind: "sw.export-status",
       sid,
       ok: false,
-      error: "Session not found for export."
+      error
     });
-    return;
+    return {
+      ok: false,
+      error
+    };
   }
 
   try {
@@ -971,7 +974,13 @@ async function exportSession(
     if (runtime.stoppedAt) {
       await disposeStoppedSession(runtime);
     }
+
+    return {
+      ok: true,
+      fileName: exported.fileName
+    };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     await appendExportAuditEvent({
       schemaVersion: 1,
       timestamp: new Date().toISOString(),
@@ -982,15 +991,19 @@ async function exportSession(
       includeScreenshots: policy.includeScreenshots,
       maxArchiveBytes: policy.maxArchiveBytes,
       recentWindowMs: policy.recentWindowMs,
-      error: redactOperationalMessage(error instanceof Error ? error.message : String(error))
+      error: redactOperationalMessage(message)
     });
     console.warn("[WebBlackbox] export failed", error);
     broadcast({
       kind: "sw.export-status",
       sid,
       ok: false,
-      error: error instanceof Error ? error.message : String(error)
+      error: message
     });
+    return {
+      ok: false,
+      error: message
+    };
   }
 }
 

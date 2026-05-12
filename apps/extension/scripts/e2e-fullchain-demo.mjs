@@ -2276,7 +2276,7 @@ async function waitForExportStatus(popupClient, previousStatus, timeoutMs) {
     async () => {
       const status = await readExportStatusLine(popupClient);
 
-      if (!status || status === previousStatus) {
+      if (!status || status === previousStatus || status === "Exporting...") {
         return null;
       }
 
