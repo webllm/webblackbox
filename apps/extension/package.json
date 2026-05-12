@@ -15,6 +15,7 @@
     "e2e:fullchain:lite": "WB_E2E_MODE=lite node scripts/e2e-fullchain-demo.mjs",
     "e2e:fullchain:lite:reload": "WB_E2E_MODE=lite WB_E2E_RELOAD_AFTER_START=1 node scripts/e2e-fullchain-demo.mjs",
     "e2e:fullchain:full": "WB_E2E_MODE=full node scripts/e2e-fullchain-demo.mjs",
+    "e2e:fullchain:full:defaults": "WB_E2E_MODE=full WB_E2E_CONFIGURE_OPTIONS=0 node scripts/e2e-fullchain-demo.mjs",
     "e2e:realworld": "node scripts/e2e-realworld-stability.mjs",
     "e2e:realworld:quick": "WB_E2E_REALWORLD_QUICK=1 node scripts/e2e-realworld-stability.mjs",
     "e2e:realworld:ci": "node scripts/e2e-realworld-stability.mjs",

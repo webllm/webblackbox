@@ -30,6 +30,7 @@ const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ??
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
+const configureRecorderOptions = (process.env.WB_E2E_CONFIGURE_OPTIONS ?? "1") !== "0";
 const usePopupUiActions =
   process.env.WB_E2E_USE_POPUP_UI === undefined
     ? !headless
@@ -285,7 +286,9 @@ async function main() {
     });
   });
 
-  const recorderConfigured = await configureE2eRecorderOptions(control, captureMode);
+  const recorderConfigured = configureRecorderOptions
+    ? await configureE2eRecorderOptions(control, captureMode)
+    : { ok: true, skipped: "default-recorder-options" };
   assert(recorderConfigured?.ok === true, "Failed to configure E2E recorder options", {
     recorderConfigured,
     captureMode
@@ -489,7 +492,9 @@ async function main() {
           "dom.snapshot",
           "storage.local.snapshot"
         ]
-      : ["user.click", "screen.screenshot", "console.entry"];
+      : configureRecorderOptions
+        ? ["user.click", "screen.screenshot", "console.entry"]
+        : ["user.click", "screen.screenshot", "network.request"];
 
   for (const eventType of requiredEventTypes) {
     await waitForPlayerEventType(playerClient, eventType, 20_000);
@@ -538,6 +543,7 @@ async function main() {
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
   console.log("Capture mode:", captureMode);
+  console.log("Recorder options:", JSON.stringify(recorderConfigured));
   console.log(
     "Popup actions:",
     control.kind === "popup" ? (control.useUiActions ? "ui" : "runtime") : control.kind

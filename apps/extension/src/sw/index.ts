@@ -36,15 +36,15 @@ import {
   normalizePerformanceBudget,
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
-import { applyModeProductBoundary, shouldInjectPageHooksForMode } from "../shared/mode-profile.js";
+import { shouldInjectPageHooksForMode } from "../shared/mode-profile.js";
 import {
   applyEnterprisePolicyToRecorderConfig,
   ENTERPRISE_POLICY_STORAGE_KEY,
   isEnterpriseOriginAllowed,
-  migrateStoredRecorderConfig,
   normalizeEnterprisePolicy,
   type EnterpriseRecorderPolicy
 } from "../shared/options-storage.js";
+import { resolveModeRecorderConfig } from "../shared/recorder-config.js";
 import {
   isLikelyTextualResourceType as isLikelyTextualResourceTypeUtil,
   isMimeAllowed as isMimeAllowedUtil,
@@ -3815,32 +3815,8 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   const baseConfig = resolveModeBaseConfig(mode);
 
   const storedValues = await chromeApi?.storage?.local?.get(OPTIONS_STORAGE_KEY);
-  const stored = asRecord(storedValues?.[OPTIONS_STORAGE_KEY]);
 
-  if (!stored) {
-    return baseConfig;
-  }
-
-  const migrated = migrateStoredRecorderConfig(stored);
-
-  const mergedConfig = {
-    ...baseConfig,
-    ...migrated,
-    mode,
-    sampling: {
-      ...baseConfig.sampling,
-      ...(asRecord(migrated.sampling) ?? {})
-    },
-    redaction: {
-      ...baseConfig.redaction,
-      ...(asRecord(migrated.redaction) ?? {})
-    },
-    sitePolicies: Array.isArray(migrated.sitePolicies)
-      ? (migrated.sitePolicies as typeof baseConfig.sitePolicies)
-      : baseConfig.sitePolicies
-  };
-
-  return applyModeProductBoundary(mode, mergedConfig);
+  return resolveModeRecorderConfig(mode, baseConfig, storedValues?.[OPTIONS_STORAGE_KEY]);
 }
 
 async function loadEnterprisePolicy(): Promise<EnterpriseRecorderPolicy> {
