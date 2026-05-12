@@ -1854,6 +1854,10 @@ function handleOffscreenRuntimeMessage(rawMessage: unknown, port: PortLike): boo
     return true;
   }
 
+  if (kind === "offscreen.keepalive") {
+    return true;
+  }
+
   if (kind !== "offscreen.pipeline-response") {
     return false;
   }

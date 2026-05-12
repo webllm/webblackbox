@@ -50,12 +50,15 @@ createExtensionI18n({
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.offscreen });
 const pipelines = new Map<string, FlightRecorderPipeline>();
 const EXPORT_OBJECT_URL_TTL_MS = 90_000;
+const SERVICE_WORKER_KEEPALIVE_INTERVAL_MS = 20_000;
 
 const state: OffscreenState = {
   active: false,
   activeSessions: 0,
   updatedAt: null
 };
+
+let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
 console.info("[WebBlackbox] offscreen pipeline initialized");
 
@@ -77,6 +80,7 @@ port?.onMessage.addListener((message) => {
       state.activeSessions =
         typeof activeSessions === "number" && Number.isFinite(activeSessions) ? activeSessions : 0;
       state.updatedAt = typeof updatedAt === "number" ? updatedAt : Date.now();
+      syncServiceWorkerKeepalive();
 
       console.info("[WebBlackbox] offscreen pipeline status", {
         active: state.active,
@@ -90,6 +94,10 @@ port?.onMessage.addListener((message) => {
       void handlePipelineRequest(message as OffscreenPipelineRequest);
     }
   }
+});
+
+port?.onDisconnect?.addListener(() => {
+  stopServiceWorkerKeepalive();
 });
 
 postToSw({
@@ -214,6 +222,41 @@ function postToSw(message: unknown): void {
   } catch {
     void 0;
   }
+}
+
+function syncServiceWorkerKeepalive(): void {
+  if (state.activeSessions > 0) {
+    startServiceWorkerKeepalive();
+    return;
+  }
+
+  stopServiceWorkerKeepalive();
+}
+
+function startServiceWorkerKeepalive(): void {
+  if (keepaliveTimer !== null) {
+    return;
+  }
+
+  postServiceWorkerKeepalive();
+  keepaliveTimer = setInterval(postServiceWorkerKeepalive, SERVICE_WORKER_KEEPALIVE_INTERVAL_MS);
+}
+
+function stopServiceWorkerKeepalive(): void {
+  if (keepaliveTimer === null) {
+    return;
+  }
+
+  clearInterval(keepaliveTimer);
+  keepaliveTimer = null;
+}
+
+function postServiceWorkerKeepalive(): void {
+  postToSw({
+    kind: "offscreen.keepalive",
+    activeSessions: state.activeSessions,
+    t: Date.now()
+  });
 }
 
 async function downloadExportedBundle(
