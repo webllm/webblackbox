@@ -1,5 +1,11 @@
 # @webblackbox/extension
 
+## 0.4.8
+
+### Patch Changes
+
+- Changed local exports to download even when the privacy scanner finds possible sensitive data, and surfaced those findings as a popup warning instead of a blocking export failure.
+
 ## 0.4.7
 
 ### Patch Changes
