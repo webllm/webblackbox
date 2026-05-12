@@ -454,6 +454,22 @@ describe("popup export policy form", () => {
     await flushPopup();
 
     expect(alertSpy).toHaveBeenCalledTimes(1);
+
+    getExportButton().click();
+    await flushPopup();
+
+    const repeatPassphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!repeatPassphraseInput) {
+      throw new Error("missing repeat passphrase input");
+    }
+
+    repeatPassphraseInput.value = "export-secret";
+    repeatPassphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    getPassphraseSubmitButton().click();
+    await flushPopup();
+
+    expect(alertSpy).toHaveBeenCalledTimes(2);
   });
 
   it("shows a retryable failure when the export acknowledgement stalls", async () => {

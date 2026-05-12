@@ -576,6 +576,7 @@ async function exportSessionFromPopup(
 ): Promise<void> {
   state.pendingExportSid = sid;
   state.exportPrivacyWarning = undefined;
+  state.lastPrivacyAlertKey = undefined;
   state.exportStatusIsError = false;
   state.exportStatus = t("popupExporting");
   render(container);
