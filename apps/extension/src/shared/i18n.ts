@@ -57,6 +57,8 @@ const EXTENSION_MESSAGES = {
     popupExporting: "Exporting...",
     popupExported: "Exported: {name}",
     popupExportFailed: "Export failed: {error}",
+    popupExportTimedOut:
+      "Export did not finish within 2 minutes. Check Chrome downloads or reload the extension and retry.",
     popupStartFailed: "Start failed: {error}",
     popupRingBuffer: "Ring buffer",
     popupArchivePolicyTitle: "Archive Policy",
@@ -188,6 +190,7 @@ const EXTENSION_MESSAGES = {
     popupExporting: "正在导出...",
     popupExported: "已导出：{name}",
     popupExportFailed: "导出失败：{error}",
+    popupExportTimedOut: "导出 2 分钟内未完成。请检查 Chrome 下载列表，或重新加载扩展后重试。",
     popupStartFailed: "启动失败：{error}",
     popupRingBuffer: "环形缓冲区",
     popupArchivePolicyTitle: "归档策略",

@@ -31,6 +31,7 @@ const {
 const root = document.getElementById("popup-root");
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
 const START_PENDING_TIMEOUT_MS = 45_000;
+const EXPORT_ACK_TIMEOUT_MS = 120_000;
 
 type PopupExportPolicyForm = {
   includeScreenshots: boolean;
@@ -101,6 +102,25 @@ async function sendUiMessage(message: ExtensionInboundMessage): Promise<unknown>
 
   postUiMessage(message);
   return undefined;
+}
+
+async function withExportAckTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(t("popupExportTimedOut")));
+        }, EXPORT_ACK_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function render(container: HTMLElement): void {
@@ -531,13 +551,15 @@ async function exportSessionFromPopup(
   render(container);
 
   try {
-    const response = await sendUiMessage({
-      kind: "ui.export",
-      sid,
-      passphrase,
-      saveAs: false,
-      policy
-    });
+    const response = await withExportAckTimeout(
+      sendUiMessage({
+        kind: "ui.export",
+        sid,
+        passphrase,
+        saveAs: false,
+        policy
+      })
+    );
     state.pendingExportSid = undefined;
 
     if (isSuccessfulExportResponse(response)) {

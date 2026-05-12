@@ -83,6 +83,13 @@ async function flushPopup(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function flushPopupWithFakeTimers(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  await Promise.resolve();
+}
+
 function getCheckbox(): HTMLInputElement {
   const checkbox = document.querySelector<HTMLInputElement>("#export-include-screenshots");
 
@@ -179,6 +186,12 @@ async function importPopupModule(): Promise<void> {
   await flushPopup();
 }
 
+async function importPopupModuleWithFakeTimers(): Promise<void> {
+  vi.resetModules();
+  await import("./index.js");
+  await flushPopupWithFakeTimers();
+}
+
 describe("popup export policy form", () => {
   beforeEach(() => {
     document.body.innerHTML = `<main id="popup-root"></main>`;
@@ -187,6 +200,7 @@ describe("popup export policy form", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     Reflect.deleteProperty(globalThis, "chrome");
     document.body.innerHTML = "";
     localStorage.clear();
@@ -353,6 +367,56 @@ describe("popup export policy form", () => {
     await flushPopup();
 
     expect(getStatusLine().textContent).toBe("Exported: sid-export-runtime.webblackbox");
+    expect(getExportButton().disabled).toBe(false);
+  });
+
+  it("shows a retryable failure when the export acknowledgement stalls", async () => {
+    vi.useFakeTimers();
+
+    const port = new FakePort();
+    const sendMessage = vi.fn(() => new Promise(() => undefined));
+    installChromeStub(port, { sendMessage });
+
+    await importPopupModuleWithFakeTimers();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-export-stalled",
+          tabId: 17,
+          mode: "full",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushPopupWithFakeTimers();
+
+    getExportButton().click();
+    await flushPopupWithFakeTimers();
+
+    const promptForm = document.querySelector<HTMLFormElement>("form.wb-prompt-card");
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!promptForm || !passphraseInput) {
+      throw new Error("missing export prompt");
+    }
+
+    passphraseInput.value = "export-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushPopupWithFakeTimers();
+
+    expect(getStatusLine().textContent).toBe("Exporting...");
+    expect(getExportButton().disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    await flushPopupWithFakeTimers();
+
+    expect(getStatusLine().textContent).toBe(
+      "Export failed: Export did not finish within 2 minutes. Check Chrome downloads or reload the extension and retry."
+    );
     expect(getExportButton().disabled).toBe(false);
   });
 
