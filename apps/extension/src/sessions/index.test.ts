@@ -3,6 +3,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type PortMessageHandler = (message: unknown) => void;
+const EXPORT_PRIVACY_WARNING = {
+  findingCount: 1,
+  summary: "jwt in event:E-2",
+  findings: [
+    {
+      kind: "jwt",
+      path: "event:E-2",
+      matchCount: 1
+    }
+  ]
+};
 
 class FakePort {
   readonly postMessage = vi.fn();
@@ -152,5 +163,26 @@ describe("sessions page rendering", () => {
       passphrase: " session-secret ",
       saveAs: false
     });
+  });
+
+  it("alerts when an exported session has privacy findings", async () => {
+    const port = new FakePort();
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => undefined);
+    installChromeStub(port);
+
+    await importSessionsModule();
+
+    port.emit({
+      kind: "sw.export-status",
+      sid: "sid-export",
+      ok: true,
+      fileName: "sid-export.webblackbox",
+      privacyWarning: EXPORT_PRIVACY_WARNING
+    });
+    await flushSessions();
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      "Export completed, but the privacy scanner found 1 possible sensitive item(s): jwt in event:E-2. Review the archive before sharing."
+    );
   });
 });

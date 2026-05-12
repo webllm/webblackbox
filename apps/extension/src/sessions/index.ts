@@ -2,6 +2,7 @@ import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import {
   PORT_NAMES,
+  type ExportPrivacyWarning,
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type SessionListItem
@@ -26,6 +27,11 @@ if (root) {
     if (typed.kind === "sw.session-list") {
       sessions = typed.sessions;
       render(root);
+      return;
+    }
+
+    if (typed.kind === "sw.export-status" && typed.ok && typed.privacyWarning) {
+      window.alert(formatExportPrivacyWarning(typed.privacyWarning));
     }
   });
 }
@@ -36,6 +42,13 @@ function postUiMessage(message: ExtensionInboundMessage): void {
   } catch {
     void 0;
   }
+}
+
+function formatExportPrivacyWarning(warning: ExportPrivacyWarning): string {
+  return t("popupExportPrivacyWarningAlert", {
+    count: warning.findingCount,
+    summary: warning.summary || t("unknownError")
+  });
 }
 
 function render(container: HTMLElement): void {
