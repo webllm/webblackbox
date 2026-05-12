@@ -63,6 +63,7 @@ import {
   buildLiteNetworkRequestRawEvent,
   buildLiteNetworkResponseRawEvent
 } from "./lite-network-baseline.js";
+import { shouldUpdateSessionMetadataFromNavigation } from "./navigation-metadata.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 import {
   buildRequestMetaKey,
@@ -3698,6 +3699,11 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
   }
 
   const payload = asRecord(event.data);
+
+  if (!shouldUpdateSessionMetadataFromNavigation(event, payload)) {
+    return;
+  }
+
   const frame = asRecord(payload?.frame);
   const nextUrl = asString(payload?.url) ?? asString(frame?.url);
   const nextTitle = asString(payload?.title) ?? asString(payload?.documentTitle);
