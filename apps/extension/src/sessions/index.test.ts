@@ -126,9 +126,7 @@ describe("sessions page rendering", () => {
     document.querySelector<HTMLButtonElement>("button[data-export]")?.click();
     await flushSessions();
 
-    document
-      .querySelector<HTMLFormElement>("form.wb-prompt-card")
-      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    document.querySelector<HTMLButtonElement>("[data-passphrase-submit]")?.click();
     await flushSessions();
 
     expect(port.postMessage).not.toHaveBeenCalledWith(
@@ -145,9 +143,7 @@ describe("sessions page rendering", () => {
 
     passphraseInput.value = " session-secret ";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
-    document
-      .querySelector<HTMLFormElement>("form.wb-prompt-card")
-      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    document.querySelector<HTMLButtonElement>("[data-passphrase-submit]")?.click();
     await flushSessions();
 
     expect(port.postMessage).toHaveBeenCalledWith({

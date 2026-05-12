@@ -401,18 +401,39 @@ function openPassphraseDialog(): Promise<string | null> {
     cancelButton.textContent = t("popupCancel");
 
     const submitButton = document.createElement("button");
-    submitButton.type = "submit";
+    submitButton.type = "button";
     submitButton.className = "wb-btn wb-btn--accent";
+    submitButton.dataset.passphraseSubmit = "";
     submitButton.textContent = t("popupExport");
 
     actions.append(cancelButton, submitButton);
     form.append(title, body, label, input, actions);
     overlay.append(form);
 
+    let finished = false;
+
     const finish = (value: string | null): void => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
       overlay.remove();
       document.removeEventListener("keydown", onKeydown);
       resolve(value);
+    };
+
+    const submitPassphrase = (): void => {
+      const passphrase = input.value;
+
+      if (!passphrase.trim()) {
+        input.setCustomValidity(t("popupPassphraseRequired"));
+        input.reportValidity();
+        input.focus();
+        return;
+      }
+
+      finish(passphrase);
     };
 
     const onKeydown = (event: KeyboardEvent): void => {
@@ -426,17 +447,16 @@ function openPassphraseDialog(): Promise<string | null> {
     input.addEventListener("input", () => {
       input.setCustomValidity("");
     });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitPassphrase();
+      }
+    });
+    submitButton.addEventListener("click", submitPassphrase);
     form?.addEventListener("submit", (event) => {
       event.preventDefault();
-      const passphrase = input.value;
-
-      if (!passphrase.trim()) {
-        input.setCustomValidity(t("popupPassphraseRequired"));
-        input.reportValidity();
-        return;
-      }
-
-      finish(passphrase);
+      submitPassphrase();
     });
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) {

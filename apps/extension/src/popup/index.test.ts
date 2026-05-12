@@ -180,6 +180,16 @@ function getOptionsButton(): HTMLButtonElement {
   return button;
 }
 
+function getPassphraseSubmitButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-passphrase-submit]");
+
+  if (!button) {
+    throw new Error("missing passphrase submit button");
+  }
+
+  return button;
+}
+
 async function importPopupModule(): Promise<void> {
   vi.resetModules();
   await import("./index.js");
@@ -291,7 +301,7 @@ describe("popup export policy form", () => {
 
     passphraseInput.value = " export-secret ";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
-    promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    getPassphraseSubmitButton().click();
     await flushPopup();
 
     expect(port.postMessage).toHaveBeenCalledWith({
@@ -346,7 +356,7 @@ describe("popup export policy form", () => {
 
     passphraseInput.value = "export-secret";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
-    promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    getPassphraseSubmitButton().click();
     await flushPopup();
 
     expect(getStatusLine().textContent).toBe("Exporting...");
@@ -405,7 +415,7 @@ describe("popup export policy form", () => {
 
     passphraseInput.value = "export-secret";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
-    promptForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    getPassphraseSubmitButton().click();
     await flushPopupWithFakeTimers();
 
     expect(getStatusLine().textContent).toBe("Exporting...");
@@ -443,9 +453,7 @@ describe("popup export policy form", () => {
     getExportButton().click();
     await flushPopup();
 
-    document
-      .querySelector<HTMLFormElement>("form.wb-prompt-card")
-      ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    getPassphraseSubmitButton().click();
     await flushPopup();
 
     expect(port.postMessage).not.toHaveBeenCalledWith(

@@ -2177,7 +2177,13 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
             const form = passphraseInput.closest('form');
 
             if (form instanceof HTMLFormElement) {
-              form.requestSubmit();
+              const submitButton = form.querySelector('[data-passphrase-submit]');
+
+              if (!(submitButton instanceof HTMLButtonElement)) {
+                return { ok: false, reason: 'passphrase-submit-not-found' };
+              }
+
+              submitButton.click();
               return {
                 ok: true,
                 sid: ${JSON.stringify(sid)},
