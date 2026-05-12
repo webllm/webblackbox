@@ -1,4 +1,9 @@
-import { DEFAULT_EXPORT_POLICY, type ExportPolicy, type FreezeReason } from "@webblackbox/protocol";
+import {
+  DEFAULT_EXPORT_POLICY,
+  type CaptureMode,
+  type ExportPolicy,
+  type FreezeReason
+} from "@webblackbox/protocol";
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
@@ -25,6 +30,7 @@ const {
 
 const root = document.getElementById("popup-root");
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
+const START_PENDING_TIMEOUT_MS = 45_000;
 
 type PopupExportPolicyForm = {
   includeScreenshots: boolean;
@@ -36,6 +42,7 @@ const state: {
   tabId: number | null;
   sessions: SessionListItem[];
   recording: { active: boolean; sid?: string; mode?: string };
+  pendingStart?: { tabId: number; mode: CaptureMode; requestedAt: number };
   exportPolicyForm: PopupExportPolicyForm;
   exportStatus?: string;
   exportStatusIsError?: boolean;
@@ -44,11 +51,14 @@ const state: {
   tabId: null,
   sessions: [],
   recording: { active: false },
+  pendingStart: undefined,
   exportPolicyForm: toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY),
   exportStatus: undefined,
   exportStatusIsError: false,
   lastFreeze: undefined
 };
+
+let pendingStartTimeout: ReturnType<typeof setTimeout> | null = null;
 
 if (root) {
   bootstrap(root).catch((error) => {
@@ -76,8 +86,23 @@ function postUiMessage(message: ExtensionInboundMessage): void {
   }
 }
 
+async function sendUiMessage(message: ExtensionInboundMessage): Promise<void> {
+  if (typeof chromeApi?.runtime?.sendMessage === "function") {
+    const response = await chromeApi.runtime.sendMessage(message);
+
+    if (isRejectedRuntimeResponse(response)) {
+      throw new Error(response.error);
+    }
+
+    return;
+  }
+
+  postUiMessage(message);
+}
+
 function render(container: HTMLElement): void {
   const now = Date.now();
+  const pendingStart = getFreshPendingStart(now);
   const sortedSessions = [...state.sessions].sort((left, right) => {
     const activeDiff = Number(right.active) - Number(left.active);
 
@@ -94,6 +119,7 @@ function render(container: HTMLElement): void {
     tabSessions.find((item) => item.active) ?? sortedSessions.find((item) => item.active);
   const exportSession = activeSession ?? tabSessions[0] ?? sortedSessions[0];
   const activeOnCurrentTab = activeSession && activeSession.tabId === state.tabId;
+  const pendingOnCurrentTab = pendingStart && pendingStart.tabId === state.tabId;
   const status = activeSession
     ? activeOnCurrentTab
       ? t("popupStatusRecordingCurrent", {
@@ -141,7 +167,7 @@ function render(container: HTMLElement): void {
   const exportStatusClass = state.exportStatusIsError
     ? "wb-popup__status wb-popup__status--error"
     : "wb-popup__status";
-  const startDisabled = Boolean(activeOnCurrentTab);
+  const startDisabled = Boolean(activeOnCurrentTab || pendingOnCurrentTab);
   const section = document.createElement("section");
   section.className = "card wb-popup";
 
@@ -229,11 +255,7 @@ function bindActions(
     }
 
     state.tabId = tabId;
-    postUiMessage({
-      kind: "ui.start",
-      tabId,
-      mode: "lite"
-    });
+    await startRecordingFromPopup(container, tabId, "lite");
   });
 
   container.querySelector("[data-action='start-full']")?.addEventListener("click", async () => {
@@ -249,11 +271,7 @@ function bindActions(
     }
 
     state.tabId = tabId;
-    postUiMessage({
-      kind: "ui.start",
-      tabId,
-      mode: "full"
-    });
+    await startRecordingFromPopup(container, tabId, "full");
   });
 
   container.querySelector("[data-action='stop']")?.addEventListener("click", () => {
@@ -413,9 +431,99 @@ function openPassphraseDialog(): Promise<string | null> {
   });
 }
 
+async function startRecordingFromPopup(
+  container: HTMLElement,
+  tabId: number,
+  mode: CaptureMode
+): Promise<void> {
+  setPendingStart(container, tabId, mode);
+
+  try {
+    await sendUiMessage({
+      kind: "ui.start",
+      tabId,
+      mode
+    });
+  } catch (error) {
+    clearPendingStart();
+    state.exportStatusIsError = true;
+    state.exportStatus = t("popupStartFailed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    render(container);
+  }
+}
+
+function setPendingStart(container: HTMLElement, tabId: number, mode: CaptureMode): void {
+  clearPendingStart();
+  state.pendingStart = {
+    tabId,
+    mode,
+    requestedAt: Date.now()
+  };
+  pendingStartTimeout = setTimeout(() => {
+    if (!state.pendingStart) {
+      return;
+    }
+
+    clearPendingStart();
+    render(container);
+  }, START_PENDING_TIMEOUT_MS);
+  render(container);
+}
+
+function clearPendingStart(): void {
+  state.pendingStart = undefined;
+
+  if (pendingStartTimeout !== null) {
+    clearTimeout(pendingStartTimeout);
+    pendingStartTimeout = null;
+  }
+}
+
+function getFreshPendingStart(now: number): typeof state.pendingStart {
+  if (!state.pendingStart) {
+    return undefined;
+  }
+
+  if (now - state.pendingStart.requestedAt > START_PENDING_TIMEOUT_MS) {
+    clearPendingStart();
+    return undefined;
+  }
+
+  return state.pendingStart;
+}
+
+function clearPendingStartIfActivated(sessions: SessionListItem[]): void {
+  const pendingStart = state.pendingStart;
+
+  if (!pendingStart) {
+    return;
+  }
+
+  const activated = sessions.some(
+    (session) =>
+      session.active && session.tabId === pendingStart.tabId && session.mode === pendingStart.mode
+  );
+
+  if (activated) {
+    clearPendingStart();
+  }
+}
+
+function isRejectedRuntimeResponse(value: unknown): value is { ok: false; error: string } {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as { ok?: unknown }).ok === false &&
+    typeof (value as { error?: unknown }).error === "string"
+  );
+}
+
 function applyMessage(message: ExtensionOutboundMessage): void {
   if (message.kind === "sw.session-list") {
     state.sessions = message.sessions;
+    clearPendingStartIfActivated(message.sessions);
     return;
   }
 
@@ -425,6 +533,11 @@ function applyMessage(message: ExtensionOutboundMessage): void {
       sid: message.sid,
       mode: message.mode
     };
+
+    if (message.active && state.pendingStart && message.mode === state.pendingStart.mode) {
+      clearPendingStart();
+    }
+
     return;
   }
 

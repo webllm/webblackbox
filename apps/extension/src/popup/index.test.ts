@@ -384,6 +384,47 @@ describe("popup export policy form", () => {
     expect(getStartFullButton().disabled).toBe(false);
   });
 
+  it("keeps start buttons disabled while a full start request is pending", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    getStartFullButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "full"
+    });
+    expect(getStartLiteButton().disabled).toBe(true);
+    expect(getStartFullButton().disabled).toBe(true);
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: []
+    });
+    await flushPopup();
+
+    expect(getStartLiteButton().disabled).toBe(true);
+    expect(getStartFullButton().disabled).toBe(true);
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-started",
+          tabId: 17,
+          mode: "full",
+          startedAt: Date.now(),
+          active: true
+        }
+      ]
+    });
+    await flushPopup();
+  });
+
   it("renders the ring buffer meter without inline styles", async () => {
     const port = new FakePort();
     installChromeStub(port);
