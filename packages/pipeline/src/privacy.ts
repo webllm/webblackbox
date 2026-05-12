@@ -86,7 +86,7 @@ export async function buildPrivacyManifest(input: PrivacyManifestInput): Promise
   const scanner = await scanPrivacyTargets([
     ...input.events.map((event) => ({
       path: `event:${event.id}`,
-      text: JSON.stringify(event)
+      text: extractEventScanText(event)
     })),
     ...input.blobs.map((blob) => ({
       path: `blob:${blob.hash}`,
@@ -112,6 +112,41 @@ export async function buildPrivacyManifest(input: PrivacyManifestInput): Promise
       privacyViolations: input.events.filter((event) => event.type === "privacy.violation").length
     }
   };
+}
+
+function extractEventScanText(event: WebBlackboxEvent): string {
+  if (event.type === "meta.config") {
+    return "";
+  }
+
+  const strings: string[] = [];
+  collectStringLeaves(event.data, strings);
+  collectStringLeaves(event.ref, strings);
+  collectStringLeaves(event.cdp, strings);
+  collectStringLeaves(event.frame, strings);
+  return strings.join("\n");
+}
+
+function collectStringLeaves(value: unknown, output: string[]): void {
+  if (typeof value === "string") {
+    output.push(value);
+    return;
+  }
+
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringLeaves(item, output);
+    }
+    return;
+  }
+
+  for (const item of Object.values(value)) {
+    collectStringLeaves(item, output);
+  }
 }
 
 export function assertPrivacyScannerPassed(scanner: PrivacyScannerResult): void {
