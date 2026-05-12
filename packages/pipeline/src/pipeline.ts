@@ -34,6 +34,7 @@ export type ExportResult = {
   fileName: string;
   bytes: Uint8Array;
   integrity: HashesManifest;
+  privacyManifest: PrivacyManifest;
 };
 
 export type ExportBundleOptions = {
@@ -41,6 +42,7 @@ export type ExportBundleOptions = {
   includeScreenshots?: boolean;
   maxArchiveBytes?: number | null;
   recentWindowMs?: number | null;
+  strictPrivacyScanner?: boolean;
 };
 
 type PreparedExportChunk = {
@@ -60,6 +62,11 @@ type ResolvedExportPolicy = {
   maxArchiveBytes: number | null;
   recentWindowMs: number | null;
   cutoffTimestamp: number;
+  strictPrivacyScanner: boolean;
+};
+
+type PreparedArchive = Awaited<ReturnType<typeof createWebBlackboxArchive>> & {
+  privacyManifest: PrivacyManifest;
 };
 
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
@@ -223,7 +230,10 @@ export class FlightRecorderPipeline {
           recentWindowMs: exportPolicy.recentWindowMs
         })
       });
-      assertPrivacyScannerPassed(privacyManifest.scanner);
+      if (options.strictPrivacyScanner === true) {
+        assertPrivacyScannerPassed(privacyManifest.scanner);
+      }
+
       assertLowRiskOverrideAllowed(privacyManifest, this.options.capturePolicy);
 
       const { bytes, integrity } = await createWebBlackboxArchive(
@@ -246,7 +256,8 @@ export class FlightRecorderPipeline {
       return {
         fileName: `${this.options.session.sid}.webblackbox`,
         bytes,
-        integrity
+        integrity,
+        privacyManifest
       };
     }
 
@@ -277,14 +288,15 @@ export class FlightRecorderPipeline {
       archive = fitted.archive;
     }
 
-    const { bytes, integrity } = archive;
+    const { bytes, integrity, privacyManifest } = archive;
 
     await this.options.storage.putIntegrity(this.options.session.sid, integrity);
 
     return {
       fileName: `${this.options.session.sid}.webblackbox`,
       bytes,
-      integrity
+      integrity,
+      privacyManifest
     };
   }
 
@@ -528,7 +540,7 @@ export class FlightRecorderPipeline {
     blobsByHash: Map<string, StoredBlob>,
     exportPolicy: ResolvedExportPolicy,
     passphrase?: string
-  ): Promise<Awaited<ReturnType<typeof createWebBlackboxArchive>>> {
+  ): Promise<PreparedArchive> {
     const exportData = this.buildExportSnapshot(selectedChunks, blobsByHash);
     const manifest = this.buildManifest(exportData.chunks, exportData.blobs.length);
     const events = selectedChunks.flatMap((chunk) => chunk.events);
@@ -546,10 +558,13 @@ export class FlightRecorderPipeline {
         recentWindowMs: exportPolicy.recentWindowMs
       })
     });
-    assertPrivacyScannerPassed(privacyManifest.scanner);
+    if (exportPolicy.strictPrivacyScanner) {
+      assertPrivacyScannerPassed(privacyManifest.scanner);
+    }
+
     assertLowRiskOverrideAllowed(privacyManifest, this.options.capturePolicy);
 
-    return createWebBlackboxArchive(
+    const archive = await createWebBlackboxArchive(
       {
         manifest,
         chunks: exportData.chunks,
@@ -563,6 +578,11 @@ export class FlightRecorderPipeline {
         passphrase
       }
     );
+
+    return {
+      ...archive,
+      privacyManifest
+    };
   }
 
   private async fitSelectionToArchiveLimit(
@@ -573,12 +593,12 @@ export class FlightRecorderPipeline {
     passphrase?: string
   ): Promise<{
     selected: PreparedExportChunk[];
-    archive: Awaited<ReturnType<typeof createWebBlackboxArchive>>;
+    archive: PreparedArchive;
   }> {
     let left = 1;
     let right = selected.length;
     let bestSelection: PreparedExportChunk[] | null = null;
-    let bestArchive: Awaited<ReturnType<typeof createWebBlackboxArchive>> | null = null;
+    let bestArchive: PreparedArchive | null = null;
 
     while (left <= right) {
       const dropCount = Math.floor((left + right) / 2);
@@ -746,7 +766,8 @@ function resolveExportPolicy(
     includeScreenshots,
     maxArchiveBytes,
     recentWindowMs,
-    cutoffTimestamp
+    cutoffTimestamp,
+    strictPrivacyScanner: options.strictPrivacyScanner === true
   };
 }
 

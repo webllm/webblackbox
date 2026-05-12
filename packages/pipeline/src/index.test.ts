@@ -263,12 +263,12 @@ describe("pipeline", () => {
     });
   });
 
-  it("blocks export when the plaintext scanner finds raw secrets", async () => {
+  it("allows local export and records scanner findings when raw secrets remain", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
       session: {
         ...SESSION,
-        sid: "S-scanner-block"
+        sid: "S-scanner-warning"
       },
       storage,
       maxChunkBytes: 512
@@ -281,7 +281,42 @@ describe("pipeline", () => {
       })
     );
 
-    await expect(pipeline.exportBundle()).rejects.toThrow(/Privacy scanner blocked export/i);
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(exported.privacyManifest.scanner.status).toBe("blocked");
+    expect(parsed.privacyManifest?.scanner.status).toBe("blocked");
+    expect(parsed.privacyManifest?.scanner.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "bearer-token",
+          path: "event:E-secret"
+        })
+      ])
+    );
+  });
+
+  it("blocks scanner findings when strict privacy scanning is requested", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-scanner-strict"
+      },
+      storage,
+      maxChunkBytes: 512
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-secret-strict", "console.entry", Date.now(), {
+        text: "Authorization: Bearer wbb_test_provider_token_000000000000"
+      })
+    );
+
+    await expect(pipeline.exportBundle({ strictPrivacyScanner: true })).rejects.toThrow(
+      /Privacy scanner blocked export/i
+    );
   });
 
   it("requires encryption for real-user capture policies", async () => {
