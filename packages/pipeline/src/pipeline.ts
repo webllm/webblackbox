@@ -43,6 +43,7 @@ export type ExportBundleOptions = {
   maxArchiveBytes?: number | null;
   recentWindowMs?: number | null;
   strictPrivacyScanner?: boolean;
+  allowPlaintextLocalExport?: boolean;
 };
 
 type PreparedExportChunk = {
@@ -308,6 +309,10 @@ export class FlightRecorderPipeline {
     }
 
     const hasPassphrase = typeof options.passphrase === "string" && options.passphrase.length > 0;
+
+    if (!hasPassphrase && options.allowPlaintextLocalExport === true) {
+      return;
+    }
 
     if (policy.encryption.archive === "required" && !hasPassphrase) {
       throw new Error("Export encryption is required by the active capture policy.");

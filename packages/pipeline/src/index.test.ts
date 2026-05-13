@@ -337,6 +337,36 @@ describe("pipeline", () => {
     await expect(pipeline.exportBundle()).rejects.toThrow(/encryption is required/i);
   });
 
+  it("allows explicit plaintext local exports for real-user capture policies", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-real-user-plaintext-local"
+      },
+      storage,
+      maxChunkBytes: 512,
+      capturePolicy: DEFAULT_CAPTURE_POLICY
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-real-user-plaintext", "user.click", Date.now()));
+
+    const exported = await pipeline.exportBundle({
+      allowPlaintextLocalExport: true
+    });
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.manifest.encryption).toBeUndefined();
+    expect(parsed.privacyManifest?.encryption.archive).toBe("plaintext");
+    expect(parsed.privacyManifest?.transfer).toMatchObject({
+      destination: "local-download",
+      archiveKeyEnvelope: "none",
+      encrypted: false,
+      shareEligible: false
+    });
+  });
+
   it("rejects plaintext capture-context exemptions without trusted evidence", async () => {
     for (const evidenceRef of [
       undefined,

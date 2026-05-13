@@ -50,9 +50,10 @@ const EXTENSION_MESSAGES = {
     popupOptions: "Options",
     popupMarkerHint: "Marker: Ctrl/Cmd + Shift + M",
     popupExportPassphraseTitle: "Export Passphrase",
-    popupExportPassphraseBody: "AES-GCM passphrase is required for real-user exports.",
+    popupExportPassphraseBody:
+      "Add an AES-GCM passphrase to encrypt this export. Leave blank to export without encryption.",
     popupPassphraseLabel: "Passphrase",
-    popupPassphraseRequired: "Passphrase is required for encrypted export.",
+    popupPassphraseRequired: "Enter a passphrase to encrypt this export.",
     popupCancel: "Cancel",
     popupExporting: "Exporting...",
     popupExported: "Exported: {name}",
@@ -138,7 +139,8 @@ const EXTENSION_MESSAGES = {
     sessionsFallbackTab: "Tab {tabId}",
     sessionsDeletePrompt: "Delete session {sid}? This removes local archive data.",
     sessionsExportDialogTitle: "Export Session",
-    sessionsExportDialogBody: "AES-GCM passphrase is required for real-user exports.",
+    sessionsExportDialogBody:
+      "Add an AES-GCM passphrase to encrypt this export. Leave blank to export without encryption.",
     sessionsConfirmDeleteTitle: "Confirm Delete",
     sessionsTitle: "Sessions"
   },
@@ -186,9 +188,9 @@ const EXTENSION_MESSAGES = {
     popupOptions: "设置",
     popupMarkerHint: "标记快捷键：Ctrl/Cmd + Shift + M",
     popupExportPassphraseTitle: "导出口令",
-    popupExportPassphraseBody: "真实用户导出必须填写 AES-GCM 口令。",
+    popupExportPassphraseBody: "填写 AES-GCM 口令可加密导出；留空则不加密导出。",
     popupPassphraseLabel: "口令",
-    popupPassphraseRequired: "加密导出必须填写口令。",
+    popupPassphraseRequired: "填写口令将加密导出。",
     popupCancel: "取消",
     popupExporting: "正在导出...",
     popupExported: "已导出：{name}",
@@ -269,7 +271,7 @@ const EXTENSION_MESSAGES = {
     sessionsFallbackTab: "标签页 {tabId}",
     sessionsDeletePrompt: "删除会话 {sid}？这会移除本地归档数据。",
     sessionsExportDialogTitle: "导出会话",
-    sessionsExportDialogBody: "真实用户导出必须填写 AES-GCM 口令。",
+    sessionsExportDialogBody: "填写 AES-GCM 口令可加密导出；留空则不加密导出。",
     sessionsConfirmDeleteTitle: "确认删除",
     sessionsTitle: "会话"
   }

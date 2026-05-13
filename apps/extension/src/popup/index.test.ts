@@ -522,7 +522,7 @@ describe("popup export policy form", () => {
     expect(getExportButton().disabled).toBe(false);
   });
 
-  it("does not submit an export with an empty passphrase", async () => {
+  it("exports without encryption when the passphrase prompt is left empty", async () => {
     const port = new FakePort();
     installChromeStub(port);
 
@@ -548,11 +548,16 @@ describe("popup export policy form", () => {
     getPassphraseSubmitButton().click();
     await flushPopup();
 
-    expect(port.postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "ui.export"
-      })
-    );
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.export",
+      sid: "sid-empty-passphrase",
+      saveAs: false,
+      policy: {
+        includeScreenshots: false,
+        maxArchiveBytes: 100 * 1024 * 1024,
+        recentWindowMs: 20 * 60 * 1000
+      }
+    });
   });
 
   it("opens the sessions and options pages from the popup", async () => {

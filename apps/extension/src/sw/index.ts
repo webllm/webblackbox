@@ -194,6 +194,7 @@ type SessionPipelineClient = {
     includeScreenshots?: boolean;
     maxArchiveBytes?: number;
     recentWindowMs?: number;
+    allowPlaintextLocalExport?: boolean;
   }) => Promise<PipelineExportDownloadResult>;
   close: (options?: { purge?: boolean }) => Promise<void>;
 };
@@ -214,6 +215,7 @@ type OffscreenPipelineRequest = {
   includeScreenshots?: boolean;
   maxArchiveBytes?: number;
   recentWindowMs?: number;
+  allowPlaintextLocalExport?: boolean;
   purge?: boolean;
 };
 
@@ -948,13 +950,15 @@ async function exportSession(
     }
 
     await flushBufferedPipelineEvents(runtime);
+    const encrypted = hasExportPassphrase(passphrase);
 
     const exported = await enqueueWithResult(runtime, async () => {
       return runtime.pipeline.exportAndDownload({
-        passphrase,
+        passphrase: encrypted ? passphrase : undefined,
         includeScreenshots: policy.includeScreenshots,
         maxArchiveBytes: policy.maxArchiveBytes,
-        recentWindowMs: policy.recentWindowMs
+        recentWindowMs: policy.recentWindowMs,
+        allowPlaintextLocalExport: !encrypted
       });
     });
 
@@ -966,7 +970,7 @@ async function exportSession(
       sid,
       mode: runtime.mode,
       outcome: "ok",
-      encrypted: typeof passphrase === "string" && passphrase.length > 0,
+      encrypted,
       includeScreenshots: policy.includeScreenshots,
       maxArchiveBytes: policy.maxArchiveBytes,
       recentWindowMs: policy.recentWindowMs,
@@ -998,7 +1002,7 @@ async function exportSession(
       sid,
       mode: runtime.mode,
       outcome: "error",
-      encrypted: typeof passphrase === "string" && passphrase.length > 0,
+      encrypted: hasExportPassphrase(passphrase),
       includeScreenshots: policy.includeScreenshots,
       maxArchiveBytes: policy.maxArchiveBytes,
       recentWindowMs: policy.recentWindowMs,
@@ -1016,6 +1020,10 @@ async function exportSession(
       error: message
     };
   }
+}
+
+function hasExportPassphrase(passphrase: string | undefined): passphrase is string {
+  return typeof passphrase === "string" && passphrase.length > 0;
 }
 
 function ingestRawEvent(rawEvent: RawRecorderEvent): void {
@@ -1734,7 +1742,8 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         passphrase: options.passphrase,
         includeScreenshots: options.includeScreenshots,
         maxArchiveBytes: options.maxArchiveBytes,
-        recentWindowMs: options.recentWindowMs
+        recentWindowMs: options.recentWindowMs,
+        allowPlaintextLocalExport: options.allowPlaintextLocalExport
       });
 
       return normalizePipelineExportDownloadResult(exported);
