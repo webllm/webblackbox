@@ -1,5 +1,17 @@
 # @webblackbox/share-server
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 secure sharing flow: public uploads now require encrypted archives, privacy preflight review, scoped API keys, expiry/revocation controls, and audit coverage.
+- Hardened upload validation by rejecting plaintext archive content, encrypted archive files uploaded as plaintext blobs, and query-string API key propagation while returning client errors for oversized uploads.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/player-sdk@0.5.0
+
 ## 0.4.5
 
 ### Patch Changes

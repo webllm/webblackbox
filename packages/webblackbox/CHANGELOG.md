@@ -1,5 +1,19 @@
 # webblackbox
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 browser SDK privacy defaults: lite capture keeps screenshots off by default, avoids raw input/local-storage values, counts storage identifiers only, and sanitizes URLs and targets before capture.
+- Threaded capture policy through the browser SDK export path, including real-user encryption enforcement, trusted plaintext exemption checks, and allowlisted captured network headers.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/pipeline@0.5.0
+  - @webblackbox/protocol@0.5.0
+  - @webblackbox/recorder@0.5.0
+
 ## 0.4.5
 
 ### Patch Changes

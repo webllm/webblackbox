@@ -1,5 +1,17 @@
 # @webblackbox/player-sdk
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 archive reader updates so encrypted event chunks, indexes, privacy manifests, and blob payloads can be opened with the archive passphrase.
+- Kept replay diagnostics consistent by counting level-based error events alongside error event types.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.5.0
+
 ## 0.4.5
 
 ### Patch Changes

@@ -1,5 +1,17 @@
 # @webblackbox/recorder
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 capture-policy work: recorder events now carry privacy classification metadata and capture adapters receive policy context before emitting sensitive categories.
+- Sanitized URLs and target selectors earlier in the recorder path and added coverage for capture-policy gates.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.5.0
+
 ## 0.4.5
 
 ### Patch Changes

@@ -1,5 +1,21 @@
 # @webblackbox/extension
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 privacy and export hardening work: store-safe capture defaults, enterprise capture-policy caps, origin-scoped recording, local export audit events, and full-mode capture policy application now work together across lite and full modes.
+- Reworked local export UX and reliability with service-worker keepalive, runtime export acknowledgements, stalled-export feedback, privacy-finding alerts, optional passphrase downloads, and a popup toggle for sensitive-info alerting.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/cdp-router@0.5.0
+  - @webblackbox/pipeline@0.5.0
+  - @webblackbox/protocol@0.5.0
+  - @webblackbox/recorder@0.5.0
+  - webblackbox@0.5.0
+
 ## 0.4.10
 
 ### Patch Changes

@@ -1,5 +1,18 @@
 # @webblackbox/player
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 replay and sharing hardening work: replay views now stay within the Player CSP, block external replay resources, render runtime progress markers correctly, and flag metadata-only archives more clearly.
+- Improved privacy-focused sharing output by using redacted client summaries and consistent error-count handling in replay diagnostics.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/player-sdk@0.5.0
+  - @webblackbox/protocol@0.5.0
+
 ## 0.4.5
 
 ### Patch Changes

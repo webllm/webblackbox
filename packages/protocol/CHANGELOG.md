@@ -1,5 +1,12 @@
 # @webblackbox/protocol
 
+## 0.5.0
+
+### Minor Changes
+
+- Added capture privacy classification, capture-policy schema support, archive privacy scanner metadata, and export transfer-policy metadata shared by recorder, pipeline, and player tooling.
+- Tightened privacy defaults and helpers by disabling body/screenshot capture by default, sanitizing URLs by default, and tokenizing file paths, target selectors, and secret-prefixed path segments.
+
 ## 0.4.5
 
 ### Patch Changes

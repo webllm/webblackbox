@@ -1,5 +1,18 @@
 # @webblackbox/pipeline
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 privacy/export pipeline: archives now carry scanner results, export transfer policy metadata, encrypted private indexes/blobs, real-user encryption enforcement, and trusted plaintext exemption checks.
+- Added explicit support for local plaintext exports through `allowPlaintextLocalExport`, while privacy findings now warn instead of blocking local downloads by default.
+- Applied default export policy bounds consistently and kept returned archive integrity metadata stable after export.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.5.0
+
 ## 0.4.6
 
 ### Patch Changes

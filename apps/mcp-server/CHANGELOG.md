@@ -1,5 +1,17 @@
 # @webblackbox/mcp-server
 
+## 0.5.0
+
+### Minor Changes
+
+- Rolled up the post-0.4.5 archive-inspection updates from Player SDK 0.5.0 so MCP tooling can read the hardened privacy/export archive format.
+- Limited archive listings after sorting so CLI/session-tool results stay deterministic before pagination limits are applied.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/player-sdk@0.5.0
+
 ## 0.4.5
 
 ### Patch Changes
