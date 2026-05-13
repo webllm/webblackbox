@@ -5,6 +5,8 @@
 ### Patch Changes
 
 - Made export passphrases optional for local downloads: leaving the passphrase prompt empty now downloads an unencrypted archive, while entering a passphrase still produces an AES-GCM encrypted archive.
+- Updated dependencies
+  - @webblackbox/pipeline@0.4.6
 
 ## 0.4.8
 

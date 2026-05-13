@@ -1,5 +1,11 @@
 # @webblackbox/pipeline
 
+## 0.4.6
+
+### Patch Changes
+
+- Added an explicit `allowPlaintextLocalExport` export option for trusted local download flows that intentionally leave archives unencrypted while preserving encrypted exports when a passphrase is supplied.
+
 ## 0.4.5
 
 ### Patch Changes
