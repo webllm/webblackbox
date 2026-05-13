@@ -36,6 +36,7 @@ const EXPORT_ACK_TIMEOUT_MS = 120_000;
 
 type PopupExportPolicyForm = {
   includeScreenshots: boolean;
+  alertSensitiveFindings: boolean;
   maxArchiveMb: string;
   recentMinutes: string;
 };
@@ -359,10 +360,22 @@ function bindExportPolicyForm(container: HTMLElement): void {
     state.exportPolicyForm = readPopupExportPolicyFormFromContainer(container);
     savePopupExportPolicyForm(state.exportPolicyForm);
   };
+  const persistAlertDraft = (): void => {
+    persistDraft();
+
+    if (!state.exportPolicyForm.alertSensitiveFindings) {
+      state.exportPrivacyWarning = undefined;
+      state.lastPrivacyAlertKey = undefined;
+      render(container);
+    }
+  };
 
   container
     .querySelector<HTMLInputElement>("#export-include-screenshots")
     ?.addEventListener("change", persistDraft);
+  container
+    .querySelector<HTMLInputElement>("#export-alert-sensitive-findings")
+    ?.addEventListener("change", persistAlertDraft);
   container
     .querySelector<HTMLInputElement>("#export-max-size-mb")
     ?.addEventListener("input", persistDraft);
@@ -619,12 +632,12 @@ function isSuccessfulExportResponse(value: unknown): value is {
 }
 
 function applyExportPrivacyWarning(warning: ExportPrivacyWarning | undefined): void {
-  state.exportPrivacyWarning = warning;
-
-  if (!warning) {
+  if (!warning || !state.exportPolicyForm.alertSensitiveFindings) {
+    state.exportPrivacyWarning = undefined;
     return;
   }
 
+  state.exportPrivacyWarning = warning;
   const alertKey = `${warning.findingCount}:${warning.summary}`;
 
   if (state.lastPrivacyAlertKey === alertKey) {
@@ -776,6 +789,7 @@ function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
 function toPopupExportPolicyForm(policy: ExportPolicy): PopupExportPolicyForm {
   return {
     includeScreenshots: policy.includeScreenshots,
+    alertSensitiveFindings: true,
     maxArchiveMb: String(Math.max(1, Math.round(policy.maxArchiveBytes / (1024 * 1024)))),
     recentMinutes: String(Math.max(1, Math.round(policy.recentWindowMs / (60 * 1000))))
   };
@@ -800,6 +814,8 @@ function loadPopupExportPolicyForm(): PopupExportPolicyForm {
         typeof parsed.includeScreenshots === "boolean"
           ? parsed.includeScreenshots
           : DEFAULT_EXPORT_POLICY.includeScreenshots,
+      alertSensitiveFindings:
+        typeof parsed.alertSensitiveFindings === "boolean" ? parsed.alertSensitiveFindings : true,
       maxArchiveMb: normalizeStoredBoundedIntText(
         parsed.maxArchiveMb,
         Math.round(DEFAULT_EXPORT_POLICY.maxArchiveBytes / (1024 * 1024)),
@@ -837,11 +853,18 @@ function writeExportPolicyFormToContainer(
   const includeScreenshots = container.querySelector<HTMLInputElement>(
     "#export-include-screenshots"
   );
+  const alertSensitiveFindings = container.querySelector<HTMLInputElement>(
+    "#export-alert-sensitive-findings"
+  );
   const maxArchiveMb = container.querySelector<HTMLInputElement>("#export-max-size-mb");
   const recentMinutes = container.querySelector<HTMLInputElement>("#export-recent-minutes");
 
   if (includeScreenshots) {
     includeScreenshots.checked = form.includeScreenshots;
+  }
+
+  if (alertSensitiveFindings) {
+    alertSensitiveFindings.checked = form.alertSensitiveFindings;
   }
 
   if (maxArchiveMb) {
@@ -858,6 +881,9 @@ function readPopupExportPolicyFormFromContainer(container: HTMLElement): PopupEx
     includeScreenshots:
       container.querySelector<HTMLInputElement>("#export-include-screenshots")?.checked ??
       state.exportPolicyForm.includeScreenshots,
+    alertSensitiveFindings:
+      container.querySelector<HTMLInputElement>("#export-alert-sensitive-findings")?.checked ??
+      state.exportPolicyForm.alertSensitiveFindings,
     maxArchiveMb:
       container.querySelector<HTMLInputElement>("#export-max-size-mb")?.value ??
       state.exportPolicyForm.maxArchiveMb,
@@ -1060,6 +1086,17 @@ function createArchivePolicySection(): HTMLElement {
   toggleText.textContent = t("popupIncludeScreenshots");
   toggleLabel.append(includeScreenshots, toggleText);
 
+  const sensitiveToggleLabel = document.createElement("label");
+  sensitiveToggleLabel.className = "wb-toggle";
+
+  const alertSensitiveFindings = document.createElement("input");
+  alertSensitiveFindings.id = "export-alert-sensitive-findings";
+  alertSensitiveFindings.type = "checkbox";
+
+  const sensitiveToggleText = document.createElement("span");
+  sensitiveToggleText.textContent = t("popupAlertSensitiveFindings");
+  sensitiveToggleLabel.append(alertSensitiveFindings, sensitiveToggleText);
+
   const sizeLabel = document.createElement("label");
   sizeLabel.className = "wb-field-label";
   sizeLabel.htmlFor = "export-max-size-mb";
@@ -1086,6 +1123,14 @@ function createArchivePolicySection(): HTMLElement {
   recentInput.step = "1";
   recentInput.className = "wb-input";
 
-  section.append(title, toggleLabel, sizeLabel, sizeInput, recentLabel, recentInput);
+  section.append(
+    title,
+    toggleLabel,
+    sensitiveToggleLabel,
+    sizeLabel,
+    sizeInput,
+    recentLabel,
+    recentInput
+  );
   return section;
 }

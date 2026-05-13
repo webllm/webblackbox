@@ -116,6 +116,16 @@ function getCheckbox(): HTMLInputElement {
   return checkbox;
 }
 
+function getSensitiveAlertCheckbox(): HTMLInputElement {
+  const checkbox = document.querySelector<HTMLInputElement>("#export-alert-sensitive-findings");
+
+  if (!checkbox) {
+    throw new Error("missing sensitive alert checkbox");
+  }
+
+  return checkbox;
+}
+
 function getMaxArchiveInput(): HTMLInputElement {
   const input = document.querySelector<HTMLInputElement>("#export-max-size-mb");
 
@@ -239,10 +249,12 @@ describe("popup export policy form", () => {
     await importPopupModule();
 
     const checkbox = getCheckbox();
+    const sensitiveAlert = getSensitiveAlertCheckbox();
     const maxArchiveMb = getMaxArchiveInput();
     const recentMinutes = getRecentMinutesInput();
 
     expect(checkbox.checked).toBe(false);
+    expect(sensitiveAlert.checked).toBe(true);
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event("change", { bubbles: true }));
 
@@ -252,6 +264,9 @@ describe("popup export policy form", () => {
     recentMinutes.value = "45";
     recentMinutes.dispatchEvent(new Event("input", { bubbles: true }));
 
+    sensitiveAlert.checked = false;
+    sensitiveAlert.dispatchEvent(new Event("change", { bubbles: true }));
+
     port.emit({
       kind: "sw.session-list",
       sessions: []
@@ -259,10 +274,12 @@ describe("popup export policy form", () => {
     await flushPopup();
 
     expect(getCheckbox().checked).toBe(true);
+    expect(getSensitiveAlertCheckbox().checked).toBe(false);
     expect(getMaxArchiveInput().value).toBe("256");
     expect(getRecentMinutesInput().value).toBe("45");
     expect(JSON.parse(localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY) ?? "null")).toEqual({
       includeScreenshots: true,
+      alertSensitiveFindings: false,
       maxArchiveMb: "256",
       recentMinutes: "45"
     });
@@ -470,6 +487,61 @@ describe("popup export policy form", () => {
     await flushPopup();
 
     expect(alertSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("suppresses popup privacy alerts when sensitive finding alerts are disabled", async () => {
+    const port = new FakePort();
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => undefined);
+    const sendMessage = vi.fn(async () => ({
+      ok: true,
+      fileName: "sid-export-muted.webblackbox",
+      privacyWarning: EXPORT_PRIVACY_WARNING
+    }));
+    installChromeStub(port, { sendMessage });
+
+    await importPopupModule();
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-export-muted",
+          tabId: 17,
+          mode: "full",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushPopup();
+
+    const sensitiveAlert = getSensitiveAlertCheckbox();
+    sensitiveAlert.checked = false;
+    sensitiveAlert.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushPopup();
+
+    getExportButton().click();
+    await flushPopup();
+
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!passphraseInput) {
+      throw new Error("missing passphrase input");
+    }
+
+    passphraseInput.value = "export-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    getPassphraseSubmitButton().click();
+    await flushPopup();
+
+    expect(getStatusLine().textContent).toBe("Exported: sid-export-muted.webblackbox");
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(document.querySelector(".wb-popup__privacy-warning")).toBeNull();
+    expect(JSON.parse(localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY) ?? "null")).toEqual(
+      expect.objectContaining({
+        alertSensitiveFindings: false
+      })
+    );
   });
 
   it("shows a retryable failure when the export acknowledgement stalls", async () => {
