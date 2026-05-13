@@ -1,5 +1,11 @@
 # @webblackbox/extension
 
+## 0.4.9
+
+### Patch Changes
+
+- Made export passphrases optional for local downloads: leaving the passphrase prompt empty now downloads an unencrypted archive, while entering a passphrase still produces an AES-GCM encrypted archive.
+
 ## 0.4.8
 
 ### Patch Changes
