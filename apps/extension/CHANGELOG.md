@@ -1,5 +1,11 @@
 # @webblackbox/extension
 
+## 0.4.10
+
+### Patch Changes
+
+- Added a popup export option for sensitive-info alerts. The alert remains enabled by default, and disabling it suppresses popup privacy warning alerts for local exports.
+
 ## 0.4.9
 
 ### Patch Changes
