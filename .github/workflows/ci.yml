@@ -22,11 +22,11 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Setup Chrome
+      - name: Setup Chrome for Testing
         id: setup-chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
         with:
-          chrome-version: 146
+          chrome-version: stable
           install-dependencies: true
 
       - name: Install dependencies
@@ -98,11 +98,11 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Setup Chrome
+      - name: Setup Chrome for Testing
         id: setup-chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
         with:
-          chrome-version: 146
+          chrome-version: stable
           install-dependencies: true
 
       - name: Install dependencies
