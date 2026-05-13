@@ -3130,20 +3130,24 @@ async function installPlayerArchivePassphraseAutoSubmit(playerClient, passphrase
   await playerClient.evaluate(`
     (() => {
       const passphrase = ${JSON.stringify(passphrase)};
-      let submitted = false;
       const globalKey = '__WEBBLACKBOX_E2E_ARCHIVE_PASSPHRASE__';
+      const stateKey = '__WEBBLACKBOX_E2E_ARCHIVE_PASSPHRASE_STATE__';
       const patchKey = '__WEBBLACKBOX_E2E_DIALOG_PATCHED__';
 
       globalThis[globalKey] = passphrase;
+      globalThis[stateKey] = {
+        passphrase,
+        submitting: false,
+        submitCount: 0,
+        lastSubmittedAt: null,
+        lastError: null
+      };
 
       const submitIfOpen = (targetDialog) => {
-        if (submitted) {
-          return;
-        }
-
+        const state = globalThis[stateKey];
         const dialog = targetDialog ?? document.querySelector('#archive-passphrase-dialog');
 
-        if (!(dialog instanceof HTMLDialogElement) || !dialog.open) {
+        if (!state || !(dialog instanceof HTMLDialogElement) || !dialog.open || state.submitting) {
           return;
         }
 
@@ -3155,16 +3159,32 @@ async function installPlayerArchivePassphraseAutoSubmit(playerClient, passphrase
           return;
         }
 
-        input.value = passphrase;
+        const currentPassphrase = String(state.passphrase ?? passphrase);
+        input.value = currentPassphrase;
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
-        submitted = true;
+        state.submitting = true;
+        state.lastError = null;
 
         requestAnimationFrame(() => {
-          if (form instanceof HTMLFormElement) {
-            form.requestSubmit(confirm);
-          } else {
-            confirm.click();
+          try {
+            if (form instanceof HTMLFormElement) {
+              form.requestSubmit(confirm);
+            } else {
+              confirm.click();
+            }
+            state.submitCount += 1;
+            state.lastSubmittedAt = Date.now();
+          } catch (error) {
+            state.lastError = error instanceof Error ? error.message : String(error);
+          } finally {
+            setTimeout(() => {
+              state.submitting = false;
+
+              if (dialog.open) {
+                submitIfOpen(dialog);
+              }
+            }, 50);
           }
         });
       };
@@ -3184,18 +3204,21 @@ async function installPlayerArchivePassphraseAutoSubmit(playerClient, passphrase
         };
 
         HTMLDialogElement.prototype.close = function patchedClose(returnValue) {
+          const state = globalThis[stateKey];
+
           if (
             this.id === 'archive-passphrase-dialog' &&
-            globalThis[globalKey] &&
+            state?.passphrase &&
             returnValue !== 'confirm'
           ) {
             const input = document.querySelector('#archive-passphrase-input');
 
             if (input instanceof HTMLInputElement) {
-              input.value = String(globalThis[globalKey]);
+              input.value = String(state.passphrase);
               input.dispatchEvent(new Event('input', { bubbles: true }));
               input.dispatchEvent(new Event('change', { bubbles: true }));
-              submitted = true;
+              state.submitCount += 1;
+              state.lastSubmittedAt = Date.now();
               return originalClose.call(this, 'confirm');
             }
           }
@@ -3216,11 +3239,6 @@ async function installPlayerArchivePassphraseAutoSubmit(playerClient, passphrase
 
       const interval = setInterval(() => {
         submitIfOpen();
-
-        if (submitted) {
-          clearInterval(interval);
-          observer.disconnect();
-        }
       }, 50);
 
       setTimeout(() => {
@@ -3242,6 +3260,9 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
       (() => {
         const dialog = document.querySelector('#archive-passphrase-dialog');
         const passphrase = ${JSON.stringify(passphrase)};
+        const retryKey = '__WEBBLACKBOX_E2E_ARCHIVE_RETRY_COUNT__';
+        const autoSubmitState =
+          globalThis.__WEBBLACKBOX_E2E_ARCHIVE_PASSPHRASE_STATE__ ?? null;
         let passphraseSubmitted = false;
 
         if (passphrase && dialog instanceof HTMLDialogElement && dialog.open) {
@@ -3270,6 +3291,14 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
         const feedback = (document.getElementById('feedback')?.textContent ?? '').trim();
         const passphraseDialogOpen =
           dialog instanceof HTMLDialogElement ? dialog.open : false;
+        const passphraseAutoSubmit = autoSubmitState
+          ? {
+              submitting: autoSubmitState.submitting === true,
+              submitCount: Number(autoSubmitState.submitCount ?? 0),
+              lastSubmittedAt: autoSubmitState.lastSubmittedAt ?? null,
+              lastError: autoSubmitState.lastError ?? null
+            }
+          : null;
         const sampleButtons = Array.from(document.querySelectorAll('#waterfall-body .waterfall-btn'))
           .slice(0, 12)
           .map((el) => ({
@@ -3280,13 +3309,33 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
         const sampleUrls = sampleButtons.map((sample) => sample.title);
 
         if (eventCount === 0) {
+          const needsPassphraseRetry =
+            passphrase &&
+            !passphraseDialogOpen &&
+            feedback.includes('Passphrase is required for encrypted archive.');
+          const retryCount =
+            typeof globalThis[retryKey] === 'number' && Number.isFinite(globalThis[retryKey])
+              ? globalThis[retryKey]
+              : 0;
+
+          if (needsPassphraseRetry && retryCount < 1) {
+            const archiveInput = document.querySelector('#archive-input');
+
+            if (archiveInput instanceof HTMLInputElement && archiveInput.files?.length) {
+              globalThis[retryKey] = retryCount + 1;
+              archiveInput.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+
           return {
             pending: true,
             eventCount,
             waterfallCount: waterfallRows,
             feedback,
             passphraseDialogOpen,
-            passphraseSubmitted
+            passphraseSubmitted,
+            passphraseAutoSubmit,
+            retryCount: globalThis[retryKey] ?? retryCount
           };
         }
 
@@ -3296,6 +3345,7 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
           feedback,
           passphraseDialogOpen,
           passphraseSubmitted,
+          passphraseAutoSubmit,
           waterfallSamples: samples,
           waterfallSampleUrls: sampleUrls
         };
