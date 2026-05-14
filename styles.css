@@ -2109,7 +2109,9 @@ input[type="file"],
   border: 2px solid #ef4444;
   border-radius: 999px;
   transform: translate(-50%, -50%);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.92), 0 1px 6px rgba(0, 0, 0, 0.4);
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.92),
+    0 1px 6px rgba(0, 0, 0, 0.4);
   pointer-events: none;
 }
 
@@ -2299,12 +2301,7 @@ input[type="file"],
   border-radius: 10px;
   background: rgba(7, 12, 20, 0.94);
   color: #d3e0f5;
-  font-family:
-    "JetBrains Mono",
-    "Fira Code",
-    "SFMono-Regular",
-    Menlo,
-    monospace;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
   font-size: 12px;
   line-height: 1.45;
   padding: 10px;
