@@ -289,7 +289,15 @@ function bindActions(
     }
 
     state.tabId = tabId;
-    await startRecordingFromPopup(container, tabId, "lite");
+    const startAction = await openLiteReloadDialog();
+
+    if (startAction === null) {
+      return;
+    }
+
+    await startRecordingFromPopup(container, tabId, "lite", {
+      reloadPage: startAction === "reload"
+    });
   });
 
   container.querySelector("[data-action='start-full']")?.addEventListener("click", async () => {
@@ -382,6 +390,86 @@ function bindExportPolicyForm(container: HTMLElement): void {
   container
     .querySelector<HTMLInputElement>("#export-recent-minutes")
     ?.addEventListener("input", persistDraft);
+}
+
+function openLiteReloadDialog(): Promise<"reload" | "direct" | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "wb-confirm-overlay";
+    const form = document.createElement("form");
+    form.className = "wb-confirm-card";
+    form.setAttribute("aria-labelledby", "wb-lite-reload-title");
+
+    const title = document.createElement("h2");
+    title.id = "wb-lite-reload-title";
+    title.className = "wb-confirm-title";
+    title.textContent = t("popupLiteReloadTitle");
+
+    const body = document.createElement("p");
+    body.className = "wb-confirm-body";
+    body.textContent = t("popupLiteReloadBody");
+
+    const actions = document.createElement("div");
+    actions.className = "wb-confirm-actions";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "wb-btn wb-btn--muted";
+    cancelButton.dataset.action = "start-lite-cancel";
+    cancelButton.textContent = t("popupCancel");
+
+    const directButton = document.createElement("button");
+    directButton.type = "button";
+    directButton.className = "wb-btn wb-btn--surface";
+    directButton.dataset.action = "start-lite-direct";
+    directButton.textContent = t("popupLiteStartWithoutReload");
+
+    const reloadButton = document.createElement("button");
+    reloadButton.type = "submit";
+    reloadButton.className = "wb-btn wb-btn--brand";
+    reloadButton.dataset.action = "start-lite-reload";
+    reloadButton.textContent = t("popupLiteReloadStart");
+
+    actions.append(cancelButton, directButton, reloadButton);
+    form.append(title, body, actions);
+    overlay.append(form);
+
+    let finished = false;
+
+    const finish = (value: "reload" | "direct" | null): void => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+      resolve(value);
+    };
+
+    const onKeydown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(null);
+      }
+    };
+
+    cancelButton.addEventListener("click", () => finish(null));
+    directButton.addEventListener("click", () => finish("direct"));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      finish("reload");
+    });
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(null);
+      }
+    });
+
+    document.addEventListener("keydown", onKeydown);
+    document.body.append(overlay);
+    reloadButton.focus();
+  });
 }
 
 function openPassphraseDialog(): Promise<string | null> {
@@ -487,7 +575,8 @@ function openPassphraseDialog(): Promise<string | null> {
 async function startRecordingFromPopup(
   container: HTMLElement,
   tabId: number,
-  mode: CaptureMode
+  mode: CaptureMode,
+  options: { reloadPage?: boolean } = {}
 ): Promise<void> {
   setPendingStart(container, tabId, mode);
 
@@ -495,7 +584,8 @@ async function startRecordingFromPopup(
     await sendUiMessage({
       kind: "ui.start",
       tabId,
-      mode
+      mode,
+      ...(options.reloadPage ? { reloadPage: true } : {})
     });
   } catch (error) {
     clearPendingStart();

@@ -244,6 +244,7 @@ export type ChromeApi = {
     onRemoved?: {
       addListener(callback: (tabId: number) => void): void;
     };
+    reload?(tabId: number, reloadProperties?: { bypassCache?: boolean }): Promise<void>;
     sendMessage(tabId: number, message: unknown): Promise<unknown>;
   };
 };

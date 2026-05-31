@@ -21,6 +21,7 @@ export type UiStartSessionMessage = {
   kind: "ui.start";
   tabId?: number;
   mode: CaptureMode;
+  reloadPage?: boolean;
 };
 
 export type UiStopSessionMessage = {

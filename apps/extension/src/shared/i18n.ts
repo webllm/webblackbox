@@ -64,6 +64,11 @@ const EXTENSION_MESSAGES = {
     popupExportPrivacyWarningAlert:
       "Export completed, but the privacy scanner found {count} possible sensitive item(s): {summary}. Review the archive before sharing.",
     popupStartFailed: "Start failed: {error}",
+    popupLiteReloadTitle: "Reload Before Lite Capture?",
+    popupLiteReloadBody:
+      "Reloading the current page lets Lite capture the page startup, first network requests, and early console/errors. Unsaved page changes may be lost.",
+    popupLiteReloadStart: "Reload and Start Lite",
+    popupLiteStartWithoutReload: "Start Without Reload",
     popupRingBuffer: "Ring buffer",
     popupArchivePolicyTitle: "Archive Policy",
     popupIncludeScreenshots: "Include screenshots in export",
@@ -201,6 +206,11 @@ const EXTENSION_MESSAGES = {
     popupExportPrivacyWarningAlert:
       "导出已完成，但隐私扫描发现 {count} 个可能的敏感项：{summary}。分享前请先检查归档内容。",
     popupStartFailed: "启动失败：{error}",
+    popupLiteReloadTitle: "启动轻量模式前刷新页面？",
+    popupLiteReloadBody:
+      "刷新当前页面可让轻量模式采集页面启动、首轮网络请求和早期 console/error。未保存的页面内容可能会丢失。",
+    popupLiteReloadStart: "刷新并开始轻量模式",
+    popupLiteStartWithoutReload: "不刷新，直接开始",
     popupRingBuffer: "环形缓冲区",
     popupArchivePolicyTitle: "归档策略",
     popupIncludeScreenshots: "导出时包含截图",

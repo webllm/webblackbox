@@ -186,6 +186,36 @@ function getStartFullButton(): HTMLButtonElement {
   return button;
 }
 
+function getLiteReloadStartButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='start-lite-reload']");
+
+  if (!button) {
+    throw new Error("missing lite reload start button");
+  }
+
+  return button;
+}
+
+function getLiteDirectStartButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='start-lite-direct']");
+
+  if (!button) {
+    throw new Error("missing lite direct start button");
+  }
+
+  return button;
+}
+
+function getLiteStartCancelButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='start-lite-cancel']");
+
+  if (!button) {
+    throw new Error("missing lite start cancel button");
+  }
+
+  return button;
+}
+
 function getSessionsButton(): HTMLButtonElement {
   const button = document.querySelector<HTMLButtonElement>("[data-action='open-sessions']");
 
@@ -703,6 +733,74 @@ describe("popup export policy form", () => {
 
     expect(getStartLiteButton().disabled).toBe(false);
     expect(getStartFullButton().disabled).toBe(false);
+  });
+
+  it("asks before starting lite with a page reload", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    getStartLiteButton().click();
+    await flushPopup();
+
+    expect(document.querySelector(".wb-confirm-overlay")).not.toBeNull();
+    expect(getLiteReloadStartButton().textContent).toBe("Reload and Start Lite");
+    expect(port.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "ui.start",
+        mode: "lite"
+      })
+    );
+
+    getLiteReloadStartButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "lite",
+      reloadPage: true
+    });
+    expect(document.querySelector(".wb-confirm-overlay")).toBeNull();
+  });
+
+  it("can start lite without reloading when the user chooses the non-refresh path", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    getStartLiteButton().click();
+    await flushPopup();
+    getLiteDirectStartButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "lite"
+    });
+  });
+
+  it("does not start lite when the reload confirmation is cancelled", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    getStartLiteButton().click();
+    await flushPopup();
+    getLiteStartCancelButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "ui.start",
+        mode: "lite"
+      })
+    );
+    expect(document.querySelector(".wb-confirm-overlay")).toBeNull();
   });
 
   it("keeps start buttons disabled while a full start request is pending", async () => {

@@ -533,10 +533,17 @@ chromeApi?.commands?.onCommand.addListener((command) => {
 
 chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (typeof changeInfo.url !== "string" || changeInfo.url.length === 0) {
+    if (changeInfo.status === "complete") {
+      void restoreTabInstrumentationAfterNavigation(tabId);
+    }
     return;
   }
 
   void handleTabUrlChanged(tabId, changeInfo.url);
+
+  if (changeInfo.status === "complete") {
+    void restoreTabInstrumentationAfterNavigation(tabId);
+  }
 });
 
 async function handleInboundMessage(
@@ -553,6 +560,14 @@ async function handleInboundMessage(
     }
 
     await startSession(tabId, message.mode);
+    if (message.mode === "lite" && message.reloadPage) {
+      try {
+        await reloadRecordingTab(tabId);
+      } catch (error) {
+        await stopSession(tabId);
+        throw error;
+      }
+    }
     return;
   }
 
@@ -872,6 +887,38 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
+}
+
+async function reloadRecordingTab(tabId: number): Promise<void> {
+  if (!chromeApi?.tabs?.reload) {
+    throw new Error("Current Chrome API cannot reload the active tab.");
+  }
+
+  await chromeApi.tabs.reload(tabId);
+}
+
+async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<void> {
+  const runtime = sessionsByTab.get(tabId);
+
+  if (
+    !runtime ||
+    runtime.stopping ||
+    runtime.stoppedAt ||
+    !shouldInjectHooksForMode(runtime.mode)
+  ) {
+    return;
+  }
+
+  await ensureContentScriptInjected(tabId);
+  await ensureInjectedHooks(tabId);
+  await notifyTabStatus(
+    tabId,
+    true,
+    runtime.sid,
+    runtime.mode,
+    toStatusSampling(runtime),
+    runtime.config.capturePolicy
+  );
 }
 
 async function stopSession(tabId: number): Promise<void> {
