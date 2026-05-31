@@ -1916,7 +1916,7 @@ async function startSessionFromControl(control, mode, expectedUrl) {
 async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiActions) {
   if (useUiActions) {
     const expression = `
-      (() => {
+      (async () => {
         const selector = ${JSON.stringify(mode === "lite" ? "[data-action='start-lite']" : "[data-action='start-full']")};
         const button = document.querySelector(selector);
         const tabLine =
@@ -1937,6 +1937,35 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
         }
 
         button.click();
+        if (${JSON.stringify(mode)} === 'lite') {
+          const reloadButton = await new Promise((resolve) => {
+            const startedAt = Date.now();
+            const tick = () => {
+              const candidate = document.querySelector("[data-action='start-lite-reload']");
+
+              if (candidate instanceof HTMLButtonElement || Date.now() - startedAt > 5000) {
+                resolve(candidate);
+                return;
+              }
+
+              setTimeout(tick, 50);
+            };
+
+            tick();
+          });
+
+          if (!(reloadButton instanceof HTMLButtonElement)) {
+            return {
+              ok: false,
+              reason: 'lite-reload-confirm-not-found',
+              selector,
+              tabLine,
+              statusLine
+            };
+          }
+
+          reloadButton.click();
+        }
         return { ok: true, mode: ${JSON.stringify(mode)}, via: 'popup-ui', tabLine, statusLine };
       })()
     `;
