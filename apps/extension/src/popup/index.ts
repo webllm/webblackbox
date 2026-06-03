@@ -46,6 +46,7 @@ const state: {
   tabId: number | null;
   sessions: SessionListItem[];
   recording: { active: boolean; sid?: string; mode?: string };
+  fullModeRecordScreen: boolean;
   pendingStart?: { tabId: number; mode: CaptureMode; requestedAt: number };
   pendingExportSid?: string;
   exportPrivacyWarning?: ExportPrivacyWarning;
@@ -58,6 +59,7 @@ const state: {
   tabId: null,
   sessions: [],
   recording: { active: false },
+  fullModeRecordScreen: false,
   pendingStart: undefined,
   pendingExportSid: undefined,
   exportPrivacyWarning: undefined,
@@ -241,6 +243,8 @@ function render(container: HTMLElement): void {
   );
   section.append(actions);
 
+  section.append(createFullModeRecordingSection(startDisabled));
+
   const nav = document.createElement("div");
   nav.className = "wb-popup__nav";
   nav.append(
@@ -314,7 +318,9 @@ function bindActions(
     }
 
     state.tabId = tabId;
-    await startRecordingFromPopup(container, tabId, "full");
+    await startRecordingFromPopup(container, tabId, "full", {
+      recordScreen: state.fullModeRecordScreen
+    });
   });
 
   container.querySelector("[data-action='stop']")?.addEventListener("click", () => {
@@ -391,6 +397,12 @@ function bindExportPolicyForm(container: HTMLElement): void {
   container
     .querySelector<HTMLInputElement>("#export-recent-minutes")
     ?.addEventListener("input", persistDraft);
+  container
+    .querySelector<HTMLInputElement>("#full-record-tab-video")
+    ?.addEventListener("change", (event) => {
+      const input = event.currentTarget as HTMLInputElement;
+      state.fullModeRecordScreen = input.checked;
+    });
 }
 
 function openLiteReloadDialog(): Promise<"reload" | "direct" | null> {
@@ -577,7 +589,7 @@ async function startRecordingFromPopup(
   container: HTMLElement,
   tabId: number,
   mode: CaptureMode,
-  options: { reloadPage?: boolean } = {}
+  options: { reloadPage?: boolean; recordScreen?: boolean } = {}
 ): Promise<void> {
   setPendingStart(container, tabId, mode);
 
@@ -586,7 +598,8 @@ async function startRecordingFromPopup(
       kind: "ui.start",
       tabId,
       mode,
-      ...(options.reloadPage ? { reloadPage: true } : {})
+      ...(options.reloadPage ? { reloadPage: true } : {}),
+      ...(options.recordScreen ? { recordScreen: true } : {})
     });
   } catch (error) {
     clearPendingStart();
@@ -1156,6 +1169,26 @@ function createRingUsageSection(ringUsage: {
   meter.setAttribute("aria-valuetext", ringUsage.windowLabel);
 
   section.append(label, meter);
+  return section;
+}
+
+function createFullModeRecordingSection(disabled: boolean): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "wb-popup__policy";
+
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "wb-toggle";
+
+  const input = document.createElement("input");
+  input.id = "full-record-tab-video";
+  input.type = "checkbox";
+  input.checked = state.fullModeRecordScreen;
+  input.disabled = disabled;
+
+  const text = document.createElement("span");
+  text.textContent = t("popupRecordTabVideo");
+  toggleLabel.append(input, text);
+  section.append(toggleLabel);
   return section;
 }
 

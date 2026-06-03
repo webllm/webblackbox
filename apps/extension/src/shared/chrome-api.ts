@@ -75,6 +75,9 @@ export type ChromeApi = {
     }): Promise<void>;
     closeDocument(): Promise<void>;
   };
+  tabCapture?: {
+    getMediaStreamId(options?: { targetTabId?: number; consumerTabId?: number }): Promise<string>;
+  };
   runtime?: {
     connect(connectInfo: { name: string }): PortLike;
     getManifest?: () => {

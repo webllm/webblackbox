@@ -186,6 +186,16 @@ function getStartFullButton(): HTMLButtonElement {
   return button;
 }
 
+function getFullRecordTabVideoCheckbox(): HTMLInputElement {
+  const checkbox = document.querySelector<HTMLInputElement>("#full-record-tab-video");
+
+  if (!checkbox) {
+    throw new Error("missing full mode tab video checkbox");
+  }
+
+  return checkbox;
+}
+
 function getLiteReloadStartButton(): HTMLButtonElement {
   const button = document.querySelector<HTMLButtonElement>("[data-action='start-lite-reload']");
 
@@ -719,6 +729,7 @@ describe("popup export policy form", () => {
 
     expect(getStartLiteButton().disabled).toBe(true);
     expect(getStartFullButton().disabled).toBe(true);
+    expect(getFullRecordTabVideoCheckbox().disabled).toBe(true);
 
     port.emit({
       kind: "sw.session-list",
@@ -736,6 +747,7 @@ describe("popup export policy form", () => {
 
     expect(getStartLiteButton().disabled).toBe(false);
     expect(getStartFullButton().disabled).toBe(false);
+    expect(getFullRecordTabVideoCheckbox().disabled).toBe(false);
   });
 
   it("asks before starting lite with a page reload", async () => {
@@ -845,6 +857,28 @@ describe("popup export policy form", () => {
       ]
     });
     await flushPopup();
+  });
+
+  it("starts full mode with tab video recording when explicitly enabled", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    const checkbox = getFullRecordTabVideoCheckbox();
+    expect(checkbox.checked).toBe(false);
+
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    getStartFullButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "full",
+      recordScreen: true
+    });
   });
 
   it("renders the ring buffer meter without inline styles", async () => {

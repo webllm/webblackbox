@@ -66,10 +66,18 @@ const DEV_PERMISSIONS = [
   "offscreen",
   "scripting",
   "storage",
+  "tabCapture",
   "tabs",
   "webRequest"
 ];
-const STORE_SAFE_PERMISSIONS = ["activeTab", "downloads", "offscreen", "scripting", "storage"];
+const STORE_SAFE_PERMISSIONS = [
+  "activeTab",
+  "downloads",
+  "offscreen",
+  "scripting",
+  "storage",
+  "tabCapture"
+];
 const URL_MATCHES = ["<all_urls>"];
 const ARCHIVE_FIXED_DATE = new Date("1980-01-01T00:00:00.000Z");
 const ARCHIVE_EXCLUDED_FILE_NAMES = new Set([".DS_Store"]);

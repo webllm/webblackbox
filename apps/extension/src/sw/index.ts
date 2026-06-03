@@ -101,6 +101,7 @@ type SessionRuntime = {
   enabledCdpSessions: Set<string>;
   requestMeta: Map<string, RequestMetaEntry>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
+  screenRecording: ScreenRecordingRuntime | null;
   lastPointer: PointerState | null;
   lastViewport: ViewportState | null;
   lastActionScreenshotMono: number;
@@ -129,6 +130,22 @@ type SessionRuntime = {
   removeCdpListeners: Array<() => void>;
   heapSnapshotCapture: HeapSnapshotCaptureState | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+};
+
+type ScreenRecordingRuntime = {
+  recordingId: string;
+  source: "tab";
+  startedAt: number;
+  startedMono: number;
+  mime: string;
+  width?: number;
+  height?: number;
+  frameRate?: number;
+  chunks: string[];
+  chunkCount: number;
+  sizeBytes: number;
+  pendingWrites: Set<Promise<void>>;
+  stopPromise: Promise<void> | null;
 };
 
 type PointerState = {
@@ -204,7 +221,16 @@ type SessionPipelineClient = {
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
   requestId: string;
-  op: "start" | "ingest" | "ingestBatch" | "flush" | "putBlob" | "exportDownload" | "close";
+  op:
+    | "start"
+    | "ingest"
+    | "ingestBatch"
+    | "flush"
+    | "putBlob"
+    | "exportDownload"
+    | "close"
+    | "startScreenRecording"
+    | "stopScreenRecording";
   sid: string;
   session?: SessionMetadata;
   redactionProfile?: RedactionProfile;
@@ -220,6 +246,10 @@ type OffscreenPipelineRequest = {
   recentWindowMs?: number;
   allowPlaintextLocalExport?: boolean;
   purge?: boolean;
+  recordingId?: string;
+  streamId?: string;
+  source?: "tab";
+  reason?: string;
 };
 
 type OffscreenPipelineResponse = {
@@ -228,6 +258,55 @@ type OffscreenPipelineResponse = {
   ok: boolean;
   result?: unknown;
   error?: string;
+};
+
+type OffscreenScreenRecordingStartResult = {
+  recordingId: string;
+  source: "tab";
+  mime: string;
+  width?: number;
+  height?: number;
+  frameRate?: number;
+  audio: boolean;
+};
+
+type OffscreenScreenRecordingStopResult = {
+  recordingId: string;
+  mime: string;
+  chunkCount: number;
+  size: number;
+  durationMs: number;
+  width?: number;
+  height?: number;
+  reason?: string;
+};
+
+type OffscreenScreenRecordingChunkMessage = {
+  kind: "offscreen.screen-recording-chunk";
+  sid: string;
+  recordingId: string;
+  index: number;
+  mime: string;
+  bytes: unknown;
+  size?: number;
+  startOffsetMs?: number;
+  endOffsetMs?: number;
+  durationMs?: number;
+};
+
+type OffscreenScreenRecordingEndedMessage = {
+  kind: "offscreen.screen-recording-ended";
+  sid: string;
+  result: OffscreenScreenRecordingStopResult;
+};
+
+type OffscreenScreenRecordingErrorMessage = {
+  kind: "offscreen.screen-recording-error";
+  sid: string;
+  recordingId?: string;
+  name?: string;
+  message: string;
+  stage?: string;
 };
 
 type RecordingSampling = {
@@ -367,6 +446,7 @@ const OFFSCREEN_PORT_READY_WAIT_MS = 25;
 const STOP_DRAIN_ACK_TIMEOUT_MS = 3_000;
 const CDP_ARTIFACT_TIMEOUT_MS = 5_000;
 const CDP_HEAP_SNAPSHOT_TIMEOUT_MS = 8_000;
+const SCREEN_RECORDING_OFFSCREEN_SOURCE = "tab";
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -562,7 +642,9 @@ async function handleInboundMessage(
       return;
     }
 
-    await startSession(tabId, message.mode);
+    await startSession(tabId, message.mode, {
+      recordScreen: message.recordScreen === true
+    });
     if (message.mode === "lite" && message.reloadPage) {
       try {
         await reloadRecordingTab(tabId);
@@ -729,7 +811,11 @@ async function deleteSessionBySid(sid: string): Promise<void> {
   }
 }
 
-async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
+async function startSession(
+  tabId: number,
+  mode: CaptureMode,
+  options: { recordScreen?: boolean } = {}
+): Promise<void> {
   const existing = sessionsByTab.get(tabId);
 
   if (existing) {
@@ -748,7 +834,11 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     throw new Error("Recording is blocked by enterprise site policy.");
   }
 
-  const loadedRecorderConfig = await loadRecorderConfig(mode);
+  const loadedRecorderConfig = applyScreenRecordingOptIn(
+    await loadRecorderConfig(mode),
+    mode,
+    options.recordScreen === true
+  );
   const recorderConfig = applyEnterprisePolicyToRecorderConfig(
     withSessionCapturePolicy(loadedRecorderConfig, {
       tabId,
@@ -799,6 +889,7 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     enabledCdpSessions: new Set<string>(),
     requestMeta: new Map(),
     screenshotInterval: null,
+    screenRecording: null,
     lastPointer: null,
     lastViewport: null,
     lastActionScreenshotMono: Number.NEGATIVE_INFINITY,
@@ -875,6 +966,15 @@ async function startSession(tabId: number, mode: CaptureMode): Promise<void> {
     await attachCdp(runtime);
   }
 
+  if (shouldStartScreenRecording(runtime)) {
+    try {
+      await startScreenRecording(runtime);
+    } catch (error) {
+      await stopSession(tabId);
+      throw error;
+    }
+  }
+
   const sampling = toStatusSampling(runtime);
 
   await setRecordingBadge();
@@ -933,6 +1033,9 @@ async function stopSession(tabId: number): Promise<void> {
 
   runtime.stopping = true;
   const stopDrainAck = createStopDrainAck(runtime);
+  await stopScreenRecording(runtime, "session-stop").catch((error) => {
+    console.warn("[WebBlackbox] failed to stop screen recording", error);
+  });
   await flushBufferedPipelineEvents(runtime);
   await teardownCaptureInstrumentation(runtime);
   sessionsByTab.delete(runtime.tabId);
@@ -1945,6 +2048,29 @@ function handleOffscreenRuntimeMessage(rawMessage: unknown, port: PortLike): boo
     return true;
   }
 
+  if (kind === "offscreen.screen-recording-chunk") {
+    void handleOffscreenScreenRecordingChunk(
+      rawMessage as OffscreenScreenRecordingChunkMessage
+    ).catch((error) => {
+      console.warn("[WebBlackbox] failed to persist screen recording chunk", error);
+    });
+    return true;
+  }
+
+  if (kind === "offscreen.screen-recording-ended") {
+    void handleOffscreenScreenRecordingEnded(
+      rawMessage as OffscreenScreenRecordingEndedMessage
+    ).catch((error) => {
+      console.warn("[WebBlackbox] failed to finalize screen recording", error);
+    });
+    return true;
+  }
+
+  if (kind === "offscreen.screen-recording-error") {
+    handleOffscreenScreenRecordingError(rawMessage as OffscreenScreenRecordingErrorMessage);
+    return true;
+  }
+
   if (kind !== "offscreen.pipeline-response") {
     return false;
   }
@@ -2533,6 +2659,288 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
   });
 }
 
+function shouldStartScreenRecording(runtime: SessionRuntime): boolean {
+  return (
+    runtime.mode === "full" && runtime.config.capturePolicy?.categories.screenRecordings === "allow"
+  );
+}
+
+async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
+  if (!chromeApi?.tabCapture?.getMediaStreamId) {
+    throw new Error("Chrome tabCapture API is unavailable for screen recording.");
+  }
+
+  if (runtime.screenRecording) {
+    return;
+  }
+
+  const recordingId = createScreenRecordingId(runtime.sid);
+  const startedAt = Date.now();
+  const startedMono = monotonicTime();
+  const streamId = await chromeApi.tabCapture.getMediaStreamId({
+    targetTabId: runtime.tabId
+  });
+
+  if (!streamId) {
+    throw new Error("Chrome did not grant a tab capture stream.");
+  }
+
+  const recording: ScreenRecordingRuntime = {
+    recordingId,
+    source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
+    startedAt,
+    startedMono,
+    mime: "video/webm",
+    chunks: [],
+    chunkCount: 0,
+    sizeBytes: 0,
+    pendingWrites: new Set(),
+    stopPromise: null
+  };
+  runtime.screenRecording = recording;
+
+  try {
+    const result = await requestOffscreenPipeline<OffscreenScreenRecordingStartResult>({
+      op: "startScreenRecording",
+      sid: runtime.sid,
+      recordingId,
+      streamId,
+      source: SCREEN_RECORDING_OFFSCREEN_SOURCE
+    });
+
+    recording.mime = result.mime;
+    recording.width = result.width;
+    recording.height = result.height;
+    recording.frameRate = result.frameRate;
+
+    ingestRawEvent({
+      source: "system",
+      rawType: "screen.recording.start",
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      t: startedAt,
+      mono: startedMono,
+      payload: {
+        recordingId,
+        source: result.source,
+        mime: result.mime,
+        width: result.width,
+        height: result.height,
+        frameRate: result.frameRate,
+        audio: result.audio
+      }
+    });
+  } catch (error) {
+    ingestScreenRecordingError(runtime, recording, error, "start");
+    runtime.screenRecording = null;
+    throw error;
+  }
+}
+
+async function stopScreenRecording(runtime: SessionRuntime, reason: string): Promise<void> {
+  const recording = runtime.screenRecording;
+
+  if (!recording) {
+    return;
+  }
+
+  if (recording.stopPromise) {
+    await recording.stopPromise;
+    return;
+  }
+
+  recording.stopPromise = (async () => {
+    const result = await requestOffscreenPipeline<OffscreenScreenRecordingStopResult>({
+      op: "stopScreenRecording",
+      sid: runtime.sid,
+      recordingId: recording.recordingId,
+      reason
+    });
+    await finalizeScreenRecording(runtime, result);
+  })();
+
+  await recording.stopPromise;
+}
+
+async function handleOffscreenScreenRecordingChunk(
+  message: OffscreenScreenRecordingChunkMessage
+): Promise<void> {
+  const runtime = sessionsBySid.get(message.sid);
+  const recording = runtime?.screenRecording;
+
+  if (!runtime || !recording || recording.recordingId !== message.recordingId) {
+    return;
+  }
+
+  const bytes = asUint8Array(message.bytes);
+
+  if (!bytes || bytes.byteLength === 0) {
+    return;
+  }
+
+  const index = resolveScreenRecordingChunkIndex(message.index, recording.chunkCount);
+  const task = (async () => {
+    const mime = typeof message.mime === "string" && message.mime ? message.mime : recording.mime;
+    const hash = await runtime.pipeline.putBlob(mime, bytes);
+    const size = bytes.byteLength;
+    recording.chunks[index] = hash;
+    recording.chunkCount = Math.max(recording.chunkCount, index + 1);
+    recording.sizeBytes += size;
+
+    ingestRawEvent({
+      source: "system",
+      rawType: "screen.recording.chunk",
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      t: Date.now(),
+      mono: monotonicTime(),
+      payload: {
+        recordingId: recording.recordingId,
+        chunkId: hash,
+        index,
+        mime,
+        size,
+        startOffsetMs: normalizeRecordingOffset(message.startOffsetMs),
+        endOffsetMs: normalizeRecordingOffset(message.endOffsetMs),
+        durationMs: normalizeRecordingOffset(message.durationMs)
+      }
+    });
+  })();
+
+  recording.pendingWrites.add(task);
+  task.then(
+    () => {
+      recording.pendingWrites.delete(task);
+    },
+    (error) => {
+      recording.pendingWrites.delete(task);
+      ingestScreenRecordingError(runtime, recording, error, "chunk");
+    }
+  );
+
+  await task;
+}
+
+async function handleOffscreenScreenRecordingEnded(
+  message: OffscreenScreenRecordingEndedMessage
+): Promise<void> {
+  const runtime = sessionsBySid.get(message.sid);
+
+  if (!runtime?.screenRecording) {
+    return;
+  }
+
+  await finalizeScreenRecording(runtime, message.result);
+}
+
+function handleOffscreenScreenRecordingError(message: OffscreenScreenRecordingErrorMessage): void {
+  const runtime = sessionsBySid.get(message.sid);
+  const recording = runtime?.screenRecording;
+
+  if (!runtime) {
+    return;
+  }
+
+  ingestRawEvent({
+    source: "system",
+    rawType: "screen.recording.error",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: Date.now(),
+    mono: monotonicTime(),
+    payload: {
+      recordingId: message.recordingId ?? recording?.recordingId,
+      name: message.name,
+      message: message.message,
+      stage: message.stage
+    }
+  });
+}
+
+async function finalizeScreenRecording(
+  runtime: SessionRuntime,
+  result: OffscreenScreenRecordingStopResult
+): Promise<void> {
+  const recording = runtime.screenRecording;
+
+  if (!recording || recording.recordingId !== result.recordingId) {
+    return;
+  }
+
+  await waitForScreenRecordingChunkWrites(recording);
+  const chunks = recording.chunks.filter(
+    (chunk): chunk is string => typeof chunk === "string" && chunk.length > 0
+  );
+
+  ingestRawEvent({
+    source: "system",
+    rawType: "screen.recording.end",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: Date.now(),
+    mono: monotonicTime(),
+    payload: {
+      recordingId: recording.recordingId,
+      mime: result.mime || recording.mime,
+      chunks,
+      chunkCount: chunks.length,
+      size: recording.sizeBytes,
+      durationMs: Math.max(0, Math.round(result.durationMs)),
+      width: result.width ?? recording.width,
+      height: result.height ?? recording.height,
+      reason: result.reason
+    }
+  });
+
+  runtime.screenRecording = null;
+}
+
+function ingestScreenRecordingError(
+  runtime: SessionRuntime,
+  recording: ScreenRecordingRuntime | null,
+  error: unknown,
+  stage: string
+): void {
+  ingestRawEvent({
+    source: "system",
+    rawType: "screen.recording.error",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: Date.now(),
+    mono: monotonicTime(),
+    payload: {
+      recordingId: recording?.recordingId,
+      name: error instanceof Error ? error.name : undefined,
+      message: error instanceof Error ? error.message : String(error),
+      stage
+    }
+  });
+}
+
+async function waitForScreenRecordingChunkWrites(recording: ScreenRecordingRuntime): Promise<void> {
+  while (recording.pendingWrites.size > 0) {
+    await Promise.allSettled([...recording.pendingWrites]);
+  }
+}
+
+function resolveScreenRecordingChunkIndex(value: unknown, fallback: number): number {
+  const numberValue = asFiniteNumber(value);
+  return numberValue === null ? Math.max(0, fallback) : Math.max(0, Math.round(numberValue));
+}
+
+function normalizeRecordingOffset(value: unknown): number | undefined {
+  const numberValue = asFiniteNumber(value);
+  return numberValue === null ? undefined : Math.max(0, Math.round(numberValue));
+}
+
+function createScreenRecordingId(sid: string): string {
+  const random =
+    typeof crypto?.randomUUID === "function"
+      ? crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+      : Math.random().toString(36).slice(2, 14);
+  return `VR-${sid}-${Date.now()}-${random}`;
+}
+
 async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
   if (!runtime.cdpRouter) {
     return;
@@ -3039,6 +3447,61 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asUint8Array(value: unknown): Uint8Array | null {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value, (entry) =>
+      typeof entry === "number" && Number.isFinite(entry) ? entry & 0xff : 0
+    );
+  }
+
+  const record = asRecord(value);
+
+  if (!record) {
+    return null;
+  }
+
+  const numericKeys = Object.keys(record)
+    .filter((key) => /^\d+$/.test(key))
+    .map((key) => Number(key))
+    .sort((left, right) => left - right);
+
+  if (numericKeys.length === 0) {
+    return null;
+  }
+
+  const maxIndex = numericKeys[numericKeys.length - 1];
+
+  if (typeof maxIndex !== "number" || !Number.isFinite(maxIndex)) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(maxIndex + 1);
+
+  for (const index of numericKeys) {
+    const byte = record[String(index)];
+
+    if (typeof byte !== "number" || !Number.isFinite(byte)) {
+      return null;
+    }
+
+    bytes[index] = byte & 0xff;
+  }
+
+  return bytes;
 }
 
 function normalizeContentFrameId(value: unknown): string | undefined {
@@ -3661,8 +4124,9 @@ async function ensureOffscreenDocument(): Promise<void> {
 
   await chromeApi.offscreen.createDocument({
     url: OFFSCREEN_PATH,
-    reasons: ["DOM_PARSER"],
-    justification: "WebBlackbox uses offscreen document for persistent local recording pipeline."
+    reasons: ["DOM_PARSER", "USER_MEDIA"],
+    justification:
+      "WebBlackbox uses offscreen document for persistent local recording pipeline and optional tab video capture."
   });
 }
 
@@ -4021,6 +4485,30 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   const storedValues = await chromeApi?.storage?.local?.get(OPTIONS_STORAGE_KEY);
 
   return resolveModeRecorderConfig(mode, baseConfig, storedValues?.[OPTIONS_STORAGE_KEY]);
+}
+
+function applyScreenRecordingOptIn(
+  config: typeof DEFAULT_RECORDER_CONFIG,
+  mode: CaptureMode,
+  enabled: boolean
+): typeof DEFAULT_RECORDER_CONFIG {
+  if (mode !== "full" || !enabled) {
+    return config;
+  }
+
+  const basePolicy =
+    config.capturePolicy ?? DEFAULT_RECORDER_CONFIG.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
+
+  return {
+    ...config,
+    capturePolicy: {
+      ...basePolicy,
+      categories: {
+        ...basePolicy.categories,
+        screenRecordings: "allow"
+      }
+    }
+  };
 }
 
 async function loadEnterprisePolicy(): Promise<EnterpriseRecorderPolicy> {

@@ -22,6 +22,7 @@ export type UiStartSessionMessage = {
   tabId?: number;
   mode: CaptureMode;
   reloadPage?: boolean;
+  recordScreen?: boolean;
 };
 
 export type UiStopSessionMessage = {

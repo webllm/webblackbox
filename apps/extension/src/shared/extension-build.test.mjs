@@ -21,6 +21,7 @@ describe("extension build manifest", () => {
     expect(manifest.key).toBeTypeOf("string");
     expect(manifest.permissions).not.toContain("activeTab");
     expect(manifest.permissions).not.toContain("cookies");
+    expect(manifest.permissions).toContain("tabCapture");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
     expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
     expect(validateExtensionManifest(manifest, { version: "1.2.3" })).toEqual([]);
@@ -35,6 +36,7 @@ describe("extension build manifest", () => {
 
     expect(manifest).not.toHaveProperty("key");
     expect(manifest.permissions).toContain("activeTab");
+    expect(manifest.permissions).toContain("tabCapture");
     expect(manifest.permissions).not.toContain("debugger");
     expect(manifest.permissions).not.toContain("tabs");
     expect(manifest.permissions).not.toContain("webRequest");
@@ -125,6 +127,7 @@ describe("extension build manifest", () => {
       const packagedManifest = JSON.parse(await zip.file("manifest.json").async("text"));
 
       expect(packagedManifest).not.toHaveProperty("key");
+      expect(packagedManifest.permissions).toContain("tabCapture");
       expect(packagedManifest.permissions).not.toContain("debugger");
       expect(packagedManifest.permissions).not.toContain("webRequest");
       expect(packagedManifest).not.toHaveProperty("host_permissions");
