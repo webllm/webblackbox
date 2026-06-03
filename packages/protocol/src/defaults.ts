@@ -60,6 +60,7 @@ export const DEFAULT_CAPTURE_POLICY: CapturePolicy = {
     inputs: "length-only",
     dom: "masked",
     screenshots: "off",
+    screenRecordings: "off",
     console: "metadata",
     network: "metadata",
     storage: "counts-only",
@@ -101,6 +102,7 @@ export const DEFAULT_RECORDER_CONFIG: RecorderConfig = {
 
 export const DEFAULT_EXPORT_POLICY: ExportPolicy = {
   includeScreenshots: false,
+  includeScreenRecordings: false,
   maxArchiveBytes: 100 * 1024 * 1024,
   recentWindowMs: 20 * 60 * 1000
 };

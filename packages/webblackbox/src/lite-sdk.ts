@@ -600,6 +600,10 @@ function resolveExportPolicy(options: WebBlackboxLiteExportOptions): ExportPolic
       typeof options.includeScreenshots === "boolean"
         ? options.includeScreenshots
         : DEFAULT_EXPORT_POLICY.includeScreenshots,
+    includeScreenRecordings:
+      typeof options.includeScreenRecordings === "boolean"
+        ? options.includeScreenRecordings
+        : DEFAULT_EXPORT_POLICY.includeScreenRecordings,
     maxArchiveBytes: normalizeExportBoundedInt(
       options.maxArchiveBytes,
       DEFAULT_EXPORT_POLICY.maxArchiveBytes,

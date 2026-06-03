@@ -265,6 +265,10 @@ function findPolicyViolationReason(
     return "screenshots-disabled";
   }
 
+  if (eventType.startsWith("screen.recording.") && policy.categories.screenRecordings === "off") {
+    return "screen-recordings-disabled";
+  }
+
   if (eventType === "network.body" && policy.categories.network !== "body-allowlist") {
     return "network-body-disabled";
   }
@@ -343,6 +347,10 @@ function classifyCategory(eventType: WebBlackboxEventType): PrivacyClassificatio
     return "dom";
   }
 
+  if (eventType.startsWith("screen.recording.")) {
+    return "screenRecordings";
+  }
+
   if (eventType.startsWith("screen.")) {
     return "screenshots";
   }
@@ -378,6 +386,7 @@ function classifySensitivity(
     eventType === "dom.snapshot" ||
     eventType === "network.body" ||
     eventType === "screen.screenshot" ||
+    eventType.startsWith("screen.recording.") ||
     eventType.startsWith("storage.")
   ) {
     return "high";
@@ -409,6 +418,8 @@ function isRedactedByPolicy(
       return policy.categories.dom !== "allow";
     case "screenshots":
       return policy.categories.screenshots !== "allow";
+    case "screenRecordings":
+      return policy.categories.screenRecordings !== "allow";
     case "console":
       return policy.categories.console !== "allow";
     case "network":

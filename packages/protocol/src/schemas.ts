@@ -45,6 +45,7 @@ export const privacyClassificationSchema = z
       "inputs",
       "dom",
       "screenshots",
+      "screenRecordings",
       "console",
       "network",
       "storage",
@@ -150,6 +151,7 @@ export const capturePolicySchema = z
         inputs: z.enum(["none", "length-only", "masked", "allow"]),
         dom: z.enum(["off", "wireframe", "masked", "allow"]),
         screenshots: z.enum(["off", "masked", "allow"]),
+        screenRecordings: z.enum(["off", "allow"]),
         console: z.enum(["off", "metadata", "sanitized", "allow"]),
         network: z.enum(["metadata", "headers-allowlist", "body-allowlist"]),
         storage: z.enum(["off", "counts-only", "names-only", "lengths-only", "allow"]),
@@ -342,6 +344,7 @@ export const privacyManifestSchema = z
         ]),
         encrypted: z.boolean(),
         includeScreenshots: z.boolean(),
+        includeScreenRecordings: z.boolean().default(false),
         maxArchiveBytes: z.number().int().positive().nullable(),
         recentWindowMs: z.number().int().positive().nullable(),
         shareEligible: z.boolean(),
@@ -500,6 +503,57 @@ const screenshotDataSchema = z
   })
   .strict();
 
+const screenRecordingSourceSchema = z.enum(["tab", "display", "desktop", "window", "screen"]);
+
+const screenRecordingStartDataSchema = z
+  .object({
+    recordingId: z.string().min(1),
+    source: screenRecordingSourceSchema,
+    mime: z.string().min(1),
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional(),
+    frameRate: z.number().positive().optional(),
+    audio: z.boolean().optional(),
+    codec: z.string().min(1).optional()
+  })
+  .strict();
+
+const screenRecordingChunkDataSchema = z
+  .object({
+    recordingId: z.string().min(1),
+    chunkId: z.string().min(1),
+    index: z.number().int().nonnegative(),
+    mime: z.string().min(1),
+    size: z.number().int().nonnegative(),
+    startOffsetMs: z.number().int().nonnegative().optional(),
+    endOffsetMs: z.number().int().nonnegative().optional(),
+    durationMs: z.number().int().nonnegative().optional()
+  })
+  .strict();
+
+const screenRecordingEndDataSchema = z
+  .object({
+    recordingId: z.string().min(1),
+    mime: z.string().min(1).optional(),
+    chunks: z.array(z.string().min(1)),
+    chunkCount: z.number().int().nonnegative(),
+    size: z.number().int().nonnegative(),
+    durationMs: z.number().int().nonnegative(),
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional(),
+    reason: z.string().min(1).optional()
+  })
+  .strict();
+
+const screenRecordingErrorDataSchema = z
+  .object({
+    recordingId: z.string().min(1).optional(),
+    name: z.string().min(1).optional(),
+    message: z.string().min(1),
+    stage: z.string().min(1).optional()
+  })
+  .strict();
+
 const domSnapshotDataSchema = z
   .object({
     snapshotId: z.string().min(1),
@@ -545,6 +599,10 @@ const specializedDataSchemas = {
   "console.entry": consoleEntryDataSchema,
   "error.exception": errorExceptionDataSchema,
   "screen.screenshot": screenshotDataSchema,
+  "screen.recording.start": screenRecordingStartDataSchema,
+  "screen.recording.chunk": screenRecordingChunkDataSchema,
+  "screen.recording.end": screenRecordingEndDataSchema,
+  "screen.recording.error": screenRecordingErrorDataSchema,
   "dom.snapshot": domSnapshotDataSchema,
   "storage.cookie.snapshot": storageSnapshotDataSchema,
   "storage.local.snapshot": storageSnapshotDataSchema,

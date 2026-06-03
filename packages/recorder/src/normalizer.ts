@@ -555,6 +555,22 @@ function tryNormalizeSystemEvent(rawType: string): WebBlackboxEventType | null {
     return "screen.screenshot";
   }
 
+  if (rawType === "screen.recording.start") {
+    return "screen.recording.start";
+  }
+
+  if (rawType === "screen.recording.chunk") {
+    return "screen.recording.chunk";
+  }
+
+  if (rawType === "screen.recording.end") {
+    return "screen.recording.end";
+  }
+
+  if (rawType === "screen.recording.error") {
+    return "screen.recording.error";
+  }
+
   if (rawType === "cdp.dom.snapshot") {
     return "dom.snapshot";
   }

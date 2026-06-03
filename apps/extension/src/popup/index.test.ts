@@ -309,6 +309,7 @@ describe("popup export policy form", () => {
     expect(getRecentMinutesInput().value).toBe("45");
     expect(JSON.parse(localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY) ?? "null")).toEqual({
       includeScreenshots: true,
+      includeScreenRecordings: false,
       alertSensitiveFindings: false,
       maxArchiveMb: "256",
       recentMinutes: "45"
@@ -374,6 +375,7 @@ describe("popup export policy form", () => {
       saveAs: false,
       policy: {
         includeScreenshots: false,
+        includeScreenRecordings: false,
         maxArchiveBytes: 256 * 1024 * 1024,
         recentWindowMs: 45 * 60 * 1000
       }
@@ -656,6 +658,7 @@ describe("popup export policy form", () => {
       saveAs: false,
       policy: {
         includeScreenshots: false,
+        includeScreenRecordings: false,
         maxArchiveBytes: 100 * 1024 * 1024,
         recentWindowMs: 20 * 60 * 1000
       }

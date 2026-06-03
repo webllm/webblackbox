@@ -168,6 +168,7 @@ function normalizeDataCategoryCaps(value: unknown): EnterpriseRecorderPolicy["da
   setEnumCap(output, "inputs", record.inputs, ["none", "length-only", "masked", "allow"]);
   setEnumCap(output, "dom", record.dom, ["off", "wireframe", "masked", "allow"]);
   setEnumCap(output, "screenshots", record.screenshots, ["off", "masked", "allow"]);
+  setEnumCap(output, "screenRecordings", record.screenRecordings, ["off", "allow"]);
   setEnumCap(output, "console", record.console, ["off", "metadata", "sanitized", "allow"]);
   setEnumCap(output, "network", record.network, [
     "metadata",
@@ -234,6 +235,7 @@ function applyDataCategoryCaps(
     inputs: capEnum(categories.inputs, caps.inputs, ["none", "length-only", "masked", "allow"]),
     dom: capEnum(categories.dom, caps.dom, ["off", "wireframe", "masked", "allow"]),
     screenshots: capEnum(categories.screenshots, caps.screenshots, ["off", "masked", "allow"]),
+    screenRecordings: capEnum(categories.screenRecordings, caps.screenRecordings, ["off", "allow"]),
     console: capEnum(categories.console, caps.console, ["off", "metadata", "sanitized", "allow"]),
     network: capEnum(categories.network, caps.network, [
       "metadata",

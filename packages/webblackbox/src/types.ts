@@ -106,6 +106,7 @@ export type WebBlackboxLiteExportOptions = {
   passphrase?: string;
   stopCapture?: boolean;
   includeScreenshots?: ExportPolicy["includeScreenshots"];
+  includeScreenRecordings?: ExportPolicy["includeScreenRecordings"];
   maxArchiveBytes?: ExportPolicy["maxArchiveBytes"];
   recentWindowMs?: ExportPolicy["recentWindowMs"];
 };

@@ -23,10 +23,11 @@ export const MODE_PRODUCT_PROFILES: Record<CaptureMode, ModeProductProfile> = {
   },
   full: {
     label: "Full",
-    summary: "Browser-assisted capture with CDP screenshots, navigation, and richer diagnostics.",
+    summary:
+      "Browser-assisted capture with CDP screenshots, optional tab recording, navigation, and richer diagnostics.",
     signals: "CDP network / navigation / runtime errors plus page-side interaction hints",
     heavyCapture:
-      "screenshots stay browser-side, page-side fetch/xhr hooks remain disabled, body capture stays capped"
+      "screenshots stay browser-side, tab recording requires explicit enablement, page-side fetch/xhr hooks remain disabled, body capture stays capped"
   }
 };
 
@@ -72,6 +73,7 @@ function applyFullModeCapturePolicy(policy: CapturePolicy | undefined): CaptureP
     categories: {
       ...basePolicy.categories,
       screenshots: "allow",
+      screenRecordings: basePolicy.categories.screenRecordings,
       cdp: basePolicy.categories.cdp === "full" ? "full" : "safe-subset"
     }
   };

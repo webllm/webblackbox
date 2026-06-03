@@ -40,6 +40,7 @@ export type ExportResult = {
 export type ExportBundleOptions = {
   passphrase?: string;
   includeScreenshots?: boolean;
+  includeScreenRecordings?: boolean;
   maxArchiveBytes?: number | null;
   recentWindowMs?: number | null;
   strictPrivacyScanner?: boolean;
@@ -60,6 +61,7 @@ type ExportIndexes = {
 
 type ResolvedExportPolicy = {
   includeScreenshots: boolean;
+  includeScreenRecordings: boolean;
   maxArchiveBytes: number | null;
   recentWindowMs: number | null;
   cutoffTimestamp: number;
@@ -72,10 +74,12 @@ type PreparedArchive = Awaited<ReturnType<typeof createWebBlackboxArchive>> & {
 
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const SCREENSHOT_EVENT_TYPE: WebBlackboxEvent["type"] = "screen.screenshot";
+const SCREEN_RECORDING_EVENT_PREFIX = "screen.recording.";
 const EXPORT_OVERHEAD_RESERVE_BYTES = 2 * 1024 * 1024;
 const LOW_RISK_OVERRIDE_BLOCKED_CATEGORIES = new Set([
   "dom",
   "screenshots",
+  "screenRecordings",
   "console",
   "network",
   "storage"
@@ -207,6 +211,7 @@ export class FlightRecorderPipeline {
     });
     const hasCustomSelection =
       !exportPolicy.includeScreenshots ||
+      !exportPolicy.includeScreenRecordings ||
       exportPolicy.maxArchiveBytes !== null ||
       exportPolicy.recentWindowMs !== null;
 
@@ -227,6 +232,7 @@ export class FlightRecorderPipeline {
           capturePolicy: this.options.capturePolicy,
           encrypted,
           includeScreenshots: exportPolicy.includeScreenshots,
+          includeScreenRecordings: exportPolicy.includeScreenRecordings,
           maxArchiveBytes: exportPolicy.maxArchiveBytes,
           recentWindowMs: exportPolicy.recentWindowMs
         })
@@ -559,6 +565,7 @@ export class FlightRecorderPipeline {
         capturePolicy: this.options.capturePolicy,
         encrypted,
         includeScreenshots: exportPolicy.includeScreenshots,
+        includeScreenRecordings: exportPolicy.includeScreenRecordings,
         maxArchiveBytes: exportPolicy.maxArchiveBytes,
         recentWindowMs: exportPolicy.recentWindowMs
       })
@@ -740,6 +747,10 @@ function resolveExportPolicy(
     typeof options.includeScreenshots === "boolean"
       ? options.includeScreenshots
       : DEFAULT_EXPORT_POLICY.includeScreenshots;
+  const includeScreenRecordings =
+    typeof options.includeScreenRecordings === "boolean"
+      ? options.includeScreenRecordings
+      : DEFAULT_EXPORT_POLICY.includeScreenRecordings;
   const maxArchiveBytes =
     options.maxArchiveBytes === null
       ? null
@@ -769,6 +780,7 @@ function resolveExportPolicy(
 
   return {
     includeScreenshots,
+    includeScreenRecordings,
     maxArchiveBytes,
     recentWindowMs,
     cutoffTimestamp,
@@ -778,6 +790,10 @@ function resolveExportPolicy(
 
 function shouldIncludeEvent(event: WebBlackboxEvent, exportPolicy: ResolvedExportPolicy): boolean {
   if (!exportPolicy.includeScreenshots && event.type === SCREENSHOT_EVENT_TYPE) {
+    return false;
+  }
+
+  if (!exportPolicy.includeScreenRecordings && isScreenRecordingEvent(event)) {
     return false;
   }
 
@@ -851,6 +867,7 @@ function buildExportTransferPolicy(input: {
   capturePolicy?: CapturePolicy;
   encrypted: boolean;
   includeScreenshots: boolean;
+  includeScreenRecordings: boolean;
   maxArchiveBytes: number | null;
   recentWindowMs: number | null;
 }): NonNullable<PrivacyManifest["transfer"]> {
@@ -861,11 +878,16 @@ function buildExportTransferPolicy(input: {
       : "none",
     encrypted: input.encrypted,
     includeScreenshots: input.includeScreenshots,
+    includeScreenRecordings: input.includeScreenRecordings,
     maxArchiveBytes: input.maxArchiveBytes,
     recentWindowMs: input.recentWindowMs,
     shareEligible: input.encrypted,
     computedAt: new Date().toISOString()
   };
+}
+
+function isScreenRecordingEvent(event: WebBlackboxEvent): boolean {
+  return event.type.startsWith(SCREEN_RECORDING_EVENT_PREFIX);
 }
 
 function collectBlobHashesFromEvents(events: WebBlackboxEvent[]): string[] {

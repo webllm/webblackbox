@@ -21,6 +21,7 @@ const TEST_CAPTURE_POLICY: CapturePolicy = {
     inputs: "allow",
     dom: "allow",
     screenshots: "allow",
+    screenRecordings: "allow",
     console: "allow",
     network: "body-allowlist",
     storage: "allow",
@@ -813,6 +814,25 @@ describe("recorder", () => {
         }),
         reason: "screenshots-disabled",
         blockedType: "screen.screenshot"
+      },
+      {
+        raw: createRawEvent({
+          source: "system",
+          rawType: "screen.recording.start",
+          payload: {
+            recordingId: "VR-1",
+            source: "tab",
+            mime: "video/webm"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            screenRecordings: "off"
+          }
+        }),
+        reason: "screen-recordings-disabled",
+        blockedType: "screen.recording.start"
       },
       {
         raw: createRawEvent({

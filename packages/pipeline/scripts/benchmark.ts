@@ -23,6 +23,7 @@ const DEFAULT_BLOB_BYTES = 24 * 1024;
 const EVENT_STEP_MS = 120;
 const FULL_EXPORT_OPTIONS = {
   includeScreenshots: true,
+  includeScreenRecordings: true,
   maxArchiveBytes: null,
   recentWindowMs: null
 } as const;
@@ -300,6 +301,7 @@ async function run(): Promise<void> {
   const filteredExportStart = performance.now();
   const filteredExport = await pipeline.exportBundle({
     includeScreenshots: false,
+    includeScreenRecordings: false,
     maxArchiveBytes,
     recentWindowMs
   });

@@ -38,6 +38,7 @@ const usePopupUiActions =
 const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "webblackbox-e2e-passphrase";
 const e2eExportPolicy = {
   includeScreenshots: true,
+  includeScreenRecordings: true,
   maxArchiveBytes: 100 * 1024 * 1024,
   recentWindowMs: 20 * 60 * 1000
 };
@@ -1797,6 +1798,7 @@ async function configureE2eRecorderOptions(control, mode) {
             inputs: 'masked',
             dom: 'allow',
             screenshots: ${JSON.stringify(mode)} === 'full' ? 'allow' : 'off',
+            screenRecordings: ${JSON.stringify(mode)} === 'full' ? 'allow' : 'off',
             console: 'allow',
             network: 'body-allowlist',
             storage: 'allow',
@@ -2189,10 +2191,16 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
           globalThis.prompt = () => "";
 
           const includeScreenshots = document.querySelector('#export-include-screenshots');
+          const includeScreenRecordings = document.querySelector('#export-include-screen-recordings');
 
           if (includeScreenshots instanceof HTMLInputElement) {
             includeScreenshots.checked = true;
             includeScreenshots.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+
+          if (includeScreenRecordings instanceof HTMLInputElement) {
+            includeScreenRecordings.checked = true;
+            includeScreenRecordings.dispatchEvent(new Event('change', { bubbles: true }));
           }
 
           button.click();

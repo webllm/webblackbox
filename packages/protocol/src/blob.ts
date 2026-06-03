@@ -13,6 +13,14 @@ export function inferBlobFileExtension(mime: string): string {
     return "webp";
   }
 
+  if (normalized.includes("webm")) {
+    return "webm";
+  }
+
+  if (normalized.includes("mp4")) {
+    return "mp4";
+  }
+
   if (normalized.includes("json")) {
     return "json";
   }
@@ -30,6 +38,10 @@ export function inferBlobMime(extension: string): string {
       return "image/png";
     case "webp":
       return "image/webp";
+    case "webm":
+      return "video/webm";
+    case "mp4":
+      return "video/mp4";
     case "json":
       return "application/json";
     case "html":

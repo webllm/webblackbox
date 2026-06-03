@@ -37,6 +37,7 @@ export type PrivacyDataCategory =
   | "inputs"
   | "dom"
   | "screenshots"
+  | "screenRecordings"
   | "console"
   | "network"
   | "storage"
@@ -128,6 +129,7 @@ export type CapturePolicy = {
     inputs: "none" | "length-only" | "masked" | "allow";
     dom: "off" | "wireframe" | "masked" | "allow";
     screenshots: "off" | "masked" | "allow";
+    screenRecordings: "off" | "allow";
     console: "off" | "metadata" | "sanitized" | "allow";
     network: "metadata" | "headers-allowlist" | "body-allowlist";
     storage: "off" | "counts-only" | "names-only" | "lengths-only" | "allow";
@@ -282,6 +284,7 @@ export type PrivacyManifest = {
     archiveKeyEnvelope: CapturePolicy["encryption"]["archiveKeyEnvelope"];
     encrypted: boolean;
     includeScreenshots: boolean;
+    includeScreenRecordings: boolean;
     maxArchiveBytes: number | null;
     recentWindowMs: number | null;
     shareEligible: boolean;
@@ -344,6 +347,7 @@ export type ExportMessage = {
 
 export type ExportPolicy = {
   includeScreenshots: boolean;
+  includeScreenRecordings: boolean;
   maxArchiveBytes: number;
   recentWindowMs: number;
 };

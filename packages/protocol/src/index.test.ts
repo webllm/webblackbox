@@ -87,6 +87,7 @@ describe("protocol", () => {
     expect(DEFAULT_CAPTURE_POLICY.scope.stopOnOriginChange).toBe(true);
     expect(DEFAULT_CAPTURE_POLICY.categories.inputs).toBe("length-only");
     expect(DEFAULT_CAPTURE_POLICY.categories.screenshots).toBe("off");
+    expect(DEFAULT_CAPTURE_POLICY.categories.screenRecordings).toBe("off");
     expect(DEFAULT_CAPTURE_POLICY.encryption.archive).toBe("required");
   });
 
@@ -150,6 +151,7 @@ describe("protocol", () => {
         archiveKeyEnvelope: "passphrase",
         encrypted: true,
         includeScreenshots: false,
+        includeScreenRecordings: false,
         maxArchiveBytes: 1048576,
         recentWindowMs: null,
         shareEligible: true,
@@ -233,6 +235,10 @@ describe("protocol", () => {
     expect(inferBlobFileExtension("text/html")).toBe("html");
     expect(inferBlobMime("html")).toBe("text/html");
     expect(inferBlobFileExtension("application/json")).toBe("json");
+    expect(inferBlobFileExtension("video/webm;codecs=vp9")).toBe("webm");
+    expect(inferBlobMime("webm")).toBe("video/webm");
+    expect(inferBlobFileExtension("video/mp4")).toBe("mp4");
+    expect(inferBlobMime("mp4")).toBe("video/mp4");
     expect(inferBlobMime("bin")).toBe("application/octet-stream");
   });
 

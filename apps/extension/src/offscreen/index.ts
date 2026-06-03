@@ -25,6 +25,7 @@ type OffscreenPipelineRequest = {
   bytes?: Uint8Array;
   passphrase?: string;
   includeScreenshots?: boolean;
+  includeScreenRecordings?: boolean;
   maxArchiveBytes?: number;
   recentWindowMs?: number;
   allowPlaintextLocalExport?: boolean;
@@ -197,6 +198,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     const exported = await pipeline.exportBundle({
       passphrase: message.passphrase,
       includeScreenshots: message.includeScreenshots,
+      includeScreenRecordings: message.includeScreenRecordings,
       maxArchiveBytes: message.maxArchiveBytes,
       recentWindowMs: message.recentWindowMs,
       allowPlaintextLocalExport: message.allowPlaintextLocalExport

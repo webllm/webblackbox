@@ -167,6 +167,7 @@ type ExportAuditEvent = {
   outcome: "ok" | "error";
   encrypted: boolean;
   includeScreenshots: boolean;
+  includeScreenRecordings: boolean;
   maxArchiveBytes: number;
   recentWindowMs: number;
   sizeBytes?: number;
@@ -192,6 +193,7 @@ type SessionPipelineClient = {
   exportAndDownload: (options?: {
     passphrase?: string;
     includeScreenshots?: boolean;
+    includeScreenRecordings?: boolean;
     maxArchiveBytes?: number;
     recentWindowMs?: number;
     allowPlaintextLocalExport?: boolean;
@@ -213,6 +215,7 @@ type OffscreenPipelineRequest = {
   bytes?: Uint8Array;
   passphrase?: string;
   includeScreenshots?: boolean;
+  includeScreenRecordings?: boolean;
   maxArchiveBytes?: number;
   recentWindowMs?: number;
   allowPlaintextLocalExport?: boolean;
@@ -1003,6 +1006,7 @@ async function exportSession(
       return runtime.pipeline.exportAndDownload({
         passphrase: encrypted ? passphrase : undefined,
         includeScreenshots: policy.includeScreenshots,
+        includeScreenRecordings: policy.includeScreenRecordings,
         maxArchiveBytes: policy.maxArchiveBytes,
         recentWindowMs: policy.recentWindowMs,
         allowPlaintextLocalExport: !encrypted
@@ -1019,6 +1023,7 @@ async function exportSession(
       outcome: "ok",
       encrypted,
       includeScreenshots: policy.includeScreenshots,
+      includeScreenRecordings: policy.includeScreenRecordings,
       maxArchiveBytes: policy.maxArchiveBytes,
       recentWindowMs: policy.recentWindowMs,
       sizeBytes: exported.sizeBytes,
@@ -1051,6 +1056,7 @@ async function exportSession(
       outcome: "error",
       encrypted: hasExportPassphrase(passphrase),
       includeScreenshots: policy.includeScreenshots,
+      includeScreenRecordings: policy.includeScreenRecordings,
       maxArchiveBytes: policy.maxArchiveBytes,
       recentWindowMs: policy.recentWindowMs,
       error: redactOperationalMessage(message)
@@ -1788,6 +1794,7 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         sid,
         passphrase: options.passphrase,
         includeScreenshots: options.includeScreenshots,
+        includeScreenRecordings: options.includeScreenRecordings,
         maxArchiveBytes: options.maxArchiveBytes,
         recentWindowMs: options.recentWindowMs,
         allowPlaintextLocalExport: options.allowPlaintextLocalExport
@@ -3207,9 +3214,14 @@ function resolveExportPolicy(value: unknown): ExportPolicy {
     typeof row?.includeScreenshots === "boolean"
       ? row.includeScreenshots
       : DEFAULT_EXPORT_POLICY.includeScreenshots;
+  const includeScreenRecordings =
+    typeof row?.includeScreenRecordings === "boolean"
+      ? row.includeScreenRecordings
+      : DEFAULT_EXPORT_POLICY.includeScreenRecordings;
 
   return {
     includeScreenshots,
+    includeScreenRecordings,
     maxArchiveBytes: normalizeExportBoundedInt(
       row?.maxArchiveBytes,
       DEFAULT_EXPORT_POLICY.maxArchiveBytes,

@@ -25,6 +25,7 @@ const SESSION: SessionMetadata = {
 };
 const FULL_EXPORT_OPTIONS = {
   includeScreenshots: true,
+  includeScreenRecordings: true,
   maxArchiveBytes: null,
   recentWindowMs: null
 } as const;
@@ -48,19 +49,24 @@ function createEvent(
     privacy: {
       category: type.startsWith("network.")
         ? "network"
-        : type.startsWith("screen.")
-          ? "screenshots"
-          : type.startsWith("console.")
-            ? "console"
-            : type.startsWith("storage.")
-              ? "storage"
-              : type.startsWith("dom.")
-                ? "dom"
-                : type.startsWith("perf.")
-                  ? "performance"
-                  : "actions",
+        : type.startsWith("screen.recording.")
+          ? "screenRecordings"
+          : type.startsWith("screen.")
+            ? "screenshots"
+            : type.startsWith("console.")
+              ? "console"
+              : type.startsWith("storage.")
+                ? "storage"
+                : type.startsWith("dom.")
+                  ? "dom"
+                  : type.startsWith("perf.")
+                    ? "performance"
+                    : "actions",
       sensitivity:
-        type === "screen.screenshot" || type === "network.body" || type.startsWith("storage.")
+        type === "screen.screenshot" ||
+        type.startsWith("screen.recording.") ||
+        type === "network.body" ||
+        type.startsWith("storage.")
           ? "high"
           : "low",
       redacted: true
@@ -941,6 +947,71 @@ describe("pipeline", () => {
 
     expect(parsed.events.some((event) => event.type === "screen.screenshot")).toBe(false);
     expect(parsed.events.some((event) => event.t < now - 20 * 60 * 1000)).toBe(false);
+  });
+
+  it("supports independent export filtering for screen recordings", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+
+    const chunkHash = await pipeline.putBlob("video/webm", new Uint8Array([9, 8, 7, 6]));
+    const now = Date.now();
+
+    await pipeline.ingest(createEvent("E-before", "user.click", now - 2));
+    await pipeline.ingest(
+      createEvent("E-video-start", "screen.recording.start", now - 1, {
+        recordingId: "VR-1",
+        source: "tab",
+        mime: "video/webm"
+      })
+    );
+    await pipeline.ingest(
+      createEvent("E-video-chunk", "screen.recording.chunk", now, {
+        recordingId: "VR-1",
+        chunkId: chunkHash,
+        index: 0,
+        mime: "video/webm",
+        size: 4
+      })
+    );
+    await pipeline.ingest(
+      createEvent("E-video-end", "screen.recording.end", now + 1, {
+        recordingId: "VR-1",
+        chunks: [chunkHash],
+        chunkCount: 1,
+        size: 4,
+        durationMs: 1000
+      })
+    );
+
+    const withoutVideo = await pipeline.exportBundle({
+      includeScreenshots: true,
+      includeScreenRecordings: false,
+      recentWindowMs: null,
+      maxArchiveBytes: null
+    });
+    const parsedWithoutVideo = await readWebBlackboxArchive(withoutVideo.bytes);
+
+    expect(parsedWithoutVideo.events.map((event) => event.id)).toEqual(["E-before"]);
+
+    const withVideo = await pipeline.exportBundle({
+      includeScreenshots: true,
+      includeScreenRecordings: true,
+      recentWindowMs: null,
+      maxArchiveBytes: null
+    });
+    const zip = await JSZip.loadAsync(withVideo.bytes);
+    const parsedWithVideo = await readWebBlackboxArchive(withVideo.bytes);
+
+    expect(parsedWithVideo.events.some((event) => event.type === "screen.recording.chunk")).toBe(
+      true
+    );
+    expect(zip.file(`blobs/sha256-${chunkHash}.webm`)).toBeTruthy();
   });
 
   it("anchors recent-window exports to the latest session activity", async () => {
