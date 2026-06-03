@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { constants, createWriteStream } from "node:fs";
-import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,8 @@ const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ??
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
+const recordScreenInFullMode =
+  captureMode === "full" && (process.env.WB_E2E_RECORD_SCREEN ?? "0") === "1";
 const configureRecorderOptions = (process.env.WB_E2E_CONFIGURE_OPTIONS ?? "1") !== "0";
 const usePopupUiActions =
   process.env.WB_E2E_USE_POPUP_UI === undefined
@@ -72,6 +74,7 @@ const state = {
   demoClient: null,
   playerClient: null,
   openedTargetIds: [],
+  tempExtensionDir: null,
   server: null,
   baseUrl: null
 };
@@ -86,6 +89,10 @@ async function main() {
   await ensureBuildInputs();
 
   await mkdir(downloadDir, { recursive: true });
+  const extensionDirForRun = recordScreenInFullMode
+    ? await prepareScreenRecordingE2eExtensionDir(extensionDir)
+    : extensionDir;
+  state.tempExtensionDir = extensionDirForRun === extensionDir ? null : extensionDirForRun;
 
   const server = await startDemoServer({
     demoDir,
@@ -99,9 +106,11 @@ async function main() {
   const playerUrl = `http://127.0.0.1:${server.port}/player/`;
 
   const chromeBinary = await resolveChromeBinary(chromeCandidates);
+  const preferredExtensionId = await resolvePreferredExtensionId(extensionDirForRun);
 
   const chrome = await launchChromeWithRetry(chromeBinary, {
-    extensionDir,
+    extensionDir: extensionDirForRun,
+    allowlistedExtensionId: recordScreenInFullMode ? preferredExtensionId : null,
     profileDir,
     remotePort,
     headless,
@@ -139,7 +148,6 @@ async function main() {
   const demoTarget = await openTarget(baseUrl, demoUrl);
   state.openedTargetIds.push(demoTarget.id);
 
-  const preferredExtensionId = await resolvePreferredExtensionId(extensionDir);
   if (preferredExtensionId) {
     console.log(`Preferred extension ID: ${preferredExtensionId}`);
   }
@@ -155,7 +163,7 @@ async function main() {
   const extensionId = swTarget
     ? extractExtensionId(swTarget.url)
     : (preferredExtensionId ??
-      (await waitForExtensionIdFromProfile(baseUrl, profileDir, extensionDir, 30_000)));
+      (await waitForExtensionIdFromProfile(baseUrl, profileDir, extensionDirForRun, 30_000)));
   console.log(`Extension ID: ${extensionId}`);
 
   let popupTarget = null;
@@ -192,17 +200,22 @@ async function main() {
   await demoClient.send("DOM.enable");
   state.demoClient = demoClient;
 
-  let usePopupUiActionsEffective = usePopupUiActions;
+  const usePopupControl = captureMode === "full" || usePopupUiActions;
+  let usePopupUiActionsEffective = recordScreenInFullMode ? false : usePopupUiActions;
   let control = null;
 
-  if (usePopupUiActionsEffective) {
+  if (usePopupControl) {
     if (!popupTarget) {
-      popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+      popupTarget = recordScreenInFullMode
+        ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
+        : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
       state.openedTargetIds.push(popupTarget.id);
     } else if (warmupPopupTargetId) {
       await closeTarget(baseUrl, warmupPopupTargetId);
       state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
-      popupTarget = await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+      popupTarget = recordScreenInFullMode
+        ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
+        : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
       state.openedTargetIds.push(popupTarget.id);
     }
 
@@ -212,18 +225,28 @@ async function main() {
     await popupClient.send("DOM.enable");
     state.popupClient = popupClient;
 
-    const popupUiReady = await waitForPopupUiReady(popupClient, 20_000).catch(() => null);
+    if (usePopupUiActionsEffective) {
+      const popupUiReady = await waitForPopupUiReady(popupClient, 20_000).catch(() => null);
 
-    if (!popupUiReady) {
+      if (!popupUiReady) {
+        const popupRuntimeReady = await waitForPopupRuntimeReady(popupClient, 12_000).catch(
+          () => null
+        );
+
+        if (popupRuntimeReady) {
+          usePopupUiActionsEffective = false;
+          console.warn("Popup UI not ready; falling back to runtime message actions.");
+        } else {
+          throw new Error("Popup UI/runtime is not ready");
+        }
+      }
+    } else {
       const popupRuntimeReady = await waitForPopupRuntimeReady(popupClient, 12_000).catch(
         () => null
       );
 
-      if (popupRuntimeReady) {
-        usePopupUiActionsEffective = false;
-        console.warn("Popup UI not ready; falling back to runtime message actions.");
-      } else {
-        throw new Error("Popup UI/runtime is not ready");
+      if (!popupRuntimeReady) {
+        throw new Error("Popup runtime is not ready");
       }
     }
 
@@ -297,7 +320,9 @@ async function main() {
 
   await sleep(1_200);
 
-  const start = await startSessionFromControl(control, captureMode, demoUrl);
+  const start = await startSessionFromControl(control, captureMode, demoUrl, {
+    recordScreen: recordScreenInFullMode
+  });
   assert(start?.ok === true, `Failed to start ${captureMode} mode`, start);
   const demoTab =
     control.kind === "popup" && control.useUiActions
@@ -348,6 +373,21 @@ async function main() {
     });
   }
 
+  if (recordScreenInFullMode) {
+    await demoClient.send("Page.bringToFront").catch(() => undefined);
+    await demoClient
+      .evaluate(
+        `
+          (() => {
+            window.focus();
+            return true;
+          })()
+        `
+      )
+      .catch(() => undefined);
+    await sleep(500);
+  }
+
   const scenarioResult = await runDemoScenario(demoClient);
   assert(scenarioResult?.ok === true, "Demo scenario failed", scenarioResult);
 
@@ -365,7 +405,7 @@ async function main() {
   const finalMarker = await requestFinalE2eMarkerCapture(demoClient, captureMode);
   assert(finalMarker?.ok === true, "Failed to request final E2E marker capture", finalMarker);
 
-  await sleep(captureMode === "lite" ? 2_400 : 1_600);
+  await sleep(captureMode === "lite" || recordScreenInFullMode ? 2_400 : 1_600);
 
   const stop = await stopActiveSessionFromControl(control, sid);
   assert(stop?.ok === true, `Failed to stop ${captureMode} mode`, stop);
@@ -440,6 +480,15 @@ async function main() {
     archiveEvidenceResult
   );
 
+  const screenRecordingArchiveResult = recordScreenInFullMode
+    ? await verifyScreenRecordingArchiveEvidence(exportedPath)
+    : { ok: true, skipped: "screen-recording-e2e-disabled" };
+  assert(
+    screenRecordingArchiveResult.ok,
+    "Exported archive missing screen recording evidence",
+    screenRecordingArchiveResult
+  );
+
   const playerTarget = await openTarget(baseUrl, playerUrl);
   state.openedTargetIds.push(playerTarget.id);
 
@@ -502,13 +551,15 @@ async function main() {
   }
 
   const markerResult =
-    captureMode === "full"
+    captureMode === "full" && !recordScreenInFullMode
       ? await verifyPlayerScreenshotMarker(playerClient, 20_000)
       : {
           ok: true,
-          skipped: "lite-screenshot-not-required"
+          skipped: recordScreenInFullMode
+            ? "screen-recording-stage-uses-video"
+            : "lite-screenshot-not-required"
         };
-  if (captureMode === "full") {
+  if (captureMode === "full" && !recordScreenInFullMode) {
     assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
   }
   const hoverResponseResult =
@@ -522,6 +573,15 @@ async function main() {
     hoverResponseResult.ok,
     "Player hover response controls are not working",
     hoverResponseResult
+  );
+
+  const playerScreenRecordingResult = recordScreenInFullMode
+    ? await verifyPlayerScreenRecording(playerClient, 25_000)
+    : { ok: true, skipped: "screen-recording-e2e-disabled" };
+  assert(
+    playerScreenRecordingResult.ok,
+    "Player screen recording playback is not synced to the unified progress bar",
+    playerScreenRecordingResult
   );
 
   if (swExceptions.length > 0) {
@@ -544,6 +604,7 @@ async function main() {
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
   console.log("Capture mode:", captureMode);
+  console.log("Record screen:", recordScreenInFullMode);
   console.log("Recorder options:", JSON.stringify(recorderConfigured));
   console.log(
     "Popup actions:",
@@ -557,9 +618,11 @@ async function main() {
   console.log("Scenario:", JSON.stringify(scenarioResult));
   console.log("Real-world scenario:", JSON.stringify(realWorldResult));
   console.log("Real-world archive evidence:", JSON.stringify(archiveEvidenceResult));
+  console.log("Screen recording archive evidence:", JSON.stringify(screenRecordingArchiveResult));
   console.log("Player:", JSON.stringify(playerResult));
   console.log("Screenshot marker:", JSON.stringify(markerResult));
   console.log("Hover response:", JSON.stringify(hoverResponseResult));
+  console.log("Player screen recording:", JSON.stringify(playerScreenRecordingResult));
   console.log("Extension restart:", JSON.stringify(restartResult));
   console.log(`Chrome log: ${chromeLogPath}`);
   console.log("Fullchain E2E passed.");
@@ -594,6 +657,27 @@ async function ensureBuildInputs() {
   await access(playerDir, constants.R_OK);
   await access(resolve(playerDir, "index.html"), constants.R_OK);
   await access(resolve(playerDir, "main.js"), constants.R_OK);
+}
+
+async function prepareScreenRecordingE2eExtensionDir(sourceDir) {
+  const tempDir = `/tmp/webblackbox-ext-fullchain-extension-${Date.now()}`;
+  await rm(tempDir, { recursive: true, force: true });
+  await cp(sourceDir, tempDir, { recursive: true });
+
+  const manifestPath = resolve(tempDir, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.commands = {
+    ...(manifest.commands && typeof manifest.commands === "object" ? manifest.commands : {}),
+    _execute_action: {
+      suggested_key: {
+        default: "Alt+Shift+Y",
+        mac: "Alt+Shift+Y"
+      }
+    }
+  };
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  return tempDir;
 }
 
 async function resolveChromeBinary(candidates) {
@@ -685,6 +769,9 @@ function startChrome(binary, options) {
     "--window-size=1400,1000",
     `--disable-extensions-except=${options.extensionDir}`,
     `--load-extension=${options.extensionDir}`,
+    ...(options.allowlistedExtensionId
+      ? [`--allowlisted-extension-id=${options.allowlistedExtensionId}`]
+      : []),
     "--enable-logging=stderr",
     "--v=1",
     "about:blank"
@@ -1604,6 +1691,90 @@ async function openTarget(urlBase, url) {
   return target;
 }
 
+async function openActionPopupFromShortcut(urlBase, pageClient, extensionId) {
+  const targetsBefore = await listTargets(urlBase);
+  const knownTargetIds = new Set(
+    targetsBefore
+      .map((target) => target?.id)
+      .filter((id) => typeof id === "string" && id.length > 0)
+  );
+
+  await pageClient.send("Page.bringToFront").catch(() => undefined);
+  await pageClient
+    .evaluate(
+      `
+        (() => {
+          window.focus();
+          return true;
+        })()
+      `
+    )
+    .catch(() => undefined);
+  await sleep(250);
+  await dispatchExtensionActionShortcut(pageClient);
+
+  return waitForExtensionPopupTarget(urlBase, extensionId, knownTargetIds, 10_000);
+}
+
+async function dispatchExtensionActionShortcut(pageClient) {
+  const event = {
+    key: "Y",
+    code: "KeyY",
+    windowsVirtualKeyCode: 89,
+    nativeVirtualKeyCode: 89,
+    altKey: true,
+    shiftKey: true,
+    modifiers: 9
+  };
+
+  await pageClient.send("Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    ...event
+  });
+  await pageClient.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...event
+  });
+}
+
+async function waitForExtensionPopupTarget(urlBase, extensionId, knownTargetIds, timeoutMs) {
+  const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+  let lastTargetSummary = "none";
+
+  return waitFor(
+    async () => {
+      const targets = await listTargets(urlBase);
+      lastTargetSummary = summarizeTargetsForDebug(targets);
+
+      return (
+        targets.find(
+          (target) =>
+            typeof target?.id === "string" &&
+            !knownTargetIds.has(target.id) &&
+            typeof target?.webSocketDebuggerUrl === "string" &&
+            typeof target?.url === "string" &&
+            target.url.startsWith(popupUrl)
+        ) ??
+        targets.find(
+          (target) =>
+            typeof target?.webSocketDebuggerUrl === "string" &&
+            typeof target?.url === "string" &&
+            target.url.startsWith(popupUrl)
+        ) ??
+        null
+      );
+    },
+    timeoutMs,
+    150,
+    () => `Extension action popup did not open from shortcut; targets=${lastTargetSummary}`
+  );
+}
+
+async function listTargets(urlBase) {
+  const targets = await fetchJson(`${urlBase}/json/list`, 4_000);
+  return Array.isArray(targets) ? targets : [];
+}
+
 async function closeTarget(urlBase, targetId) {
   try {
     await fetchJson(`${urlBase}/json/close/${targetId}`, 4_000);
@@ -1798,7 +1969,7 @@ async function configureE2eRecorderOptions(control, mode) {
             inputs: 'masked',
             dom: 'allow',
             screenshots: ${JSON.stringify(mode)} === 'full' ? 'allow' : 'off',
-            screenRecordings: ${JSON.stringify(mode)} === 'full' ? 'allow' : 'off',
+            screenRecordings: ${JSON.stringify(recordScreenInFullMode)} ? 'allow' : 'off',
             console: 'allow',
             network: 'body-allowlist',
             storage: 'allow',
@@ -1875,6 +2046,7 @@ async function configureE2eRecorderOptions(control, mode) {
           mode: ${JSON.stringify(mode)},
           cdp: capturePolicy.categories.cdp,
           screenshots: capturePolicy.categories.screenshots,
+          screenRecordings: capturePolicy.categories.screenRecordings,
           screenshotIdleMs: ${JSON.stringify(mode)} === 'full' ? 600 : 0
         };
       })()
@@ -1882,9 +2054,9 @@ async function configureE2eRecorderOptions(control, mode) {
   );
 }
 
-async function startSessionFromControl(control, mode, expectedUrl) {
+async function startSessionFromControl(control, mode, expectedUrl, options = {}) {
   if (control.kind === "popup") {
-    return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions);
+    return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions, options);
   }
 
   return evaluateControl(
@@ -1898,7 +2070,8 @@ async function startSessionFromControl(control, mode, expectedUrl) {
 
         const response = await chromeApi.runtime.sendMessage({
           kind: 'ui.start',
-          mode: ${JSON.stringify(mode)}
+          mode: ${JSON.stringify(mode)},
+          recordScreen: ${JSON.stringify(options.recordScreen === true)}
         });
 
         if (response && typeof response === 'object' && response.ok === false) {
@@ -1915,12 +2088,13 @@ async function startSessionFromControl(control, mode, expectedUrl) {
   );
 }
 
-async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiActions) {
+async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiActions, options = {}) {
   if (useUiActions) {
     const expression = `
       (async () => {
         const selector = ${JSON.stringify(mode === "lite" ? "[data-action='start-lite']" : "[data-action='start-full']")};
         const button = document.querySelector(selector);
+        const recordScreen = ${JSON.stringify(options.recordScreen === true)};
         const tabLine =
           Array.from(document.querySelectorAll('p'))
             .map((line) => (line.textContent ?? '').trim())
@@ -1936,6 +2110,17 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
 
         if (button.disabled) {
           return { ok: false, reason: 'start-button-disabled', selector, tabLine, statusLine };
+        }
+
+        if (recordScreen) {
+          const videoToggle = document.querySelector('#full-record-tab-video');
+
+          if (!(videoToggle instanceof HTMLInputElement)) {
+            return { ok: false, reason: 'record-screen-toggle-not-found', selector, tabLine, statusLine };
+          }
+
+          videoToggle.checked = true;
+          videoToggle.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
         button.click();
@@ -1968,7 +2153,14 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
 
           reloadButton.click();
         }
-        return { ok: true, mode: ${JSON.stringify(mode)}, via: 'popup-ui', tabLine, statusLine };
+        return {
+          ok: true,
+          mode: ${JSON.stringify(mode)},
+          recordScreen,
+          via: 'popup-ui',
+          tabLine,
+          statusLine
+        };
       })()
     `;
 
@@ -2002,14 +2194,47 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
           };
         }
 
-        await chrome.runtime.sendMessage({ kind: 'ui.start', tabId: target.id, mode: ${JSON.stringify(
-          mode
-        )} });
-        return { ok: true, tabId: target.id, mode: ${JSON.stringify(mode)}, via: 'runtime-tabs' };
+        const response = await chrome.runtime.sendMessage({
+          kind: 'ui.start',
+          tabId: target.id,
+          mode: ${JSON.stringify(mode)},
+          recordScreen: ${JSON.stringify(options.recordScreen === true)}
+        });
+        if (response && typeof response === 'object' && response.ok === false) {
+          return {
+            ok: false,
+            reason: 'runtime-start-rejected',
+            tabId: target.id,
+            response
+          };
+        }
+        return {
+          ok: true,
+          tabId: target.id,
+          mode: ${JSON.stringify(mode)},
+          recordScreen: ${JSON.stringify(options.recordScreen === true)},
+          via: 'runtime-tabs'
+        };
       }
 
-      await chrome.runtime.sendMessage({ kind: 'ui.start', mode: ${JSON.stringify(mode)} });
-      return { ok: true, mode: ${JSON.stringify(mode)}, via: 'runtime-active-tab-fallback' };
+      const response = await chrome.runtime.sendMessage({
+        kind: 'ui.start',
+        mode: ${JSON.stringify(mode)},
+        recordScreen: ${JSON.stringify(options.recordScreen === true)}
+      });
+      if (response && typeof response === 'object' && response.ok === false) {
+        return {
+          ok: false,
+          reason: 'runtime-start-rejected',
+          response
+        };
+      }
+      return {
+        ok: true,
+        mode: ${JSON.stringify(mode)},
+        recordScreen: ${JSON.stringify(options.recordScreen === true)},
+        via: 'runtime-active-tab-fallback'
+      };
     })()
   `;
 
@@ -2518,6 +2743,53 @@ async function verifyRealWorldArchiveEvidence(archivePath, evidence) {
     missingMarkers,
     missingUrls,
     missingEventTypes
+  };
+}
+
+async function verifyScreenRecordingArchiveEvidence(archivePath) {
+  if (exportPassphrase.length > 0) {
+    return { ok: true, skipped: "encrypted-export" };
+  }
+
+  const zip = await JSZip.loadAsync(await readFile(archivePath));
+  const paths = Object.keys(zip.files);
+  const events = await readArchiveEvents(archivePath);
+  const startEvents = events.filter((event) => event.type === "screen.recording.start");
+  const chunkEvents = events.filter((event) => event.type === "screen.recording.chunk");
+  const endEvents = events.filter((event) => event.type === "screen.recording.end");
+  const endWithChunks = endEvents.find(
+    (event) => Array.isArray(event.data?.chunks) && event.data.chunks.length > 0
+  );
+  const referencedChunks = new Set([
+    ...chunkEvents
+      .map((event) => event.data?.chunkId)
+      .filter((value) => typeof value === "string" && value.length > 0),
+    ...((Array.isArray(endWithChunks?.data?.chunks) ? endWithChunks.data.chunks : []).filter(
+      (value) => typeof value === "string" && value.length > 0
+    ) ?? [])
+  ]);
+  const webmBlobs = paths.filter((path) => path.startsWith("blobs/") && path.endsWith(".webm"));
+  const missingChunkBlobs = [...referencedChunks].filter(
+    (hash) => !webmBlobs.some((path) => path.includes(hash))
+  );
+
+  return {
+    ok:
+      startEvents.length > 0 &&
+      chunkEvents.length > 0 &&
+      endEvents.length > 0 &&
+      Boolean(endWithChunks) &&
+      webmBlobs.length > 0 &&
+      missingChunkBlobs.length === 0,
+    startEvents: startEvents.length,
+    chunkEvents: chunkEvents.length,
+    endEvents: endEvents.length,
+    endChunkCount: Array.isArray(endWithChunks?.data?.chunks)
+      ? endWithChunks.data.chunks.length
+      : 0,
+    webmBlobs: webmBlobs.length,
+    referencedChunks: referencedChunks.size,
+    missingChunkBlobs
   };
 }
 
@@ -3325,6 +3597,11 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
 
         const eventCount = document.querySelectorAll('#timeline-list .event').length;
         const waterfallRows = document.querySelectorAll('#waterfall-body tr').length;
+        const recordingMarkerCount = document.querySelectorAll(
+          '#playback-markers button[data-marker-kind="recording"]'
+        ).length;
+        const recordingVideo = document.getElementById('filmstrip-recording');
+        const playbackProgress = document.getElementById('playback-progress');
         const feedback = (document.getElementById('feedback')?.textContent ?? '').trim();
         const passphraseDialogOpen =
           dialog instanceof HTMLDialogElement ? dialog.open : false;
@@ -3368,6 +3645,11 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
             pending: true,
             eventCount,
             waterfallCount: waterfallRows,
+            recordingMarkerCount,
+            recordingVideoPresent: recordingVideo instanceof HTMLVideoElement,
+            recordingVideoControls:
+              recordingVideo instanceof HTMLVideoElement ? recordingVideo.controls : null,
+            playbackProgressPresent: playbackProgress instanceof HTMLInputElement,
             feedback,
             passphraseDialogOpen,
             passphraseSubmitted,
@@ -3379,6 +3661,11 @@ async function waitForPlayerLoad(playerClient, timeoutMs, passphrase = "") {
         return {
           eventCount,
           waterfallCount: waterfallRows,
+          recordingMarkerCount,
+          recordingVideoPresent: recordingVideo instanceof HTMLVideoElement,
+          recordingVideoControls:
+            recordingVideo instanceof HTMLVideoElement ? recordingVideo.controls : null,
+          playbackProgressPresent: playbackProgress instanceof HTMLInputElement,
           feedback,
           passphraseDialogOpen,
           passphraseSubmitted,
@@ -3436,6 +3723,7 @@ async function verifyPlayerScreenshotMarker(playerClient, timeoutMs) {
     250,
     "No screenshot in player filmstrip"
   );
+  const attempts = [];
 
   for (let index = count - 1; index >= 0; index -= 1) {
     const clicked = await playerClient.evaluate(`
@@ -3496,13 +3784,221 @@ async function verifyPlayerScreenshotMarker(playerClient, timeoutMs) {
         screenshotIndex: index
       };
     } catch {
+      const snapshot = await playerClient
+        .evaluate(
+          `
+            (() => {
+              const meta = (document.getElementById('filmstrip-meta')?.textContent ?? '').trim();
+              const cursor = document.getElementById('filmstrip-cursor');
+              const visible = !!cursor && !cursor.hasAttribute('hidden');
+              const trailSegments = document.querySelectorAll(
+                '#filmstrip-trail-svg .preview-trail-line, #filmstrip-trail-svg .preview-trail-point'
+              ).length;
+              return { meta, visible, trailSegments };
+            })()
+          `
+        )
+        .catch(() => null);
+      attempts.push({
+        screenshotIndex: index,
+        snapshot
+      });
       // Continue trying older screenshots.
     }
   }
 
   return {
     ok: false,
-    reason: "no-screenshot-with-pointer-marker"
+    reason: "no-screenshot-with-pointer-marker",
+    screenshotCount: count,
+    attempts: attempts.slice(0, 8)
+  };
+}
+
+async function verifyPlayerScreenRecording(playerClient, timeoutMs) {
+  const prepared = await waitFor(
+    async () => {
+      const snapshot = await playerClient.evaluate(`
+      (() => {
+        const markers = Array.from(
+          document.querySelectorAll('#playback-markers button[data-marker-kind="recording"]')
+        );
+        const marker = markers[0];
+        const video = document.getElementById('filmstrip-recording');
+        const progress = document.getElementById('playback-progress');
+
+        if (!(marker instanceof HTMLButtonElement) || !(video instanceof HTMLVideoElement) || !(progress instanceof HTMLInputElement)) {
+          return null;
+        }
+
+        marker.click();
+
+        return {
+          markerCount: markers.length,
+          videoControls: video.controls,
+          videoControlsAttribute: video.hasAttribute('controls'),
+          progressId: progress.id
+        };
+      })()
+    `);
+
+      if (!snapshot || snapshot.videoControls || snapshot.videoControlsAttribute) {
+        return null;
+      }
+
+      return snapshot;
+    },
+    timeoutMs,
+    250,
+    "Player recording marker or unified progress controls not found"
+  );
+
+  let lastReadySnapshot = null;
+  const ready = await waitFor(
+    async () => {
+      const snapshot = await playerClient.evaluate(`
+      (() => {
+        const video = document.getElementById('filmstrip-recording');
+        const progress = document.getElementById('playback-progress');
+        const meta = (document.getElementById('filmstrip-meta')?.textContent ?? '').trim();
+
+        if (!(video instanceof HTMLVideoElement) || !(progress instanceof HTMLInputElement)) {
+          return null;
+        }
+
+        return {
+          currentSrc: video.currentSrc,
+          hidden: video.hidden,
+          readyState: video.readyState,
+          currentTime: video.currentTime,
+          progressValue: progress.value,
+          progressMax: progress.max,
+          meta,
+          videoControls: video.controls,
+          videoControlsAttribute: video.hasAttribute('controls')
+        };
+      })()
+    `);
+
+      if (!snapshot || snapshot.videoControls || snapshot.videoControlsAttribute) {
+        return null;
+      }
+
+      lastReadySnapshot = snapshot;
+
+      if (snapshot.meta.includes("Failed to decode screen recording.")) {
+        return {
+          ...snapshot,
+          decodeFailed: true
+        };
+      }
+
+      if (snapshot.hidden || !snapshot.currentSrc || snapshot.readyState < 1) {
+        return null;
+      }
+
+      return snapshot;
+    },
+    timeoutMs,
+    250,
+    () =>
+      `Player video did not load recording metadata${
+        lastReadySnapshot ? `; lastSnapshot=${JSON.stringify(lastReadySnapshot)}` : ""
+      }`
+  );
+
+  if (ready.decodeFailed) {
+    return {
+      ok: false,
+      reason: "recording-video-decode-failed",
+      prepared,
+      ready
+    };
+  }
+
+  const moved = await playerClient.evaluate(`
+    (() => {
+      const video = document.getElementById('filmstrip-recording');
+      const progress = document.getElementById('playback-progress');
+
+      if (!(video instanceof HTMLVideoElement) || !(progress instanceof HTMLInputElement)) {
+        return null;
+      }
+
+      const before = video.currentTime;
+      const max = Number(progress.max);
+      const current = Number(progress.value);
+      const next = Number.isFinite(max) && Number.isFinite(current)
+        ? Math.min(max, current + 1000)
+        : current;
+
+      if (Number.isFinite(next)) {
+        progress.value = String(next);
+        progress.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      return {
+        before,
+        next,
+        current,
+        progressMax: progress.max
+      };
+    })()
+  `);
+
+  let lastSyncSnapshot = moved;
+  const synced = await waitFor(
+    async () => {
+      const snapshot = await playerClient.evaluate(`
+      (() => {
+        const video = document.getElementById('filmstrip-recording');
+        const progress = document.getElementById('playback-progress');
+        const meta = (document.getElementById('filmstrip-meta')?.textContent ?? '').trim();
+
+        if (!(video instanceof HTMLVideoElement) || !(progress instanceof HTMLInputElement)) {
+          return null;
+        }
+
+        return {
+          currentTime: video.currentTime,
+          currentSrc: video.currentSrc,
+          hidden: video.hidden,
+          readyState: video.readyState,
+          progressValue: progress.value,
+          progressMax: progress.max,
+          meta,
+          videoControls: video.controls,
+          videoControlsAttribute: video.hasAttribute('controls')
+        };
+      })()
+    `);
+
+      if (!snapshot || snapshot.videoControls || snapshot.videoControlsAttribute) {
+        return null;
+      }
+
+      lastSyncSnapshot = snapshot;
+
+      if (typeof snapshot.currentTime !== "number" || snapshot.currentTime < 0.2) {
+        return null;
+      }
+
+      return snapshot;
+    },
+    timeoutMs,
+    250,
+    () =>
+      `Player video did not sync after moving the unified playback progress bar${
+        lastSyncSnapshot ? `; lastSnapshot=${JSON.stringify(lastSyncSnapshot)}` : ""
+      }`
+  );
+
+  return {
+    ok: true,
+    prepared,
+    ready,
+    moved,
+    synced
   };
 }
 
@@ -3896,6 +4392,11 @@ async function cleanup() {
       state.server.close(() => resolve());
     });
     state.server = null;
+  }
+
+  if (state.tempExtensionDir) {
+    await rm(state.tempExtensionDir, { recursive: true, force: true }).catch(() => undefined);
+    state.tempExtensionDir = null;
   }
 }
 
