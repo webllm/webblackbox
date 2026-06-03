@@ -17,11 +17,19 @@ export const PORT_NAMES = {
   offscreen: "webblackbox:offscreen"
 } as const;
 
+export type FullModeVisualCapture = "screenshots" | "recording" | "both";
+
 export type UiStartSessionMessage = {
   kind: "ui.start";
   tabId?: number;
   mode: CaptureMode;
   reloadPage?: boolean;
+  visualCapture?: FullModeVisualCapture;
+  /**
+   * Backward-compatible alias for older popup/runtime callers. New callers
+   * should send `visualCapture` so screenshots can be disabled for
+   * recording-only full sessions.
+   */
   recordScreen?: boolean;
 };
 

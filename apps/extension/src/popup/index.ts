@@ -12,6 +12,7 @@ import {
   type ExportPrivacyWarning,
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
+  type FullModeVisualCapture,
   type SessionListItem
 } from "../shared/messages.js";
 
@@ -46,7 +47,7 @@ const state: {
   tabId: number | null;
   sessions: SessionListItem[];
   recording: { active: boolean; sid?: string; mode?: string };
-  fullModeRecordScreen: boolean;
+  fullModeVisualCapture: FullModeVisualCapture;
   pendingStart?: { tabId: number; mode: CaptureMode; requestedAt: number };
   pendingExportSid?: string;
   exportPrivacyWarning?: ExportPrivacyWarning;
@@ -59,7 +60,7 @@ const state: {
   tabId: null,
   sessions: [],
   recording: { active: false },
-  fullModeRecordScreen: false,
+  fullModeVisualCapture: "screenshots",
   pendingStart: undefined,
   pendingExportSid: undefined,
   exportPrivacyWarning: undefined,
@@ -319,7 +320,7 @@ function bindActions(
 
     state.tabId = tabId;
     await startRecordingFromPopup(container, tabId, "full", {
-      recordScreen: state.fullModeRecordScreen
+      visualCapture: state.fullModeVisualCapture
     });
   });
 
@@ -398,10 +399,15 @@ function bindExportPolicyForm(container: HTMLElement): void {
     .querySelector<HTMLInputElement>("#export-recent-minutes")
     ?.addEventListener("input", persistDraft);
   container
-    .querySelector<HTMLInputElement>("#full-record-tab-video")
-    ?.addEventListener("change", (event) => {
-      const input = event.currentTarget as HTMLInputElement;
-      state.fullModeRecordScreen = input.checked;
+    .querySelectorAll<HTMLInputElement>("input[name='full-visual-capture']")
+    .forEach((input) => {
+      input.addEventListener("change", (event) => {
+        const target = event.currentTarget as HTMLInputElement;
+
+        if (target.checked && isFullModeVisualCapture(target.value)) {
+          state.fullModeVisualCapture = target.value;
+        }
+      });
     });
 }
 
@@ -589,7 +595,7 @@ async function startRecordingFromPopup(
   container: HTMLElement,
   tabId: number,
   mode: CaptureMode,
-  options: { reloadPage?: boolean; recordScreen?: boolean } = {}
+  options: { reloadPage?: boolean; visualCapture?: FullModeVisualCapture } = {}
 ): Promise<void> {
   setPendingStart(container, tabId, mode);
 
@@ -599,7 +605,7 @@ async function startRecordingFromPopup(
       tabId,
       mode,
       ...(options.reloadPage ? { reloadPage: true } : {}),
-      ...(options.recordScreen ? { recordScreen: true } : {})
+      ...(mode === "full" && options.visualCapture ? { visualCapture: options.visualCapture } : {})
     });
   } catch (error) {
     clearPendingStart();
@@ -1176,20 +1182,39 @@ function createFullModeRecordingSection(disabled: boolean): HTMLElement {
   const section = document.createElement("section");
   section.className = "wb-popup__policy";
 
-  const toggleLabel = document.createElement("label");
-  toggleLabel.className = "wb-toggle";
+  const title = document.createElement("h2");
+  title.className = "wb-popup__policy-title";
+  title.textContent = t("popupFullVisualCaptureTitle");
+  section.append(title);
 
-  const input = document.createElement("input");
-  input.id = "full-record-tab-video";
-  input.type = "checkbox";
-  input.checked = state.fullModeRecordScreen;
-  input.disabled = disabled;
+  const options: Array<{ value: FullModeVisualCapture; label: string }> = [
+    { value: "screenshots", label: t("popupFullVisualScreenshots") },
+    { value: "recording", label: t("popupFullVisualRecording") },
+    { value: "both", label: t("popupFullVisualBoth") }
+  ];
 
-  const text = document.createElement("span");
-  text.textContent = t("popupRecordTabVideo");
-  toggleLabel.append(input, text);
-  section.append(toggleLabel);
+  for (const option of options) {
+    const label = document.createElement("label");
+    label.className = "wb-toggle";
+
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "full-visual-capture";
+    input.value = option.value;
+    input.checked = state.fullModeVisualCapture === option.value;
+    input.disabled = disabled;
+
+    const text = document.createElement("span");
+    text.textContent = option.label;
+    label.append(input, text);
+    section.append(label);
+  }
+
   return section;
+}
+
+function isFullModeVisualCapture(value: string): value is FullModeVisualCapture {
+  return value === "screenshots" || value === "recording" || value === "both";
 }
 
 function createActionButton(

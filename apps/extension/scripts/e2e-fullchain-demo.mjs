@@ -30,8 +30,14 @@ const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ??
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
+const fullVisualCapture = normalizeFullVisualCaptureMode(
+  process.env.WB_E2E_FULL_VISUAL_CAPTURE ??
+    ((process.env.WB_E2E_RECORD_SCREEN ?? "0") === "1" ? "recording" : "screenshots")
+);
 const recordScreenInFullMode =
-  captureMode === "full" && (process.env.WB_E2E_RECORD_SCREEN ?? "0") === "1";
+  captureMode === "full" && (fullVisualCapture === "recording" || fullVisualCapture === "both");
+const captureScreenshotsInFullMode =
+  captureMode === "full" && (fullVisualCapture === "screenshots" || fullVisualCapture === "both");
 const configureRecorderOptions = (process.env.WB_E2E_CONFIGURE_OPTIONS ?? "1") !== "0";
 const usePopupUiActions =
   process.env.WB_E2E_USE_POPUP_UI === undefined
@@ -49,6 +55,10 @@ const realWorldLongRecordingMs = Number(process.env.WB_E2E_REALWORLD_LONG_MS ?? 
 const realWorldLargeResponseBytes = Number(
   process.env.WB_E2E_REALWORLD_LARGE_RESPONSE_BYTES ?? "1048576"
 );
+
+function normalizeFullVisualCaptureMode(value) {
+  return value === "recording" || value === "both" ? value : "screenshots";
+}
 
 const chromeCandidates = [
   process.env.WB_E2E_CHROME_BIN,
@@ -321,7 +331,7 @@ async function main() {
   await sleep(1_200);
 
   const start = await startSessionFromControl(control, captureMode, demoUrl, {
-    recordScreen: recordScreenInFullMode
+    visualCapture: fullVisualCapture
   });
   assert(start?.ok === true, `Failed to start ${captureMode} mode`, start);
   const demoTab =
@@ -542,26 +552,41 @@ async function main() {
           "dom.snapshot",
           "storage.local.snapshot"
         ]
-      : configureRecorderOptions
-        ? ["user.click", "screen.screenshot", "console.entry"]
-        : ["user.click", "screen.screenshot", "network.request"];
+      : !captureScreenshotsInFullMode
+        ? ["user.click", "console.entry"]
+        : configureRecorderOptions
+          ? ["user.click", "screen.screenshot", "console.entry"]
+          : ["user.click", "screen.screenshot", "network.request"];
 
   for (const eventType of requiredEventTypes) {
     await waitForPlayerEventType(playerClient, eventType, 20_000);
   }
 
   const markerResult =
-    captureMode === "full" && !recordScreenInFullMode
+    captureMode === "full" && captureScreenshotsInFullMode && !recordScreenInFullMode
       ? await verifyPlayerScreenshotMarker(playerClient, 20_000)
       : {
           ok: true,
-          skipped: recordScreenInFullMode
-            ? "screen-recording-stage-uses-video"
-            : "lite-screenshot-not-required"
+          skipped:
+            recordScreenInFullMode && captureScreenshotsInFullMode
+              ? "screen-recording-stage-uses-video"
+              : recordScreenInFullMode
+                ? "recording-only-screenshot-disabled"
+                : "lite-screenshot-not-required"
         };
-  if (captureMode === "full" && !recordScreenInFullMode) {
+  if (captureMode === "full" && captureScreenshotsInFullMode && !recordScreenInFullMode) {
     assert(markerResult.ok, "Player screenshot marker is missing", markerResult);
   }
+
+  const screenshotSuppressionResult =
+    captureMode === "full" && recordScreenInFullMode && !captureScreenshotsInFullMode
+      ? await verifyPlayerEventTypeAbsent(playerClient, "screen.screenshot")
+      : { ok: true, skipped: "screenshot-suppression-not-required" };
+  assert(
+    screenshotSuppressionResult.ok,
+    "Recording-only full mode still captured screenshots",
+    screenshotSuppressionResult
+  );
   const hoverResponseResult =
     captureMode === "full"
       ? await verifyPlayerProgressHoverResponse(playerClient, 20_000)
@@ -604,7 +629,9 @@ async function main() {
   console.log("Demo URL:", demoUrl);
   console.log("Player URL:", playerUrl);
   console.log("Capture mode:", captureMode);
+  console.log("Full visual capture:", fullVisualCapture);
   console.log("Record screen:", recordScreenInFullMode);
+  console.log("Capture screenshots:", captureScreenshotsInFullMode);
   console.log("Recorder options:", JSON.stringify(recorderConfigured));
   console.log(
     "Popup actions:",
@@ -621,6 +648,7 @@ async function main() {
   console.log("Screen recording archive evidence:", JSON.stringify(screenRecordingArchiveResult));
   console.log("Player:", JSON.stringify(playerResult));
   console.log("Screenshot marker:", JSON.stringify(markerResult));
+  console.log("Screenshot suppression:", JSON.stringify(screenshotSuppressionResult));
   console.log("Hover response:", JSON.stringify(hoverResponseResult));
   console.log("Player screen recording:", JSON.stringify(playerScreenRecordingResult));
   console.log("Extension restart:", JSON.stringify(restartResult));
@@ -1968,7 +1996,7 @@ async function configureE2eRecorderOptions(control, mode) {
             actions: 'allow',
             inputs: 'masked',
             dom: 'allow',
-            screenshots: ${JSON.stringify(mode)} === 'full' ? 'allow' : 'off',
+            screenshots: ${JSON.stringify(captureScreenshotsInFullMode)} ? 'allow' : 'off',
             screenRecordings: ${JSON.stringify(recordScreenInFullMode)} ? 'allow' : 'off',
             console: 'allow',
             network: 'body-allowlist',
@@ -2055,8 +2083,16 @@ async function configureE2eRecorderOptions(control, mode) {
 }
 
 async function startSessionFromControl(control, mode, expectedUrl, options = {}) {
+  const visualCapture =
+    mode === "full"
+      ? (options.visualCapture ?? (options.recordScreen === true ? "both" : "screenshots"))
+      : null;
+
   if (control.kind === "popup") {
-    return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions, options);
+    return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions, {
+      ...options,
+      visualCapture
+    });
   }
 
   return evaluateControl(
@@ -2071,7 +2107,7 @@ async function startSessionFromControl(control, mode, expectedUrl, options = {})
         const response = await chromeApi.runtime.sendMessage({
           kind: 'ui.start',
           mode: ${JSON.stringify(mode)},
-          recordScreen: ${JSON.stringify(options.recordScreen === true)}
+          visualCapture: ${JSON.stringify(visualCapture)}
         });
 
         if (response && typeof response === 'object' && response.ok === false) {
@@ -2089,12 +2125,17 @@ async function startSessionFromControl(control, mode, expectedUrl, options = {})
 }
 
 async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiActions, options = {}) {
+  const visualCapture =
+    mode === "full"
+      ? (options.visualCapture ?? (options.recordScreen === true ? "both" : "screenshots"))
+      : null;
+
   if (useUiActions) {
     const expression = `
       (async () => {
         const selector = ${JSON.stringify(mode === "lite" ? "[data-action='start-lite']" : "[data-action='start-full']")};
         const button = document.querySelector(selector);
-        const recordScreen = ${JSON.stringify(options.recordScreen === true)};
+        const visualCapture = ${JSON.stringify(visualCapture)};
         const tabLine =
           Array.from(document.querySelectorAll('p'))
             .map((line) => (line.textContent ?? '').trim())
@@ -2112,15 +2153,17 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
           return { ok: false, reason: 'start-button-disabled', selector, tabLine, statusLine };
         }
 
-        if (recordScreen) {
-          const videoToggle = document.querySelector('#full-record-tab-video');
+        if (visualCapture) {
+          const visualCaptureInput = document.querySelector(
+            \`input[name='full-visual-capture'][value='\${visualCapture}']\`
+          );
 
-          if (!(videoToggle instanceof HTMLInputElement)) {
-            return { ok: false, reason: 'record-screen-toggle-not-found', selector, tabLine, statusLine };
+          if (!(visualCaptureInput instanceof HTMLInputElement)) {
+            return { ok: false, reason: 'visual-capture-option-not-found', visualCapture, selector, tabLine, statusLine };
           }
 
-          videoToggle.checked = true;
-          videoToggle.dispatchEvent(new Event('change', { bubbles: true }));
+          visualCaptureInput.checked = true;
+          visualCaptureInput.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
         button.click();
@@ -2156,7 +2199,7 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
         return {
           ok: true,
           mode: ${JSON.stringify(mode)},
-          recordScreen,
+          visualCapture,
           via: 'popup-ui',
           tabLine,
           statusLine
@@ -2198,7 +2241,7 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
           kind: 'ui.start',
           tabId: target.id,
           mode: ${JSON.stringify(mode)},
-          recordScreen: ${JSON.stringify(options.recordScreen === true)}
+          visualCapture: ${JSON.stringify(visualCapture)}
         });
         if (response && typeof response === 'object' && response.ok === false) {
           return {
@@ -2212,7 +2255,7 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
           ok: true,
           tabId: target.id,
           mode: ${JSON.stringify(mode)},
-          recordScreen: ${JSON.stringify(options.recordScreen === true)},
+          visualCapture: ${JSON.stringify(visualCapture)},
           via: 'runtime-tabs'
         };
       }
@@ -2220,7 +2263,7 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
       const response = await chrome.runtime.sendMessage({
         kind: 'ui.start',
         mode: ${JSON.stringify(mode)},
-        recordScreen: ${JSON.stringify(options.recordScreen === true)}
+        visualCapture: ${JSON.stringify(visualCapture)}
       });
       if (response && typeof response === 'object' && response.ok === false) {
         return {
@@ -2232,7 +2275,7 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
       return {
         ok: true,
         mode: ${JSON.stringify(mode)},
-        recordScreen: ${JSON.stringify(options.recordScreen === true)},
+        visualCapture: ${JSON.stringify(visualCapture)},
         via: 'runtime-active-tab-fallback'
       };
     })()
@@ -2757,6 +2800,7 @@ async function verifyScreenRecordingArchiveEvidence(archivePath) {
   const startEvents = events.filter((event) => event.type === "screen.recording.start");
   const chunkEvents = events.filter((event) => event.type === "screen.recording.chunk");
   const endEvents = events.filter((event) => event.type === "screen.recording.end");
+  const screenshotEvents = events.filter((event) => event.type === "screen.screenshot");
   const endWithChunks = endEvents.find(
     (event) => Array.isArray(event.data?.chunks) && event.data.chunks.length > 0
   );
@@ -2769,9 +2813,14 @@ async function verifyScreenRecordingArchiveEvidence(archivePath) {
     ) ?? [])
   ]);
   const webmBlobs = paths.filter((path) => path.startsWith("blobs/") && path.endsWith(".webm"));
+  const screenshotBlobs = paths.filter(
+    (path) => path.startsWith("blobs/") && path.endsWith(".webp")
+  );
   const missingChunkBlobs = [...referencedChunks].filter(
     (hash) => !webmBlobs.some((path) => path.includes(hash))
   );
+  const screenshotLeak =
+    !captureScreenshotsInFullMode && (screenshotEvents.length > 0 || screenshotBlobs.length > 0);
 
   return {
     ok:
@@ -2780,16 +2829,20 @@ async function verifyScreenRecordingArchiveEvidence(archivePath) {
       endEvents.length > 0 &&
       Boolean(endWithChunks) &&
       webmBlobs.length > 0 &&
-      missingChunkBlobs.length === 0,
+      missingChunkBlobs.length === 0 &&
+      !screenshotLeak,
     startEvents: startEvents.length,
     chunkEvents: chunkEvents.length,
     endEvents: endEvents.length,
+    screenshotEvents: screenshotEvents.length,
     endChunkCount: Array.isArray(endWithChunks?.data?.chunks)
       ? endWithChunks.data.chunks.length
       : 0,
     webmBlobs: webmBlobs.length,
+    screenshotBlobs: screenshotBlobs.length,
     referencedChunks: referencedChunks.size,
-    missingChunkBlobs
+    missingChunkBlobs,
+    screenshotLeak
   };
 }
 
@@ -3708,6 +3761,21 @@ async function waitForPlayerEventType(playerClient, eventType, timeoutMs) {
     250,
     `Timeline did not include event type: ${eventType}`
   );
+}
+
+async function verifyPlayerEventTypeAbsent(playerClient, eventType) {
+  const count = await playerClient.evaluate(`
+    (() => {
+      const tags = Array.from(document.querySelectorAll('#timeline-list .tag'));
+      return tags.filter((node) => (node.textContent ?? '').trim() === ${JSON.stringify(eventType)}).length;
+    })()
+  `);
+
+  return {
+    ok: count === 0,
+    eventType,
+    count
+  };
 }
 
 async function verifyPlayerScreenshotMarker(playerClient, timeoutMs) {

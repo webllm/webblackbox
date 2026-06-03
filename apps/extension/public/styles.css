@@ -316,7 +316,8 @@ main {
   background: rgba(255, 255, 255, 0.86);
 }
 
-.wb-toggle input[type="checkbox"] {
+.wb-toggle input[type="checkbox"],
+.wb-toggle input[type="radio"] {
   width: 16px;
   height: 16px;
   margin: 0;

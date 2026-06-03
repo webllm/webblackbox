@@ -186,14 +186,16 @@ function getStartFullButton(): HTMLButtonElement {
   return button;
 }
 
-function getFullRecordTabVideoCheckbox(): HTMLInputElement {
-  const checkbox = document.querySelector<HTMLInputElement>("#full-record-tab-video");
+function getFullVisualCaptureRadio(value: "screenshots" | "recording" | "both"): HTMLInputElement {
+  const radio = document.querySelector<HTMLInputElement>(
+    `input[name='full-visual-capture'][value='${value}']`
+  );
 
-  if (!checkbox) {
-    throw new Error("missing full mode tab video checkbox");
+  if (!radio) {
+    throw new Error(`missing full visual capture radio: ${value}`);
   }
 
-  return checkbox;
+  return radio;
 }
 
 function getLiteReloadStartButton(): HTMLButtonElement {
@@ -729,7 +731,9 @@ describe("popup export policy form", () => {
 
     expect(getStartLiteButton().disabled).toBe(true);
     expect(getStartFullButton().disabled).toBe(true);
-    expect(getFullRecordTabVideoCheckbox().disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("recording").disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("both").disabled).toBe(true);
 
     port.emit({
       kind: "sw.session-list",
@@ -747,7 +751,9 @@ describe("popup export policy form", () => {
 
     expect(getStartLiteButton().disabled).toBe(false);
     expect(getStartFullButton().disabled).toBe(false);
-    expect(getFullRecordTabVideoCheckbox().disabled).toBe(false);
+    expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(false);
+    expect(getFullVisualCaptureRadio("recording").disabled).toBe(false);
+    expect(getFullVisualCaptureRadio("both").disabled).toBe(false);
   });
 
   it("asks before starting lite with a page reload", async () => {
@@ -830,7 +836,8 @@ describe("popup export policy form", () => {
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.start",
       tabId: 17,
-      mode: "full"
+      mode: "full",
+      visualCapture: "screenshots"
     });
     expect(getStartLiteButton().disabled).toBe(true);
     expect(getStartFullButton().disabled).toBe(true);
@@ -859,17 +866,19 @@ describe("popup export policy form", () => {
     await flushPopup();
   });
 
-  it("starts full mode with tab video recording when explicitly enabled", async () => {
+  it("starts full mode with recording-only visual capture when explicitly selected", async () => {
     const port = new FakePort();
     installChromeStub(port);
 
     await importPopupModule();
 
-    const checkbox = getFullRecordTabVideoCheckbox();
-    expect(checkbox.checked).toBe(false);
+    const screenshots = getFullVisualCaptureRadio("screenshots");
+    const recording = getFullVisualCaptureRadio("recording");
+    expect(screenshots.checked).toBe(true);
+    expect(recording.checked).toBe(false);
 
-    checkbox.checked = true;
-    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    recording.checked = true;
+    recording.dispatchEvent(new Event("change", { bubbles: true }));
     getStartFullButton().click();
     await flushPopup();
 
@@ -877,7 +886,27 @@ describe("popup export policy form", () => {
       kind: "ui.start",
       tabId: 17,
       mode: "full",
-      recordScreen: true
+      visualCapture: "recording"
+    });
+  });
+
+  it("starts full mode with screenshots and recording when both is selected", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    const both = getFullVisualCaptureRadio("both");
+    both.checked = true;
+    both.dispatchEvent(new Event("change", { bubbles: true }));
+    getStartFullButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "full",
+      visualCapture: "both"
     });
   });
 

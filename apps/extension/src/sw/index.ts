@@ -33,6 +33,7 @@ import {
   type ExportPrivacyWarning,
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
+  type FullModeVisualCapture,
   type SessionListItem
 } from "../shared/messages.js";
 import {
@@ -643,7 +644,7 @@ async function handleInboundMessage(
     }
 
     await startSession(tabId, message.mode, {
-      recordScreen: message.recordScreen === true
+      visualCapture: resolveFullModeVisualCapture(message)
     });
     if (message.mode === "lite" && message.reloadPage) {
       try {
@@ -814,7 +815,7 @@ async function deleteSessionBySid(sid: string): Promise<void> {
 async function startSession(
   tabId: number,
   mode: CaptureMode,
-  options: { recordScreen?: boolean } = {}
+  options: { visualCapture?: FullModeVisualCapture } = {}
 ): Promise<void> {
   const existing = sessionsByTab.get(tabId);
 
@@ -834,10 +835,10 @@ async function startSession(
     throw new Error("Recording is blocked by enterprise site policy.");
   }
 
-  const loadedRecorderConfig = applyScreenRecordingOptIn(
+  const loadedRecorderConfig = applyFullModeVisualCapture(
     await loadRecorderConfig(mode),
     mode,
-    options.recordScreen === true
+    options.visualCapture
   );
   const recorderConfig = applyEnterprisePolicyToRecorderConfig(
     withSessionCapturePolicy(loadedRecorderConfig, {
@@ -4487,17 +4488,37 @@ async function loadRecorderConfig(mode: CaptureMode): Promise<typeof DEFAULT_REC
   return resolveModeRecorderConfig(mode, baseConfig, storedValues?.[OPTIONS_STORAGE_KEY]);
 }
 
-function applyScreenRecordingOptIn(
+function resolveFullModeVisualCapture(
+  message: ExtensionInboundMessage
+): FullModeVisualCapture | undefined {
+  if (message.kind !== "ui.start" || message.mode !== "full") {
+    return undefined;
+  }
+
+  if (isFullModeVisualCapture(message.visualCapture)) {
+    return message.visualCapture;
+  }
+
+  return message.recordScreen === true ? "both" : undefined;
+}
+
+function isFullModeVisualCapture(value: unknown): value is FullModeVisualCapture {
+  return value === "screenshots" || value === "recording" || value === "both";
+}
+
+function applyFullModeVisualCapture(
   config: typeof DEFAULT_RECORDER_CONFIG,
   mode: CaptureMode,
-  enabled: boolean
+  visualCapture: FullModeVisualCapture | undefined
 ): typeof DEFAULT_RECORDER_CONFIG {
-  if (mode !== "full" || !enabled) {
+  if (mode !== "full" || !visualCapture) {
     return config;
   }
 
   const basePolicy =
     config.capturePolicy ?? DEFAULT_RECORDER_CONFIG.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
+  const screenshots = visualCapture === "recording" ? "off" : "allow";
+  const screenRecordings = visualCapture === "screenshots" ? "off" : "allow";
 
   return {
     ...config,
@@ -4505,7 +4526,8 @@ function applyScreenRecordingOptIn(
       ...basePolicy,
       categories: {
         ...basePolicy.categories,
-        screenRecordings: "allow"
+        screenshots,
+        screenRecordings
       }
     }
   };
