@@ -24,7 +24,7 @@ type NetworkType =
   | "other";
 
 type CompareSignal = "regressed" | "stable" | "new" | "missing";
-type MarkerKind = "error" | "network" | "screenshot" | "action";
+type MarkerKind = "error" | "network" | "screenshot" | "recording" | "action";
 type SortDirection = "asc" | "desc";
 type SelectionKind = "action" | "event" | "request";
 
@@ -65,11 +65,13 @@ type PlayerMessages = {
   playbackSpeed: string;
   playbackTime: string;
   previewAltScreenshotPlayback: string;
+  previewAltRecordingPlayback: string;
   previewAltProgressPreview: string;
   stagePlaceholderLoadArchive: string;
   progressLegendError: string;
   progressLegendNetwork: string;
   progressLegendScreenshot: string;
+  progressLegendRecording: string;
   progressLegendAction: string;
   resizeScreenshotStage: string;
   resizePanels: string;
@@ -243,6 +245,10 @@ type PlayerMessages = {
   screenshotDecodeFailed: string;
   screenshotMissingBlob: string;
   screenshotNoLoaded: string;
+  screenRecordingLoading: string;
+  screenRecordingDecodeFailed: string;
+  screenRecordingMissingBlob: string;
+  screenRecordingMeta: string;
   feedbackBugReportExported: string;
   feedbackHarExported: string;
   feedbackGitHubIssueExported: string;
@@ -340,11 +346,13 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     playbackSpeed: "Speed",
     playbackTime: "Playback time",
     previewAltScreenshotPlayback: "Screenshot playback",
+    previewAltRecordingPlayback: "Screen recording playback",
     previewAltProgressPreview: "Progress preview",
     stagePlaceholderLoadArchive: "Load an archive to start playback.",
     progressLegendError: "Error",
     progressLegendNetwork: "Network",
     progressLegendScreenshot: "Screenshot",
+    progressLegendRecording: "Recording",
     progressLegendAction: "Action",
     resizeScreenshotStage: "Resize screenshot stage",
     resizePanels: "Resize panels",
@@ -524,6 +532,11 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     screenshotDecodeFailed: "Failed to decode screenshot.",
     screenshotMissingBlob: "Missing screenshot blob: {shotId}",
     screenshotNoLoaded: "No screenshot loaded.",
+    screenRecordingLoading: "Loading screen recording...",
+    screenRecordingDecodeFailed: "Failed to decode screen recording.",
+    screenRecordingMissingBlob: "Missing screen recording blob: {recordingId}",
+    screenRecordingMeta:
+      "Recording {current} / {duration} | {chunks} chunks | {size}B | {dimensions}",
     feedbackBugReportExported: "Bug report exported.",
     feedbackHarExported: "HAR exported.",
     feedbackGitHubIssueExported: "GitHub issue template exported.",
@@ -578,6 +591,7 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
       error: "error",
       network: "network",
       screenshot: "screenshot",
+      recording: "recording",
       action: "action"
     },
     networkTypes: {
@@ -652,11 +666,13 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     playbackSpeed: "倍速",
     playbackTime: "播放时间",
     previewAltScreenshotPlayback: "截图回放",
+    previewAltRecordingPlayback: "录屏回放",
     previewAltProgressPreview: "进度预览",
     stagePlaceholderLoadArchive: "加载归档以开始回放。",
     progressLegendError: "错误",
     progressLegendNetwork: "网络",
     progressLegendScreenshot: "截图",
+    progressLegendRecording: "录屏",
     progressLegendAction: "动作",
     resizeScreenshotStage: "调整截图区域大小",
     resizePanels: "调整面板大小",
@@ -832,6 +848,10 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     screenshotDecodeFailed: "截图解码失败。",
     screenshotMissingBlob: "缺少截图 Blob：{shotId}",
     screenshotNoLoaded: "未加载截图。",
+    screenRecordingLoading: "录屏加载中...",
+    screenRecordingDecodeFailed: "录屏解码失败。",
+    screenRecordingMissingBlob: "缺少录屏 Blob：{recordingId}",
+    screenRecordingMeta: "录屏 {current} / {duration} | {chunks} 个分片 | {size}B | {dimensions}",
     feedbackBugReportExported: "已导出缺陷报告。",
     feedbackHarExported: "已导出 HAR。",
     feedbackGitHubIssueExported: "已导出 GitHub issue 模板。",
@@ -884,6 +904,7 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
       error: "错误",
       network: "网络",
       screenshot: "截图",
+      recording: "录屏",
       action: "动作"
     },
     networkTypes: {

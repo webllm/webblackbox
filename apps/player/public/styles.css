@@ -687,6 +687,10 @@ input[type="file"],
   object-fit: contain;
 }
 
+.preview-video {
+  background: #161a20;
+}
+
 .stage-placeholder {
   position: absolute;
   inset: 0;
@@ -819,6 +823,10 @@ input[type="file"],
   background: var(--sys-color-on-surface-subtle);
 }
 
+.progress-marker-recording {
+  background: #00897b;
+}
+
 .progress-marker-action {
   background: var(--sys-color-yellow);
 }
@@ -920,6 +928,12 @@ input[type="file"],
   background: #eceff3;
   border-color: #d2d7de;
   color: #3f4753;
+}
+
+.progress-hover-tag-recording {
+  background: #e0f2f1;
+  border-color: #9bd2ce;
+  color: #00695c;
 }
 
 .progress-hover-tag-action {
@@ -1059,6 +1073,10 @@ input[type="file"],
 
 .legend-screenshot {
   background: var(--sys-color-on-surface-subtle);
+}
+
+.legend-recording {
+  background: #00897b;
 }
 
 .legend-action {

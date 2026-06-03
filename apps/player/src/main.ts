@@ -42,7 +42,7 @@ import {
   type NetworkStatusFilter,
   type NetworkTypeFilter
 } from "./lib/network-view.js";
-import { asFiniteNumber, asRecord } from "./lib/parsing.js";
+import { asFiniteNumber, asRecord, asString } from "./lib/parsing.js";
 import { markerKindToPanel } from "./lib/progress.js";
 import { normalizePlaybackEvents, type PlaybackTimeNormalization } from "./lib/playback-time.js";
 import { generatePlaywrightScriptFromEvents } from "./lib/playwright-script.js";
@@ -158,14 +158,14 @@ type ScreenshotRenderContext = {
   viewportHeight?: number;
 };
 
-type ProgressMarkerKind = "error" | "network" | "screenshot" | "action";
+type ProgressMarkerKind = "error" | "network" | "screenshot" | "recording" | "action";
 
 type ProgressMarker = {
   mono: number;
   kind: ProgressMarkerKind;
 };
 
-type ProgressHoverTagTone = "error" | "network" | "screenshot" | "action" | "neutral";
+type ProgressHoverTagTone = "error" | "network" | "screenshot" | "recording" | "action" | "neutral";
 
 type ProgressHoverTag = {
   label: string;
@@ -206,6 +206,21 @@ type ScreenshotRecord = {
   context: ScreenshotRenderContext | null;
 };
 
+type ScreenRecordingRecord = {
+  eventId: string;
+  recordingId: string;
+  source: string | null;
+  mime: string;
+  startMono: number;
+  endMono: number;
+  durationMs: number;
+  chunks: string[];
+  chunkCount: number;
+  size: number | null;
+  width?: number;
+  height?: number;
+};
+
 type ArchiveModel = {
   events: WebBlackboxEvent[];
   eventScopeById: Map<string, EventScope>;
@@ -222,6 +237,8 @@ type ArchiveModel = {
   requestPrefix: number[];
   screenshots: ScreenshotRecord[];
   shotByEventId: Map<string, ScreenshotRecord>;
+  screenRecordings: ScreenRecordingRecord[];
+  screenRecordingById: Map<string, ScreenRecordingRecord>;
   pointers: PointerSample[];
   waterfall: NetworkWaterfallEntry[];
   waterfallByReqId: Map<string, NetworkWaterfallEntry>;
@@ -281,6 +298,9 @@ type PlayerState = {
   screenshotTrail: ScreenshotTrailPoint[];
   screenshotUrlCache: Map<string, { url: string; expiresAt: number }>;
   screenshotLoadToken: number;
+  recordingId: string | null;
+  recordingUrlCache: Map<string, { url: string; expiresAt: number }>;
+  recordingLoadToken: number;
   timelineRows: WebBlackboxEvent[];
   progressMarkerSource: ArchiveModel | null;
   progressHoverToken: number;
@@ -353,6 +373,9 @@ const TIMELINE_OVERSCAN = 8;
 const MAX_PROGRESS_MARKERS_PER_KIND = 120;
 const TRAIL_WINDOW_MS = 3_500;
 const SCREENSHOT_OBJECT_URL_TTL_MS = 5 * 60 * 1000;
+const SCREEN_RECORDING_OBJECT_URL_TTL_MS = 5 * 60 * 1000;
+const SCREEN_RECORDING_SYNC_DRIFT_SECONDS = 0.35;
+const SCREEN_RECORDING_SEEK_DRIFT_SECONDS = 0.04;
 const PANEL_RENDER_BUCKET_MS = 120;
 const PLAYBACK_STEP_MS = 1_000;
 const TRIAGE_SLOW_REQUEST_MS = 1_000;
@@ -428,6 +451,9 @@ const state: PlayerState = {
   screenshotTrail: [],
   screenshotUrlCache: new Map<string, { url: string; expiresAt: number }>(),
   screenshotLoadToken: 0,
+  recordingId: null,
+  recordingUrlCache: new Map<string, { url: string; expiresAt: number }>(),
+  recordingLoadToken: 0,
   timelineRows: [],
   progressMarkerSource: null,
   progressHoverToken: 0,
@@ -525,6 +551,7 @@ const refs = {
   playbackWindowPanel: getElement<HTMLElement>("playback-window-panel"),
   previewWrap: getElement<HTMLElement>("filmstrip-preview-wrap"),
   preview: getElement<HTMLImageElement>("filmstrip-preview"),
+  recording: getElement<HTMLVideoElement>("filmstrip-recording"),
   stagePlaceholder: getElement<HTMLElement>("stage-placeholder"),
   filmstripMeta: getElement<HTMLElement>("filmstrip-meta"),
   filmstripList: getElement<HTMLUListElement>("filmstrip-list"),
@@ -725,6 +752,7 @@ function bindGlobalActions(): void {
 
     if (Number.isFinite(next) && next > 0) {
       state.playbackRate = next;
+      refs.recording.playbackRate = next;
     }
   });
 
@@ -1000,6 +1028,16 @@ function bindGlobalActions(): void {
   refs.preview.addEventListener("error", () => {
     refs.preview.hidden = true;
     clearScreenshotView(i18n.messages.screenshotDecodeFailed);
+  });
+
+  refs.recording.addEventListener("loadedmetadata", () => {
+    refs.recording.hidden = false;
+    updateStagePlaceholder();
+    syncRecordingElementToPlayhead();
+  });
+
+  refs.recording.addEventListener("error", () => {
+    clearScreenRecordingView(i18n.messages.screenRecordingDecodeFailed);
   });
 
   window.addEventListener("resize", () => {
@@ -2199,6 +2237,7 @@ function startPlayback(): void {
   state.isPlaying = true;
   state.lastTickTs = 0;
   renderPlaybackChrome();
+  syncRecordingElementToPlayhead();
   state.rafId = window.requestAnimationFrame(playbackTick);
 }
 
@@ -2214,6 +2253,7 @@ function pausePlayback(): void {
 
   state.isPlaying = false;
   state.lastTickTs = 0;
+  refs.recording.pause();
   renderPlaybackChrome();
 }
 
@@ -2268,7 +2308,7 @@ function setPlayhead(nextMono: number, options: SetPlayheadOptions = {}): void {
     renderSummary();
   }
 
-  void syncScreenshotForPlayhead(false);
+  void syncStageMediaForPlayhead(false);
 
   if (clamped >= model.maxMono - 0.001 && state.isPlaying) {
     pausePlayback();
@@ -2285,7 +2325,7 @@ async function renderAll(
   renderPlaybackChrome();
   renderPanels();
   renderSummary();
-  await syncScreenshotForPlayhead(Boolean(options.forceScreenshot));
+  await syncStageMediaForPlayhead(Boolean(options.forceScreenshot));
 
   if (options.forcePanels) {
     state.lastPanelBucket = Number.NEGATIVE_INFINITY;
@@ -4054,6 +4094,76 @@ function renderFilmstripList(): void {
     .join("");
 }
 
+async function syncStageMediaForPlayhead(forceReload: boolean): Promise<void> {
+  const model = state.model;
+  const player = state.player;
+
+  if (!model || !player) {
+    clearScreenRecordingElement();
+    clearScreenshotView(i18n.messages.stagePlaceholderLoadArchive);
+    return;
+  }
+
+  const recording = resolveScreenRecordingForMono(model.screenRecordings, state.playheadMono);
+
+  if (recording) {
+    await syncScreenRecordingForPlayhead(recording, forceReload);
+    return;
+  }
+
+  clearScreenRecordingElement();
+  await syncScreenshotForPlayhead(forceReload);
+}
+
+async function syncScreenRecordingForPlayhead(
+  recording: ScreenRecordingRecord,
+  forceReload: boolean
+): Promise<void> {
+  clearScreenshotMedia();
+
+  const sourceChanged =
+    forceReload ||
+    state.recordingId !== recording.recordingId ||
+    !refs.recording.getAttribute("src");
+  state.recordingId = recording.recordingId;
+  refs.recording.playbackRate = state.playbackRate;
+
+  if (sourceChanged) {
+    refs.recording.pause();
+    refs.recording.hidden = true;
+    refs.stagePlaceholder.hidden = false;
+    refs.stagePlaceholder.textContent = i18n.messages.screenRecordingLoading;
+
+    const token = ++state.recordingLoadToken;
+    const url = await getScreenRecordingUrl(recording);
+
+    if (token !== state.recordingLoadToken || state.recordingId !== recording.recordingId) {
+      return;
+    }
+
+    if (!url) {
+      clearScreenRecordingView(
+        i18n.t("screenRecordingMissingBlob", {
+          recordingId: recording.recordingId
+        })
+      );
+      return;
+    }
+
+    if (!isReplayResourceAllowedByDefault(url)) {
+      clearScreenRecordingView(i18n.messages.screenshotNoLoaded);
+      return;
+    }
+
+    refs.recording.src = url;
+    refs.recording.load();
+  }
+
+  refs.filmstripMeta.textContent = describeScreenRecordingMeta(recording);
+  syncRecordingElementToPlayhead(recording);
+  updateStagePlaceholder();
+}
+
 async function syncScreenshotForPlayhead(forceReload: boolean): Promise<void> {
   const model = state.model;
   const player = state.player;
@@ -4224,17 +4334,53 @@ function renderScreenshotTrail(): void {
   trailSvg.innerHTML = `<polyline class="preview-trail-line" points="${polylinePoints}"></polyline>${clickDots}${tailDot}`;
 }
 
-function clearScreenshotView(message: string): void {
+function clearScreenshotMedia(): void {
+  if (
+    state.screenshotShotId === null &&
+    state.screenshotContext === null &&
+    state.screenshotMarker === null &&
+    state.screenshotTrail.length === 0 &&
+    !refs.preview.getAttribute("src")
+  ) {
+    return;
+  }
+
   state.screenshotShotId = null;
   state.screenshotContext = null;
   state.screenshotMarker = null;
   state.screenshotTrail = [];
+  state.screenshotLoadToken += 1;
   refs.preview.hidden = true;
   refs.preview.removeAttribute("src");
+  renderScreenshotOverlay();
+}
+
+function clearScreenshotView(message: string): void {
+  clearScreenshotMedia();
   refs.filmstripMeta.textContent = message;
   refs.stagePlaceholder.hidden = false;
   refs.stagePlaceholder.textContent = message;
-  renderScreenshotOverlay();
+}
+
+function clearScreenRecordingElement(): void {
+  if (state.recordingId === null && !refs.recording.getAttribute("src")) {
+    return;
+  }
+
+  state.recordingId = null;
+  state.recordingLoadToken += 1;
+  refs.recording.pause();
+  refs.recording.hidden = true;
+  refs.recording.removeAttribute("src");
+  refs.recording.load();
+  updateStagePlaceholder();
+}
+
+function clearScreenRecordingView(message: string): void {
+  clearScreenRecordingElement();
+  refs.filmstripMeta.textContent = message;
+  refs.stagePlaceholder.hidden = false;
+  refs.stagePlaceholder.textContent = message;
 }
 
 function updateStagePlaceholder(): void {
@@ -4244,10 +4390,14 @@ function updateStagePlaceholder(): void {
     refs.preview.complete &&
     refs.preview.naturalWidth > 0 &&
     refs.preview.naturalHeight > 0;
+  const hasRecordingSource = Boolean(
+    refs.recording.getAttribute("src") || refs.recording.currentSrc
+  );
+  const hasRenderedRecording = !refs.recording.hidden && hasRecordingSource;
 
-  refs.stagePlaceholder.hidden = hasRenderedImage;
+  refs.stagePlaceholder.hidden = hasRenderedImage || hasRenderedRecording;
 
-  if (hasRenderedImage) {
+  if (hasRenderedImage || hasRenderedRecording) {
     return;
   }
 
@@ -4263,6 +4413,7 @@ function updateStagePlaceholder(): void {
 
 function resetScreenshotResources(): void {
   state.screenshotLoadToken += 1;
+  resetScreenRecordingResources();
   hideProgressHover();
 
   for (const entry of state.screenshotUrlCache.values()) {
@@ -4271,6 +4422,82 @@ function resetScreenshotResources(): void {
 
   state.screenshotUrlCache.clear();
   clearScreenshotView(i18n.messages.stagePlaceholderLoadArchive);
+}
+
+function resetScreenRecordingResources(): void {
+  for (const entry of state.recordingUrlCache.values()) {
+    URL.revokeObjectURL(entry.url);
+  }
+
+  state.recordingUrlCache.clear();
+  clearScreenRecordingElement();
+}
+
+function syncRecordingElementToPlayhead(recording?: ScreenRecordingRecord): void {
+  const activeRecording =
+    recording ??
+    (state.recordingId && state.model
+      ? (state.model.screenRecordingById.get(state.recordingId) ?? null)
+      : null);
+
+  if (!activeRecording || !refs.recording.getAttribute("src") || refs.recording.hidden) {
+    return;
+  }
+
+  const targetSeconds = resolveRecordingOffsetSeconds(activeRecording);
+  const boundedTarget =
+    Number.isFinite(refs.recording.duration) && refs.recording.duration > 0
+      ? Math.min(refs.recording.duration, targetSeconds)
+      : targetSeconds;
+  const drift = Math.abs(refs.recording.currentTime - boundedTarget);
+  const allowedDrift = state.isPlaying
+    ? SCREEN_RECORDING_SYNC_DRIFT_SECONDS
+    : SCREEN_RECORDING_SEEK_DRIFT_SECONDS;
+
+  refs.recording.playbackRate = state.playbackRate;
+
+  if (refs.recording.readyState >= 1 && Number.isFinite(boundedTarget) && drift > allowedDrift) {
+    refs.recording.currentTime = boundedTarget;
+  }
+
+  if (state.isPlaying) {
+    void refs.recording.play().catch(() => undefined);
+    return;
+  }
+
+  refs.recording.pause();
+}
+
+function resolveRecordingOffsetSeconds(recording: ScreenRecordingRecord): number {
+  const timelineOffsetMs = Math.max(0, state.playheadMono - recording.startMono);
+  const maxOffsetMs =
+    recording.durationMs > 0
+      ? recording.durationMs
+      : Math.max(0, recording.endMono - recording.startMono);
+  const boundedOffsetMs =
+    maxOffsetMs > 0 ? Math.min(maxOffsetMs, timelineOffsetMs) : timelineOffsetMs;
+  return Math.max(0, boundedOffsetMs / 1_000);
+}
+
+function describeScreenRecordingMeta(recording: ScreenRecordingRecord): string {
+  const currentMs = Math.min(
+    recording.durationMs || Math.max(0, recording.endMono - recording.startMono),
+    Math.max(0, state.playheadMono - recording.startMono)
+  );
+  const dimensions =
+    typeof recording.width === "number" && typeof recording.height === "number"
+      ? `${recording.width}x${recording.height}`
+      : "-";
+
+  return i18n.t("screenRecordingMeta", {
+    current: formatMono(currentMs),
+    duration: formatMono(
+      recording.durationMs || Math.max(0, recording.endMono - recording.startMono)
+    ),
+    chunks: String(recording.chunkCount || recording.chunks.length),
+    size: typeof recording.size === "number" ? String(recording.size) : "-",
+    dimensions
+  });
 }
 
 function applyTimelineFilters(model: ArchiveModel, visibleCount: number): WebBlackboxEvent[] {
@@ -4462,6 +4689,19 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   const requestPrefix: number[] = [];
   const screenshots: ScreenshotRecord[] = [];
   const shotByEventId = new Map<string, ScreenshotRecord>();
+  const screenRecordingStarts = new Map<
+    string,
+    {
+      eventId: string;
+      mono: number;
+      source: string | null;
+      mime: string | null;
+      width?: number;
+      height?: number;
+    }
+  >();
+  const screenRecordings: ScreenRecordingRecord[] = [];
+  const screenRecordingById = new Map<string, ScreenRecordingRecord>();
   const pointers: PointerSample[] = [];
   const requestScopeByReqId = new Map<string, EventScope>();
 
@@ -4521,6 +4761,34 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
       }
     }
 
+    if (event.type === "screen.recording.start") {
+      const recordingId = asString(data?.recordingId);
+
+      if (recordingId) {
+        screenRecordingStarts.set(recordingId, {
+          eventId: event.id,
+          mono: event.mono,
+          source: asString(data?.source),
+          mime: asString(data?.mime),
+          width: normalizePositiveInteger(data?.width),
+          height: normalizePositiveInteger(data?.height)
+        });
+      }
+    }
+
+    if (event.type === "screen.recording.end") {
+      const recording = readScreenRecordingRecord(
+        event,
+        data,
+        screenRecordingStarts.get(asString(data?.recordingId) ?? "")
+      );
+
+      if (recording) {
+        screenRecordings.push(recording);
+        screenRecordingById.set(recording.recordingId, recording);
+      }
+    }
+
     if (
       event.type === "user.mousemove" ||
       event.type === "user.click" ||
@@ -4545,6 +4813,7 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
   }
 
   screenshots.sort((left, right) => left.mono - right.mono);
+  screenRecordings.sort((left, right) => left.startMono - right.startMono);
   pointers.sort((left, right) => left.mono - right.mono);
 
   const waterfall = player
@@ -4596,6 +4865,8 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
     requestPrefix,
     screenshots,
     shotByEventId,
+    screenRecordings,
+    screenRecordingById,
     pointers,
     waterfall,
     waterfallByReqId,
@@ -4632,6 +4903,67 @@ function buildArchiveModel(player: WebBlackboxPlayer): ArchiveModel {
       actionSpans: derived.actionSpans.length
     }
   };
+}
+
+function readScreenRecordingRecord(
+  event: WebBlackboxEvent,
+  data: Record<string, unknown> | null,
+  start:
+    | {
+        eventId: string;
+        mono: number;
+        source: string | null;
+        mime: string | null;
+        width?: number;
+        height?: number;
+      }
+    | undefined
+): ScreenRecordingRecord | null {
+  const recordingId = asString(data?.recordingId);
+  const chunks = readStringList(data?.chunks);
+
+  if (!recordingId || chunks.length === 0) {
+    return null;
+  }
+
+  const durationMs = Math.max(0, Math.round(asFiniteNumber(data?.durationMs) ?? 0));
+  const fallbackStartMono = durationMs > 0 ? Math.max(0, event.mono - durationMs) : event.mono;
+  const startMono = typeof start?.mono === "number" ? start.mono : fallbackStartMono;
+  const endMono = Math.max(event.mono, startMono);
+  const width = normalizePositiveInteger(data?.width) ?? start?.width;
+  const height = normalizePositiveInteger(data?.height) ?? start?.height;
+
+  return {
+    eventId: event.id,
+    recordingId,
+    source: start?.source ?? null,
+    mime: asString(data?.mime) ?? start?.mime ?? "video/webm",
+    startMono,
+    endMono,
+    durationMs: Math.max(durationMs, Math.round(endMono - startMono)),
+    chunks,
+    chunkCount: Math.max(
+      chunks.length,
+      Math.max(0, Math.round(asFiniteNumber(data?.chunkCount) ?? chunks.length))
+    ),
+    size: asFiniteNumber(data?.size),
+    width,
+    height
+  };
+}
+
+function readStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
 }
 
 function normalizeWaterfallEntry(
@@ -4771,6 +5103,7 @@ function buildProgressMarkers(
     error: [],
     network: [],
     screenshot: [],
+    recording: [],
     action: []
   };
 
@@ -4787,6 +5120,11 @@ function buildProgressMarkers(
 
     if (event.type === "screen.screenshot") {
       buckets.screenshot.push(event.mono);
+      continue;
+    }
+
+    if (event.type === "screen.recording.start" || event.type === "screen.recording.end") {
+      buckets.recording.push(event.mono);
       continue;
     }
 
@@ -4910,6 +5248,29 @@ function resolveShotForMono(
   return screenshots[end] ?? null;
 }
 
+function resolveScreenRecordingForMono(
+  recordings: ScreenRecordingRecord[],
+  mono: number
+): ScreenRecordingRecord | null {
+  if (recordings.length === 0) {
+    return null;
+  }
+
+  const end = upperBoundByMono(recordings, mono, (entry) => entry.startMono) - 1;
+
+  if (end < 0) {
+    return null;
+  }
+
+  const recording = recordings[end] ?? null;
+
+  if (!recording) {
+    return null;
+  }
+
+  return mono <= recording.endMono + 1 ? recording : null;
+}
+
 function renderSignalEvents(
   container: HTMLElement,
   events: WebBlackboxEvent[],
@@ -4974,6 +5335,51 @@ async function getScreenshotUrlByShotId(shotId: string): Promise<string | null> 
   return url;
 }
 
+async function getScreenRecordingUrl(recording: ScreenRecordingRecord): Promise<string | null> {
+  pruneExpiredScreenRecordingUrls();
+  const cached = state.recordingUrlCache.get(recording.recordingId);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.url;
+  }
+
+  if (cached) {
+    URL.revokeObjectURL(cached.url);
+    state.recordingUrlCache.delete(recording.recordingId);
+  }
+
+  const player = state.player;
+
+  if (!player) {
+    return null;
+  }
+
+  const parts: ArrayBuffer[] = [];
+  let mime = recording.mime;
+
+  for (const chunkHash of recording.chunks) {
+    const blob = await player.getBlob(chunkHash);
+
+    if (!blob) {
+      return null;
+    }
+
+    mime = mime || blob.mime;
+    parts.push(toArrayBuffer(blob.bytes));
+  }
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  const url = URL.createObjectURL(new Blob(parts, { type: mime || "video/webm" }));
+  state.recordingUrlCache.set(recording.recordingId, {
+    url,
+    expiresAt: Date.now() + SCREEN_RECORDING_OBJECT_URL_TTL_MS
+  });
+  return url;
+}
+
 function pruneExpiredScreenshotUrls(now = Date.now()): void {
   for (const [shotId, entry] of state.screenshotUrlCache.entries()) {
     if (entry.expiresAt > now) {
@@ -4982,6 +5388,17 @@ function pruneExpiredScreenshotUrls(now = Date.now()): void {
 
     URL.revokeObjectURL(entry.url);
     state.screenshotUrlCache.delete(shotId);
+  }
+}
+
+function pruneExpiredScreenRecordingUrls(now = Date.now()): void {
+  for (const [recordingId, entry] of state.recordingUrlCache.entries()) {
+    if (entry.expiresAt > now) {
+      continue;
+    }
+
+    URL.revokeObjectURL(entry.url);
+    state.recordingUrlCache.delete(recordingId);
   }
 }
 

@@ -22,6 +22,7 @@ describe("PlayerShell", () => {
     const playbackRate = screen.getByLabelText("Speed");
     const playerVersion = screen.getByLabelText("Player version");
     const stagePlaceholder = document.querySelector("#stage-placeholder");
+    const recordingPreview = screen.getByLabelText("Screen recording playback");
 
     expect(archiveInput).toHaveAttribute("type", "file");
     expect(archiveInput).toHaveAttribute("accept", ".webblackbox,.zip");
@@ -32,6 +33,10 @@ describe("PlayerShell", () => {
     expect(playerVersion).toHaveTextContent("v0.1.0");
     expect(stagePlaceholder?.tagName).toBe("LABEL");
     expect(stagePlaceholder).toHaveAttribute("for", "archive-input");
+    expect(recordingPreview).toBeInstanceOf(HTMLVideoElement);
+    expect(recordingPreview).toHaveAttribute("preload", "metadata");
+    expect(recordingPreview).not.toHaveAttribute("controls");
+    expect(recordingPreview).toHaveAttribute("hidden");
 
     expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "-1s" })).toBeInTheDocument();

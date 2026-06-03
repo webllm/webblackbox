@@ -14,6 +14,7 @@ describe("player CSP", () => {
 
     expect(csp).toContain("style-src 'self' 'unsafe-inline'");
     expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("media-src 'self' blob: data:");
     expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
   });
 });

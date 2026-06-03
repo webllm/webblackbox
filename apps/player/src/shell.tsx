@@ -210,6 +210,15 @@ export function PlayerShell({ locale = "en" }: PlayerShellProps = {}): React.JSX
             className="preview"
             hidden
           />
+          <video
+            id="filmstrip-recording"
+            className="preview preview-video"
+            aria-label={messages.previewAltRecordingPlayback}
+            muted
+            playsInline
+            preload="metadata"
+            hidden
+          ></video>
           <svg id="filmstrip-trail-svg" className="preview-trail" aria-hidden="true"></svg>
           <div id="filmstrip-cursor" className="preview-cursor" hidden></div>
           <label id="stage-placeholder" className="stage-placeholder" htmlFor="archive-input">
@@ -301,6 +310,10 @@ export function PlayerShell({ locale = "en" }: PlayerShellProps = {}): React.JSX
               <span className="legend-item">
                 <i className="legend-dot legend-screenshot"></i>
                 {messages.progressLegendScreenshot}
+              </span>
+              <span className="legend-item">
+                <i className="legend-dot legend-recording"></i>
+                {messages.progressLegendRecording}
               </span>
               <span className="legend-item">
                 <i className="legend-dot legend-action"></i>
