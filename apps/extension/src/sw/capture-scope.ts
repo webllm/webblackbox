@@ -8,7 +8,7 @@ export type CaptureScopeOriginChangeInput = {
 export function shouldStopForCaptureScopeOriginChange(
   input: CaptureScopeOriginChangeInput
 ): boolean {
-  if (!input.stopOnOriginChange && !input.activeTabScopedBuild) {
+  if (!input.stopOnOriginChange) {
     return false;
   }
 

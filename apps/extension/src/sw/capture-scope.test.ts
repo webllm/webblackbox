@@ -25,7 +25,18 @@ describe("capture-scope", () => {
     ).toBe(false);
   });
 
-  it("keeps activeTab scoped captures fail-closed on opaque navigations", () => {
+  it("keeps tab-scoped captures active when origin-change stops are disabled", () => {
+    expect(
+      shouldStopForCaptureScopeOriginChange({
+        scopeOrigin: "https://app.example",
+        nextOrigin: "https://admin.example",
+        stopOnOriginChange: false,
+        activeTabScopedBuild: true
+      })
+    ).toBe(false);
+  });
+
+  it("keeps tab-scoped captures active on opaque navigations when origin-change stops are disabled", () => {
     expect(
       shouldStopForCaptureScopeOriginChange({
         scopeOrigin: "https://app.example",
@@ -33,6 +44,6 @@ describe("capture-scope", () => {
         stopOnOriginChange: false,
         activeTabScopedBuild: true
       })
-    ).toBe(true);
+    ).toBe(false);
   });
 });

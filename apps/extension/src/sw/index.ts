@@ -631,6 +631,10 @@ chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   }
 });
 
+chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
+  void stopSession(tabId);
+});
+
 async function handleInboundMessage(
   message: ExtensionInboundMessage,
   port?: PortLike,
@@ -4574,7 +4578,6 @@ function withSessionCapturePolicy(
 ): typeof DEFAULT_RECORDER_CONFIG {
   const basePolicy =
     config.capturePolicy ?? DEFAULT_RECORDER_CONFIG.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
-  const allowedOrigins = context.origin ? [context.origin] : [];
   const capturePolicy: CapturePolicy = {
     ...basePolicy,
     consent: {
@@ -4585,8 +4588,8 @@ function withSessionCapturePolicy(
       ...basePolicy.scope,
       tabId: context.tabId,
       origin: context.origin,
-      allowedOrigins,
-      stopOnOriginChange: true
+      allowedOrigins: [...basePolicy.scope.allowedOrigins],
+      stopOnOriginChange: false
     },
     redaction: config.redaction
   };
