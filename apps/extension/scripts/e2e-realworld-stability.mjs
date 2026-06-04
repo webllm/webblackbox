@@ -10,6 +10,11 @@ const fullchainScript = resolve(root, "e2e-fullchain-demo.mjs");
 const quick = (process.env.WB_E2E_REALWORLD_QUICK ?? "0") === "1";
 const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const basePort = Number(process.env.WB_E2E_REALWORLD_BASE_PORT ?? "9250");
+const scenarioTimeoutMs = readPositiveInteger(
+  process.env.WB_E2E_REALWORLD_SCENARIO_TIMEOUT_MS,
+  120_000
+);
+const scenarioKillGraceMs = readPositiveInteger(process.env.WB_E2E_REALWORLD_KILL_GRACE_MS, 5_000);
 
 const scenarios = [
   {
@@ -93,21 +98,68 @@ function runScenario(scenario, index) {
 
     const child = spawn(process.execPath, [fullchainScript], {
       env,
-      stdio: "inherit"
+      stdio: "inherit",
+      detached: process.platform !== "win32"
     });
 
-    child.on("error", rejectPromise);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      console.error(
+        `Scenario ${scenario.name} exceeded ${scenarioTimeoutMs}ms; terminating child process.`
+      );
+      signalScenarioChild(child, "SIGTERM");
+      setTimeout(() => {
+        signalScenarioChild(child, "SIGKILL");
+      }, scenarioKillGraceMs).unref();
+    }, scenarioTimeoutMs);
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      rejectPromise(error);
+    });
+
     child.on("exit", (code, signal) => {
-      if (code === 0) {
+      clearTimeout(timeout);
+
+      if (code === 0 && !timedOut) {
         resolvePromise();
         return;
       }
 
       rejectPromise(
         new Error(
-          `Scenario ${scenario.name} failed with ${signal ? `signal ${signal}` : `exit code ${code}`}`
+          timedOut
+            ? `Scenario ${scenario.name} exceeded ${scenarioTimeoutMs}ms and exited with ${signal ? `signal ${signal}` : `exit code ${code}`}`
+            : `Scenario ${scenario.name} failed with ${signal ? `signal ${signal}` : `exit code ${code}`}`
         )
       );
     });
   });
+}
+
+function readPositiveInteger(value, fallback) {
+  const numeric = Number(value ?? fallback);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : fallback;
+}
+
+function signalScenarioChild(child, signal) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-child.pid, signal);
+      return;
+    }
+
+    child.kill(signal);
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return;
+    }
+
+    child.kill(signal);
+  }
 }
