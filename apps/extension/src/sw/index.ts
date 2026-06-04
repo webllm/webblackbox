@@ -34,6 +34,7 @@ import {
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type FullModeVisualCapture,
+  type SessionListMessage,
   type SessionListItem
 } from "../shared/messages.js";
 import {
@@ -685,6 +686,17 @@ async function handleInboundMessage(
   if (message.kind === "ui.annotate") {
     await updateSessionAnnotation(message.sid, message.tags, message.note);
     return;
+  }
+
+  if (message.kind === "ui.request-session-list") {
+    const sessionList = buildSessionListMessage();
+
+    if (port) {
+      sendPortMessage(port, sessionList);
+      return;
+    }
+
+    return sessionList;
   }
 
   if (message.kind === "content.marker") {
@@ -4397,6 +4409,10 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
 }
 
 function pushSessionList(): void {
+  broadcast(buildSessionListMessage());
+}
+
+function buildSessionListMessage(): SessionListMessage {
   const sessions: SessionListItem[] = [...sessionsBySid.values()]
     .map((runtime) => toSessionListItem(runtime))
     .sort((left, right) => {
@@ -4409,10 +4425,10 @@ function pushSessionList(): void {
       return right.startedAt - left.startedAt;
     });
 
-  broadcast({
+  return {
     kind: "sw.session-list",
     sessions
-  });
+  };
 }
 
 async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void> {
@@ -4464,19 +4480,23 @@ function resolveUrlOrigin(value: string): string | null {
 
 function broadcast(message: ExtensionOutboundMessage): void {
   for (const port of connectedPorts) {
-    try {
-      port.postMessage(message);
-    } catch (error) {
-      connectedPorts.delete(port);
+    sendPortMessage(port, message);
+  }
+}
 
-      if (offscreenPort === port) {
-        offscreenPort = null;
-      }
+function sendPortMessage(port: PortLike, message: ExtensionOutboundMessage): void {
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    connectedPorts.delete(port);
 
-      logPortSendFailure(message.kind, error, {
-        portName: port.name
-      });
+    if (offscreenPort === port) {
+      offscreenPort = null;
     }
+
+    logPortSendFailure(message.kind, error, {
+      portName: port.name
+    });
   }
 }
 

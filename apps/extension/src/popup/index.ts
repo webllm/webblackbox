@@ -89,6 +89,7 @@ async function bootstrap(container: HTMLElement): Promise<void> {
     applyMessage(message as ExtensionOutboundMessage);
     render(container);
   });
+  postUiMessage({ kind: "ui.request-session-list" });
 
   render(container);
 }

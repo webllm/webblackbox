@@ -58,6 +58,10 @@ export type UiAnnotateSessionMessage = {
   note?: string;
 };
 
+export type UiRequestSessionListMessage = {
+  kind: "ui.request-session-list";
+};
+
 export type ContentEventBatchMessage = {
   kind: "content.events";
   events: RawRecorderEvent[];
@@ -83,6 +87,7 @@ export type ExtensionInboundMessage =
   | UiExportSessionMessage
   | UiDeleteSessionMessage
   | UiAnnotateSessionMessage
+  | UiRequestSessionListMessage
   | ContentEventBatchMessage
   | ContentMarkerMessage
   | ContentReadyMessage

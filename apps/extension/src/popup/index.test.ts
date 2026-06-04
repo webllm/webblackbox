@@ -22,11 +22,18 @@ const EXPORT_PRIVACY_WARNING = {
 };
 
 type PortMessageHandler = (message: unknown) => void;
+type PortPostMessageHandler = (message: unknown, port: FakePort) => void;
 
 class FakePort {
   name = "webblackbox:popup";
-  readonly postMessage = vi.fn();
+  readonly postMessage: ReturnType<typeof vi.fn>;
   private readonly messageHandlers = new Set<PortMessageHandler>();
+
+  constructor(onPostMessage?: PortPostMessageHandler) {
+    this.postMessage = vi.fn((message: unknown) => {
+      onPostMessage?.(message, this);
+    });
+  }
 
   readonly onMessage = {
     addListener: (handler: PortMessageHandler): void => {
@@ -57,16 +64,20 @@ function installChromeStub(
   port: FakePort,
   options: {
     sendMessage?: ReturnType<typeof vi.fn>;
+    onQuery?: () => void | Promise<void>;
   } = {}
 ): void {
-  const query = vi.fn(async () => [
-    {
-      id: 17,
-      active: true,
-      url: "https://example.com",
-      lastAccessed: Date.now()
-    }
-  ]);
+  const query = vi.fn(async () => {
+    await options.onQuery?.();
+    return [
+      {
+        id: 17,
+        active: true,
+        url: "https://example.com",
+        lastAccessed: Date.now()
+      }
+    ];
+  });
   const create = vi.fn(async (details: { url?: string; active?: boolean }) => ({
     id: 99,
     active: details.active ?? true,
@@ -192,6 +203,16 @@ function getStartFullButton(): HTMLButtonElement {
 
   if (!button) {
     throw new Error("missing start full button");
+  }
+
+  return button;
+}
+
+function getStopButton(): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>("[data-action='stop']");
+
+  if (!button) {
+    throw new Error("missing stop button");
   }
 
   return button;
@@ -781,6 +802,45 @@ describe("popup export policy form", () => {
     expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(false);
     expect(getFullVisualCaptureRadio("recording").disabled).toBe(false);
     expect(getFullVisualCaptureRadio("both").disabled).toBe(false);
+  });
+
+  it("refreshes active session state when reopening after the initial connect push was missed", async () => {
+    const activeSessions = [
+      {
+        sid: "sid-full-active",
+        tabId: 17,
+        mode: "full",
+        startedAt: Date.now(),
+        active: true
+      }
+    ];
+    const port = new FakePort((message, currentPort) => {
+      if ((message as { kind?: unknown }).kind === "ui.request-session-list") {
+        currentPort.emit({
+          kind: "sw.session-list",
+          sessions: activeSessions
+        });
+      }
+    });
+    installChromeStub(port, {
+      onQuery: () => {
+        port.emit({
+          kind: "sw.session-list",
+          sessions: activeSessions
+        });
+      }
+    });
+
+    await importPopupModule();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.request-session-list"
+    });
+    expect(getStartFullButton().disabled).toBe(true);
+    expect(getStartLiteButton().disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(true);
+    expect(getStopButton().disabled).toBe(false);
+    expect(document.body.textContent).toContain("Recording (Full)");
   });
 
   it("asks before starting lite with a page reload", async () => {
