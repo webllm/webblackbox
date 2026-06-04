@@ -32,6 +32,7 @@ const {
 
 const root = document.getElementById("popup-root");
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
+const POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY = "webblackbox.popup.full-visual-capture";
 const START_PENDING_TIMEOUT_MS = 45_000;
 const EXPORT_ACK_TIMEOUT_MS = 120_000;
 
@@ -82,6 +83,7 @@ if (root) {
 async function bootstrap(container: HTMLElement): Promise<void> {
   state.tabId = await getActiveTabId();
   state.exportPolicyForm = loadPopupExportPolicyForm();
+  state.fullModeVisualCapture = loadPopupFullVisualCapture();
 
   port?.onMessage.addListener((message) => {
     applyMessage(message as ExtensionOutboundMessage);
@@ -390,6 +392,9 @@ function bindExportPolicyForm(container: HTMLElement): void {
     .querySelector<HTMLInputElement>("#export-include-screenshots")
     ?.addEventListener("change", persistDraft);
   container
+    .querySelector<HTMLInputElement>("#export-include-screen-recordings")
+    ?.addEventListener("change", persistDraft);
+  container
     .querySelector<HTMLInputElement>("#export-alert-sensitive-findings")
     ?.addEventListener("change", persistAlertDraft);
   container
@@ -406,6 +411,7 @@ function bindExportPolicyForm(container: HTMLElement): void {
 
         if (target.checked && isFullModeVisualCapture(target.value)) {
           state.fullModeVisualCapture = target.value;
+          savePopupFullVisualCapture(state.fullModeVisualCapture);
         }
       });
     });
@@ -956,6 +962,31 @@ function savePopupExportPolicyForm(policy: PopupExportPolicyForm): void {
 
   try {
     localStorage.setItem(POPUP_EXPORT_POLICY_STORAGE_KEY, JSON.stringify(policy));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function loadPopupFullVisualCapture(): FullModeVisualCapture {
+  if (typeof localStorage === "undefined") {
+    return "screenshots";
+  }
+
+  try {
+    const raw = localStorage.getItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY);
+    return raw && isFullModeVisualCapture(raw) ? raw : "screenshots";
+  } catch {
+    return "screenshots";
+  }
+}
+
+function savePopupFullVisualCapture(value: FullModeVisualCapture): void {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+
+  try {
+    localStorage.setItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY, value);
   } catch {
     // ignore storage write failures
   }

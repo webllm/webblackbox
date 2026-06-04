@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
+const POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY = "webblackbox.popup.full-visual-capture";
 const EXPORT_PRIVACY_WARNING = {
   findingCount: 2,
   summary: "email in event:E-1, jwt in event:E-2",
@@ -121,6 +122,16 @@ function getSensitiveAlertCheckbox(): HTMLInputElement {
 
   if (!checkbox) {
     throw new Error("missing sensitive alert checkbox");
+  }
+
+  return checkbox;
+}
+
+function getScreenRecordingsCheckbox(): HTMLInputElement {
+  const checkbox = document.querySelector<HTMLInputElement>("#export-include-screen-recordings");
+
+  if (!checkbox) {
+    throw new Error("missing screen recordings checkbox");
   }
 
   return checkbox;
@@ -284,21 +295,26 @@ describe("popup export policy form", () => {
     localStorage.clear();
   });
 
-  it("preserves the screenshots toggle and numeric draft fields across popup rerenders", async () => {
+  it("preserves archive policy draft fields across popup rerenders and reopen", async () => {
     const port = new FakePort();
     installChromeStub(port);
 
     await importPopupModule();
 
     const checkbox = getCheckbox();
+    const screenRecordings = getScreenRecordingsCheckbox();
     const sensitiveAlert = getSensitiveAlertCheckbox();
     const maxArchiveMb = getMaxArchiveInput();
     const recentMinutes = getRecentMinutesInput();
 
     expect(checkbox.checked).toBe(false);
+    expect(screenRecordings.checked).toBe(false);
     expect(sensitiveAlert.checked).toBe(true);
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+
+    screenRecordings.checked = true;
+    screenRecordings.dispatchEvent(new Event("change", { bubbles: true }));
 
     maxArchiveMb.value = "256";
     maxArchiveMb.dispatchEvent(new Event("input", { bubbles: true }));
@@ -316,16 +332,27 @@ describe("popup export policy form", () => {
     await flushPopup();
 
     expect(getCheckbox().checked).toBe(true);
+    expect(getScreenRecordingsCheckbox().checked).toBe(true);
     expect(getSensitiveAlertCheckbox().checked).toBe(false);
     expect(getMaxArchiveInput().value).toBe("256");
     expect(getRecentMinutesInput().value).toBe("45");
     expect(JSON.parse(localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY) ?? "null")).toEqual({
       includeScreenshots: true,
-      includeScreenRecordings: false,
+      includeScreenRecordings: true,
       alertSensitiveFindings: false,
       maxArchiveMb: "256",
       recentMinutes: "45"
     });
+
+    document.body.innerHTML = `<main id="popup-root"></main>`;
+    installChromeStub(new FakePort());
+    await importPopupModule();
+
+    expect(getCheckbox().checked).toBe(true);
+    expect(getScreenRecordingsCheckbox().checked).toBe(true);
+    expect(getSensitiveAlertCheckbox().checked).toBe(false);
+    expect(getMaxArchiveInput().value).toBe("256");
+    expect(getRecentMinutesInput().value).toBe("45");
   });
 
   it("exports the updated draft policy instead of the stale default values", async () => {
@@ -907,6 +934,37 @@ describe("popup export policy form", () => {
       tabId: 17,
       mode: "full",
       visualCapture: "both"
+    });
+  });
+
+  it("preserves the full visual capture mode across popup reopen", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    const recording = getFullVisualCaptureRadio("recording");
+    recording.checked = true;
+    recording.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(localStorage.getItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY)).toBe("recording");
+
+    document.body.innerHTML = `<main id="popup-root"></main>`;
+    const reopenedPort = new FakePort();
+    installChromeStub(reopenedPort);
+    await importPopupModule();
+
+    expect(getFullVisualCaptureRadio("screenshots").checked).toBe(false);
+    expect(getFullVisualCaptureRadio("recording").checked).toBe(true);
+
+    getStartFullButton().click();
+    await flushPopup();
+
+    expect(reopenedPort.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "full",
+      visualCapture: "recording"
     });
   });
 
