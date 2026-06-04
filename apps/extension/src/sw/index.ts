@@ -62,7 +62,10 @@ import {
   resolveLiteBodyCaptureRule as resolveLiteBodyCaptureRuleUtil,
   transformResponseBodyForCapture
 } from "./body-capture-utils.js";
-import { shouldStopForCaptureScopeOriginChange } from "./capture-scope.js";
+import {
+  shouldStopForCaptureScopeOriginChange,
+  shouldStopForEnterpriseOriginPolicy as shouldStopForEnterpriseOriginPolicyInput
+} from "./capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
 import {
   buildLiteNetworkFailureRawEvent,
@@ -4368,6 +4371,15 @@ async function resolveTabSessionMetadata(
 }
 
 function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
+  void updateSessionMetadataFromEventAsync(runtime, event).catch((error) => {
+    console.warn("[WebBlackbox] failed to update session navigation metadata", error);
+  });
+}
+
+async function updateSessionMetadataFromEventAsync(
+  runtime: SessionRuntime,
+  event: WebBlackboxEvent
+): Promise<void> {
   if (
     event.type !== "nav.commit" &&
     event.type !== "nav.history.push" &&
@@ -4394,7 +4406,12 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
     const nextOrigin = resolveUrlOrigin(sanitizedNextUrl);
 
     if (shouldStopOnOriginChange(runtime, nextOrigin)) {
-      void stopSession(runtime.tabId);
+      await stopSession(runtime.tabId);
+      return;
+    }
+
+    if (await shouldStopForEnterpriseOriginPolicy(nextOrigin)) {
+      await stopSession(runtime.tabId);
       return;
     }
 
@@ -4450,6 +4467,11 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     return;
   }
 
+  if (await shouldStopForEnterpriseOriginPolicy(nextOrigin)) {
+    await stopSession(tabId);
+    return;
+  }
+
   if (nextUrl !== runtime.url) {
     runtime.url = nextUrl;
     pushSessionList();
@@ -4462,6 +4484,15 @@ function shouldStopOnOriginChange(runtime: SessionRuntime, nextOrigin: string | 
     nextOrigin,
     stopOnOriginChange: runtime.config.capturePolicy?.scope.stopOnOriginChange === true,
     activeTabScopedBuild: isActiveTabScopedBuild()
+  });
+}
+
+async function shouldStopForEnterpriseOriginPolicy(nextOrigin: string | null): Promise<boolean> {
+  const enterprisePolicy = await loadEnterprisePolicy();
+
+  return shouldStopForEnterpriseOriginPolicyInput({
+    nextOrigin,
+    isEnterpriseOriginAllowed: (origin) => isEnterpriseOriginAllowed(origin, enterprisePolicy)
   });
 }
 
