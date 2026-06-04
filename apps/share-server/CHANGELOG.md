@@ -1,5 +1,16 @@
 # @webblackbox/share-server
 
+## 0.6.0
+
+### Minor Changes
+
+- No share-server runtime changes shipped in this release. The version bump keeps hosted sharing aligned with Player SDK 0.6.0 archive metadata support.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/player-sdk@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

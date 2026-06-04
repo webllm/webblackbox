@@ -1,5 +1,23 @@
 # @webblackbox/extension
 
+## 0.6.0
+
+### Minor Changes
+
+- Added Lite-mode reload confirmation so users can choose whether to reload the current page before capture starts.
+- Added Full visual capture modes for screenshots, tab recording, both, or none, with popup state persistence and export policy derived from the selected visual mode.
+- Added full-mode tab screen recording capture, kept tab-scoped recordings active across same-tab navigations, and enforced enterprise site policy after navigation.
+- Improved popup session recovery on reopen so active start/stop state is refreshed even if the initial service-worker push was missed.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/cdp-router@0.6.0
+  - @webblackbox/pipeline@0.6.0
+  - @webblackbox/protocol@0.6.0
+  - @webblackbox/recorder@0.6.0
+  - webblackbox@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

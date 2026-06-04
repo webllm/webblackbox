@@ -1,5 +1,19 @@
 # @webblackbox/player
 
+## 0.6.0
+
+### Minor Changes
+
+- Added screen-recording playback in the main stage, including WebM/MP4 blob loading, recording timeline markers, metadata, and synchronized seeking.
+- Unified recording playback with the existing log playback progress bar so screenshots, recordings, actions, network, and errors share one timeline control.
+- Updated Player CSP and localized UI strings for browser-safe video playback from archive blobs.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/player-sdk@0.6.0
+  - @webblackbox/protocol@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

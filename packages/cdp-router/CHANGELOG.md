@@ -1,5 +1,16 @@
 # @webblackbox/cdp-router
 
+## 0.6.0
+
+### Minor Changes
+
+- No CDP router API changes shipped in this release. The 0.6.0 bump keeps the package aligned with protocol screen-recording event schema updates.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

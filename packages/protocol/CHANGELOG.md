@@ -1,5 +1,13 @@
 # @webblackbox/protocol
 
+## 0.6.0
+
+### Minor Changes
+
+- Added screen-recording event types, validation schemas, and privacy categories for archive playback and filtering.
+- Added `screenRecordings` capture policy and `includeScreenRecordings` export policy fields.
+- Added WebM and MP4 blob MIME/extension inference for screen-recording chunks.
+
 ## 0.5.0
 
 ### Minor Changes

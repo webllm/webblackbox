@@ -1,5 +1,16 @@
 # @webblackbox/mcp-server
 
+## 0.6.0
+
+### Minor Changes
+
+- No MCP server runtime or CLI changes shipped in this release. The package picks up Player SDK archive support for 0.6.0 screen-recording metadata.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/player-sdk@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

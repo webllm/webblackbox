@@ -1,5 +1,18 @@
 # webblackbox
 
+## 0.6.0
+
+### Minor Changes
+
+- Added the Lite SDK `includeScreenRecordings` export option so browser exports can include or exclude captured recording artifacts independently.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/pipeline@0.6.0
+  - @webblackbox/protocol@0.6.0
+  - @webblackbox/recorder@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

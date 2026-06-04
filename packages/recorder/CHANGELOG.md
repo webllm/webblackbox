@@ -1,5 +1,17 @@
 # @webblackbox/recorder
 
+## 0.6.0
+
+### Minor Changes
+
+- Normalized `screen.recording.*` raw events into protocol events.
+- Classified screen recordings as high-sensitivity capture data and enforced the `screenRecordings` capture-policy gate.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

@@ -1,5 +1,17 @@
 # @webblackbox/pipeline
 
+## 0.6.0
+
+### Minor Changes
+
+- Added independent export filtering for screen-recording events and blobs through `includeScreenRecordings`.
+- Included screen-recording selection in export transfer-policy metadata and low-risk plaintext override checks.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

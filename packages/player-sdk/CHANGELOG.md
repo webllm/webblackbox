@@ -1,5 +1,16 @@
 # @webblackbox/player-sdk
 
+## 0.6.0
+
+### Minor Changes
+
+- No Player SDK runtime changes shipped in this release. The package picks up protocol 0.6.0 support for screen-recording archive events and transfer metadata.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webblackbox/protocol@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes
