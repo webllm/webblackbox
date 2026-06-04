@@ -28,6 +28,11 @@ const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-fullchain-
 const chromeReadyTimeoutMs = Number(process.env.WB_E2E_CHROME_READY_TIMEOUT_MS ?? "25000");
 const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ?? "2");
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
+const downloadApiTimeoutMs = readPositiveInteger(
+  process.env.WB_E2E_DOWNLOAD_API_TIMEOUT_MS,
+  12_000
+);
+const cdpCommandTimeoutMs = readPositiveInteger(process.env.WB_E2E_CDP_COMMAND_TIMEOUT_MS, 15_000);
 const captureMode = process.env.WB_E2E_MODE === "lite" ? "lite" : "full";
 const reloadAfterStart = (process.env.WB_E2E_RELOAD_AFTER_START ?? "0") === "1";
 const fullVisualCapture = normalizeFullVisualCaptureMode(
@@ -58,6 +63,11 @@ const realWorldLargeResponseBytes = Number(
 
 function normalizeFullVisualCaptureMode(value) {
   return value === "recording" || value === "both" || value === "none" ? value : "screenshots";
+}
+
+function readPositiveInteger(value, fallback) {
+  const numeric = Number(value ?? fallback);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : fallback;
 }
 
 const chromeCandidates = [
@@ -454,9 +464,12 @@ async function main() {
   assert(exportStatus?.ok, "Export status indicates failure", exportStatus);
 
   const downloadClient = control.kind === "popup" ? control.client : state.swClient;
-  const downloadRecord = downloadClient
-    ? await waitForExportedDownload(downloadClient, sid, exportStartedAtMs, downloadTimeoutMs)
-    : await waitForExportedArchiveFile(sid, exportStartedAtMs, downloadTimeoutMs);
+  const downloadRecord = await waitForExportedDownloadWithFallback(
+    downloadClient,
+    sid,
+    exportStartedAtMs,
+    downloadTimeoutMs
+  );
   assert(typeof downloadRecord?.filename === "string", "Download record missing filename", {
     downloadRecord
   });
@@ -2589,6 +2602,25 @@ async function waitForExportStatus(popupClient, previousStatus, timeoutMs) {
   );
 }
 
+async function waitForExportedDownloadWithFallback(downloadClient, sid, startedAtMs, timeoutMs) {
+  if (downloadClient) {
+    try {
+      return await waitForExportedDownload(
+        downloadClient,
+        sid,
+        startedAtMs,
+        Math.min(timeoutMs, downloadApiTimeoutMs)
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Download API lookup failed; falling back to archive file scan: ${message}`);
+    }
+  }
+
+  const remainingMs = Math.max(1_000, timeoutMs - (Date.now() - startedAtMs));
+  return waitForExportedArchiveFile(sid, startedAtMs, remainingMs);
+}
+
 async function waitForExportedDownload(popupClient, sid, startedAtMs, timeoutMs) {
   const expression = `
     (async () => {
@@ -4479,6 +4511,7 @@ class CdpClient {
 
       socket.addEventListener("close", () => {
         for (const pending of this.pending.values()) {
+          clearTimeout(pending.timer);
           pending.reject(new Error("CDP socket closed"));
         }
         this.pending.clear();
@@ -4495,6 +4528,7 @@ class CdpClient {
           }
 
           this.pending.delete(payload.id);
+          clearTimeout(pending.timer);
 
           if (payload.error) {
             pending.reject(new Error(payload.error.message ?? JSON.stringify(payload.error)));
@@ -4522,7 +4556,7 @@ class CdpClient {
     this.eventHandlers.set(method, handlers);
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = cdpCommandTimeoutMs) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("CDP socket is not open"));
     }
@@ -4531,8 +4565,20 @@ class CdpClient {
     const message = JSON.stringify({ id, method, params });
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(message);
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP command timed out after ${timeoutMs}ms: ${method}`));
+      }, timeoutMs);
+
+      this.pending.set(id, { resolve, reject, timer });
+
+      try {
+        this.socket.send(message);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -4553,6 +4599,12 @@ class CdpClient {
   }
 
   close() {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("CDP client closed"));
+    }
+    this.pending.clear();
+
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.close();
     }
