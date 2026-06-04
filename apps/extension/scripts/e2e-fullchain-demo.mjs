@@ -210,7 +210,7 @@ async function main() {
   await demoClient.send("DOM.enable");
   state.demoClient = demoClient;
 
-  const usePopupControl = captureMode === "full" || usePopupUiActions;
+  const usePopupControl = recordScreenInFullMode || usePopupUiActions;
   let usePopupUiActionsEffective = recordScreenInFullMode ? false : usePopupUiActions;
   let control = null;
 
