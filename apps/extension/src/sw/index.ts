@@ -1117,6 +1117,8 @@ async function exportSession(
     };
   }
 
+  const effectivePolicy = resolveSessionExportPolicy(runtime, policy);
+
   try {
     if (!runtime.stoppedAt) {
       await stopSession(runtime.tabId);
@@ -1128,10 +1130,10 @@ async function exportSession(
     const exported = await enqueueWithResult(runtime, async () => {
       return runtime.pipeline.exportAndDownload({
         passphrase: encrypted ? passphrase : undefined,
-        includeScreenshots: policy.includeScreenshots,
-        includeScreenRecordings: policy.includeScreenRecordings,
-        maxArchiveBytes: policy.maxArchiveBytes,
-        recentWindowMs: policy.recentWindowMs,
+        includeScreenshots: effectivePolicy.includeScreenshots,
+        includeScreenRecordings: effectivePolicy.includeScreenRecordings,
+        maxArchiveBytes: effectivePolicy.maxArchiveBytes,
+        recentWindowMs: effectivePolicy.recentWindowMs,
         allowPlaintextLocalExport: !encrypted
       });
     });
@@ -1145,10 +1147,10 @@ async function exportSession(
       mode: runtime.mode,
       outcome: "ok",
       encrypted,
-      includeScreenshots: policy.includeScreenshots,
-      includeScreenRecordings: policy.includeScreenRecordings,
-      maxArchiveBytes: policy.maxArchiveBytes,
-      recentWindowMs: policy.recentWindowMs,
+      includeScreenshots: effectivePolicy.includeScreenshots,
+      includeScreenRecordings: effectivePolicy.includeScreenRecordings,
+      maxArchiveBytes: effectivePolicy.maxArchiveBytes,
+      recentWindowMs: effectivePolicy.recentWindowMs,
       sizeBytes: exported.sizeBytes,
       downloadId: exported.downloadId
     });
@@ -1178,10 +1180,10 @@ async function exportSession(
       mode: runtime.mode,
       outcome: "error",
       encrypted: hasExportPassphrase(passphrase),
-      includeScreenshots: policy.includeScreenshots,
-      includeScreenRecordings: policy.includeScreenRecordings,
-      maxArchiveBytes: policy.maxArchiveBytes,
-      recentWindowMs: policy.recentWindowMs,
+      includeScreenshots: effectivePolicy.includeScreenshots,
+      includeScreenRecordings: effectivePolicy.includeScreenRecordings,
+      maxArchiveBytes: effectivePolicy.maxArchiveBytes,
+      recentWindowMs: effectivePolicy.recentWindowMs,
       error: redactOperationalMessage(message)
     });
     console.warn("[WebBlackbox] export failed", error);
@@ -1196,6 +1198,24 @@ async function exportSession(
       error: message
     };
   }
+}
+
+function resolveSessionExportPolicy(runtime: SessionRuntime, policy: ExportPolicy): ExportPolicy {
+  if (runtime.mode !== "full") {
+    return policy;
+  }
+
+  const categories = runtime.config.capturePolicy?.categories;
+
+  if (!categories) {
+    return policy;
+  }
+
+  return {
+    ...policy,
+    includeScreenshots: categories.screenshots !== "off",
+    includeScreenRecordings: categories.screenRecordings === "allow"
+  };
 }
 
 function hasExportPassphrase(passphrase: string | undefined): passphrase is string {
@@ -4558,7 +4578,7 @@ function resolveFullModeVisualCapture(
 }
 
 function isFullModeVisualCapture(value: unknown): value is FullModeVisualCapture {
-  return value === "screenshots" || value === "recording" || value === "both";
+  return value === "screenshots" || value === "recording" || value === "both" || value === "none";
 }
 
 function applyFullModeVisualCapture(
@@ -4572,8 +4592,9 @@ function applyFullModeVisualCapture(
 
   const basePolicy =
     config.capturePolicy ?? DEFAULT_RECORDER_CONFIG.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
-  const screenshots = visualCapture === "recording" ? "off" : "allow";
-  const screenRecordings = visualCapture === "screenshots" ? "off" : "allow";
+  const screenshots = visualCapture === "screenshots" || visualCapture === "both" ? "allow" : "off";
+  const screenRecordings =
+    visualCapture === "recording" || visualCapture === "both" ? "allow" : "off";
 
   return {
     ...config,

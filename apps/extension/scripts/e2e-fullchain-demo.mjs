@@ -45,8 +45,8 @@ const usePopupUiActions =
     : process.env.WB_E2E_USE_POPUP_UI !== "0";
 const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "webblackbox-e2e-passphrase";
 const e2eExportPolicy = {
-  includeScreenshots: true,
-  includeScreenRecordings: true,
+  includeScreenshots: captureScreenshotsInFullMode,
+  includeScreenRecordings: recordScreenInFullMode,
   maxArchiveBytes: 100 * 1024 * 1024,
   recentWindowMs: 20 * 60 * 1000
 };
@@ -57,7 +57,7 @@ const realWorldLargeResponseBytes = Number(
 );
 
 function normalizeFullVisualCaptureMode(value) {
-  return value === "recording" || value === "both" ? value : "screenshots";
+  return value === "recording" || value === "both" || value === "none" ? value : "screenshots";
 }
 
 const chromeCandidates = [
@@ -2457,19 +2457,6 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
 
         try {
           globalThis.prompt = () => "";
-
-          const includeScreenshots = document.querySelector('#export-include-screenshots');
-          const includeScreenRecordings = document.querySelector('#export-include-screen-recordings');
-
-          if (includeScreenshots instanceof HTMLInputElement) {
-            includeScreenshots.checked = true;
-            includeScreenshots.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-
-          if (includeScreenRecordings instanceof HTMLInputElement) {
-            includeScreenRecordings.checked = true;
-            includeScreenRecordings.dispatchEvent(new Event('change', { bubbles: true }));
-          }
 
           button.click();
 

@@ -37,8 +37,6 @@ const START_PENDING_TIMEOUT_MS = 45_000;
 const EXPORT_ACK_TIMEOUT_MS = 120_000;
 
 type PopupExportPolicyForm = {
-  includeScreenshots: boolean;
-  includeScreenRecordings: boolean;
   alertSensitiveFindings: boolean;
   maxArchiveMb: string;
   recentMinutes: string;
@@ -349,7 +347,7 @@ function bindActions(
       return;
     }
 
-    const policy = readExportPolicyFromForm(container);
+    const policy = readExportPolicyFromForm(container, exportSession);
 
     await exportSessionFromPopup(container, exportSession.sid, passphrase, policy);
   });
@@ -389,12 +387,6 @@ function bindExportPolicyForm(container: HTMLElement): void {
     }
   };
 
-  container
-    .querySelector<HTMLInputElement>("#export-include-screenshots")
-    ?.addEventListener("change", persistDraft);
-  container
-    .querySelector<HTMLInputElement>("#export-include-screen-recordings")
-    ?.addEventListener("change", persistDraft);
   container
     .querySelector<HTMLInputElement>("#export-alert-sensitive-findings")
     ?.addEventListener("change", persistAlertDraft);
@@ -896,17 +888,20 @@ function isRecordableTabUrl(url: string | undefined): boolean {
   return true;
 }
 
-function readExportPolicyFromForm(container: HTMLElement): ExportPolicy {
+function readExportPolicyFromForm(
+  container: HTMLElement,
+  exportSession?: SessionListItem
+): ExportPolicy {
   state.exportPolicyForm = readPopupExportPolicyFormFromContainer(container);
   savePopupExportPolicyForm(state.exportPolicyForm);
 
-  return toExportPolicy(state.exportPolicyForm);
+  const visualCapture = exportSession?.mode === "full" ? state.fullModeVisualCapture : "none";
+
+  return toExportPolicy(state.exportPolicyForm, visualCapture);
 }
 
 function toPopupExportPolicyForm(policy: ExportPolicy): PopupExportPolicyForm {
   return {
-    includeScreenshots: policy.includeScreenshots,
-    includeScreenRecordings: policy.includeScreenRecordings,
     alertSensitiveFindings: true,
     maxArchiveMb: String(Math.max(1, Math.round(policy.maxArchiveBytes / (1024 * 1024)))),
     recentMinutes: String(Math.max(1, Math.round(policy.recentWindowMs / (60 * 1000))))
@@ -928,14 +923,6 @@ function loadPopupExportPolicyForm(): PopupExportPolicyForm {
     const parsed = JSON.parse(raw) as Partial<PopupExportPolicyForm>;
 
     return {
-      includeScreenshots:
-        typeof parsed.includeScreenshots === "boolean"
-          ? parsed.includeScreenshots
-          : DEFAULT_EXPORT_POLICY.includeScreenshots,
-      includeScreenRecordings:
-        typeof parsed.includeScreenRecordings === "boolean"
-          ? parsed.includeScreenRecordings
-          : DEFAULT_EXPORT_POLICY.includeScreenRecordings,
       alertSensitiveFindings:
         typeof parsed.alertSensitiveFindings === "boolean" ? parsed.alertSensitiveFindings : true,
       maxArchiveMb: normalizeStoredBoundedIntText(
@@ -997,25 +984,11 @@ function writeExportPolicyFormToContainer(
   container: HTMLElement,
   form: PopupExportPolicyForm
 ): void {
-  const includeScreenshots = container.querySelector<HTMLInputElement>(
-    "#export-include-screenshots"
-  );
-  const includeScreenRecordings = container.querySelector<HTMLInputElement>(
-    "#export-include-screen-recordings"
-  );
   const alertSensitiveFindings = container.querySelector<HTMLInputElement>(
     "#export-alert-sensitive-findings"
   );
   const maxArchiveMb = container.querySelector<HTMLInputElement>("#export-max-size-mb");
   const recentMinutes = container.querySelector<HTMLInputElement>("#export-recent-minutes");
-
-  if (includeScreenshots) {
-    includeScreenshots.checked = form.includeScreenshots;
-  }
-
-  if (includeScreenRecordings) {
-    includeScreenRecordings.checked = form.includeScreenRecordings;
-  }
 
   if (alertSensitiveFindings) {
     alertSensitiveFindings.checked = form.alertSensitiveFindings;
@@ -1032,12 +1005,6 @@ function writeExportPolicyFormToContainer(
 
 function readPopupExportPolicyFormFromContainer(container: HTMLElement): PopupExportPolicyForm {
   return {
-    includeScreenshots:
-      container.querySelector<HTMLInputElement>("#export-include-screenshots")?.checked ??
-      state.exportPolicyForm.includeScreenshots,
-    includeScreenRecordings:
-      container.querySelector<HTMLInputElement>("#export-include-screen-recordings")?.checked ??
-      state.exportPolicyForm.includeScreenRecordings,
     alertSensitiveFindings:
       container.querySelector<HTMLInputElement>("#export-alert-sensitive-findings")?.checked ??
       state.exportPolicyForm.alertSensitiveFindings,
@@ -1050,7 +1017,10 @@ function readPopupExportPolicyFormFromContainer(container: HTMLElement): PopupEx
   };
 }
 
-function toExportPolicy(form: PopupExportPolicyForm): ExportPolicy {
+function toExportPolicy(
+  form: PopupExportPolicyForm,
+  visualCapture: FullModeVisualCapture
+): ExportPolicy {
   const defaultPolicyForm = toPopupExportPolicyForm(DEFAULT_EXPORT_POLICY);
   const maxArchiveMb = normalizeBoundedInt(
     Number(form.maxArchiveMb),
@@ -1064,12 +1034,22 @@ function toExportPolicy(form: PopupExportPolicyForm): ExportPolicy {
     1,
     43_200
   );
+  const visualExport = resolveVisualExportPolicy(visualCapture);
 
   return {
-    includeScreenshots: form.includeScreenshots,
-    includeScreenRecordings: form.includeScreenRecordings,
+    includeScreenshots: visualExport.includeScreenshots,
+    includeScreenRecordings: visualExport.includeScreenRecordings,
     maxArchiveBytes: maxArchiveMb * 1024 * 1024,
     recentWindowMs: recentMinutes * 60 * 1000
+  };
+}
+
+function resolveVisualExportPolicy(
+  visualCapture: FullModeVisualCapture
+): Pick<ExportPolicy, "includeScreenshots" | "includeScreenRecordings"> {
+  return {
+    includeScreenshots: visualCapture === "screenshots" || visualCapture === "both",
+    includeScreenRecordings: visualCapture === "recording" || visualCapture === "both"
   };
 }
 
@@ -1222,7 +1202,8 @@ function createFullModeRecordingSection(disabled: boolean): HTMLElement {
   const options: Array<{ value: FullModeVisualCapture; label: string }> = [
     { value: "screenshots", label: t("popupFullVisualScreenshots") },
     { value: "recording", label: t("popupFullVisualRecording") },
-    { value: "both", label: t("popupFullVisualBoth") }
+    { value: "both", label: t("popupFullVisualBoth") },
+    { value: "none", label: t("popupFullVisualNone") }
   ];
 
   for (const option of options) {
@@ -1246,7 +1227,7 @@ function createFullModeRecordingSection(disabled: boolean): HTMLElement {
 }
 
 function isFullModeVisualCapture(value: string): value is FullModeVisualCapture {
-  return value === "screenshots" || value === "recording" || value === "both";
+  return value === "screenshots" || value === "recording" || value === "both" || value === "none";
 }
 
 function createActionButton(
@@ -1271,28 +1252,6 @@ function createArchivePolicySection(): HTMLElement {
   const title = document.createElement("p");
   title.className = "wb-popup__policy-title";
   title.textContent = t("popupArchivePolicyTitle");
-
-  const toggleLabel = document.createElement("label");
-  toggleLabel.className = "wb-toggle";
-
-  const includeScreenshots = document.createElement("input");
-  includeScreenshots.id = "export-include-screenshots";
-  includeScreenshots.type = "checkbox";
-
-  const toggleText = document.createElement("span");
-  toggleText.textContent = t("popupIncludeScreenshots");
-  toggleLabel.append(includeScreenshots, toggleText);
-
-  const recordingToggleLabel = document.createElement("label");
-  recordingToggleLabel.className = "wb-toggle";
-
-  const includeScreenRecordings = document.createElement("input");
-  includeScreenRecordings.id = "export-include-screen-recordings";
-  includeScreenRecordings.type = "checkbox";
-
-  const recordingToggleText = document.createElement("span");
-  recordingToggleText.textContent = t("popupIncludeScreenRecordings");
-  recordingToggleLabel.append(includeScreenRecordings, recordingToggleText);
 
   const sensitiveToggleLabel = document.createElement("label");
   sensitiveToggleLabel.className = "wb-toggle";
@@ -1331,15 +1290,6 @@ function createArchivePolicySection(): HTMLElement {
   recentInput.step = "1";
   recentInput.className = "wb-input";
 
-  section.append(
-    title,
-    toggleLabel,
-    recordingToggleLabel,
-    sensitiveToggleLabel,
-    sizeLabel,
-    sizeInput,
-    recentLabel,
-    recentInput
-  );
+  section.append(title, sensitiveToggleLabel, sizeLabel, sizeInput, recentLabel, recentInput);
   return section;
 }

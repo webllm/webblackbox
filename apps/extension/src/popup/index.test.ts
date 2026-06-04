@@ -118,31 +118,11 @@ async function flushPopupWithFakeTimers(): Promise<void> {
   await Promise.resolve();
 }
 
-function getCheckbox(): HTMLInputElement {
-  const checkbox = document.querySelector<HTMLInputElement>("#export-include-screenshots");
-
-  if (!checkbox) {
-    throw new Error("missing screenshots checkbox");
-  }
-
-  return checkbox;
-}
-
 function getSensitiveAlertCheckbox(): HTMLInputElement {
   const checkbox = document.querySelector<HTMLInputElement>("#export-alert-sensitive-findings");
 
   if (!checkbox) {
     throw new Error("missing sensitive alert checkbox");
-  }
-
-  return checkbox;
-}
-
-function getScreenRecordingsCheckbox(): HTMLInputElement {
-  const checkbox = document.querySelector<HTMLInputElement>("#export-include-screen-recordings");
-
-  if (!checkbox) {
-    throw new Error("missing screen recordings checkbox");
   }
 
   return checkbox;
@@ -218,7 +198,9 @@ function getStopButton(): HTMLButtonElement {
   return button;
 }
 
-function getFullVisualCaptureRadio(value: "screenshots" | "recording" | "both"): HTMLInputElement {
+function getFullVisualCaptureRadio(
+  value: "screenshots" | "recording" | "both" | "none"
+): HTMLInputElement {
   const radio = document.querySelector<HTMLInputElement>(
     `input[name='full-visual-capture'][value='${value}']`
   );
@@ -322,20 +304,13 @@ describe("popup export policy form", () => {
 
     await importPopupModule();
 
-    const checkbox = getCheckbox();
-    const screenRecordings = getScreenRecordingsCheckbox();
     const sensitiveAlert = getSensitiveAlertCheckbox();
     const maxArchiveMb = getMaxArchiveInput();
     const recentMinutes = getRecentMinutesInput();
 
-    expect(checkbox.checked).toBe(false);
-    expect(screenRecordings.checked).toBe(false);
+    expect(document.querySelector("#export-include-screenshots")).toBeNull();
+    expect(document.querySelector("#export-include-screen-recordings")).toBeNull();
     expect(sensitiveAlert.checked).toBe(true);
-    checkbox.checked = true;
-    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
-
-    screenRecordings.checked = true;
-    screenRecordings.dispatchEvent(new Event("change", { bubbles: true }));
 
     maxArchiveMb.value = "256";
     maxArchiveMb.dispatchEvent(new Event("input", { bubbles: true }));
@@ -352,14 +327,12 @@ describe("popup export policy form", () => {
     });
     await flushPopup();
 
-    expect(getCheckbox().checked).toBe(true);
-    expect(getScreenRecordingsCheckbox().checked).toBe(true);
+    expect(document.querySelector("#export-include-screenshots")).toBeNull();
+    expect(document.querySelector("#export-include-screen-recordings")).toBeNull();
     expect(getSensitiveAlertCheckbox().checked).toBe(false);
     expect(getMaxArchiveInput().value).toBe("256");
     expect(getRecentMinutesInput().value).toBe("45");
     expect(JSON.parse(localStorage.getItem(POPUP_EXPORT_POLICY_STORAGE_KEY) ?? "null")).toEqual({
-      includeScreenshots: true,
-      includeScreenRecordings: true,
       alertSensitiveFindings: false,
       maxArchiveMb: "256",
       recentMinutes: "45"
@@ -369,14 +342,14 @@ describe("popup export policy form", () => {
     installChromeStub(new FakePort());
     await importPopupModule();
 
-    expect(getCheckbox().checked).toBe(true);
-    expect(getScreenRecordingsCheckbox().checked).toBe(true);
+    expect(document.querySelector("#export-include-screenshots")).toBeNull();
+    expect(document.querySelector("#export-include-screen-recordings")).toBeNull();
     expect(getSensitiveAlertCheckbox().checked).toBe(false);
     expect(getMaxArchiveInput().value).toBe("256");
     expect(getRecentMinutesInput().value).toBe("45");
   });
 
-  it("exports the updated draft policy instead of the stale default values", async () => {
+  it("exports archive limits with visual policy from the full capture selection", async () => {
     const port = new FakePort();
     installChromeStub(port);
 
@@ -396,9 +369,9 @@ describe("popup export policy form", () => {
     });
     await flushPopup();
 
-    const checkbox = getCheckbox();
-    checkbox.checked = false;
-    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    const recording = getFullVisualCaptureRadio("recording");
+    recording.checked = true;
+    recording.dispatchEvent(new Event("change", { bubbles: true }));
 
     const maxArchiveMb = getMaxArchiveInput();
     maxArchiveMb.value = "256";
@@ -435,7 +408,7 @@ describe("popup export policy form", () => {
       saveAs: false,
       policy: {
         includeScreenshots: false,
-        includeScreenRecordings: false,
+        includeScreenRecordings: true,
         maxArchiveBytes: 256 * 1024 * 1024,
         recentWindowMs: 45 * 60 * 1000
       }
@@ -782,6 +755,7 @@ describe("popup export policy form", () => {
     expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(true);
     expect(getFullVisualCaptureRadio("recording").disabled).toBe(true);
     expect(getFullVisualCaptureRadio("both").disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("none").disabled).toBe(true);
 
     port.emit({
       kind: "sw.session-list",
@@ -802,6 +776,7 @@ describe("popup export policy form", () => {
     expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(false);
     expect(getFullVisualCaptureRadio("recording").disabled).toBe(false);
     expect(getFullVisualCaptureRadio("both").disabled).toBe(false);
+    expect(getFullVisualCaptureRadio("none").disabled).toBe(false);
   });
 
   it("refreshes active session state when reopening after the initial connect push was missed", async () => {
@@ -839,6 +814,9 @@ describe("popup export policy form", () => {
     expect(getStartFullButton().disabled).toBe(true);
     expect(getStartLiteButton().disabled).toBe(true);
     expect(getFullVisualCaptureRadio("screenshots").disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("recording").disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("both").disabled).toBe(true);
+    expect(getFullVisualCaptureRadio("none").disabled).toBe(true);
     expect(getStopButton().disabled).toBe(false);
     expect(document.body.textContent).toContain("Recording (Full)");
   });
@@ -994,6 +972,68 @@ describe("popup export policy form", () => {
       tabId: 17,
       mode: "full",
       visualCapture: "both"
+    });
+  });
+
+  it("starts full mode without visual capture when none is selected", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    const none = getFullVisualCaptureRadio("none");
+    none.checked = true;
+    none.dispatchEvent(new Event("change", { bubbles: true }));
+    getStartFullButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "full",
+      visualCapture: "none"
+    });
+  });
+
+  it("exports no visual artifacts when none is selected", async () => {
+    const port = new FakePort();
+    installChromeStub(port);
+
+    await importPopupModule();
+
+    const none = getFullVisualCaptureRadio("none");
+    none.checked = true;
+    none.dispatchEvent(new Event("change", { bubbles: true }));
+
+    port.emit({
+      kind: "sw.session-list",
+      sessions: [
+        {
+          sid: "sid-none-export",
+          tabId: 17,
+          mode: "full",
+          startedAt: Date.now(),
+          active: false
+        }
+      ]
+    });
+    await flushPopup();
+
+    getExportButton().click();
+    await flushPopup();
+    getPassphraseSubmitButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.export",
+      sid: "sid-none-export",
+      saveAs: false,
+      policy: {
+        includeScreenshots: false,
+        includeScreenRecordings: false,
+        maxArchiveBytes: 100 * 1024 * 1024,
+        recentWindowMs: 20 * 60 * 1000
+      }
     });
   });
 
