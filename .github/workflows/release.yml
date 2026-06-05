@@ -22,6 +22,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,19 +36,34 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: pnpm
+          node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Verify publish artifacts
+        run: >
+          pnpm
+          --filter @webblackbox/mcp-server
+          --filter @webblackbox/cdp-router
+          --filter @webblackbox/pipeline
+          --filter @webblackbox/player-sdk
+          --filter @webblackbox/protocol
+          --filter @webblackbox/recorder
+          --filter webblackbox
+          exec npm pack --dry-run --json
+
       - name: Publish packages to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
           CI: true
-        run: pnpm build && pnpm release
+        run: pnpm release
 
       - name: Summarize release publish
         run: |
