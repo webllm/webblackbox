@@ -3793,7 +3793,7 @@ function normalizeIpAddress(value: string): string | null {
 }
 
 function isTrustedProxyAddress(address: string): boolean {
-  return isLoopbackAddress(address) || TRUSTED_PROXY_ADDRESSES.has(address);
+  return TRUSTED_PROXY_ADDRESSES.has(address);
 }
 
 function isLoopbackAddress(address: string): boolean {

@@ -1745,7 +1745,8 @@ describe("share-server", () => {
 
   it("derives forwarded clients from the first untrusted hop next to trusted proxies", async () => {
     const server = await startShareServer({
-      WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true"
+      WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true",
+      WEBBLACKBOX_TRUSTED_PROXY_IPS: "127.0.0.1"
     });
     const response = await fetch(`${server.baseUrl}/api/share/list`, {
       headers: {
@@ -1778,7 +1779,7 @@ describe("share-server", () => {
     async (_label, configuredProxy, forwardedProxy) => {
       const server = await startShareServer({
         WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true",
-        WEBBLACKBOX_TRUSTED_PROXY_IPS: configuredProxy
+        WEBBLACKBOX_TRUSTED_PROXY_IPS: `127.0.0.1,${configuredProxy}`
       });
       const clientAddress = "198.51.100.99";
       const response = await fetch(`${server.baseUrl}/api/share/list`, {
@@ -1798,6 +1799,36 @@ describe("share-server", () => {
         .update(`webblackbox-share-audit:ip:${clientAddress}`)
         .digest("hex");
       expect(events.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
+    }
+  );
+
+  it.each([
+    ["an unlisted loopback peer", "203.0.113.10", "198.51.100.1", "198.51.100.2"],
+    ["a malformed forwarded chain", "127.0.0.1", "not-an-ip", "also-not-an-ip"]
+  ])(
+    "does not split upload rate limits through %s",
+    async (_label, trustedProxies, firstForwardedFor, secondForwardedFor) => {
+      const server = await startShareServer({
+        WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true",
+        WEBBLACKBOX_TRUSTED_PROXY_IPS: trustedProxies,
+        WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX: "1"
+      });
+      const upload = (forwardedFor: string) =>
+        fetch(`${server.baseUrl}/api/share/upload`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/octet-stream",
+            "x-webblackbox-api-key": apiKey,
+            "x-forwarded-for": forwardedFor
+          },
+          body: Buffer.from("not-an-archive")
+        });
+
+      const firstResponse = await upload(firstForwardedFor);
+      const secondResponse = await upload(secondForwardedFor);
+
+      expect(firstResponse.status).toBe(400);
+      expect(secondResponse.status).toBe(429);
     }
   );
 

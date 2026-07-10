@@ -45,8 +45,8 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_SHUTDOWN_TIMEOUT_MS`: maximum time to drain in-flight requests and queued audit events after `SIGINT` or `SIGTERM` (default `10000`, hard ceiling `60000`). A timeout forces remaining connections closed and terminates the process.
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX`: max uploads per client in each window (default `10`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS`: upload rate limit window in ms (default `60000`).
-- `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: enables proxy-aware client addresses for rate limiting and redacted audit hashes only; authorization never trusts forwarded headers. Forwarded chains are used only when the socket peer is loopback or listed in `WEBBLACKBOX_TRUSTED_PROXY_IPS`, and the first untrusted hop is selected from right to left.
-- `WEBBLACKBOX_TRUSTED_PROXY_IPS`: comma-separated exact proxy IPs allowed to extend the trusted forwarded chain. The edge proxy must append or overwrite `X-Forwarded-For`; invalid IP configuration fails startup. Loopback proxy peers are trusted automatically when forwarded support is enabled.
+- `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: enables proxy-aware client addresses for rate limiting and redacted audit hashes only; authorization never trusts forwarded headers. Forwarded chains are used only when the socket peer is explicitly listed in `WEBBLACKBOX_TRUSTED_PROXY_IPS`, and the first untrusted hop is selected from right to left.
+- `WEBBLACKBOX_TRUSTED_PROXY_IPS`: comma-separated exact proxy IPs allowed to extend the trusted forwarded chain. The edge proxy must append or overwrite `X-Forwarded-For`; invalid IP configuration fails startup. Loopback proxies are not trusted implicitly: list `127.0.0.1` or `::1` explicitly when the proxy connects from that address.
 
 For production, prefer scoped keys over a single admin key:
 
