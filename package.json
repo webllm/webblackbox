@@ -88,11 +88,19 @@
     "prettier": "^3.6.2",
     "tsup": "^8.5.1",
     "tsx": "^4.20.6",
-    "turbo": "2.10.4",
+    "turbo": "2.9.18",
     "typedoc": "^0.28.20",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "7.3.5",
     "vitest": "^4.1.10"
+  },
+  "optionalDependencies": {
+    "@turbo/darwin-64": "2.9.18",
+    "@turbo/darwin-arm64": "2.9.18",
+    "@turbo/linux-64": "2.9.18",
+    "@turbo/linux-arm64": "2.9.18",
+    "@turbo/windows-64": "2.9.18",
+    "@turbo/windows-arm64": "2.9.18"
   }
 }
