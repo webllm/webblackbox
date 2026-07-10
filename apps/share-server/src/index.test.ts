@@ -1279,6 +1279,32 @@ describe("share-server", () => {
     expect(response.status).toBe(401);
   });
 
+  it("does not create read sessions or success audits for unavailable shares", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY: "true"
+    });
+    const missingId = "missing-share";
+
+    const queryResponse = await fetch(
+      `${server.baseUrl}/share/${missingId}?key=${encodeURIComponent(apiKey)}`,
+      { redirect: "manual" }
+    );
+    expect(queryResponse.status).toBe(404);
+    expect(queryResponse.headers.get("location")).toBeNull();
+    expect(queryResponse.headers.get("set-cookie")).toBeNull();
+
+    const headerResponse = await fetch(`${server.baseUrl}/share/${missingId}`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(headerResponse.status).toBe(404);
+    expect(headerResponse.headers.get("set-cookie")).toBeNull();
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
+    expect(auditLog).toContain('"outcome":"not-found"');
+    expect(auditLog).not.toContain('"authorization":"query-bootstrap"');
+  });
+
   it("does not trust Host or forwarded-protocol headers for public URLs and CORS", async () => {
     const server = await startShareServer();
     const encryptedArchive = await createEncryptedEnvelopeArchive();

@@ -320,6 +320,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
 
   const requiredScope = resolveRequiredShareScope(method, pathname);
   const auditContext = resolveShareAuditContext(method, pathname);
+  let issueReadSessionForPage = false;
 
   if (requiredScope) {
     const authorization = authorizeRequest(request, requestUrl, method, pathname, requiredScope);
@@ -346,6 +347,10 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
 
     const readShareId = requiredScope === "read" ? extractReadShareId(pathname) : null;
     if (readShareId && authorization.source === "query") {
+      const record = await readAvailableShareRecord(request, response, readShareId, "page");
+      if (!record) {
+        return;
+      }
       issueShareReadSessionCookie(response, readShareId);
       await writeShareAuditEvent(request, {
         action: "page",
@@ -365,7 +370,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
       /^\/share\/[a-zA-Z0-9_-]{1,128}$/.test(pathname) &&
       authorization.source !== "read-session"
     ) {
-      issueShareReadSessionCookie(response, readShareId);
+      issueReadSessionForPage = true;
     }
   }
 
@@ -403,7 +408,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]{1,128})$/.exec(pathname);
 
   if (method === "GET" && sharePageMatch?.[1]) {
-    await handleSharePage(request, response, sharePageMatch[1]);
+    await handleSharePage(request, response, sharePageMatch[1], issueReadSessionForPage);
     return;
   }
 
@@ -939,12 +944,17 @@ class ArchiveIntegrityError extends Error {}
 async function handleSharePage(
   request: IncomingMessage,
   response: ServerResponse,
-  id: string
+  id: string,
+  issueReadSession: boolean
 ): Promise<void> {
   const record = await readAvailableShareRecord(request, response, id, "page");
 
   if (!record) {
     return;
+  }
+
+  if (issueReadSession) {
+    issueShareReadSessionCookie(response, id);
   }
 
   const publicMetadata = buildPublicShareMetadata(record);
