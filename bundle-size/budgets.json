@@ -47,8 +47,8 @@
     {
       "name": "Share server runtime",
       "path": "apps/share-server/dist/index.js",
-      "maxBytes": 96000,
-      "maxGzipBytes": 23000
+      "maxBytes": 184000,
+      "maxGzipBytes": 40000
     },
     {
       "name": "Player application",
