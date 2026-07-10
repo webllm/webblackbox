@@ -414,14 +414,21 @@ async function stopActiveSessionFromPopup(popupClient) {
         return { ok: false, reason: 'no-active-session', rows };
       }
 
-      const response = await chrome.runtime.sendMessage({
-        kind: 'ui.stop',
-        tabId: active.tabId
-      });
+      const button = document.querySelector("[data-action='stop']");
+
+      if (!(button instanceof HTMLButtonElement)) {
+        return { ok: false, reason: 'stop-button-not-found', tabId: active.tabId };
+      }
+
+      if (button.disabled) {
+        return { ok: false, reason: 'stop-button-disabled', tabId: active.tabId };
+      }
+
+      button.click();
       return {
-        ok: response?.ok === true,
+        ok: true,
         tabId: active.tabId,
-        response
+        via: 'popup-ui'
       };
     })()
   `;
