@@ -70,9 +70,55 @@ describe("injected-hooks", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     window.fetch = originalFetch;
     localStorage.clear();
     sessionStorage.clear();
+  });
+
+  it("omits IndexedDB names when policy is counts-only", async () => {
+    const open = vi.fn(() => ({}) as IDBOpenDBRequest);
+    vi.stubGlobal("indexedDB", { open });
+
+    installInjectedLiteCaptureHooks({
+      flag: "__WB_TEST_INJECTED_IDB_COUNTS_ONLY__",
+      capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+    });
+
+    indexedDB.open("customer-secret-db", 7);
+    await delay(10);
+
+    const event = captured.find((message) => message.rawType === "indexedDbOp");
+    expect(event?.payload).toEqual({ op: "open" });
+    expect(JSON.stringify(event)).not.toContain("customer-secret-db");
+    expect(open).toHaveBeenCalledWith("customer-secret-db", 7);
+  });
+
+  it("retains IndexedDB names only when names-only policy explicitly allows them", async () => {
+    const open = vi.fn(() => ({}) as IDBOpenDBRequest);
+    vi.stubGlobal("indexedDB", { open });
+    const capturePolicy: CapturePolicy = {
+      ...DETAILED_TEST_CAPTURE_POLICY,
+      categories: {
+        ...DETAILED_TEST_CAPTURE_POLICY.categories,
+        indexedDb: "names-only"
+      }
+    };
+
+    installInjectedLiteCaptureHooks({
+      flag: "__WB_TEST_INJECTED_IDB_NAMES_ONLY__",
+      capturePolicy
+    });
+
+    indexedDB.open("allowed-database-name", 3);
+    await delay(10);
+
+    const event = captured.find((message) => message.rawType === "indexedDbOp");
+    expect(event?.payload).toEqual({
+      op: "open",
+      name: "allowed-database-name",
+      version: 3
+    });
   });
 
   it("is idempotent for the same flag and emits ready + console events", async () => {

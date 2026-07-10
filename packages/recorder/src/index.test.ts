@@ -996,6 +996,23 @@ describe("recorder", () => {
       },
       {
         raw: createRawEvent({
+          rawType: "indexedDbOp",
+          payload: {
+            op: "open",
+            name: "customer-secret-db"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            indexedDb: "counts-only"
+          }
+        }),
+        reason: "storage-detail-disabled",
+        blockedType: "storage.idb.op"
+      },
+      {
+        raw: createRawEvent({
           rawType: "cookieSnapshot",
           payload: {
             names: ["session"]
