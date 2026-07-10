@@ -1,5 +1,6 @@
 export * from "./blob.js";
 export * from "./archive-validation.js";
+export * from "./capture-scope.js";
 export * from "./constants.js";
 export * from "./defaults.js";
 export * from "./ids.js";

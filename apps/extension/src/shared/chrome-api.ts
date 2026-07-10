@@ -2,14 +2,19 @@ export type PortMessageHandler = (message: unknown) => void;
 
 export type PortDisconnectHandler = () => void;
 
+export type MessageSenderLike = {
+  frameId?: number;
+  url?: string;
+  origin?: string;
+  tab?: {
+    id?: number;
+    url?: string;
+  };
+};
+
 export type PortLike = {
   name: string;
-  sender?: {
-    frameId?: number;
-    tab?: {
-      id?: number;
-    };
-  };
+  sender?: MessageSenderLike;
   onMessage: {
     addListener(handler: PortMessageHandler): void;
     removeListener(handler: PortMessageHandler): void;
@@ -101,7 +106,7 @@ export type ChromeApi = {
       addListener(
         callback: (
           message: unknown,
-          sender: { tab?: { id?: number }; frameId?: number },
+          sender: MessageSenderLike,
           sendResponse: (response: unknown) => void
         ) => boolean | void
       ): void;
@@ -187,7 +192,7 @@ export type ChromeApi = {
   };
   scripting?: {
     executeScript(options: {
-      target: { tabId: number; allFrames?: boolean };
+      target: { tabId: number; allFrames?: boolean; frameIds?: number[] };
       world?: "MAIN" | "ISOLATED";
       files?: string[];
     }): Promise<void>;
@@ -248,7 +253,7 @@ export type ChromeApi = {
       addListener(callback: (tabId: number) => void): void;
     };
     reload?(tabId: number, reloadProperties?: { bypassCache?: boolean }): Promise<void>;
-    sendMessage(tabId: number, message: unknown): Promise<unknown>;
+    sendMessage(tabId: number, message: unknown, options?: { frameId?: number }): Promise<unknown>;
   };
 };
 

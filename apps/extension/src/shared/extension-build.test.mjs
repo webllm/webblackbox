@@ -50,6 +50,7 @@ describe("extension build manifest", () => {
     expect(manifest.permissions).not.toContain("activeTab");
     expect(manifest.permissions).not.toContain("cookies");
     expect(manifest.permissions).toContain("tabCapture");
+    expect(manifest).not.toHaveProperty("content_scripts");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
     expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
     expect(validateExtensionManifest(manifest, { version: "1.2.3" })).toEqual([]);
@@ -84,6 +85,21 @@ describe("extension build manifest", () => {
 
     expect(manifest).not.toHaveProperty("key");
     expect(validateExtensionManifest(manifest, { version: "1.2.3", release: true })).toEqual([]);
+  });
+
+  it("rejects always-on content scripts in the development profile", () => {
+    const manifest = createExtensionManifest({ version: "1.2.3", profile: "dev" });
+    manifest.content_scripts = [
+      {
+        matches: ["<all_urls>"],
+        js: ["content.js"],
+        all_frames: true
+      }
+    ];
+
+    expect(validateExtensionManifest(manifest, { version: "1.2.3", profile: "dev" })).toContain(
+      "Dev manifest must use policy-scoped dynamic content-script injection."
+    );
   });
 
   it("fails validation when explicit CSP is removed", () => {

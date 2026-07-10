@@ -26,6 +26,8 @@ Enterprise deployments can provide a managed policy object through `chrome.stora
 
 `siteDenylist` wins over `siteAllowlist`. If `siteAllowlist` is non-empty, recording is denied outside the allowlist. `disableLabMode` forces lab-only categories such as full CDP and heap profiles off.
 
+Exact origins and `*.example.com` host wildcards are supported. Managed allow/deny rules are merged into the effective capture scope and are checked at session start, navigation, frame activation, and event ingestion. Opaque frame URLs are rejected. Cross-frame capture additionally requires the effective policy to set `includeSubframes: true`; otherwise dynamic injection, content events, webRequest events, and child CDP sessions remain top-frame-only.
+
 ## Self-Hosted Share Server
 
 Recommended production settings:

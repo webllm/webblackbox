@@ -1,5 +1,6 @@
 import {
   DEFAULT_CAPTURE_POLICY,
+  evaluateCaptureScope,
   sanitizeUrlForPrivacy,
   type CapturePolicy
 } from "@webblackbox/protocol";
@@ -201,6 +202,7 @@ export class LiteCaptureAgent {
   private trailingScrollTimer = 0;
   private mutationFlushTimer = 0;
   private flushTimer = 0;
+  private scopeExpiryTimer = 0;
   private lastScrollTime = 0;
   private lastPointerTime = Number.NEGATIVE_INFINITY;
   private screenshotInFlight = false;
@@ -250,6 +252,10 @@ export class LiteCaptureAgent {
     }
 
     const wasRecording = this.recordingActive;
+    const nextPolicy = state.capturePolicy ?? this.capturePolicy;
+    const nextActive = state.active && this.isDocumentWithinScope(nextPolicy);
+
+    this.capturePolicy = nextPolicy;
 
     if (state.active && !wasRecording) {
       this.hasDomSnapshot = false;
@@ -270,10 +276,9 @@ export class LiteCaptureAgent {
       this.emitLocalStorageSnapshot("stop");
     }
 
-    this.recordingActive = state.active;
+    this.recordingActive = nextActive;
     this.mode = state.mode ?? this.mode;
     this.sampling = sanitizeSamplingConfig(state.sampling);
-    this.capturePolicy = state.capturePolicy ?? this.capturePolicy;
 
     if (typeof state.sid === "string") {
       this.sid = state.sid;
@@ -284,6 +289,7 @@ export class LiteCaptureAgent {
     }
 
     if (this.recordingActive) {
+      this.scheduleScopeExpiry();
       this.ensureCaptureInstalled();
 
       if (!wasRecording) {
@@ -295,6 +301,7 @@ export class LiteCaptureAgent {
       return;
     }
 
+    this.clearScopeExpiryTimer();
     this.stopMutationAndSnapshots();
     this.teardownCapture();
     this.removeIndicator();
@@ -342,7 +349,8 @@ export class LiteCaptureAgent {
 
   /** Completes any in-flight screenshot and captures one final frame if none was recorded yet. */
   public async prepareStopCapture(): Promise<void> {
-    if (this.disposed || !this.recordingActive) {
+    if (this.disposed || !this.recordingActive || !this.isDocumentWithinScope()) {
+      this.deactivateForScope();
       return;
     }
 
@@ -368,6 +376,7 @@ export class LiteCaptureAgent {
     }
 
     this.disposed = true;
+    this.clearScopeExpiryTimer();
     this.stopMutationAndSnapshots();
     this.removeIndicator();
 
@@ -854,6 +863,8 @@ export class LiteCaptureAgent {
     return (
       this.mode !== "full" &&
       this.isTopLevelFrame &&
+      this.isDocumentWithinScope() &&
+      !hasDisallowedEmbeddedFrame(this.capturePolicy) &&
       this.sampling.screenshotIdleMs > 0 &&
       this.capturePolicy.categories.screenshots === "allow"
     );
@@ -861,13 +872,19 @@ export class LiteCaptureAgent {
 
   private shouldCaptureMutationSignals(): boolean {
     return (
-      this.mode !== "full" && this.isTopLevelFrame && this.capturePolicy.categories.dom !== "off"
+      this.mode !== "full" &&
+      this.isTopLevelFrame &&
+      this.isDocumentWithinScope() &&
+      this.capturePolicy.categories.dom !== "off"
     );
   }
 
   private shouldCaptureDomSnapshots(): boolean {
     return (
-      this.mode !== "full" && this.isTopLevelFrame && this.capturePolicy.categories.dom !== "off"
+      this.mode !== "full" &&
+      this.isTopLevelFrame &&
+      this.isDocumentWithinScope() &&
+      this.capturePolicy.categories.dom !== "off"
     );
   }
 
@@ -875,6 +892,7 @@ export class LiteCaptureAgent {
     return (
       this.mode !== "full" &&
       this.isTopLevelFrame &&
+      this.isDocumentWithinScope() &&
       (this.capturePolicy.categories.storage !== "off" ||
         this.capturePolicy.categories.indexedDb !== "off" ||
         this.capturePolicy.categories.cookies !== "off")
@@ -1845,6 +1863,11 @@ export class LiteCaptureAgent {
       return;
     }
 
+    if (this.recordingActive && !this.isDocumentWithinScope()) {
+      this.deactivateForScope();
+      return;
+    }
+
     if (!this.recordingActive) {
       if (shouldBufferBeforeRecording(event)) {
         this.preRecordingBuffer.push(event);
@@ -1868,6 +1891,66 @@ export class LiteCaptureAgent {
     this.scheduleBufferedFlush(
       this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE ? 0 : EVENT_BUFFER_FLUSH_DELAY_MS
     );
+  }
+
+  private isDocumentWithinScope(policy: CapturePolicy = this.capturePolicy): boolean {
+    return evaluateCaptureScope(policy, {
+      url: readDocumentUrl(),
+      topLevel: this.isTopLevelFrame,
+      frameId: this.isTopLevelFrame ? 0 : 1
+    }).allowed;
+  }
+
+  private scheduleScopeExpiry(): void {
+    this.clearScopeExpiryTimer();
+
+    const expiresAt = this.capturePolicy.consent.expiresAt;
+
+    if (!expiresAt) {
+      return;
+    }
+
+    const delay = Date.parse(expiresAt) - Date.now();
+
+    if (!Number.isFinite(delay) || delay <= 0) {
+      this.deactivateForScope();
+      return;
+    }
+
+    this.scopeExpiryTimer = window.setTimeout(
+      () => {
+        this.scopeExpiryTimer = 0;
+
+        if (this.isDocumentWithinScope()) {
+          this.scheduleScopeExpiry();
+          return;
+        }
+
+        this.deactivateForScope();
+      },
+      Math.min(delay, 2_147_000_000)
+    );
+  }
+
+  private clearScopeExpiryTimer(): void {
+    if (this.scopeExpiryTimer > 0) {
+      clearTimeout(this.scopeExpiryTimer);
+      this.scopeExpiryTimer = 0;
+    }
+  }
+
+  private deactivateForScope(): void {
+    if (!this.recordingActive) {
+      return;
+    }
+
+    this.recordingActive = false;
+    this.clearScopeExpiryTimer();
+    this.stopMutationAndSnapshots();
+    this.teardownCapture();
+    this.removeIndicator();
+    this.flush();
+    this.preRecordingBuffer.length = 0;
   }
 
   private createClickPayload(event: MouseEvent): Record<string, unknown> {
@@ -2223,6 +2306,50 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 
 function monotonicTime(): number {
   return performance.timeOrigin + performance.now();
+}
+
+function readDocumentUrl(): string | null {
+  try {
+    return window.location.href;
+  } catch {
+    return null;
+  }
+}
+
+function hasDisallowedEmbeddedFrame(policy: CapturePolicy): boolean {
+  const frames = document.querySelectorAll("iframe, frame");
+
+  for (const frame of frames) {
+    if (!policy.scope.includeSubframes) {
+      return true;
+    }
+
+    let frameUrl: string;
+
+    try {
+      const contentWindow = (frame as HTMLIFrameElement | HTMLFrameElement).contentWindow;
+
+      if (!contentWindow) {
+        return true;
+      }
+
+      frameUrl = contentWindow.location.href;
+    } catch {
+      return true;
+    }
+
+    if (
+      !evaluateCaptureScope(policy, {
+        url: frameUrl,
+        topLevel: false,
+        frameId: 1
+      }).allowed
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function resolveContentFrameContext(scope: LiteCaptureAgentOptions["frameScope"] = "auto"): {

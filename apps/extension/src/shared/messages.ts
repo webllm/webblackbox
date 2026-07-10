@@ -65,15 +65,18 @@ export type UiRequestSessionListMessage = {
 export type ContentEventBatchMessage = {
   kind: "content.events";
   events: RawRecorderEvent[];
+  documentUrl?: string;
 };
 
 export type ContentMarkerMessage = {
   kind: "content.marker";
   message: string;
+  documentUrl?: string;
 };
 
 export type ContentReadyMessage = {
   kind: "content.ready";
+  documentUrl?: string;
 };
 
 export type ContentStopDrainedMessage = {

@@ -149,17 +149,6 @@ export function createExtensionManifest({ version, release = false, profile = "d
     }
   };
 
-  if (!storeSafe) {
-    manifest.content_scripts = [
-      {
-        matches: [...URL_MATCHES],
-        js: ["content.js"],
-        all_frames: true,
-        run_at: "document_start"
-      }
-    ];
-  }
-
   return manifest;
 }
 
@@ -464,25 +453,15 @@ function validateDevManifest(manifest, issues) {
     }
   }
 
-  if (!Array.isArray(manifest?.host_permissions)) {
-    return;
-  }
-
-  if (!manifest.host_permissions.includes("<all_urls>")) {
+  if (
+    !Array.isArray(manifest?.host_permissions) ||
+    !manifest.host_permissions.includes("<all_urls>")
+  ) {
     issues.push("Dev manifest must include <all_urls> host permission.");
   }
 
-  const contentScripts = Array.isArray(manifest?.content_scripts) ? manifest.content_scripts : [];
-  const hasAllSitesContentScript = contentScripts.some(
-    (entry) =>
-      Array.isArray(entry?.matches) &&
-      entry.matches.includes("<all_urls>") &&
-      Array.isArray(entry?.js) &&
-      entry.js.includes("content.js")
-  );
-
-  if (!hasAllSitesContentScript) {
-    issues.push("Dev manifest must include the all-sites content script.");
+  if (Array.isArray(manifest?.content_scripts) && manifest.content_scripts.length > 0) {
+    issues.push("Dev manifest must use policy-scoped dynamic content-script injection.");
   }
 }
 

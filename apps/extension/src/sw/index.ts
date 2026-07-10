@@ -27,7 +27,7 @@ import {
   WebBlackboxRecorder
 } from "@webblackbox/recorder";
 
-import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
+import { getChromeApi, type MessageSenderLike, type PortLike } from "../shared/chrome-api.js";
 import {
   PORT_NAMES,
   type ExportPrivacyWarning,
@@ -62,9 +62,24 @@ import {
   transformResponseBodyForCapture
 } from "./body-capture-utils.js";
 import {
-  shouldStopForCaptureScopeOriginChange,
+  bindCapturePolicyToSession,
+  evaluateCaptureDocumentScope,
+  isCaptureEventFrameAllowed,
+  resolveContentScriptInjectionTarget,
   shouldStopForEnterpriseOriginPolicy as shouldStopForEnterpriseOriginPolicyInput
 } from "./capture-scope.js";
+import {
+  clearCdpCaptureScopeState,
+  createCdpCaptureScopeState,
+  evaluateCdpCaptureScopeEvent,
+  filterCdpSnapshotDocuments,
+  forgetCdpRequestScope,
+  forgetCdpSessionScope,
+  hasDisallowedCdpFrames,
+  isCdpSessionWithinScope,
+  primeCdpCaptureFrameTree,
+  type CdpCaptureScopeState
+} from "./cdp-capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
 import {
   buildLiteNetworkFailureRawEvent,
@@ -92,7 +107,7 @@ type SessionRuntime = {
   tabId: number;
   mode: CaptureMode;
   url: string;
-  scopeOrigin: string | null;
+  captureUrl: string;
   title?: string;
   tags: string[];
   note?: string;
@@ -103,6 +118,8 @@ type SessionRuntime = {
   pipeline: SessionPipelineClient;
   cdpRouter: CdpRouter | null;
   enabledCdpSessions: Set<string>;
+  cdpScope: CdpCaptureScopeState;
+  authorizedContentFrames: Set<number>;
   requestMeta: Map<string, RequestMetaEntry>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
   screenRecording: ScreenRecordingRuntime | null;
@@ -134,6 +151,7 @@ type SessionRuntime = {
   removeCdpListeners: Array<() => void>;
   heapSnapshotCapture: HeapSnapshotCaptureState | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+  consentExpiryTimer: ReturnType<typeof setTimeout> | null;
 };
 
 type ScreenRecordingRuntime = {
@@ -529,8 +547,20 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
     return;
   }
 
+  if (!authorizeContentSender(runtime, port.sender)) {
+    sendContentPortRecordingState(port, runtime, false);
+
+    if (normalizeSenderFrameId(port.sender) === 0) {
+      await stopSession(tabId);
+    } else {
+      runtime.authorizedContentFrames.delete(normalizeSenderFrameId(port.sender));
+    }
+
+    return;
+  }
+
   if (shouldInjectHooksForMode(runtime.mode)) {
-    await ensureInjectedHooks(tabId);
+    await ensureInjectedHooks(tabId, normalizeSenderFrameId(port.sender));
   }
 
   syncContentPortRecordingState(port);
@@ -549,12 +579,26 @@ function syncContentPortRecordingState(port: PortLike): void {
     return;
   }
 
+  if (!authorizeContentSender(runtime, port.sender)) {
+    sendContentPortRecordingState(port, runtime, false);
+    runtime.authorizedContentFrames.delete(normalizeSenderFrameId(port.sender));
+    return;
+  }
+
+  sendContentPortRecordingState(port, runtime, true);
+}
+
+function sendContentPortRecordingState(
+  port: PortLike,
+  runtime: SessionRuntime,
+  active: boolean
+): void {
   const sampling = toStatusSampling(runtime);
 
   try {
     port.postMessage({
       kind: "sw.recording-status",
-      active: true,
+      active,
       sid: runtime.sid,
       mode: runtime.mode,
       sampling,
@@ -562,7 +606,7 @@ function syncContentPortRecordingState(port: PortLike): void {
     });
   } catch (error) {
     logPortSendFailure("sw.recording-status", error, {
-      tabId,
+      tabId: runtime.tabId,
       sid: runtime.sid,
       mode: runtime.mode
     });
@@ -576,7 +620,7 @@ chromeApi?.runtime?.onMessage.addListener((rawMessage, sender, sendResponse) => 
     return;
   }
 
-  void handleInboundMessage(message, undefined, sender.tab?.id, sender.frameId)
+  void handleInboundMessage(message, undefined, sender)
     .then((result) => {
       sendResponse(result ?? { ok: true });
     })
@@ -597,13 +641,12 @@ chromeApi?.runtime?.onMessage.addListener((rawMessage, sender, sendResponse) => 
 function dispatchInboundMessage(
   message: ExtensionInboundMessage,
   port?: PortLike,
-  senderTabId?: number,
-  senderFrameId?: number
+  sender: MessageSenderLike | undefined = port?.sender
 ): void {
-  void handleInboundMessage(message, port, senderTabId, senderFrameId).catch((error) => {
+  void handleInboundMessage(message, port, sender).catch((error) => {
     logInboundMessageFailure(message.kind, error, port, {
-      tabId: senderTabId,
-      frameId: senderFrameId
+      tabId: sender?.tab?.id,
+      frameId: sender?.frameId
     });
   });
 }
@@ -638,8 +681,7 @@ chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
 async function handleInboundMessage(
   message: ExtensionInboundMessage,
   port?: PortLike,
-  senderTabId?: number,
-  senderFrameId?: number
+  sender: MessageSenderLike | undefined = port?.sender
 ): Promise<unknown> {
   if (message.kind === "ui.start") {
     const tabId = await resolveUiActionTabId(message.tabId);
@@ -704,15 +746,16 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "content.marker") {
-    const tabId = senderTabId ?? port?.sender?.tab?.id;
-    const frame = normalizeContentFrameId(senderFrameId ?? port?.sender?.frameId);
+    const tabId = sender?.tab?.id;
+    const frame = normalizeContentFrameId(sender?.frameId);
+    const runtime = typeof tabId === "number" ? sessionsByTab.get(tabId) : undefined;
 
-    if (typeof tabId === "number") {
+    if (runtime && authorizeContentSender(runtime, sender, message.documentUrl)) {
       ingestRawEvent({
         source: "content",
         rawType: "marker",
-        tabId,
-        sid: sessionsByTab.get(tabId)?.sid ?? "",
+        tabId: runtime.tabId,
+        sid: runtime.sid,
         t: Date.now(),
         mono: monotonicTime(),
         frame,
@@ -720,13 +763,15 @@ async function handleInboundMessage(
           message: message.message
         }
       });
+    } else if (runtime) {
+      await deactivateDeniedContentFrame(runtime, sender, port);
     }
 
     return;
   }
 
   if (message.kind === "content.ready") {
-    const tabId = senderTabId ?? port?.sender?.tab?.id;
+    const tabId = sender?.tab?.id;
 
     if (typeof tabId !== "number") {
       return {
@@ -744,8 +789,24 @@ async function handleInboundMessage(
       };
     }
 
+    if (!authorizeContentSender(runtime, sender, message.documentUrl)) {
+      if (normalizeSenderFrameId(sender) === 0) {
+        await stopSession(tabId);
+      } else {
+        await deactivateDeniedContentFrame(runtime, sender, port);
+      }
+
+      return {
+        kind: "sw.recording-status",
+        active: false,
+        sid: runtime.sid,
+        mode: runtime.mode,
+        capturePolicy: runtime.config.capturePolicy
+      };
+    }
+
     if (shouldInjectHooksForMode(runtime.mode)) {
-      await ensureInjectedHooks(tabId);
+      await ensureInjectedHooks(tabId, normalizeSenderFrameId(sender));
     }
 
     const sampling = toStatusSampling(runtime);
@@ -768,19 +829,33 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "content.stop-drained") {
-    markStopDrainAckReceived(message.sid);
+    if (normalizeSenderFrameId(sender) === 0) {
+      markStopDrainAckReceived(message.sid);
+    }
     return;
   }
 
   if (message.kind === "content.events") {
-    const tabId = senderTabId ?? port?.sender?.tab?.id;
-    const frame = normalizeContentFrameId(senderFrameId ?? port?.sender?.frameId);
+    const tabId = sender?.tab?.id;
+    const frame = normalizeContentFrameId(sender?.frameId);
 
     if (
       typeof tabId !== "number" ||
       !Array.isArray(message.events) ||
       message.events.length === 0
     ) {
+      return;
+    }
+
+    const runtime = sessionsByTab.get(tabId);
+
+    if (!runtime || !authorizeContentSender(runtime, sender, message.documentUrl)) {
+      if (runtime && normalizeSenderFrameId(sender) === 0) {
+        await stopSession(tabId);
+      } else if (runtime) {
+        await deactivateDeniedContentFrame(runtime, sender, port);
+      }
+
       return;
     }
 
@@ -792,7 +867,8 @@ async function handleInboundMessage(
         ingestRawEvent({
           ...rawEvent,
           tabId,
-          frame: rawEvent.frame ?? frame
+          sid: runtime.sid,
+          frame
         });
 
         if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
@@ -839,17 +915,11 @@ async function startSession(
     await stopSession(tabId);
   }
 
-  await ensureOffscreenDocument();
-
   const sid = createSessionId();
   const startedAt = Date.now();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
-  const sessionOrigin = resolveUrlOrigin(sanitizeUrlForPrivacy(tabMetadata.url)) ?? "";
+  const sessionOrigin = resolveUrlOrigin(tabMetadata.captureUrl) ?? "";
   const enterprisePolicy = await loadEnterprisePolicy();
-
-  if (!isEnterpriseOriginAllowed(sessionOrigin, enterprisePolicy)) {
-    throw new Error("Recording is blocked by enterprise site policy.");
-  }
 
   const loadedRecorderConfig = applyFullModeVisualCapture(
     await loadRecorderConfig(mode),
@@ -864,6 +934,19 @@ async function startSession(
     }),
     enterprisePolicy
   );
+  const startScope = evaluateCaptureDocumentScope(recorderConfig.capturePolicy, {
+    url: tabMetadata.captureUrl,
+    tabId,
+    frameId: 0,
+    now: startedAt
+  });
+
+  if (!startScope.allowed) {
+    throw new Error(`Recording is outside the permitted capture scope (${startScope.reason}).`);
+  }
+
+  await ensureOffscreenDocument();
+
   const performanceBudget = await loadPerformanceBudgetConfig();
   const annotation = getSessionAnnotation(sid);
   const metadata: SessionMetadata = {
@@ -885,7 +968,7 @@ async function startSession(
     tabId,
     mode,
     url: metadata.url,
-    scopeOrigin: resolveUrlOrigin(metadata.url),
+    captureUrl: tabMetadata.captureUrl,
     title: metadata.title,
     tags: [...annotation.tags],
     note: annotation.note,
@@ -904,6 +987,12 @@ async function startSession(
     pipeline,
     cdpRouter: null,
     enabledCdpSessions: new Set<string>(),
+    cdpScope: createCdpCaptureScopeState(
+      recorderConfig.capturePolicy,
+      tabId,
+      tabMetadata.captureUrl
+    ),
+    authorizedContentFrames: new Set<number>([0]),
     requestMeta: new Map(),
     screenshotInterval: null,
     screenRecording: null,
@@ -934,7 +1023,8 @@ async function startSession(
     queue: Promise.resolve(),
     removeCdpListeners: [],
     heapSnapshotCapture: null,
-    cleanupTimer: null
+    cleanupTimer: null,
+    consentExpiryTimer: null
   };
 
   runtime.recorder = new WebBlackboxRecorder(
@@ -959,6 +1049,7 @@ async function startSession(
 
   sessionsByTab.set(tabId, runtime);
   sessionsBySid.set(sid, runtime);
+  scheduleConsentExpiry(runtime);
 
   if (mode === "lite") {
     installLiteWebRequestCapture();
@@ -975,8 +1066,8 @@ async function startSession(
   });
 
   if (shouldInjectHooksForMode(mode)) {
-    await ensureContentScriptInjected(tabId);
-    await ensureInjectedHooks(tabId);
+    await ensureContentScriptInjected(runtime);
+    await ensureInjectedHooks(tabId, 0);
   }
 
   if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
@@ -995,7 +1086,7 @@ async function startSession(
   const sampling = toStatusSampling(runtime);
 
   await setRecordingBadge();
-  await notifyTabStatus(tabId, true, sid, mode, sampling, recorderConfig.capturePolicy);
+  await notifyAuthorizedContentFrames(runtime, true);
   broadcast({
     kind: "sw.recording-status",
     active: true,
@@ -1029,16 +1120,21 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
     return;
   }
 
-  await ensureContentScriptInjected(tabId);
-  await ensureInjectedHooks(tabId);
-  await notifyTabStatus(
-    tabId,
-    true,
-    runtime.sid,
-    runtime.mode,
-    toStatusSampling(runtime),
-    runtime.config.capturePolicy
-  );
+  const tabMetadata = await resolveTabSessionMetadata(tabId);
+
+  if (!(await isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl))) {
+    await stopSession(tabId);
+    return;
+  }
+
+  runtime.captureUrl = tabMetadata.captureUrl;
+  runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
+  runtime.url = tabMetadata.url;
+  resetAuthorizedContentFrames(runtime);
+
+  await ensureContentScriptInjected(runtime);
+  await ensureInjectedHooks(tabId, 0);
+  await notifyAuthorizedContentFrames(runtime, true);
 }
 
 async function stopSession(tabId: number): Promise<void> {
@@ -1055,6 +1151,7 @@ async function stopSession(tabId: number): Promise<void> {
   });
   await flushBufferedPipelineEvents(runtime);
   await teardownCaptureInstrumentation(runtime);
+  await notifyAuthorizedContentFrames(runtime, false);
   sessionsByTab.delete(runtime.tabId);
   uninstallLiteWebRequestCaptureIfUnused();
   runtime.stoppedAt = Date.now();
@@ -1066,14 +1163,6 @@ async function stopSession(tabId: number): Promise<void> {
     await setRecordingBadge();
   }
 
-  await notifyTabStatus(
-    tabId,
-    false,
-    runtime.sid,
-    runtime.mode,
-    toStatusSampling(runtime),
-    runtime.config.capturePolicy
-  );
   broadcast({
     kind: "sw.recording-status",
     active: false,
@@ -1227,6 +1316,24 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
     return;
   }
 
+  const runtimeScope = evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+    url: runtime.captureUrl,
+    tabId: runtime.tabId,
+    frameId: 0
+  });
+
+  if (!runtimeScope.allowed) {
+    if (!runtime.stopping && !runtime.stoppedAt) {
+      void stopSession(runtime.tabId);
+    }
+
+    return;
+  }
+
+  if (!isCaptureEventFrameAllowed(runtime.config.capturePolicy, rawEvent)) {
+    return;
+  }
+
   if (
     runtime.stopping &&
     rawEvent.source !== "system" &&
@@ -1348,6 +1455,10 @@ async function materializeLiteContentEvent(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent
 ): Promise<RawRecorderEvent | null> {
+  if (!isRuntimeDocumentWithinScope(runtime)) {
+    return null;
+  }
+
   if (rawEvent.rawType === "screenshot") {
     return materializeLiteScreenshot(runtime, rawEvent);
   }
@@ -2200,8 +2311,28 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
     const unsubscribeEvent = router.onEvent((event) => {
       const normalizedPayload = normalizeFullModePayload(event.method, event.params ?? {});
+      const scopeEvaluation = evaluateCdpCaptureScopeEvent(
+        runtime.cdpScope,
+        event.method,
+        event.params ?? {},
+        event.sessionId
+      );
+      const scopeAllowed = scopeEvaluation.allowed;
 
-      if (event.method === "HeapProfiler.addHeapSnapshotChunk") {
+      if (scopeEvaluation.topNavigation) {
+        const { url, decision } = scopeEvaluation.topNavigation;
+
+        if (!decision.allowed) {
+          void stopSession(runtime.tabId);
+        } else {
+          runtime.captureUrl = url;
+          runtime.url = sanitizeUrlForPrivacy(url);
+          resetAuthorizedContentFrames(runtime);
+          void handleTabUrlChanged(runtime.tabId, url);
+        }
+      }
+
+      if (scopeAllowed && event.method === "HeapProfiler.addHeapSnapshotChunk") {
         const payload = asRecord(normalizedPayload);
         const chunk = typeof payload?.chunk === "string" ? payload.chunk : undefined;
 
@@ -2218,18 +2349,25 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         }
       }
 
-      ingestRawEvent({
-        source: "cdp",
-        rawType: event.method,
-        tabId: runtime.tabId,
-        sid: runtime.sid,
-        t: Date.now(),
-        mono: monotonicTime(),
-        cdpSessionId: event.sessionId,
-        payload: normalizedPayload
-      });
+      if (scopeAllowed) {
+        ingestRawEvent({
+          source: "cdp",
+          rawType: event.method,
+          tabId: runtime.tabId,
+          sid: runtime.sid,
+          t: Date.now(),
+          mono: monotonicTime(),
+          cdpSessionId: event.sessionId,
+          payload: normalizedPayload
+        });
+      }
 
-      if (!FULL_MODE_FOLLOWUP_METHODS.has(event.method)) {
+      if (
+        !FULL_MODE_FOLLOWUP_METHODS.has(event.method) ||
+        (!scopeAllowed &&
+          event.method !== "Target.attachedToTarget" &&
+          event.method !== "Target.detachedFromTarget")
+      ) {
         return;
       }
 
@@ -2251,14 +2389,19 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
     runtime.removeCdpListeners.push(unsubscribeEvent, unsubscribeDetach);
 
     await router.attach(runtime.tabId);
+    runtime.cdpRouter = router;
     runtime.enabledCdpSessions.clear();
     await router.enableBaseline(runtime.tabId);
     runtime.enabledCdpSessions.add("root");
-    await router.enableAutoAttach(runtime.tabId);
+    await primeCdpFrameTreeScopes(runtime);
+    runtime.cdpScope.executionContextScopes.clear();
+    await router.send({ tabId: runtime.tabId }, "Runtime.disable").catch(() => undefined);
+    await router.send({ tabId: runtime.tabId }, "Runtime.enable").catch(() => undefined);
+    if (runtime.config.capturePolicy?.scope.includeSubframes === true) {
+      await router.enableAutoAttach(runtime.tabId);
+    }
     await router.send({ tabId: runtime.tabId }, "DOMStorage.enable").catch(() => undefined);
     await router.send({ tabId: runtime.tabId }, "Performance.enable").catch(() => undefined);
-
-    runtime.cdpRouter = router;
 
     enqueue(
       runtime,
@@ -2295,6 +2438,38 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
   }
 }
 
+async function primeCdpFrameTreeScopes(runtime: SessionRuntime): Promise<void> {
+  if (!runtime.cdpRouter) {
+    return;
+  }
+
+  const response = await runtime.cdpRouter
+    .send<{ frameTree?: unknown }>({ tabId: runtime.tabId }, "Page.getFrameTree")
+    .catch(() => undefined);
+
+  primeCdpCaptureFrameTree(runtime.cdpScope, response?.frameTree);
+}
+
+function evaluateRuntimeFrameDocument(
+  runtime: SessionRuntime,
+  url: string | null | undefined,
+  topLevel: boolean
+): boolean {
+  return evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+    url,
+    tabId: runtime.tabId,
+    frameId: topLevel ? 0 : 1
+  }).allowed;
+}
+
+function isRuntimeCaptureScopeActive(runtime: SessionRuntime): boolean {
+  return !runtime.stopping && !runtime.stoppedAt && isRuntimeDocumentWithinScope(runtime);
+}
+
+function isRuntimeDocumentWithinScope(runtime: SessionRuntime): boolean {
+  return evaluateRuntimeFrameDocument(runtime, runtime.captureUrl, true);
+}
+
 async function processFullModeEvent(
   runtime: SessionRuntime,
   method: string,
@@ -2310,7 +2485,7 @@ async function processFullModeEvent(
   if (method === "Target.attachedToTarget") {
     const childSessionId = typeof payload?.sessionId === "string" ? payload.sessionId : undefined;
 
-    if (childSessionId) {
+    if (childSessionId && isCdpSessionWithinScope(runtime.cdpScope, childSessionId)) {
       await primeChildCdpSession(runtime, childSessionId);
     }
 
@@ -2322,6 +2497,7 @@ async function processFullModeEvent(
 
     if (childSessionId) {
       runtime.enabledCdpSessions.delete(childSessionId);
+      forgetCdpSessionScope(runtime.cdpScope, childSessionId);
     }
 
     return;
@@ -2353,6 +2529,7 @@ async function processFullModeEvent(
 
     if (requestId) {
       deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
+      forgetCdpRequestScope(runtime.cdpScope, requestId, sessionId);
     }
 
     return;
@@ -2364,6 +2541,7 @@ async function processFullModeEvent(
 
       if (requestId) {
         deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
+        forgetCdpRequestScope(runtime.cdpScope, requestId, sessionId);
       }
     }
 
@@ -2374,7 +2552,14 @@ async function processFullModeEvent(
     return;
   }
 
-  if (method === "Page.frameNavigated" && shouldCaptureNavigationSnapshot(runtime)) {
+  const frame = asRecord(payload?.frame);
+  const isTopFrameNavigation =
+    method === "Page.frameNavigated" &&
+    !sessionId &&
+    typeof frame?.parentId !== "string" &&
+    typeof frame?.parentFrameId !== "string";
+
+  if (isTopFrameNavigation && shouldCaptureNavigationSnapshot(runtime)) {
     await captureDomSnapshot(runtime, "navigation");
   }
 }
@@ -2408,7 +2593,7 @@ async function captureResponseBody(
   requestId: string,
   sessionId?: string
 ): Promise<void> {
-  if (!runtime.cdpRouter || runtime.stopping) {
+  if (!runtime.cdpRouter || !isRuntimeCaptureScopeActive(runtime)) {
     return;
   }
 
@@ -2419,6 +2604,10 @@ async function captureResponseBody(
   }>(runtime, target, "Network.getResponseBody", { requestId });
 
   if (!response?.body) {
+    return;
+  }
+
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return;
   }
 
@@ -2615,6 +2804,11 @@ function handleFreezeNotice(runtime: SessionRuntime, reason: FreezeReason): void
 }
 
 async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
+  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+    await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
+    return;
+  }
+
   const tasks: Array<Promise<void>> = [
     captureScreenshot(runtime, reason),
     captureTraceMetrics(runtime, reason)
@@ -2632,7 +2826,11 @@ async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string)
 }
 
 async function captureScreenshot(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!runtime.cdpRouter) {
+  if (
+    !runtime.cdpRouter ||
+    !isRuntimeCaptureScopeActive(runtime) ||
+    hasDisallowedCdpFrames(runtime.cdpScope)
+  ) {
     return;
   }
 
@@ -2652,6 +2850,10 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
   );
 
   if (!screenshot?.data) {
+    return;
+  }
+
+  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
     return;
   }
 
@@ -2699,7 +2901,10 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
 
 function shouldStartScreenRecording(runtime: SessionRuntime): boolean {
   return (
-    runtime.mode === "full" && runtime.config.capturePolicy?.categories.screenRecordings === "allow"
+    runtime.mode === "full" &&
+    isRuntimeCaptureScopeActive(runtime) &&
+    !hasDisallowedCdpFrames(runtime.cdpScope) &&
+    runtime.config.capturePolicy?.categories.screenRecordings === "allow"
   );
 }
 
@@ -2721,6 +2926,10 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
 
   if (!streamId) {
     throw new Error("Chrome did not grant a tab capture stream.");
+  }
+
+  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+    return;
   }
 
   const recording: ScreenRecordingRuntime = {
@@ -2807,6 +3016,11 @@ async function handleOffscreenScreenRecordingChunk(
   const recording = runtime?.screenRecording;
 
   if (!runtime || !recording || recording.recordingId !== message.recordingId) {
+    return;
+  }
+
+  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+    await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
     return;
   }
 
@@ -2980,6 +3194,10 @@ function createScreenRecordingId(sid: string): string {
 }
 
 async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
+  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+    return;
+  }
+
   if (!runtime.cdpRouter) {
     return;
   }
@@ -3003,10 +3221,18 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
     return;
   }
 
-  const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
+  if (!isRuntimeCaptureScopeActive(runtime)) {
+    return;
+  }
+
+  const scopedDocuments = filterCdpSnapshotDocuments(runtime.cdpScope, snapshot.documents);
+  const scopedSnapshot = {
+    ...snapshot,
+    documents: scopedDocuments
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(scopedSnapshot));
   const hash = await runtime.pipeline.putBlob("application/json", bytes);
-  const documents = Array.isArray(snapshot.documents) ? snapshot.documents : [];
-  const firstDocument = documents[0] as Record<string, unknown> | undefined;
+  const firstDocument = scopedDocuments[0] as Record<string, unknown> | undefined;
   const nodes = firstDocument ? asRecord(firstDocument.nodes) : null;
   const nodeNameArray = Array.isArray(nodes?.nodeName) ? nodes.nodeName : [];
 
@@ -3028,6 +3254,10 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
 }
 
 async function captureStorageSnapshots(runtime: SessionRuntime, reason: string): Promise<void> {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
+    return;
+  }
+
   if (!runtime.cdpRouter) {
     return;
   }
@@ -3039,11 +3269,14 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       ? await sendCdpCommand<{ cookies?: unknown[] }>(
           runtime,
           { tabId: runtime.tabId },
-          "Storage.getCookies"
+          "Network.getCookies",
+          {
+            urls: [runtime.captureUrl]
+          }
         )
       : null;
 
-  if (cookies?.cookies) {
+  if (cookies?.cookies && isRuntimeCaptureScopeActive(runtime)) {
     const cookieNames = cookies.cookies
       .map((entry) => asString(asRecord(entry)?.name))
       .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
@@ -3074,7 +3307,7 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     ? await evaluateExpression(runtime, buildLocalStorageSnapshotExpression(localStorageMode))
     : null;
 
-  if (typeof localStorageData === "string") {
+  if (typeof localStorageData === "string" && isRuntimeCaptureScopeActive(runtime)) {
     const bytes = new TextEncoder().encode(localStorageData);
     const hash = await runtime.pipeline.putBlob("application/json", bytes);
     const parsed = parseStorageSnapshotMeta(localStorageData);
@@ -3103,7 +3336,7 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       ? await evaluateExpression(runtime, "location.origin")
       : null;
 
-  if (typeof origin === "string") {
+  if (typeof origin === "string" && isRuntimeCaptureScopeActive(runtime)) {
     const dbNames = await sendCdpCommand<{ databaseNames?: string[] }>(
       runtime,
       { tabId: runtime.tabId },
@@ -3113,7 +3346,7 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       }
     );
 
-    if (dbNames?.databaseNames) {
+    if (dbNames?.databaseNames && isRuntimeCaptureScopeActive(runtime)) {
       const bytes = new TextEncoder().encode(JSON.stringify(dbNames.databaseNames));
       const hash = await runtime.pipeline.putBlob("application/json", bytes);
 
@@ -3146,6 +3379,10 @@ function resolveLocalStorageSnapshotMode(
 }
 
 async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Promise<void> {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
+    return;
+  }
+
   if (!runtime.cdpRouter) {
     return;
   }
@@ -3161,6 +3398,10 @@ async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Pro
   );
 
   if (!metrics) {
+    return;
+  }
+
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return;
   }
 
@@ -3192,7 +3433,11 @@ async function captureAdvancedProfiles(runtime: SessionRuntime, reason: string):
 }
 
 async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!runtime.cdpRouter) {
+  if (
+    !runtime.cdpRouter ||
+    !isRuntimeCaptureScopeActive(runtime) ||
+    hasDisallowedCdpFrames(runtime.cdpScope)
+  ) {
     return;
   }
 
@@ -3221,7 +3466,11 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
       "Profiler.stop"
     );
 
-    if (!profileResult?.profile) {
+    if (
+      !profileResult?.profile ||
+      !isRuntimeCaptureScopeActive(runtime) ||
+      hasDisallowedCdpFrames(runtime.cdpScope)
+    ) {
       return;
     }
 
@@ -3248,7 +3497,11 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
 }
 
 async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!runtime.cdpRouter) {
+  if (
+    !runtime.cdpRouter ||
+    !isRuntimeCaptureScopeActive(runtime) ||
+    hasDisallowedCdpFrames(runtime.cdpScope)
+  ) {
     return;
   }
 
@@ -3281,7 +3534,13 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
   const snapshot = runtime.heapSnapshotCapture;
   runtime.heapSnapshotCapture = null;
 
-  if (!completed.ok || !snapshot || snapshot.chunks.length === 0) {
+  if (
+    !completed.ok ||
+    !snapshot ||
+    snapshot.chunks.length === 0 ||
+    !isRuntimeCaptureScopeActive(runtime) ||
+    hasDisallowedCdpFrames(runtime.cdpScope)
+  ) {
     await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.disable");
     return;
   }
@@ -3546,6 +3805,90 @@ function normalizeContentFrameId(value: unknown): string | undefined {
   }
 
   return `content-frame-${frameId}`;
+}
+
+function normalizeSenderFrameId(sender: MessageSenderLike | undefined): number {
+  const candidate = asFiniteNumber(sender?.frameId);
+
+  if (candidate === null) {
+    return sender?.frameId === undefined ? 0 : -1;
+  }
+
+  return candidate >= 0 ? Math.floor(candidate) : -1;
+}
+
+function authorizeContentSender(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined,
+  documentUrl?: string
+): boolean {
+  const tabId = sender?.tab?.id;
+  const frameId = normalizeSenderFrameId(sender);
+
+  if (typeof tabId !== "number" || tabId !== runtime.tabId || frameId < 0) {
+    return false;
+  }
+
+  const senderUrl =
+    typeof documentUrl === "string" && documentUrl.length > 0
+      ? documentUrl
+      : typeof sender?.url === "string" && sender.url.length > 0
+        ? sender.url
+        : frameId === 0
+          ? runtime.captureUrl
+          : null;
+  const decision = evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+    url: senderUrl,
+    tabId,
+    frameId
+  });
+
+  if (!decision.allowed) {
+    return false;
+  }
+
+  if (frameId === 0 && senderUrl && senderUrl !== runtime.captureUrl) {
+    runtime.captureUrl = senderUrl;
+    runtime.cdpScope.captureUrl = senderUrl;
+    runtime.url = sanitizeUrlForPrivacy(senderUrl);
+    resetAuthorizedContentFrames(runtime);
+  }
+
+  runtime.authorizedContentFrames.add(frameId);
+  return true;
+}
+
+async function deactivateDeniedContentFrame(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined,
+  port?: PortLike
+): Promise<void> {
+  const frameId = normalizeSenderFrameId(sender);
+
+  if (frameId < 0) {
+    return;
+  }
+
+  if (port?.name === PORT_NAMES.content) {
+    sendContentPortRecordingState(port, runtime, false);
+  } else {
+    await notifyTabStatus(
+      runtime.tabId,
+      false,
+      runtime.sid,
+      runtime.mode,
+      toStatusSampling(runtime),
+      runtime.config.capturePolicy,
+      frameId
+    );
+  }
+
+  runtime.authorizedContentFrames.delete(frameId);
+}
+
+function resetAuthorizedContentFrames(runtime: SessionRuntime): void {
+  runtime.authorizedContentFrames.clear();
+  runtime.authorizedContentFrames.add(0);
 }
 
 function asString(value: unknown): string | null {
@@ -3920,37 +4263,26 @@ function normalizeHashesManifest(value: unknown): HashesManifest {
   };
 }
 
-async function ensureInjectedHooks(tabId: number): Promise<void> {
+async function ensureInjectedHooks(tabId: number, frameId: number): Promise<void> {
   await chromeApi?.scripting
     ?.executeScript({
-      target: { tabId },
+      target: { tabId, frameIds: [frameId] },
       world: "MAIN",
       files: ["injected.js"]
     })
     .catch(() => undefined);
 }
 
-async function ensureContentScriptInjected(tabId: number): Promise<void> {
-  if (manifestDeclaresStaticContentScript()) {
-    return;
-  }
-
+async function ensureContentScriptInjected(runtime: SessionRuntime): Promise<void> {
   await chromeApi?.scripting
     ?.executeScript({
-      target: { tabId, allFrames: true },
+      target: {
+        ...resolveContentScriptInjectionTarget(runtime.config.capturePolicy, runtime.tabId)
+      },
       world: "ISOLATED",
       files: ["content.js"]
     })
     .catch(() => undefined);
-}
-
-function manifestDeclaresStaticContentScript(): boolean {
-  const manifest = chromeApi?.runtime?.getManifest?.();
-  const contentScripts = Array.isArray(manifest?.content_scripts) ? manifest.content_scripts : [];
-
-  return contentScripts.some(
-    (entry) => Array.isArray(entry?.js) && entry.js.includes("content.js")
-  );
 }
 
 function installLiteWebRequestCapture(): void {
@@ -3967,7 +4299,7 @@ function installLiteWebRequestCapture(): void {
     url: string;
     timeStamp?: number;
   }) => {
-    const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
+    const runtime = resolveLiteRuntimeForWebRequest(details.tabId, details.frameId);
 
     if (!runtime) {
       return;
@@ -4007,7 +4339,7 @@ function installLiteWebRequestCapture(): void {
     statusLine?: string;
     timeStamp?: number;
   }) => {
-    const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
+    const runtime = resolveLiteRuntimeForWebRequest(details.tabId, details.frameId);
 
     if (!runtime) {
       return;
@@ -4050,7 +4382,7 @@ function installLiteWebRequestCapture(): void {
     error?: string;
     timeStamp?: number;
   }) => {
-    const runtime = resolveLiteRuntimeForWebRequest(details.tabId);
+    const runtime = resolveLiteRuntimeForWebRequest(details.tabId, details.frameId);
 
     if (!runtime) {
       return;
@@ -4113,7 +4445,10 @@ function hasActiveLiteRuntime(): boolean {
   return false;
 }
 
-function resolveLiteRuntimeForWebRequest(tabId: number): SessionRuntime | undefined {
+function resolveLiteRuntimeForWebRequest(
+  tabId: number,
+  frameIdCandidate?: number
+): SessionRuntime | undefined {
   if (!Number.isFinite(tabId) || tabId < 0) {
     return undefined;
   }
@@ -4121,6 +4456,25 @@ function resolveLiteRuntimeForWebRequest(tabId: number): SessionRuntime | undefi
   const runtime = sessionsByTab.get(tabId);
 
   if (!runtime || runtime.mode !== "lite" || runtime.stopping) {
+    return undefined;
+  }
+
+  const frameId =
+    typeof frameIdCandidate === "number" && Number.isFinite(frameIdCandidate)
+      ? Math.max(0, Math.floor(frameIdCandidate))
+      : 0;
+
+  if (frameId > 0 && !runtime.authorizedContentFrames.has(frameId)) {
+    return undefined;
+  }
+
+  if (
+    !evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+      url: runtime.captureUrl,
+      tabId,
+      frameId: 0
+    }).allowed
+  ) {
     return undefined;
   }
 
@@ -4208,12 +4562,51 @@ function enqueueWithResult<TResult>(
 }
 
 async function teardownCaptureInstrumentation(runtime: SessionRuntime): Promise<void> {
+  if (runtime.consentExpiryTimer !== null) {
+    clearTimeout(runtime.consentExpiryTimer);
+    runtime.consentExpiryTimer = null;
+  }
+
   if (runtime.pipelineFlushTimer !== null) {
     clearTimeout(runtime.pipelineFlushTimer);
     runtime.pipelineFlushTimer = null;
   }
 
   await cleanupCdpInstrumentation(runtime, runtime.cdpRouter);
+}
+
+function scheduleConsentExpiry(runtime: SessionRuntime): void {
+  if (runtime.consentExpiryTimer !== null) {
+    clearTimeout(runtime.consentExpiryTimer);
+    runtime.consentExpiryTimer = null;
+  }
+
+  const expiresAt = runtime.config.capturePolicy?.consent.expiresAt;
+
+  if (!expiresAt) {
+    return;
+  }
+
+  const delay = Date.parse(expiresAt) - Date.now();
+
+  if (!Number.isFinite(delay) || delay <= 0) {
+    void stopSession(runtime.tabId);
+    return;
+  }
+
+  runtime.consentExpiryTimer = setTimeout(
+    () => {
+      runtime.consentExpiryTimer = null;
+
+      if (Date.now() >= Date.parse(expiresAt)) {
+        void stopSession(runtime.tabId);
+        return;
+      }
+
+      scheduleConsentExpiry(runtime);
+    },
+    Math.min(delay, 2_147_000_000)
+  );
 }
 
 async function cleanupCdpInstrumentation(
@@ -4240,6 +4633,7 @@ async function cleanupCdpInstrumentation(
   }
 
   runtime.enabledCdpSessions.clear();
+  clearCdpCaptureScopeState(runtime.cdpScope);
   runtime.requestMeta.clear();
   runtime.responseBodyCaptureTimestamps.length = 0;
   runtime.heapSnapshotCapture = null;
@@ -4349,31 +4743,32 @@ function toSessionMetadata(runtime: SessionRuntime): SessionMetadata {
 
 async function resolveTabSessionMetadata(
   tabId: number
-): Promise<Pick<SessionMetadata, "url" | "title">> {
+): Promise<Pick<SessionMetadata, "url" | "title"> & { captureUrl: string }> {
   const fallbackUrl = `tab:${tabId}`;
 
   if (!chromeApi?.tabs?.get) {
     return {
-      url: fallbackUrl
+      url: fallbackUrl,
+      captureUrl: fallbackUrl
     };
   }
 
   try {
     const tab = await chromeApi.tabs.get(tabId);
-    const url =
-      typeof tab?.url === "string" && tab.url.length > 0
-        ? sanitizeUrlForPrivacy(tab.url)
-        : fallbackUrl;
+    const captureUrl = typeof tab?.url === "string" && tab.url.length > 0 ? tab.url : fallbackUrl;
+    const url = sanitizeUrlForPrivacy(captureUrl);
     const title =
       typeof tab?.title === "string" && tab.title.trim().length > 0 ? tab.title.trim() : undefined;
 
     return {
       url,
+      captureUrl,
       title
     };
   } catch {
     return {
-      url: fallbackUrl
+      url: fallbackUrl,
+      captureUrl: fallbackUrl
     };
   }
 }
@@ -4408,23 +4803,21 @@ async function updateSessionMetadataFromEventAsync(
   const nextTitle = asString(payload?.title) ?? asString(payload?.documentTitle);
   let changed = false;
 
-  const sanitizedNextUrl = nextUrl ? sanitizeUrlForPrivacy(nextUrl) : undefined;
-
-  if (sanitizedNextUrl && sanitizedNextUrl !== runtime.url) {
-    const nextOrigin = resolveUrlOrigin(sanitizedNextUrl);
-
-    if (shouldStopOnOriginChange(runtime, nextOrigin)) {
+  if (nextUrl) {
+    if (!(await isRuntimeTopDocumentAllowed(runtime, nextUrl))) {
       await stopSession(runtime.tabId);
       return;
     }
 
-    if (await shouldStopForEnterpriseOriginPolicy(nextOrigin)) {
-      await stopSession(runtime.tabId);
-      return;
-    }
+    const sanitizedNextUrl = sanitizeUrlForPrivacy(nextUrl);
 
-    runtime.url = sanitizedNextUrl;
-    changed = true;
+    if (sanitizedNextUrl !== runtime.url || nextUrl !== runtime.captureUrl) {
+      runtime.url = sanitizedNextUrl;
+      runtime.captureUrl = nextUrl;
+      runtime.cdpScope.captureUrl = nextUrl;
+      resetAuthorizedContentFrames(runtime);
+      changed = true;
+    }
   }
 
   if (nextTitle && nextTitle.trim().length > 0 && nextTitle !== runtime.title) {
@@ -4467,32 +4860,37 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     return;
   }
 
+  if (!(await isRuntimeTopDocumentAllowed(runtime, rawUrl))) {
+    await stopSession(tabId);
+    return;
+  }
+
   const nextUrl = sanitizeUrlForPrivacy(rawUrl);
-  const nextOrigin = resolveUrlOrigin(nextUrl);
 
-  if (shouldStopOnOriginChange(runtime, nextOrigin)) {
-    await stopSession(tabId);
-    return;
-  }
-
-  if (await shouldStopForEnterpriseOriginPolicy(nextOrigin)) {
-    await stopSession(tabId);
-    return;
-  }
-
-  if (nextUrl !== runtime.url) {
+  if (nextUrl !== runtime.url || rawUrl !== runtime.captureUrl) {
     runtime.url = nextUrl;
+    runtime.captureUrl = rawUrl;
+    runtime.cdpScope.captureUrl = rawUrl;
+    resetAuthorizedContentFrames(runtime);
     pushSessionList();
   }
 }
 
-function shouldStopOnOriginChange(runtime: SessionRuntime, nextOrigin: string | null): boolean {
-  return shouldStopForCaptureScopeOriginChange({
-    scopeOrigin: runtime.scopeOrigin,
-    nextOrigin,
-    stopOnOriginChange: runtime.config.capturePolicy?.scope.stopOnOriginChange === true,
-    activeTabScopedBuild: isActiveTabScopedBuild()
+async function isRuntimeTopDocumentAllowed(
+  runtime: SessionRuntime,
+  rawUrl: string
+): Promise<boolean> {
+  const decision = evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+    url: rawUrl,
+    tabId: runtime.tabId,
+    frameId: 0
   });
+
+  if (!decision.allowed) {
+    return false;
+  }
+
+  return !(await shouldStopForEnterpriseOriginPolicy(decision.origin));
 }
 
 async function shouldStopForEnterpriseOriginPolicy(nextOrigin: string | null): Promise<boolean> {
@@ -4502,14 +4900,6 @@ async function shouldStopForEnterpriseOriginPolicy(nextOrigin: string | null): P
     nextOrigin,
     isEnterpriseOriginAllowed: (origin) => isEnterpriseOriginAllowed(origin, enterprisePolicy)
   });
-}
-
-function isActiveTabScopedBuild(): boolean {
-  const manifest = chromeApi?.runtime?.getManifest?.();
-  const permissions = new Set(manifest?.permissions ?? []);
-  const hostPermissions = manifest?.host_permissions ?? [];
-
-  return permissions.has("activeTab") && hostPermissions.length === 0;
 }
 
 function resolveUrlOrigin(value: string): string | null {
@@ -4523,6 +4913,10 @@ function resolveUrlOrigin(value: string): string | null {
 
 function broadcast(message: ExtensionOutboundMessage): void {
   for (const port of connectedPorts) {
+    if (port.name === PORT_NAMES.content && message.kind === "sw.recording-status") {
+      continue;
+    }
+
     sendPortMessage(port, message);
   }
 }
@@ -4618,18 +5012,15 @@ function withSessionCapturePolicy(
 ): typeof DEFAULT_RECORDER_CONFIG {
   const basePolicy =
     config.capturePolicy ?? DEFAULT_RECORDER_CONFIG.capturePolicy ?? DEFAULT_CAPTURE_POLICY;
+  const sessionPolicy = bindCapturePolicyToSession(basePolicy, {
+    tabId: context.tabId,
+    origin: context.origin
+  });
   const capturePolicy: CapturePolicy = {
-    ...basePolicy,
+    ...sessionPolicy,
     consent: {
-      ...basePolicy.consent,
+      ...sessionPolicy.consent,
       grantedAt: new Date(context.startedAt).toISOString()
-    },
-    scope: {
-      ...basePolicy.scope,
-      tabId: context.tabId,
-      origin: context.origin,
-      allowedOrigins: [...basePolicy.scope.allowedOrigins],
-      stopOnOriginChange: false
     },
     redaction: config.redaction
   };
@@ -4938,22 +5329,48 @@ async function notifyTabStatus(
   sid?: string,
   mode?: CaptureMode,
   sampling?: RecordingSampling,
-  capturePolicy?: CapturePolicy
+  capturePolicy?: CapturePolicy,
+  frameId?: number
 ): Promise<void> {
   if (!chromeApi?.tabs?.sendMessage) {
     return;
   }
 
   await chromeApi.tabs
-    .sendMessage(tabId, {
-      kind: "sw.recording-status",
-      active,
-      sid,
-      mode,
-      sampling,
-      capturePolicy
-    })
+    .sendMessage(
+      tabId,
+      {
+        kind: "sw.recording-status",
+        active,
+        sid,
+        mode,
+        sampling,
+        capturePolicy
+      },
+      frameId === undefined ? undefined : { frameId }
+    )
     .catch(() => undefined);
+}
+
+async function notifyAuthorizedContentFrames(
+  runtime: SessionRuntime,
+  active: boolean
+): Promise<void> {
+  const frameIds = [...runtime.authorizedContentFrames];
+
+  await Promise.all(
+    frameIds.map((frameId) =>
+      notifyTabStatus(
+        runtime.tabId,
+        active,
+        runtime.sid,
+        runtime.mode,
+        toStatusSampling(runtime),
+        runtime.config.capturePolicy,
+        frameId
+      )
+    )
+  );
 }
 
 function adjustInFlightContentMessages(tabId: number, delta: 1 | -1): void {
@@ -5049,7 +5466,9 @@ async function relayMarkerCommand(): Promise<void> {
     return;
   }
 
-  await chromeApi?.tabs?.sendMessage(tabId, { kind: "sw.marker-command" }).catch(() => undefined);
+  await chromeApi?.tabs
+    ?.sendMessage(tabId, { kind: "sw.marker-command" }, { frameId: 0 })
+    .catch(() => undefined);
 }
 
 async function resolveUiActionTabId(tabId?: number): Promise<number | undefined> {

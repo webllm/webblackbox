@@ -168,7 +168,8 @@ function flushPendingEventsChunk(): boolean {
   try {
     contentPort.postMessage({
       kind: "content.events",
-      events: batch
+      events: batch,
+      documentUrl: readDocumentUrl()
     });
   } catch (error) {
     debugPortSendFailure("content.events.replay", error);
@@ -226,7 +227,8 @@ function emitMarker(message: string): void {
   try {
     contentPort.postMessage({
       kind: "content.marker",
-      message
+      message,
+      documentUrl: readDocumentUrl()
     });
   } catch (error) {
     debugPortSendFailure("content.marker", error);
@@ -367,7 +369,8 @@ async function requestRecordingStatusOnce(): Promise<void> {
 
   try {
     const response = await chromeApi.runtime.sendMessage({
-      kind: "content.ready"
+      kind: "content.ready",
+      documentUrl: readDocumentUrl()
     });
 
     if (isRecordingStatusMessage(response)) {
@@ -469,4 +472,12 @@ function normalizeBodyCaptureBudget(value: unknown): number {
   }
 
   return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
+}
+
+function readDocumentUrl(): string | undefined {
+  try {
+    return window.location.href;
+  } catch {
+    return undefined;
+  }
 }

@@ -34,6 +34,14 @@ const MASKED_SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
   }
 };
 
+const SUBFRAME_CAPTURE_POLICY: CapturePolicy = {
+  ...SCREENSHOT_TEST_CAPTURE_POLICY,
+  scope: {
+    ...SCREENSHOT_TEST_CAPTURE_POLICY.scope,
+    includeSubframes: true
+  }
+};
+
 function capturePolicyWithInputs(inputs: CapturePolicy["categories"]["inputs"]): CapturePolicy {
   return {
     ...DEFAULT_CAPTURE_POLICY,
@@ -263,6 +271,25 @@ describe("LiteCaptureAgent", () => {
 
     expect(snapdomToBlobMock).not.toHaveBeenCalled();
 
+    agent.dispose();
+  });
+
+  it("does not capture root screenshots containing an out-of-scope child frame", async () => {
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<iframe src="https://outside.example/private"></iframe>'
+    );
+    const { agent } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
+
+    clickTarget();
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(snapdomToBlobMock).not.toHaveBeenCalled();
     agent.dispose();
   });
 
@@ -524,7 +551,7 @@ describe("LiteCaptureAgent", () => {
   it("keeps child-frame capture lightweight", async () => {
     const { agent, emitBatch } = createAgent(
       {
-        capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
+        capturePolicy: SUBFRAME_CAPTURE_POLICY,
         sampling: {
           screenshotIdleMs: 1_000
         }
@@ -556,6 +583,61 @@ describe("LiteCaptureAgent", () => {
     expect(rawTypes).not.toContain("indexedDbSnapshot");
     expect(snapdomToBlobMock).not.toHaveBeenCalled();
 
+    agent.dispose();
+  });
+
+  it("does not install or emit capture from a child frame when subframes are disabled", () => {
+    const { agent, emitBatch } = createAgent(
+      {
+        capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY
+      },
+      {
+        frameScope: "child"
+      }
+    );
+
+    clickTarget();
+    agent.flush();
+
+    expect(emitBatch).not.toHaveBeenCalled();
+    agent.dispose();
+  });
+
+  it("fails closed when the current document URL is excluded", () => {
+    const excludedPolicy: CapturePolicy = {
+      ...DEFAULT_CAPTURE_POLICY,
+      scope: {
+        ...DEFAULT_CAPTURE_POLICY.scope,
+        excludedUrlPatterns: ["*"]
+      }
+    };
+    const { agent, emitBatch } = createAgent({ capturePolicy: excludedPolicy });
+
+    clickTarget();
+    agent.flush();
+
+    expect(emitBatch).not.toHaveBeenCalled();
+    agent.dispose();
+  });
+
+  it("tears down capture when consent expires", async () => {
+    vi.setSystemTime(new Date("2026-07-11T00:00:00.000Z"));
+    const expiringPolicy: CapturePolicy = {
+      ...DEFAULT_CAPTURE_POLICY,
+      consent: {
+        ...DEFAULT_CAPTURE_POLICY.consent,
+        grantedAt: "2026-07-10T00:00:00.000Z",
+        expiresAt: "2026-07-11T00:00:01.000Z"
+      }
+    };
+    const { agent, emitBatch } = createAgent({ capturePolicy: expiringPolicy });
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    emitBatch.mockClear();
+    clickTarget();
+    agent.flush();
+
+    expect(emitBatch).not.toHaveBeenCalled();
     agent.dispose();
   });
 

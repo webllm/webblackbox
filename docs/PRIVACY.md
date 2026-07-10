@@ -14,6 +14,12 @@ By default, WebBlackbox records metadata needed to debug a session:
 
 By default, WebBlackbox does not collect raw input values, DOM text, screenshots, storage values, cookies, raw headers, request bodies, or response bodies.
 
+## Capture Scope And Consent
+
+The extension binds each session to the selected tab and starting origin. The same effective scope is evaluated before startup, after top-level navigation, before frame capture instrumentation is activated, and again when content, webRequest, or CDP events arrive. Denied origins and excluded URL patterns always win; a non-empty origin allowlist is restrictive; opaque or invalid document URLs fail closed.
+
+`stopOnOriginChange` is preserved from the configured policy and defaults to `true`. Child-frame capture is disabled unless `includeSubframes` is explicitly enabled, and enabled child frames must independently pass the origin, URL, tab, and consent checks. Capture stops when time-bounded consent expires.
+
 ## Local Storage
 
 Captured sessions remain local until the user exports or shares an archive. Under the required local-at-rest policy, persisted event chunks and blobs are authenticated and encrypted with AES-GCM; raw persistent storage is rejected. Extension upgrades purge the former plaintext cache, and a missing managed key causes unverifiable cached payloads to be purged instead of silently reopened. Query indexes and session metadata remain plaintext and must not contain captured payload values. Local stopped sessions are subject to retention controls, and enterprise policies can cap local retention.

@@ -7,7 +7,7 @@ WebBlackbox records browser debugging metadata for sessions that the user explic
 ## Permission Rationale
 
 - `activeTab`: grants temporary access to the active tab after a user gesture.
-- `scripting`: injects capture code only after recording starts.
+- `scripting`: injects a passive scope-checking bootstrap only after recording starts; capture instrumentation activates only in frames permitted by the effective capture scope.
 - `storage`: stores local settings, local session metadata, and local audit records.
 - `downloads`: saves user-requested archive exports.
 
