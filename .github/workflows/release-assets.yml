@@ -11,12 +11,58 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
+  verify-release:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Checkout released ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Verify immutable release source
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          node scripts/verify-release-ref.mjs "$RELEASE_TAG" origin/main
+
+      - name: Verify successful CI for release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_sha=$(git rev-parse HEAD)
+          successful_runs=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow ci.yml \
+            --commit "$release_sha" \
+            --branch main \
+            --event push \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq 'length')
+          if [ "$successful_runs" -ne 1 ]; then
+            echo "No successful CI workflow found for $release_sha." >&2
+            exit 1
+          fi
+
   chrome-extension:
     runs-on: ubuntu-latest
+    needs: verify-release
+    permissions:
+      contents: write
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
     steps:
@@ -79,6 +125,9 @@ jobs:
 
   player-pages:
     runs-on: ubuntu-latest
+    needs: verify-release
+    permissions:
+      contents: write
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
       PLAYER_SITE_URL: https://webllm.github.io/webblackbox/
