@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createE2eTempPath, executableSearchPaths, resolveExecutable } from "./e2e-runtime.mjs";
+import {
+  createE2eTempPath,
+  executableSearchPaths,
+  extensionChromeLoadArgs,
+  resolveExecutable
+} from "./e2e-runtime.mjs";
+
+test("keeps unpacked extension loading available in branded and unbranded test browsers", () => {
+  assert.deepEqual(extensionChromeLoadArgs("/tmp/WebBlackbox Extension"), [
+    "--disable-features=DisableDisableExtensionsExceptCommandLineSwitch",
+    "--disable-extensions-except=/tmp/WebBlackbox Extension",
+    "--load-extension=/tmp/WebBlackbox Extension"
+  ]);
+  assert.throws(() => extensionChromeLoadArgs(""), /non-empty path/u);
+});
 
 test("creates platform-native E2E temporary paths", () => {
   assert.equal(

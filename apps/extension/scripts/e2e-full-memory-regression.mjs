@@ -8,7 +8,11 @@ import { access, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
+import {
+  createE2eTempPath,
+  extensionChromeLoadArgs,
+  resolveExecutable
+} from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -385,8 +389,7 @@ function startChrome(binary, options) {
     "--disable-component-update",
     "--disable-default-apps",
     "--disable-popup-blocking",
-    `--disable-extensions-except=${options.extensionDir}`,
-    `--load-extension=${options.extensionDir}`,
+    ...extensionChromeLoadArgs(options.extensionDir),
     "--enable-logging=stderr",
     "--v=1",
     "about:blank"

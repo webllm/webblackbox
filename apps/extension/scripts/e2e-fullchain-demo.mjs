@@ -10,7 +10,11 @@ import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 
-import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
+import {
+  createE2eTempPath,
+  extensionChromeLoadArgs,
+  resolveExecutable
+} from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -149,7 +153,6 @@ async function main() {
 
   const version = chrome.version;
   console.log(`Chrome: ${version.Browser}`);
-  assertCommandLineExtensionLoadingSupported(chromeBinary, version.Browser);
 
   const browserWsUrl =
     typeof version.webSocketDebuggerUrl === "string" ? version.webSocketDebuggerUrl : null;
@@ -738,24 +741,6 @@ async function resolveChromeBinary(candidates) {
   );
 }
 
-function assertCommandLineExtensionLoadingSupported(binary, browserVersion) {
-  const major = Number(/^Chrome\/(\d+)/u.exec(browserVersion ?? "")?.[1] ?? "0");
-  const normalizedBinary = String(binary).replaceAll("\\", "/").toLowerCase();
-  const isChromeForTesting = normalizedBinary.includes("chrome for testing");
-  const isChromium = normalizedBinary.includes("chromium");
-  const isMacBrandedChrome = normalizedBinary.includes("/applications/google chrome.app/");
-
-  if (major >= 137 && isMacBrandedChrome && !isChromeForTesting && !isChromium) {
-    throw new Error(
-      [
-        "This E2E requires a browser that still supports command-line unpacked extensions.",
-        "Official Chrome branded builds block --load-extension starting with Chrome 137.",
-        "Set WB_E2E_CHROME_BIN to Chrome for Testing or Chromium."
-      ].join(" ")
-    );
-  }
-}
-
 function startChrome(binary, options) {
   const args = [
     `--remote-debugging-port=${options.remotePort}`,
@@ -770,8 +755,7 @@ function startChrome(binary, options) {
     "--disable-popup-blocking",
     "--safebrowsing-disable-download-protection",
     "--window-size=1400,1000",
-    `--disable-extensions-except=${options.extensionDir}`,
-    `--load-extension=${options.extensionDir}`,
+    ...extensionChromeLoadArgs(options.extensionDir),
     ...(options.allowlistedExtensionId
       ? [`--allowlisted-extension-id=${options.allowlistedExtensionId}`]
       : []),

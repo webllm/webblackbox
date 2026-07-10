@@ -7,7 +7,11 @@ import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
+import {
+  createE2eTempPath,
+  extensionChromeLoadArgs,
+  resolveExecutable
+} from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(root, "..");
@@ -256,8 +260,7 @@ function startChrome(binary, options) {
     "--disable-sync",
     "--disable-component-update",
     "--disable-default-apps",
-    `--disable-extensions-except=${options.extensionDir}`,
-    `--load-extension=${options.extensionDir}`,
+    ...extensionChromeLoadArgs(options.extensionDir),
     "--enable-logging=stderr",
     "--v=1",
     "about:blank"

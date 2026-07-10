@@ -5,6 +5,21 @@ import { posix, win32 } from "node:path";
 
 const WINDOWS_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD";
 
+export function extensionChromeLoadArgs(extensionDirectory) {
+  if (typeof extensionDirectory !== "string" || extensionDirectory.trim().length === 0) {
+    throw new TypeError("Extension E2E directory must be a non-empty path.");
+  }
+
+  return [
+    // Chrome 137+ blocks --load-extension in branded builds. Keeping the
+    // disable-extensions-except path enabled preserves unpacked E2E loading,
+    // while unbranded Chromium continues to honor --load-extension directly.
+    "--disable-features=DisableDisableExtensionsExceptCommandLineSwitch",
+    `--disable-extensions-except=${extensionDirectory}`,
+    `--load-extension=${extensionDirectory}`
+  ];
+}
+
 export function createE2eTempPath(
   prefix,
   extension = "",

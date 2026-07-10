@@ -9,7 +9,11 @@ import { dirname, resolve } from "node:path";
 import { createServer as createNetServer } from "node:net";
 import { fileURLToPath } from "node:url";
 
-import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
+import {
+  createE2eTempPath,
+  extensionChromeLoadArgs,
+  resolveExecutable
+} from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -453,8 +457,7 @@ function startChrome(binary, options) {
     "--disable-popup-blocking",
     "--safebrowsing-disable-download-protection",
     "--window-size=1400,1000",
-    `--disable-extensions-except=${options.extensionDir}`,
-    `--load-extension=${options.extensionDir}`,
+    ...extensionChromeLoadArgs(options.extensionDir),
     "--enable-logging=stderr",
     "--v=1",
     "about:blank"
