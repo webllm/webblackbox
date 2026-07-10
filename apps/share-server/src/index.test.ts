@@ -485,6 +485,164 @@ describe("share-server", () => {
     await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toEqual([]);
   });
 
+  it("rebuilds current persisted server summaries from allowlisted public fields", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const initialResponse = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const initialPayload = (await initialResponse.json()) as {
+      summary: {
+        source: string;
+        clientClaim?: { privacy?: { scanner?: { status?: string } } };
+      };
+    };
+    expect(initialResponse.status).toBe(200);
+    expect(initialPayload.summary.source).toBe("client-unverified");
+    expect(initialPayload.summary.clientClaim?.privacy?.scanner?.status).toBe("passed");
+
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as {
+      summary: Record<string, unknown>;
+    };
+    const extraSecret = "persisted-extra-secret";
+    record.summary = buildPersistedServerSummary(record.summary);
+    record.summary.extraSecret = extraSecret;
+    const privacy = record.summary.privacy as Record<string, unknown>;
+    privacy.extraSecret = extraSecret;
+    const scanner = privacy.scanner as Record<string, unknown>;
+    scanner.extraSecret = extraSecret;
+    await writeFile(recordPath, JSON.stringify(record));
+
+    const response = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        source: string;
+        analyzed: boolean;
+        extraSecret?: unknown;
+        privacy?: {
+          extraSecret?: unknown;
+          scanner: { status: string; extraSecret?: unknown };
+        };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.summary).toMatchObject({
+      source: "server",
+      analyzed: true,
+      privacy: { scanner: { status: "passed" } }
+    });
+    expect(payload.summary.extraSecret).toBeUndefined();
+    expect(payload.summary.privacy?.extraSecret).toBeUndefined();
+    expect(payload.summary.privacy?.scanner.extraSecret).toBeUndefined();
+    expect(JSON.stringify(payload.summary)).not.toContain(extraSecret);
+  });
+
+  it("downgrades malformed current persisted server summaries to unavailable", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as {
+      summary: Record<string, unknown>;
+    };
+    const validSummary = buildPersistedServerSummary(record.summary);
+    const mutations: Array<{
+      name: string;
+      mutate: (summary: Record<string, unknown>) => void;
+    }> = [
+      {
+        name: "encrypted type",
+        mutate: (summary) => {
+          summary.encrypted = "true";
+        }
+      },
+      {
+        name: "totals type",
+        mutate: (summary) => {
+          (summary.totals as Record<string, unknown>).events = "0";
+        }
+      },
+      {
+        name: "totals bound",
+        mutate: (summary) => {
+          (summary.totals as Record<string, unknown>).events = Number.MAX_SAFE_INTEGER;
+        }
+      },
+      {
+        name: "privacy type",
+        mutate: (summary) => {
+          const privacy = summary.privacy as Record<string, unknown>;
+          (privacy.scanner as Record<string, unknown>).preEncryption = "true";
+        }
+      }
+    ];
+
+    for (const { name, mutate } of mutations) {
+      record.summary = structuredClone(validSummary);
+      mutate(record.summary);
+      await writeFile(recordPath, JSON.stringify(record));
+
+      const response = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+        headers: { "x-webblackbox-api-key": apiKey }
+      });
+      const payload = (await response.json()) as {
+        summary: {
+          source: string;
+          analyzed: boolean;
+          privacy?: unknown;
+          clientClaim?: unknown;
+          trust: { privateContent: string };
+        };
+      };
+
+      expect(response.status, name).toBe(200);
+      expect(payload.summary, name).toMatchObject({
+        source: "unavailable",
+        analyzed: false,
+        trust: { privateContent: "not-analyzed" }
+      });
+      expect(payload.summary.privacy, name).toBeUndefined();
+      expect(payload.summary.clientClaim, name).toBeUndefined();
+    }
+  });
+
+  it("downgrades persisted client claims that forge top-level verified privacy", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as {
+      summary: Record<string, unknown>;
+    };
+    const clientClaim = record.summary.clientClaim as Record<string, unknown>;
+    record.summary.privacy = clientClaim.privacy;
+    await writeFile(recordPath, JSON.stringify(record));
+
+    const response = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        source: string;
+        analyzed: boolean;
+        privacy?: unknown;
+        clientClaim?: unknown;
+        trust: { privateContent: string };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.summary).toMatchObject({
+      source: "unavailable",
+      analyzed: false,
+      trust: { privateContent: "not-analyzed" }
+    });
+    expect(payload.summary.privacy).toBeUndefined();
+    expect(payload.summary.clientClaim).toBeUndefined();
+  });
+
   it("downgrades legacy stored client summaries instead of exposing them as analyzed", async () => {
     const server = await startShareServer();
     const upload = await uploadEncryptedFixture(server);
@@ -1607,6 +1765,36 @@ async function uploadEncryptedFixture(
 
   expect(response.status).toBe(201);
   return (await response.json()) as { shareId: string };
+}
+
+function buildPersistedServerSummary(
+  clientSummary: Record<string, unknown>
+): Record<string, unknown> {
+  const envelopeTotals = clientSummary.totals as Record<string, unknown>;
+  const clientClaim = clientSummary.clientClaim as Record<string, unknown>;
+
+  return {
+    schemaVersion: 2,
+    source: "server",
+    analyzed: true,
+    encrypted: clientSummary.encrypted,
+    trust: {
+      archiveEnvelope: "server-inspected",
+      privateContent: "server-analyzed"
+    },
+    manifest: clientSummary.manifest,
+    totals: {
+      events: envelopeTotals.events,
+      blobs: envelopeTotals.blobs,
+      privacyViolations: 0,
+      errors: 0,
+      requests: 0,
+      actions: 0,
+      durationMs: envelopeTotals.durationMs
+    },
+    topActionTriggers: [],
+    privacy: clientClaim.privacy
+  };
 }
 
 function buildPassedShareSummary(archive: Uint8Array): unknown {

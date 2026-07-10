@@ -2249,87 +2249,516 @@ function buildPublicShareMetadata(record: ShareRecord): {
 }
 
 function normalizePersistedShareSummary(value: unknown): ShareSummary {
-  const record = asRecord(value);
-  const source = record.source;
-  const trust = asRecord(record.trust);
-  const currentTrustIsConsistent =
-    (source === "server" &&
-      record.analyzed === true &&
-      trust.privateContent === "server-analyzed") ||
-    (source === "client-unverified" &&
-      record.analyzed === false &&
-      trust.privateContent === "client-claim-unverified") ||
-    (source === "unavailable" &&
-      record.analyzed === false &&
-      trust.privateContent === "not-analyzed");
+  const record = readPersistedObject(value);
+  const encrypted = record?.encrypted === true;
 
-  if (
-    record.schemaVersion === 2 &&
-    trust.archiveEnvelope === "server-inspected" &&
-    currentTrustIsConsistent
-  ) {
-    return value as ShareSummary;
+  if (record?.schemaVersion === 2) {
+    return (
+      normalizeCurrentPersistedShareSummary(record) ?? unavailablePersistedShareSummary(encrypted)
+    );
   }
 
-  const legacy = value as Partial<ShareSummary> & {
-    source?: string;
-    archiveSha256?: unknown;
-  };
-  const legacyWithoutDigest = { ...legacy };
-  delete legacyWithoutDigest.archiveSha256;
-  const encrypted = legacy.encrypted === true;
+  return (
+    normalizeLegacyPersistedShareSummary(record) ?? unavailablePersistedShareSummary(encrypted)
+  );
+}
 
-  if (source === "client" || source === "client-unverified") {
-    const legacyTotals = legacy.totals;
+function normalizeCurrentPersistedShareSummary(
+  record: Record<string, unknown>
+): ShareSummary | null {
+  if (typeof record.encrypted !== "boolean") {
+    return null;
+  }
+
+  const trust = readPersistedObject(record.trust);
+  if (trust?.archiveEnvelope !== "server-inspected") {
+    return null;
+  }
+
+  const manifest = normalizePersistedShareManifest(record.manifest);
+  if (manifest === null) {
+    return null;
+  }
+
+  if (record.source === "server") {
+    const totals = normalizePersistedShareTotals(record.totals, "server");
+    const topActionTriggers = normalizePersistedActionTriggerSummaries(record.topActionTriggers);
+    const privacy = normalizePersistedSharePrivacySummary(record.privacy);
+    if (
+      record.analyzed !== true ||
+      trust.privateContent !== "server-analyzed" ||
+      trust.archiveDigestMatched !== undefined ||
+      record.analysisError !== undefined ||
+      record.clientClaim !== undefined ||
+      totals === null ||
+      topActionTriggers === null ||
+      privacy === null
+    ) {
+      return null;
+    }
+
+    return {
+      schemaVersion: 2,
+      source: "server",
+      analyzed: true,
+      encrypted: record.encrypted,
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "server-analyzed"
+      },
+      manifest,
+      totals,
+      topActionTriggers,
+      privacy
+    };
+  }
+
+  if (record.source === "client-unverified") {
+    const totals = normalizePersistedShareTotals(record.totals, "envelope");
+    const clientClaim = normalizePersistedClientClaim(record.clientClaim);
+    if (
+      record.analyzed !== false ||
+      trust.privateContent !== "client-claim-unverified" ||
+      (trust.archiveDigestMatched !== undefined && trust.archiveDigestMatched !== true) ||
+      record.privacy !== undefined ||
+      record.topActionTriggers !== undefined ||
+      !isOptionalPersistedAnalysisError(record.analysisError) ||
+      totals === null ||
+      clientClaim === null
+    ) {
+      return null;
+    }
 
     return {
       schemaVersion: 2,
       source: "client-unverified",
       analyzed: false,
-      encrypted,
+      encrypted: record.encrypted,
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "client-claim-unverified",
+        ...(trust.archiveDigestMatched === true ? { archiveDigestMatched: true } : {})
+      },
+      manifest,
+      totals,
+      clientClaim,
+      analysisError:
+        trust.archiveDigestMatched === true
+          ? "Encrypted private content was not analyzed by the share server; privacy fields are unverified client claims."
+          : "Legacy client privacy fields were not archive-digest-bound and remain unverified claims."
+    };
+  }
+
+  if (record.source === "unavailable") {
+    const totals = normalizePersistedShareTotals(record.totals, "envelope");
+    if (
+      record.analyzed !== false ||
+      trust.privateContent !== "not-analyzed" ||
+      trust.archiveDigestMatched !== undefined ||
+      record.privacy !== undefined ||
+      record.topActionTriggers !== undefined ||
+      record.clientClaim !== undefined ||
+      !isOptionalPersistedAnalysisError(record.analysisError) ||
+      totals === null
+    ) {
+      return null;
+    }
+
+    return {
+      schemaVersion: 2,
+      source: "unavailable",
+      analyzed: false,
+      encrypted: record.encrypted,
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "not-analyzed"
+      },
+      manifest,
+      totals,
+      analysisError: "Stored share analysis is unavailable."
+    };
+  }
+
+  return null;
+}
+
+function normalizeLegacyPersistedShareSummary(
+  record: Record<string, unknown> | null
+): ShareSummary | null {
+  if (!record || typeof record.encrypted !== "boolean") {
+    return null;
+  }
+
+  const manifest = normalizePersistedShareManifest(record.manifest);
+  const totals = normalizePersistedShareTotals(record.totals, "server");
+  const topActionTriggers = normalizePersistedActionTriggerSummaries(record.topActionTriggers);
+  const privacy = normalizePersistedSharePrivacySummary(record.privacy);
+  if (manifest === null || totals === null || topActionTriggers === null || privacy === null) {
+    return null;
+  }
+
+  if (record.source === "client" || record.source === "client-unverified") {
+    if (record.analyzed !== undefined && typeof record.analyzed !== "boolean") {
+      return null;
+    }
+
+    return {
+      schemaVersion: 2,
+      source: "client-unverified",
+      analyzed: false,
+      encrypted: record.encrypted,
       trust: {
         archiveEnvelope: "server-inspected",
         privateContent: "client-claim-unverified"
       },
-      manifest: legacy.manifest,
-      totals: legacyTotals
-        ? {
-            events: legacyTotals.events,
-            blobs: legacyTotals.blobs,
-            durationMs: legacyTotals.durationMs
-          }
-        : undefined,
+      manifest,
+      totals:
+        totals === undefined
+          ? undefined
+          : {
+              events: totals.events,
+              ...(totals.blobs === undefined ? {} : { blobs: totals.blobs }),
+              durationMs: totals.durationMs
+            },
       clientClaim: {
-        totals: legacyTotals
-          ? {
-              privacyViolations: legacyTotals.privacyViolations,
-              errors: legacyTotals.errors,
-              requests: legacyTotals.requests,
-              actions: legacyTotals.actions
-            }
-          : undefined,
-        topActionTriggers: legacy.topActionTriggers,
-        privacy: legacy.privacy
+        totals:
+          totals === undefined
+            ? undefined
+            : {
+                ...(totals.privacyViolations === undefined
+                  ? {}
+                  : { privacyViolations: totals.privacyViolations }),
+                ...(totals.errors === undefined ? {} : { errors: totals.errors }),
+                ...(totals.requests === undefined ? {} : { requests: totals.requests }),
+                ...(totals.actions === undefined ? {} : { actions: totals.actions })
+              },
+        topActionTriggers,
+        privacy
       },
       analysisError:
         "Legacy client privacy fields were not archive-digest-bound and remain unverified claims."
     };
   }
 
-  if (source === "server" && legacy.analyzed === true) {
+  if (record.source === "server" && record.analyzed === true) {
     return {
-      ...legacyWithoutDigest,
       schemaVersion: 2,
       source: "server",
       analyzed: true,
-      encrypted,
+      encrypted: record.encrypted,
       trust: {
         archiveEnvelope: "server-inspected",
         privateContent: "server-analyzed"
-      }
-    } as ShareSummary;
+      },
+      manifest,
+      totals,
+      topActionTriggers,
+      privacy
+    };
   }
 
+  return null;
+}
+
+function normalizePersistedShareManifest(value: unknown): ShareSummary["manifest"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const record = readPersistedObject(value);
+  const mode = exportManifestSchema.shape.mode.safeParse(record?.mode);
+  const chunkCodec = exportManifestSchema.shape.chunkCodec.safeParse(record?.chunkCodec);
+  const recordedAt = exportManifestSchema.shape.createdAt.safeParse(record?.recordedAt);
+  if (!mode.success || !chunkCodec.success || !recordedAt.success) {
+    return null;
+  }
+
+  return {
+    mode: mode.data,
+    chunkCodec: chunkCodec.data,
+    recordedAt: recordedAt.data
+  };
+}
+
+function normalizePersistedShareTotals(
+  value: unknown,
+  kind: "server" | "envelope"
+): ShareSummary["totals"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const record = readPersistedObject(value);
+  if (!record) {
+    return null;
+  }
+  const events = readPersistedNonNegativeInteger(
+    record.events,
+    SHARE_ARCHIVE_RESOURCE_LIMITS.maxEventCount
+  );
+  const durationMs = readPersistedNonNegativeInteger(record.durationMs, Number.MAX_SAFE_INTEGER);
+  const blobs = readOptionalPersistedNonNegativeInteger(
+    record,
+    "blobs",
+    SHARE_ARCHIVE_RESOURCE_LIMITS.maxEntryCount
+  );
+  if (events === null || durationMs === null || blobs === null) {
+    return null;
+  }
+
+  const privacyViolations = readOptionalPersistedSummaryCount(record, "privacyViolations");
+  const errors = readOptionalPersistedSummaryCount(record, "errors");
+  const requests = readOptionalPersistedSummaryCount(record, "requests");
+  const actions = readOptionalPersistedSummaryCount(record, "actions");
+  if (
+    privacyViolations === null ||
+    errors === null ||
+    requests === null ||
+    actions === null ||
+    (kind === "envelope" &&
+      (privacyViolations !== undefined ||
+        errors !== undefined ||
+        requests !== undefined ||
+        actions !== undefined))
+  ) {
+    return null;
+  }
+
+  return {
+    events,
+    ...(blobs === undefined ? {} : { blobs }),
+    ...(kind === "server"
+      ? {
+          ...(privacyViolations === undefined ? {} : { privacyViolations }),
+          ...(errors === undefined ? {} : { errors }),
+          ...(requests === undefined ? {} : { requests }),
+          ...(actions === undefined ? {} : { actions })
+        }
+      : {}),
+    durationMs
+  };
+}
+
+function normalizePersistedClientClaim(value: unknown): ShareSummary["clientClaim"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const record = readPersistedObject(value);
+  if (!record) {
+    return null;
+  }
+
+  let totals: NonNullable<ShareSummary["clientClaim"]>["totals"];
+  if (record.totals !== undefined) {
+    const totalsRecord = readPersistedObject(record.totals);
+    if (!totalsRecord) {
+      return null;
+    }
+    const privacyViolations = readOptionalPersistedSummaryCount(totalsRecord, "privacyViolations");
+    const errors = readOptionalPersistedSummaryCount(totalsRecord, "errors");
+    const requests = readOptionalPersistedSummaryCount(totalsRecord, "requests");
+    const actions = readOptionalPersistedSummaryCount(totalsRecord, "actions");
+    if (privacyViolations === null || errors === null || requests === null || actions === null) {
+      return null;
+    }
+    totals = {
+      ...(privacyViolations === undefined ? {} : { privacyViolations }),
+      ...(errors === undefined ? {} : { errors }),
+      ...(requests === undefined ? {} : { requests }),
+      ...(actions === undefined ? {} : { actions })
+    };
+  }
+
+  const topActionTriggers = normalizePersistedActionTriggerSummaries(record.topActionTriggers);
+  const privacy = normalizePersistedSharePrivacySummary(record.privacy);
+  if (topActionTriggers === null || privacy === null) {
+    return null;
+  }
+
+  return { totals, topActionTriggers, privacy };
+}
+
+function normalizePersistedSharePrivacySummary(value: unknown): ShareSummary["privacy"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const record = readPersistedObject(value);
+  const redaction = readPersistedObject(record?.redaction);
+  const detected = readPersistedObject(record?.detected);
+  const scanner = readPersistedObject(record?.scanner);
+  if (!record || !redaction || !detected || !scanner) {
+    return null;
+  }
+
+  const headerRuleCount = readPersistedSummaryCount(redaction.headerRuleCount);
+  const cookieRuleCount = readPersistedSummaryCount(redaction.cookieRuleCount);
+  const bodyPatternCount = readPersistedSummaryCount(redaction.bodyPatternCount);
+  const blockedSelectorCount = readPersistedSummaryCount(redaction.blockedSelectorCount);
+  const redactedMarkers = readPersistedSummaryCount(detected.redactedMarkers);
+  const hashedSensitiveValues = readPersistedSummaryCount(detected.hashedSensitiveValues);
+  const sensitiveKeyMentions = readPersistedSummaryCount(detected.sensitiveKeyMentions);
+  const findingCount = readPersistedSummaryCount(scanner.findingCount);
+  if (
+    typeof redaction.hashSensitiveValues !== "boolean" ||
+    headerRuleCount === null ||
+    cookieRuleCount === null ||
+    bodyPatternCount === null ||
+    blockedSelectorCount === null ||
+    redactedMarkers === null ||
+    hashedSensitiveValues === null ||
+    sensitiveKeyMentions === null ||
+    typeof scanner.preEncryption !== "boolean" ||
+    (scanner.status !== "passed" && scanner.status !== "blocked" && scanner.status !== "unknown") ||
+    findingCount === null
+  ) {
+    return null;
+  }
+
+  const categories = normalizePersistedCategorySummaries(record.categories);
+  if (categories === null) {
+    return null;
+  }
+
+  return {
+    redaction: {
+      hashSensitiveValues: redaction.hashSensitiveValues,
+      headerRuleCount,
+      cookieRuleCount,
+      bodyPatternCount,
+      blockedSelectorCount
+    },
+    detected: {
+      redactedMarkers,
+      hashedSensitiveValues,
+      sensitiveKeyMentions
+    },
+    scanner: {
+      preEncryption: scanner.preEncryption,
+      status: scanner.status,
+      findingCount
+    },
+    categories
+  };
+}
+
+function normalizePersistedActionTriggerSummaries(
+  value: unknown
+): ShareSummary["topActionTriggers"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > 10) {
+    return null;
+  }
+
+  const summaries: NonNullable<ShareSummary["topActionTriggers"]> = [];
+  for (const entry of value) {
+    const record = readPersistedObject(entry);
+    const triggerType = readPersistedPublicText(record?.triggerType, 64);
+    const count = readPersistedSummaryCount(record?.count);
+    const errorRate = record?.errorRate;
+    if (
+      triggerType === null ||
+      count === null ||
+      typeof errorRate !== "number" ||
+      !Number.isFinite(errorRate) ||
+      errorRate < 0 ||
+      errorRate > 1
+    ) {
+      return null;
+    }
+    summaries.push({ triggerType, count, errorRate });
+  }
+  return summaries;
+}
+
+function normalizePersistedCategorySummaries(
+  value: unknown
+): NonNullable<ShareSummary["privacy"]>["categories"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > 24) {
+    return null;
+  }
+
+  const summaries: NonNullable<NonNullable<ShareSummary["privacy"]>["categories"]> = [];
+  for (const entry of value) {
+    const record = readPersistedObject(entry);
+    const category = readPersistedPublicText(record?.category, 32);
+    const events = readPersistedSummaryCount(record?.events);
+    const low = readPersistedSummaryCount(record?.low);
+    const medium = readPersistedSummaryCount(record?.medium);
+    const high = readPersistedSummaryCount(record?.high);
+    const redacted = readPersistedSummaryCount(record?.redacted);
+    const unredacted = readPersistedSummaryCount(record?.unredacted);
+    if (
+      category === null ||
+      events === null ||
+      low === null ||
+      medium === null ||
+      high === null ||
+      redacted === null ||
+      unredacted === null
+    ) {
+      return null;
+    }
+    summaries.push({ category, events, low, medium, high, redacted, unredacted });
+  }
+  return summaries;
+}
+
+function readPersistedObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readPersistedNonNegativeInteger(value: unknown, maximum: number): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum
+    ? value
+    : null;
+}
+
+function readOptionalPersistedNonNegativeInteger(
+  record: Record<string, unknown> | null,
+  key: string,
+  maximum: number
+): number | undefined | null {
+  if (!record || !(key in record)) {
+    return undefined;
+  }
+  return readPersistedNonNegativeInteger(record[key], maximum);
+}
+
+function readPersistedSummaryCount(value: unknown): number | null {
+  return readPersistedNonNegativeInteger(
+    value,
+    SHARE_ARCHIVE_RESOURCE_LIMITS.maxTotalUncompressedBytes
+  );
+}
+
+function readOptionalPersistedSummaryCount(
+  record: Record<string, unknown>,
+  key: string
+): number | undefined | null {
+  return key in record ? readPersistedSummaryCount(record[key]) : undefined;
+}
+
+function readPersistedPublicText(value: unknown, maximumLength: number): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > maximumLength) {
+    return null;
+  }
+  return redactText(value, maximumLength);
+}
+
+function isOptionalPersistedAnalysisError(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && value.length <= 240);
+}
+
+function unavailablePersistedShareSummary(encrypted: boolean): ShareSummary {
   return {
     schemaVersion: 2,
     source: "unavailable",
