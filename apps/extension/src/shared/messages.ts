@@ -101,6 +101,7 @@ export type ExtensionInboundMessage =
 export type RecordingStatusMessage = {
   kind: "sw.recording-status";
   active: boolean;
+  tabId?: number;
   sid?: string;
   mode?: CaptureMode;
   sampling?: Pick<

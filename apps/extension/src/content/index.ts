@@ -6,6 +6,7 @@ import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
 import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
+import { resolveRecordingStatusTabId } from "./recording-status.js";
 
 type ContentAgentModule = typeof import("./content-agent.js");
 
@@ -26,7 +27,6 @@ let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
 const PORT_RECONNECT_INITIAL_MS = 250;
 const PORT_RECONNECT_MAX_MS = 5_000;
 const PENDING_EVENT_MAX = 1_200;
-const DEFAULT_TAB_ID = -1;
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
 
@@ -261,7 +261,7 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
     const nextState = {
       active: message.active,
       sid: message.sid,
-      tabId: DEFAULT_TAB_ID,
+      tabId: resolveRecordingStatusTabId(message),
       mode: message.mode,
       sampling: message.sampling,
       capturePolicy: message.capturePolicy

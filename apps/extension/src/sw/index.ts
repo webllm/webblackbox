@@ -714,6 +714,7 @@ function sendContentPortRecordingState(
     port.postMessage({
       kind: "sw.recording-status",
       active,
+      tabId: runtime.tabId,
       sid: runtime.sid,
       mode: runtime.mode,
       sampling,
@@ -927,6 +928,7 @@ async function handleInboundMessage(
       return {
         kind: "sw.recording-status",
         active: false,
+        tabId: runtime.tabId,
         sid: runtime.sid,
         mode: runtime.mode,
         capturePolicy: runtime.config.capturePolicy
@@ -949,6 +951,7 @@ async function handleInboundMessage(
     return {
       kind: "sw.recording-status",
       active: true,
+      tabId: runtime.tabId,
       sid: runtime.sid,
       mode: runtime.mode,
       sampling,
@@ -1159,6 +1162,7 @@ async function startSessionUnlocked(
   broadcast({
     kind: "sw.recording-status",
     active: true,
+    tabId,
     sid,
     mode,
     sampling,
@@ -1432,6 +1436,7 @@ async function stopSessionOnce(tabId: number): Promise<void> {
           broadcast({
             kind: "sw.recording-status",
             active: false,
+            tabId: runtime.tabId,
             sid: runtime.sid,
             mode: runtime.mode,
             capturePolicy: runtime.config.capturePolicy
@@ -6651,6 +6656,7 @@ async function notifyTabStatus(
       {
         kind: "sw.recording-status",
         active,
+        tabId,
         sid,
         mode,
         sampling,
