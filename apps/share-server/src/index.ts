@@ -253,9 +253,14 @@ const ARCHIVE_CHECKSUM_BUFFER_BYTES = 64 * 1024;
 const DEFAULT_SHARE_LIST_LIMIT = 100;
 const MAX_SHARE_LIST_LIMIT = 200;
 const MAX_SHARE_LIST_CURSOR_BYTES = 256;
-const MAX_SHARE_AUDIT_LOG_BYTES = Math.min(
-  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES, 16 * 1024 * 1024),
-  64 * 1024 * 1024
+const MIN_SHARE_AUDIT_LOG_BYTES = 512;
+const HARD_MAX_SHARE_AUDIT_LOG_BYTES = 64 * 1024 * 1024;
+const MAX_SHARE_AUDIT_LOG_BYTES = parseConfiguredInteger(
+  "WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES",
+  process.env.WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES,
+  16 * 1024 * 1024,
+  MIN_SHARE_AUDIT_LOG_BYTES,
+  HARD_MAX_SHARE_AUDIT_LOG_BYTES
 );
 const MAX_SHARE_SHUTDOWN_TIMEOUT_MS = 60_000;
 const SHARE_SHUTDOWN_TIMEOUT_MS = Math.min(
@@ -321,6 +326,7 @@ async function startShareServer(): Promise<void> {
   }
   await ensureStorageLayout();
   await migrateLegacyStoragePermissions();
+  await reconcileAuditLogLayout();
   await reconcileStorageLayout();
   await pruneExpiredShareRecords(Date.now());
 
@@ -2042,6 +2048,71 @@ async function migrateLegacyStoragePermissions(): Promise<void> {
     await hardenStorageFileIfPresent(auditPath);
   }
   await assertManagedStorageLayout();
+}
+
+async function reconcileAuditLogLayout(): Promise<void> {
+  const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+
+  for (const auditPath of [SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH]) {
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    await validateAuditLogForStartup(auditPath, auditDirectoryIdentity);
+  }
+
+  await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+}
+
+async function validateAuditLogForStartup(
+  auditPath: string,
+  auditDirectoryIdentity: BigIntStats
+): Promise<void> {
+  let handle: FileHandle;
+  try {
+    handle = await open(auditPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return;
+    }
+    throw unsafeStoragePathError(auditPath, "refusing to follow or replace this path", error);
+  }
+
+  try {
+    const openedStat = await handle.stat({ bigint: true });
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1n ||
+      (process.platform !== "win32" && (openedStat.mode & 0o777n) !== 0o600n)
+    ) {
+      throw unsafeStoragePathError(auditPath, "expected a private regular audit log");
+    }
+
+    if (openedStat.size > BigInt(MAX_SHARE_AUDIT_LOG_BYTES)) {
+      throw new Error(
+        `Share audit log "${auditPath}" exceeds WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES (${MAX_SHARE_AUDIT_LOG_BYTES}). Move or delete the whole file before restarting; byte truncation can create an invalid JSONL record.`
+      );
+    }
+
+    if (openedStat.size > 0n) {
+      const finalByte = Buffer.allocUnsafe(1);
+      const { bytesRead } = await handle.read(finalByte, 0, 1, Number(openedStat.size - 1n));
+      if (bytesRead !== 1 || finalByte[0] !== 0x0a) {
+        throw new Error(
+          `Share audit log "${auditPath}" does not end at a complete JSONL record. Move or delete the whole file before restarting; byte truncation is not repaired automatically.`
+        );
+      }
+    }
+
+    const verifiedStat = await handle.stat({ bigint: true });
+    if (
+      verifiedStat.size !== openedStat.size ||
+      !isSameFileSystemObject(verifiedStat, openedStat)
+    ) {
+      throw unsafeStoragePathError(auditPath, "changed during startup reconciliation");
+    }
+    await assertStoragePathIdentity(auditPath, verifiedStat, "file");
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 async function hardenCommittedStorageFiles(
@@ -4401,6 +4472,29 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
     return fallback;
   }
   return Math.max(1, Math.floor(parsed));
+}
+
+function parseConfiguredInteger(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number {
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
+
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+  return parsed;
 }
 
 function parseRateLimitWindowMs(value: string | undefined, fallback: number): number {

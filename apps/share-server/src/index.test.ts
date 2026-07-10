@@ -1304,6 +1304,71 @@ describe("share-server", () => {
     expect(metadataResponse.status).toBe(200);
   });
 
+  it.each(["share-access.jsonl", "share-access.1.jsonl"])(
+    "refuses to start with an oversized legacy audit log at %s",
+    async (auditFileName) => {
+      const server = await startShareServer();
+      await stopShareServer(server, false);
+
+      const auditDirectory = resolve(server.dataDir, "audit");
+      const auditPath = resolve(auditDirectory, auditFileName);
+      const legacyLine = `${JSON.stringify({ legacy: true, value: "x".repeat(96) })}\n`;
+      const oversizedLog = legacyLine.repeat(8);
+      expect(Buffer.byteLength(oversizedLog)).toBeGreaterThan(512);
+      await writeFile(auditPath, oversizedLog);
+
+      const otherAuditPath = resolve(
+        auditDirectory,
+        auditFileName === "share-access.jsonl" ? "share-access.1.jsonl" : "share-access.jsonl"
+      );
+      const otherAuditLog = `${JSON.stringify({ legacy: "retained" })}\n`;
+      await writeFile(otherAuditPath, otherAuditLog);
+      if (process.platform !== "win32") {
+        await Promise.all([chmod(auditPath, 0o644), chmod(otherAuditPath, 0o644)]);
+      }
+
+      await expect(
+        startShareServer(
+          {
+            WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES: "512"
+          },
+          server.dataDir
+        )
+      ).rejects.toThrow(new RegExp(`${escapeRegExp(auditFileName)}.*exceeds`));
+
+      await expect(readFile(auditPath, "utf8")).resolves.toBe(oversizedLog);
+      await expect(readFile(otherAuditPath, "utf8")).resolves.toBe(otherAuditLog);
+      if (process.platform !== "win32") {
+        expect((await stat(auditPath)).mode & 0o777).toBe(0o600);
+        expect((await stat(otherAuditPath)).mode & 0o777).toBe(0o600);
+      }
+    }
+  );
+
+  it("refuses to append after an incomplete legacy audit JSONL record", async () => {
+    const server = await startShareServer();
+    await stopShareServer(server, false);
+
+    const auditPath = resolve(server.dataDir, "audit", "share-access.jsonl");
+    const incompleteLog = '{"legacy":true';
+    await writeFile(auditPath, incompleteLog);
+
+    await expect(startShareServer({}, server.dataDir)).rejects.toThrow(
+      /does not end at a complete JSONL record/
+    );
+    await expect(readFile(auditPath, "utf8")).resolves.toBe(incompleteLog);
+  });
+
+  it("rejects an audit log ceiling too small to retain an event", async () => {
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES: "1"
+      })
+    ).rejects.toThrow(
+      /WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES must be an integer between 512 and 67108864/
+    );
+  });
+
   it("refuses a managed storage directory symlink without changing its external target", async () => {
     if (process.platform === "win32") {
       return;
