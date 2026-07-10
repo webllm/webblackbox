@@ -36,7 +36,7 @@ import {
   type ArchiveResourceLimits
 } from "./archive-resource-limits.js";
 import { ArchiveDecodeTimeoutError, readBoundedReadableStream } from "./bounded-stream-reader.js";
-import { BoundedZipReader } from "./bounded-zip-reader.js";
+import { ArchiveEntryReadLimitError, BoundedZipReader } from "./bounded-zip-reader.js";
 
 export {
   ArchiveResourceLimitError,
@@ -1856,6 +1856,104 @@ export class WebBlackboxPlayer {
     return lines.join("\n");
   }
 
+  /** @internal */
+  public async exportHarWithLimits(
+    range: PlayerRange | undefined,
+    limits: HarExportLimits
+  ): Promise<string> {
+    const resolvedLimits = resolveHarExportLimits(limits);
+    const networkBuckets = this.getNetworkBucketsWithLimit(range, resolvedLimits.maxEntries);
+
+    const started = new Date(this.eventChunks[0]?.events[0]?.t ?? Date.now()).toISOString();
+    const title = this.archive.manifest.site.title ?? this.archive.manifest.site.origin;
+    const titleBytes = utf8ByteLengthAtMost(title, resolvedLimits.maxEntryMetadataBytes);
+    if (titleBytes > resolvedLimits.maxEntryMetadataBytes) {
+      throw new HarExportResourceLimitError(
+        "maxEntryMetadataBytes",
+        resolvedLimits.maxEntryMetadataBytes,
+        titleBytes,
+        0,
+        0
+      );
+    }
+
+    const writer = new BoundedHarJsonWriter(resolvedLimits);
+    writer.append(
+      `{"log":{"version":"1.2","creator":{"name":"WebBlackbox","version":"1.0.0"},"pages":[${JSON.stringify(
+        {
+          startedDateTime: started,
+          id: "page_1",
+          title,
+          pageTimings: {
+            onContentLoad: -1,
+            onLoad: -1
+          }
+        }
+      )}],"entries":[`,
+      0,
+      0
+    );
+
+    let completedEntries = 0;
+    let totalBodyBytes = 0;
+
+    for (const bucket of networkBuckets) {
+      const entry = toNetworkEntry(bucket);
+      assertHarEntryMetadataBudget(entry, resolvedLimits, completedEntries, totalBodyBytes);
+      assertHarEntryFieldBudget(entry, resolvedLimits, completedEntries, totalBodyBytes);
+
+      let responseBody: PlayerBlob | null = null;
+      if (entry.responseBodyHash) {
+        const remainingBodyBytes = resolvedLimits.maxTotalBodyBytes - totalBodyBytes;
+        if (remainingBodyBytes <= 0) {
+          throw new HarExportResourceLimitError(
+            "maxTotalBodyBytes",
+            resolvedLimits.maxTotalBodyBytes,
+            totalBodyBytes + 1,
+            completedEntries,
+            totalBodyBytes
+          );
+        }
+
+        const bodyLimit = Math.min(resolvedLimits.maxBodyBytes, remainingBodyBytes);
+        try {
+          responseBody = await this.readHarResponseBody(entry.responseBodyHash, bodyLimit);
+        } catch (error) {
+          if (!(error instanceof ArchiveEntryReadLimitError)) {
+            throw error;
+          }
+
+          const resource =
+            bodyLimit < resolvedLimits.maxBodyBytes ? "maxTotalBodyBytes" : "maxBodyBytes";
+          const actual =
+            resource === "maxTotalBodyBytes" ? totalBodyBytes + error.actual : error.actual;
+          throw new HarExportResourceLimitError(
+            resource,
+            resolvedLimits[resource],
+            actual,
+            completedEntries,
+            totalBodyBytes + Math.min(error.actual, bodyLimit)
+          );
+        }
+
+        if (responseBody) {
+          totalBodyBytes += responseBody.bytes.byteLength;
+        }
+      }
+
+      const serializedEntry = JSON.stringify(toHarEntry(entry, responseBody ?? undefined));
+      writer.append(
+        `${completedEntries === 0 ? "" : ","}${serializedEntry}`,
+        completedEntries,
+        totalBodyBytes
+      );
+      completedEntries += 1;
+    }
+
+    writer.append("]}}", completedEntries, totalBodyBytes);
+    return writer.finish();
+  }
+
   private async loadDomPaths(snapshot: DomSnapshotRef): Promise<Set<string>> {
     if (snapshot.contentHash) {
       const blob = await this.getBlob(snapshot.contentHash);
@@ -1930,6 +2028,70 @@ export class WebBlackboxPlayer {
       throw new Error("Unable to decrypt archive content. The passphrase may be invalid.");
     }
   }
+
+  private async readHarResponseBody(hash: string, maxBytes: number): Promise<PlayerBlob | null> {
+    const blob = resolveBlobByKey(this.blobsByHash, hash);
+    if (!blob || !this.zipReader.has(blob.path)) {
+      return null;
+    }
+
+    const encryptionOverhead = this.encryptedFiles[blob.path] ? 16 : 0;
+    const storedByteLimit = addSafeInteger(maxBytes, encryptionOverhead);
+    let rawBytes: Uint8Array;
+
+    try {
+      rawBytes = await this.zipReader.readBounded(blob.path, storedByteLimit);
+    } catch (error) {
+      if (error instanceof ArchiveEntryReadLimitError) {
+        throw new ArchiveEntryReadLimitError(
+          blob.path,
+          maxBytes,
+          Math.max(0, error.actual - encryptionOverhead)
+        );
+      }
+      throw error;
+    }
+
+    await assertArchiveFileIntegrity(this.archive.integrity, blob.path, rawBytes);
+    const bytes = await this.decryptArchiveFile(blob.path, rawBytes);
+    if (bytes.byteLength > maxBytes) {
+      throw new ArchiveEntryReadLimitError(blob.path, maxBytes, bytes.byteLength);
+    }
+
+    return {
+      mime: blob.mime,
+      bytes
+    };
+  }
+
+  private getNetworkBucketsWithLimit(
+    range: PlayerRange | undefined,
+    maxEntries: number
+  ): MutableNetworkBucket[] {
+    const buckets = new Map<string, MutableNetworkBucket>();
+
+    for (const chunk of this.getChunksForRange(range)) {
+      for (const event of this.getChunkEvents(chunk)) {
+        if (!withinRange(event, range) || !NETWORK_EVENT_TYPES.has(event.type)) {
+          continue;
+        }
+
+        const reqId = extractRequestId(event);
+        if (!reqId) {
+          continue;
+        }
+        if (!buckets.has(reqId) && buckets.size >= maxEntries) {
+          throw new HarExportResourceLimitError("maxEntries", maxEntries, maxEntries + 1, 0, 0);
+        }
+
+        addNetworkEventToBuckets(buckets, event, reqId, false);
+      }
+    }
+
+    return [...buckets.values()].sort(
+      (left, right) => left.startMono - right.startMono || left.reqId.localeCompare(right.reqId)
+    );
+  }
 }
 
 /** Returns the default pre-open player status. */
@@ -1962,49 +2124,60 @@ function collectNetworkBuckets(events: WebBlackboxEvent[]): MutableNetworkBucket
       continue;
     }
 
-    const bucket = buckets.get(reqId) ?? {
-      reqId,
-      events: [],
-      startMono: event.mono,
-      endMono: event.mono,
-      startWallTime: event.t,
-      endWallTime: event.t
-    };
-
-    bucket.events.push(event);
-    bucket.startMono = Math.min(bucket.startMono, event.mono);
-    bucket.endMono = Math.max(bucket.endMono, event.mono);
-    bucket.startWallTime = Math.min(bucket.startWallTime, event.t);
-    bucket.endWallTime = Math.max(bucket.endWallTime, event.t);
-
-    if (!bucket.actionId && event.ref?.act) {
-      bucket.actionId = event.ref.act;
-    }
-
-    if (event.type === "network.request" && !bucket.request) {
-      bucket.request = event;
-    }
-
-    if (event.type === "network.response") {
-      bucket.response = event;
-    }
-
-    if (event.type === "network.finished") {
-      bucket.finished = event;
-    }
-
-    if (event.type === "network.failed") {
-      bucket.failed = event;
-    }
-
-    if (event.type === "network.body") {
-      bucket.body = event;
-    }
-
-    buckets.set(reqId, bucket);
+    addNetworkEventToBuckets(buckets, event, reqId);
   }
 
   return [...buckets.values()];
+}
+
+function addNetworkEventToBuckets(
+  buckets: Map<string, MutableNetworkBucket>,
+  event: WebBlackboxEvent,
+  reqId: string,
+  includeEventId = true
+): void {
+  const bucket = buckets.get(reqId) ?? {
+    reqId,
+    events: [],
+    startMono: event.mono,
+    endMono: event.mono,
+    startWallTime: event.t,
+    endWallTime: event.t
+  };
+
+  if (includeEventId) {
+    bucket.events.push(event);
+  }
+  bucket.startMono = Math.min(bucket.startMono, event.mono);
+  bucket.endMono = Math.max(bucket.endMono, event.mono);
+  bucket.startWallTime = Math.min(bucket.startWallTime, event.t);
+  bucket.endWallTime = Math.max(bucket.endWallTime, event.t);
+
+  if (!bucket.actionId && event.ref?.act) {
+    bucket.actionId = event.ref.act;
+  }
+
+  if (event.type === "network.request" && !bucket.request) {
+    bucket.request = event;
+  }
+
+  if (event.type === "network.response") {
+    bucket.response = event;
+  }
+
+  if (event.type === "network.finished") {
+    bucket.finished = event;
+  }
+
+  if (event.type === "network.failed") {
+    bucket.failed = event;
+  }
+
+  if (event.type === "network.body") {
+    bucket.body = event;
+  }
+
+  buckets.set(reqId, bucket);
 }
 
 function toNetworkEntry(bucket: MutableNetworkBucket): NetworkWaterfallEntry {
@@ -3996,4 +4169,281 @@ async function normalizeOpenInput(
 
   assertArchiveInputResourceLimits(bytes, resourceLimits);
   return bytes;
+}
+
+/** @internal */
+type HarExportLimits = {
+  maxEntries: number;
+  maxBodyBytes: number;
+  maxTotalBodyBytes: number;
+  maxEntryMetadataBytes: number;
+  maxHeaderFields: number;
+  maxDerivedFields: number;
+  maxHarBytes: number;
+  maxEncodedBytes: number;
+};
+
+/** @internal */
+type HarExportResourceName = keyof HarExportLimits;
+
+/** @internal */
+class HarExportResourceLimitError extends Error {
+  public override readonly name = "HarExportResourceLimitError";
+
+  public constructor(
+    public readonly resource: HarExportResourceName,
+    public readonly limit: number,
+    public readonly actual: number,
+    public readonly completedEntries: number,
+    public readonly bodyBytesRead: number
+  ) {
+    super(
+      `HAR limit ${resource} exceeded (${actual} > ${limit}; ` +
+        `entries=${completedEntries}; bodyBytes=${bodyBytesRead}).`
+    );
+  }
+}
+
+class BoundedHarJsonWriter {
+  private readonly chunks: string[] = [];
+
+  private rawBytes = 0;
+
+  // JSON.stringify(harText) contributes surrounding quotes in addition to escaped contents.
+  private encodedBytes = 2;
+
+  public constructor(private readonly limits: Readonly<HarExportLimits>) {}
+
+  public append(chunk: string, completedEntries: number, bodyBytesRead: number): void {
+    const rawChunkBytes = utf8ByteLengthAtMost(
+      chunk,
+      Math.max(0, this.limits.maxHarBytes - this.rawBytes)
+    );
+    const nextRawBytes = addSafeInteger(this.rawBytes, rawChunkBytes);
+    if (nextRawBytes > this.limits.maxHarBytes) {
+      throw new HarExportResourceLimitError(
+        "maxHarBytes",
+        this.limits.maxHarBytes,
+        nextRawBytes,
+        completedEntries,
+        bodyBytesRead
+      );
+    }
+
+    const encodedChunkBytes = jsonStringContentByteLengthAtMost(
+      chunk,
+      Math.max(0, this.limits.maxEncodedBytes - this.encodedBytes)
+    );
+    const nextEncodedBytes = addSafeInteger(this.encodedBytes, encodedChunkBytes);
+    if (nextEncodedBytes > this.limits.maxEncodedBytes) {
+      throw new HarExportResourceLimitError(
+        "maxEncodedBytes",
+        this.limits.maxEncodedBytes,
+        nextEncodedBytes,
+        completedEntries,
+        bodyBytesRead
+      );
+    }
+
+    this.rawBytes = nextRawBytes;
+    this.encodedBytes = nextEncodedBytes;
+    this.chunks.push(chunk);
+  }
+
+  public finish(): string {
+    return this.chunks.join("");
+  }
+}
+
+function resolveHarExportLimits(limits: HarExportLimits): HarExportLimits {
+  if (!limits || typeof limits !== "object") {
+    throw new TypeError("HAR export limits are required.");
+  }
+
+  const values = [
+    limits.maxEntries,
+    limits.maxBodyBytes,
+    limits.maxTotalBodyBytes,
+    limits.maxEntryMetadataBytes,
+    limits.maxHeaderFields,
+    limits.maxDerivedFields,
+    limits.maxHarBytes,
+    limits.maxEncodedBytes
+  ];
+  if (values.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new TypeError("HAR export limits must be positive safe integers.");
+  }
+
+  return { ...limits };
+}
+
+function assertHarEntryMetadataBudget(
+  entry: NetworkWaterfallEntry,
+  limits: Readonly<HarExportLimits>,
+  completedEntries: number,
+  bodyBytesRead: number
+): void {
+  let metadataBytes = 0;
+
+  const addString = (value: string | undefined): void => {
+    if (value === undefined) {
+      return;
+    }
+
+    const addedBytes = utf8ByteLengthAtMost(
+      value,
+      Math.max(0, limits.maxEntryMetadataBytes - metadataBytes)
+    );
+    metadataBytes = addSafeInteger(metadataBytes, addedBytes);
+    if (metadataBytes > limits.maxEntryMetadataBytes) {
+      throw new HarExportResourceLimitError(
+        "maxEntryMetadataBytes",
+        limits.maxEntryMetadataBytes,
+        metadataBytes,
+        completedEntries,
+        bodyBytesRead
+      );
+    }
+  };
+
+  const addHeaders = (headers: Record<string, string>): void => {
+    for (const [name, value] of Object.entries(headers)) {
+      addString(name);
+      addString(value);
+    }
+  };
+
+  addString(entry.method);
+  addString(entry.url);
+  addString(entry.statusText);
+  addString(entry.mimeType);
+  addString(entry.requestBodyText);
+  addHeaders(entry.requestHeaders);
+  addHeaders(entry.responseHeaders);
+}
+
+function assertHarEntryFieldBudget(
+  entry: NetworkWaterfallEntry,
+  limits: Readonly<HarExportLimits>,
+  completedEntries: number,
+  bodyBytesRead: number
+): void {
+  const headerFields =
+    Object.keys(entry.requestHeaders).length + Object.keys(entry.responseHeaders).length;
+  if (headerFields > limits.maxHeaderFields) {
+    throw new HarExportResourceLimitError(
+      "maxHeaderFields",
+      limits.maxHeaderFields,
+      headerFields,
+      completedEntries,
+      bodyBytesRead
+    );
+  }
+
+  const queryStart = entry.url.indexOf("?");
+  const queryEnd = entry.url.indexOf("#", queryStart + 1);
+  const derivedFields =
+    (queryStart < 0 ? 0 : countDelimitedFields(entry.url, "&", queryStart + 1, queryEnd)) +
+    countDelimitedFields(entry.requestHeaders.cookie ?? "", ";") +
+    countDelimitedFields(entry.responseHeaders["set-cookie"] ?? "", ";");
+  if (derivedFields > limits.maxDerivedFields) {
+    throw new HarExportResourceLimitError(
+      "maxDerivedFields",
+      limits.maxDerivedFields,
+      derivedFields,
+      completedEntries,
+      bodyBytesRead
+    );
+  }
+}
+
+function countDelimitedFields(
+  value: string,
+  delimiter: string,
+  start = 0,
+  end = value.length
+): number {
+  if (start < 0 || start >= value.length || start === end) {
+    return 0;
+  }
+
+  let fields = 1;
+  const stop = end < 0 ? value.length : end;
+  for (let index = start; index < stop; index += 1) {
+    if (value[index] === delimiter) {
+      fields += 1;
+    }
+  }
+  return fields;
+}
+
+function utf8ByteLengthAtMost(value: string, maxBytes: number): number {
+  let bytes = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+
+    if (bytes > maxBytes) {
+      return bytes;
+    }
+  }
+
+  return bytes;
+}
+
+function jsonStringContentByteLengthAtMost(value: string, maxBytes: number): number {
+  let bytes = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c) {
+      bytes += 2;
+    } else if (code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) {
+      bytes += 2;
+    } else if (code <= 0x1f) {
+      bytes += 6;
+    } else if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes += 6;
+    } else {
+      bytes += 3;
+    }
+
+    if (bytes > maxBytes) {
+      return bytes;
+    }
+  }
+
+  return bytes;
+}
+
+function addSafeInteger(left: number, right: number): number {
+  const value = left + right;
+  return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }

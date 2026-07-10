@@ -1,0 +1,1 @@
+export const MAX_MCP_TEXT_PAYLOAD_BYTES = 4 * 1024 * 1024;

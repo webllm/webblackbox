@@ -73,13 +73,22 @@ export class BoundedZipReader {
     this.reads.delete(path);
   }
 
+  /** @internal */
+  public readBounded(path: string, maxBytes: number): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw new TypeError("Invalid archive entry read limit.");
+    }
+
+    return this.readEntry(path, Math.min(maxBytes, this.limits.maxEntryUncompressedBytes));
+  }
+
   private deleteRead(path: string, pending: Promise<Uint8Array>): void {
     if (this.reads.get(path) === pending) {
       this.reads.delete(path);
     }
   }
 
-  private async readEntry(path: string): Promise<Uint8Array> {
+  private async readEntry(path: string, callerMaxBytes?: number): Promise<Uint8Array> {
     const file = this.zip.file(path) as JSZipObjectWithInternals | null;
     if (!file) {
       throw new Error(`Archive is missing required file: ${path}`);
@@ -94,7 +103,12 @@ export class BoundedZipReader {
     }
 
     const helper = file.internalStream("uint8array");
-    const accumulator = new ByteAccumulator(this.limits.maxEntryUncompressedBytes);
+    const accumulator = new ByteAccumulator(
+      Math.min(
+        callerMaxBytes ?? this.limits.maxEntryUncompressedBytes,
+        this.limits.maxEntryUncompressedBytes
+      )
+    );
     const metadata = isArchiveMetadataPath(path);
     this.budget.begin(path, metadata);
 
@@ -154,6 +168,9 @@ export class BoundedZipReader {
 
             try {
               const nextBytes = accumulator.length + chunk.byteLength;
+              if (callerMaxBytes !== undefined && nextBytes > callerMaxBytes) {
+                throw new ArchiveEntryReadLimitError(path, callerMaxBytes, nextBytes);
+              }
               this.budget.progress(path, compressedBytes, nextBytes);
               accumulator.append(chunk);
             } catch (error) {
@@ -367,5 +384,18 @@ function assertLimit(
 ): void {
   if (!Number.isFinite(actual) || actual > limit) {
     throw new ArchiveResourceLimitError(resource, limit, actual, detail);
+  }
+}
+
+/** @internal */
+export class ArchiveEntryReadLimitError extends Error {
+  public override readonly name = "ArchiveEntryReadLimitError";
+
+  public constructor(
+    public readonly path: string,
+    public readonly limit: number,
+    public readonly actual: number
+  ) {
+    super(`Archive entry '${path}' exceeds its read limit (${actual} > ${limit}).`);
   }
 }

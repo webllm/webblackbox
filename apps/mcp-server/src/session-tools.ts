@@ -4,6 +4,7 @@ import { DEFAULT_ARCHIVE_RESOURCE_LIMITS, WebBlackboxPlayer } from "@webblackbox
 import { z } from "zod";
 
 import { readFileHandleBounded } from "./archive-file-reader.js";
+import { MAX_MCP_TEXT_PAYLOAD_BYTES } from "./output-limits.js";
 
 const ARCHIVE_EXTENSIONS = new Set([".webblackbox", ".zip"]);
 const DEFAULT_LIST_LIMIT = 50;
@@ -23,6 +24,15 @@ export const MCP_ARCHIVE_SCAN_LIMITS = Object.freeze({
   entries: 10_000,
   directories: 1_000,
   durationMs: 5_000
+});
+export const MCP_HAR_EXPORT_LIMITS = Object.freeze({
+  maxEntries: 2_000,
+  maxBodyBytes: 1024 * 1024,
+  maxTotalBodyBytes: 2 * 1024 * 1024,
+  maxEntryMetadataBytes: 256 * 1024,
+  maxHeaderFields: 512,
+  maxDerivedFields: 1_024,
+  maxHarBytes: 3 * 1024 * 1024
 });
 
 function archivePathSchema(description: string): z.ZodString {
@@ -706,15 +716,36 @@ export async function exportHarFromArchive(args: ExportHarArgs): Promise<{
 }> {
   const archivePath = resolveArchivePath(args.path);
   const range = buildRange(args.monoStart, args.monoEnd);
+  const outputRange = {
+    monoStart: range?.monoStart ?? null,
+    monoEnd: range?.monoEnd ?? null
+  };
+  const emptyEnvelopeBytes = Buffer.byteLength(
+    JSON.stringify(
+      {
+        archive: archivePath,
+        range: outputRange,
+        har: ""
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const maxEncodedBytes = MAX_MCP_TEXT_PAYLOAD_BYTES - emptyEnvelopeBytes + 2;
+  if (maxEncodedBytes <= 2) {
+    throw new Error("MCP HAR output envelope leaves no room for a HAR document.");
+  }
+
   const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
-  const har = await player.exportHar(range ?? undefined);
+  const har = await player.exportHarWithLimits(range ?? undefined, {
+    ...MCP_HAR_EXPORT_LIMITS,
+    maxEncodedBytes
+  });
 
   return {
     archive: archivePath,
-    range: {
-      monoStart: range?.monoStart ?? null,
-      monoEnd: range?.monoEnd ?? null
-    },
+    range: outputRange,
     har
   };
 }

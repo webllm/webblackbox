@@ -27,7 +27,7 @@
     {
       "name": "Player SDK runtime",
       "path": "packages/player-sdk/dist/index.js",
-      "maxBytes": 128000,
+      "maxBytes": 145000,
       "maxGzipBytes": 30000
     },
     {

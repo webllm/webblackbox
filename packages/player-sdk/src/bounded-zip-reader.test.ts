@@ -50,6 +50,31 @@ describe("BoundedZipReader", () => {
     await expect(reader.read("blobs/sha256-repeat.bin")).resolves.toHaveLength(1024 * 1024);
   });
 
+  it("stops a transient read when its caller-specific byte budget is crossed", async () => {
+    const fullBytes = 2 * 1024 * 1024;
+    const callerLimit = 1024 * 1024;
+    const zip = new JSZip();
+    zip.file("large.bin", new Uint8Array(fullBytes));
+    const source = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 }
+    });
+    const loaded = await JSZip.loadAsync(source);
+    const reader = new BoundedZipReader(loaded, resolveArchiveResourceLimits());
+
+    const error = await reader
+      .readBounded("large.bin", callerLimit)
+      .catch((reason: unknown) => (reason instanceof Error ? reason : new Error(String(reason))));
+
+    expect(error).toMatchObject({
+      name: "ArchiveEntryReadLimitError",
+      limit: callerLimit
+    });
+    expect((error as Error & { actual: number }).actual).toBeGreaterThan(callerLimit);
+    expect((error as Error & { actual: number }).actual).toBeLessThan(fullBytes);
+  });
+
   it("accounts concurrent distinct entries against one aggregate output budget", async () => {
     const zip = new JSZip();
     zip.file("left.bin", new Uint8Array(2 * 1024 * 1024));

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { ArchiveOperationAdmission } from "./archive-operation-admission.js";
+import { MAX_MCP_TEXT_PAYLOAD_BYTES } from "./output-limits.js";
 import {
   compareSessions,
   compareSessionsInput,
@@ -29,7 +30,7 @@ export const SERVER_NAME = "webblackbox-mcp-server";
 export const SERVER_VERSION =
   typeof __MCP_SERVER_VERSION__ !== "undefined" ? __MCP_SERVER_VERSION__ : "0.1.0";
 export const nowUtcInput = {};
-export const MAX_MCP_TEXT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+export { MAX_MCP_TEXT_PAYLOAD_BYTES } from "./output-limits.js";
 
 export class McpOutputLimitError extends Error {
   public override readonly name = "McpOutputLimitError";

@@ -9,6 +9,7 @@ import type { ExportManifest, WebBlackboxEvent } from "@webblackbox/protocol";
 import {
   MAX_MCP_PATH_CHARS,
   MCP_ARCHIVE_SCAN_LIMITS,
+  MCP_HAR_EXPORT_LIMITS,
   assertArchiveScanBudget,
   compareSessions,
   exportHarFromArchive,
@@ -19,8 +20,11 @@ import {
   sessionSummaryInput,
   summarizeActions
 } from "./session-tools.js";
+import { MAX_MCP_TEXT_PAYLOAD_BYTES } from "./output-limits.js";
 
 const tempDirs: string[] = [];
+
+type HarLimitFailure = Error & { actual: number };
 
 afterEach(async () => {
   await Promise.all(
@@ -264,6 +268,114 @@ describe("session tools", () => {
     );
   });
 
+  it("rejects HAR request counts after observing only maxEntries plus one", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wb-mcp-har-entry-limit-"));
+    tempDirs.push(root);
+    const archivePath = join(root, "many-requests.webblackbox");
+    const fixture = createHarFixture(
+      Array.from({ length: MCP_HAR_EXPORT_LIMITS.maxEntries + 1 }, () => 0)
+    );
+    const archiveBytes = await createArchiveFixture(fixture.events, {
+      blobs: fixture.blobs,
+      compression: "DEFLATE"
+    });
+    await writeFile(archivePath, archiveBytes);
+
+    const error = await rejectedError(exportHarFromArchive({ path: archivePath }));
+
+    expect(error).toMatchObject({
+      name: "HarExportResourceLimitError",
+      resource: "maxEntries",
+      limit: MCP_HAR_EXPORT_LIMITS.maxEntries,
+      actual: MCP_HAR_EXPORT_LIMITS.maxEntries + 1,
+      completedEntries: 0,
+      bodyBytesRead: 0
+    });
+  });
+
+  it("stops inflating a single compressed HAR body at its byte budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wb-mcp-har-body-limit-"));
+    tempDirs.push(root);
+    const archivePath = join(root, "large-body.webblackbox");
+    const fullBodyBytes = MCP_HAR_EXPORT_LIMITS.maxBodyBytes + 512 * 1024;
+    const fixture = createHarFixture([fullBodyBytes]);
+    const archiveBytes = await createArchiveFixture(fixture.events, {
+      blobs: fixture.blobs,
+      compression: "DEFLATE"
+    });
+    expect(archiveBytes.byteLength).toBeLessThan(fullBodyBytes / 20);
+    await writeFile(archivePath, archiveBytes);
+
+    const error = await rejectedError(exportHarFromArchive({ path: archivePath }));
+
+    expect(error).toMatchObject({
+      name: "HarExportResourceLimitError",
+      resource: "maxBodyBytes",
+      limit: MCP_HAR_EXPORT_LIMITS.maxBodyBytes,
+      completedEntries: 0,
+      bodyBytesRead: MCP_HAR_EXPORT_LIMITS.maxBodyBytes
+    });
+    expect((error as HarLimitFailure).actual).toBeGreaterThan(MCP_HAR_EXPORT_LIMITS.maxBodyBytes);
+    expect((error as HarLimitFailure).actual).toBeLessThan(fullBodyBytes);
+  });
+
+  it("stops a multi-body HAR at the cumulative read budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wb-mcp-har-total-body-limit-"));
+    tempDirs.push(root);
+    const archivePath = join(root, "many-bodies.webblackbox");
+    const bodySizes = [900 * 1024, 900 * 1024, 900 * 1024];
+    const fixture = createHarFixture(bodySizes);
+    const archiveBytes = await createArchiveFixture(fixture.events, {
+      blobs: fixture.blobs,
+      compression: "DEFLATE"
+    });
+    const fullBodyBytes = bodySizes.reduce((total, size) => total + size, 0);
+    expect(archiveBytes.byteLength).toBeLessThan(fullBodyBytes / 20);
+    await writeFile(archivePath, archiveBytes);
+
+    const error = await rejectedError(exportHarFromArchive({ path: archivePath }));
+
+    expect(error).toMatchObject({
+      name: "HarExportResourceLimitError",
+      resource: "maxTotalBodyBytes",
+      limit: MCP_HAR_EXPORT_LIMITS.maxTotalBodyBytes,
+      completedEntries: 2,
+      bodyBytesRead: MCP_HAR_EXPORT_LIMITS.maxTotalBodyBytes
+    });
+    expect((error as HarLimitFailure).actual).toBeGreaterThan(
+      MCP_HAR_EXPORT_LIMITS.maxTotalBodyBytes
+    );
+    expect((error as HarLimitFailure).actual).toBeLessThan(fullBodyBytes);
+  });
+
+  it("keeps the final encoded HAR envelope within the MCP text limit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wb-mcp-har-output-limit-"));
+    tempDirs.push(root);
+    const archivePath = join(root, "bounded-output.webblackbox");
+    const fixture = createHarFixture([256 * 1024]);
+    const archiveBytes = await createArchiveFixture(fixture.events, {
+      blobs: fixture.blobs,
+      compression: "DEFLATE"
+    });
+    await writeFile(archivePath, archiveBytes);
+
+    const result = await exportHarFromArchive({ path: archivePath });
+    const serialized = JSON.stringify(result, null, 2);
+    const emptyEnvelope = JSON.stringify({ ...result, har: "" }, null, 2);
+    const expectedBytes =
+      Buffer.byteLength(emptyEnvelope, "utf8") -
+      2 +
+      Buffer.byteLength(JSON.stringify(result.har), "utf8");
+
+    expect(Buffer.byteLength(serialized, "utf8")).toBe(expectedBytes);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(MAX_MCP_TEXT_PAYLOAD_BYTES);
+    expect(JSON.parse(result.har)).toMatchObject({
+      log: {
+        entries: [expect.any(Object)]
+      }
+    });
+  });
+
   it("throws helpful errors when report archive is missing", async () => {
     const missing = join(tmpdir(), `wb-mcp-missing-${Date.now()}.webblackbox`);
 
@@ -327,7 +439,13 @@ describe("session tools", () => {
   });
 });
 
-async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Array> {
+async function createArchiveFixture(
+  events: WebBlackboxEvent[],
+  options: {
+    blobs?: Record<string, Uint8Array>;
+    compression?: "DEFLATE" | "STORE";
+  } = {}
+): Promise<Uint8Array> {
   const zip = new JSZip();
   const firstEvent = events[0];
   const lastEvent = events[events.length - 1];
@@ -392,20 +510,21 @@ async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Ar
     stats: {
       eventCount: events.length,
       chunkCount: 1,
-      blobCount: 0,
+      blobCount: Object.keys(options.blobs ?? {}).length,
       durationMs
     }
   };
 
-  const files = new Map<string, string>();
+  const files = new Map<string, Uint8Array>();
   const addJsonFile = (path: string, value: unknown) => {
-    const content = JSON.stringify(value, null, 2);
+    const content = Buffer.from(JSON.stringify(value, null, 2));
     zip.file(path, content);
     files.set(path, content);
   };
   const addTextFile = (path: string, content: string) => {
-    zip.file(path, content);
-    files.set(path, content);
+    const bytes = Buffer.from(content);
+    zip.file(path, bytes);
+    files.set(path, bytes);
   };
 
   addJsonFile("manifest.json", manifest);
@@ -413,6 +532,10 @@ async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Ar
   addJsonFile("index/req.json", reqIndex);
   addJsonFile("index/inv.json", []);
   addTextFile(`events/${chunkId}.ndjson`, eventContent);
+  for (const [path, bytes] of Object.entries(options.blobs ?? {})) {
+    zip.file(path, bytes);
+    files.set(path, bytes);
+  }
 
   const fileHashes = Object.fromEntries(
     [...files.entries()].map(([path, content]) => [path, sha256Hex(content)])
@@ -423,11 +546,109 @@ async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Ar
     files: fileHashes
   });
 
-  return zip.generateAsync({ type: "uint8array" });
+  return zip.generateAsync({
+    type: "uint8array",
+    compression: options.compression ?? "STORE",
+    compressionOptions: options.compression === "DEFLATE" ? { level: 9 } : undefined
+  });
 }
 
-function sha256Hex(content: string): string {
+function sha256Hex(content: string | Uint8Array): string {
   return createHash("sha256").update(Buffer.from(content)).digest("hex");
+}
+
+function createHarFixture(bodySizes: number[]): {
+  events: WebBlackboxEvent[];
+  blobs: Record<string, Uint8Array>;
+} {
+  const events: WebBlackboxEvent[] = [
+    {
+      v: 1,
+      sid: "S-HAR",
+      tab: 1,
+      t: 1_700_000_000_000,
+      mono: 0,
+      type: "meta.session.start",
+      id: "E-HAR-START",
+      data: {}
+    }
+  ];
+  const blobs: Record<string, Uint8Array> = {};
+
+  bodySizes.forEach((bodySize, index) => {
+    const reqId = `REQ-HAR-${index}`;
+    const hash = `har-body-${index}`;
+    const mono = index * 10 + 1;
+    events.push(
+      {
+        v: 1,
+        sid: "S-HAR",
+        tab: 1,
+        t: 1_700_000_000_000 + mono,
+        mono,
+        type: "network.request",
+        id: `E-HAR-${index}-REQUEST`,
+        ref: { req: reqId },
+        data: {
+          requestId: reqId,
+          request: {
+            method: "GET",
+            url: `https://example.test/api/${index}`
+          }
+        }
+      },
+      {
+        v: 1,
+        sid: "S-HAR",
+        tab: 1,
+        t: 1_700_000_000_002 + mono,
+        mono: mono + 2,
+        type: "network.response",
+        id: `E-HAR-${index}-RESPONSE`,
+        ref: { req: reqId },
+        data: {
+          requestId: reqId,
+          response: {
+            url: `https://example.test/api/${index}`,
+            status: 200,
+            statusText: "OK",
+            mimeType: "application/json"
+          }
+        }
+      }
+    );
+
+    if (bodySize > 0) {
+      events.push({
+        v: 1,
+        sid: "S-HAR",
+        tab: 1,
+        t: 1_700_000_000_003 + mono,
+        mono: mono + 3,
+        type: "network.body",
+        id: `E-HAR-${index}-BODY`,
+        ref: { req: reqId },
+        data: {
+          reqId,
+          contentHash: hash,
+          size: bodySize
+        }
+      });
+      blobs[`blobs/sha256-${hash}.json`] = new Uint8Array(bodySize).fill(0x78);
+    }
+  });
+
+  return { events, blobs };
+}
+
+async function rejectedError(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  throw new Error("Expected promise to reject.");
 }
 
 function createBaselineEvents(): WebBlackboxEvent[] {

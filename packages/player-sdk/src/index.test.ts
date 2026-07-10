@@ -7,6 +7,8 @@ import type { ChunkTimeIndexEntry, ExportManifest, WebBlackboxEvent } from "@web
 
 import { WebBlackboxPlayer } from "./index.js";
 
+type HarExportLimits = Parameters<WebBlackboxPlayer["exportHarWithLimits"]>[1];
+
 function expectValidTypeScript(source: string): void {
   const result = transpileModule(source, {
     compilerOptions: {
@@ -333,6 +335,23 @@ describe("WebBlackboxPlayer", () => {
     const heapSamples = [process.memoryUsage().heapUsed];
     const player = await WebBlackboxPlayer.open(bytes);
     heapSamples.push(process.memoryUsage().heapUsed);
+
+    const waterfallSpy = vi.spyOn(player, "getNetworkWaterfall");
+    try {
+      await expect(
+        player.exportHarWithLimits(undefined, createHarExportLimits({ maxEntries: 1 }))
+      ).rejects.toMatchObject({
+        name: "HarExportResourceLimitError",
+        resource: "maxEntries",
+        limit: 1,
+        actual: 2,
+        completedEntries: 0,
+        bodyBytesRead: 0
+      });
+      expect(waterfallSpy).not.toHaveBeenCalled();
+    } finally {
+      waterfallSpy.mockRestore();
+    }
 
     const searchResults = player.search("large-session-checkpoint", 25);
     heapSamples.push(process.memoryUsage().heapUsed);
@@ -891,6 +910,64 @@ describe("WebBlackboxPlayer", () => {
       text: '{"ok":true}'
     });
     expect(har.log.entries[0]?.response.content.encoding).toBeUndefined();
+  });
+
+  it("accounts the exact outer JSON-string encoding for bounded HAR output", async () => {
+    const player = await WebBlackboxPlayer.open(await createRichFixtureArchive());
+    const getBlobSpy = vi.spyOn(player, "getBlob");
+    const querySpy = vi.spyOn(player, "query");
+
+    try {
+      const generousLimits = createHarExportLimits();
+      const har = await player.exportHarWithLimits(undefined, generousLimits);
+      const exactEncodedBytes = Buffer.byteLength(JSON.stringify(har), "utf8");
+
+      await expect(
+        player.exportHarWithLimits(undefined, {
+          ...generousLimits,
+          maxEncodedBytes: exactEncodedBytes
+        })
+      ).resolves.toBe(har);
+      await expect(
+        player.exportHarWithLimits(undefined, {
+          ...generousLimits,
+          maxEncodedBytes: exactEncodedBytes - 1
+        })
+      ).rejects.toMatchObject({
+        name: "HarExportResourceLimitError",
+        resource: "maxEncodedBytes",
+        limit: exactEncodedBytes - 1
+      });
+      expect(getBlobSpy).not.toHaveBeenCalled();
+      expect(querySpy).not.toHaveBeenCalled();
+    } finally {
+      getBlobSpy.mockRestore();
+      querySpy.mockRestore();
+    }
+  });
+
+  it("rejects query-field explosions before deriving HAR parameter objects", async () => {
+    const query = Array.from({ length: 1_025 }, (_, index) => `field${index}=x`).join("&");
+    const player = await WebBlackboxPlayer.open(
+      await createRichFixtureArchive("POST", `https://example.com/api?${query}`)
+    );
+    const getBlobSpy = vi.spyOn(player, "getBlob");
+
+    try {
+      await expect(
+        player.exportHarWithLimits(undefined, createHarExportLimits())
+      ).rejects.toMatchObject({
+        name: "HarExportResourceLimitError",
+        resource: "maxDerivedFields",
+        limit: 1_024,
+        actual: 1_025,
+        completedEntries: 0,
+        bodyBytesRead: 0
+      });
+      expect(getBlobSpy).not.toHaveBeenCalled();
+    } finally {
+      getBlobSpy.mockRestore();
+    }
   });
 
   it("shell-quotes untrusted HTTP methods in generated curl commands", async () => {
@@ -1907,7 +1984,10 @@ async function createArchiveWithDeprecatedBlobPath(): Promise<Uint8Array> {
   return zip.generateAsync({ type: "uint8array" });
 }
 
-async function createRichFixtureArchive(requestMethod = "POST"): Promise<Uint8Array> {
+async function createRichFixtureArchive(
+  requestMethod = "POST",
+  requestUrl = "https://example.com/api"
+): Promise<Uint8Array> {
   const zip = new JSZip();
   const events: WebBlackboxEvent[] = [
     {
@@ -1952,7 +2032,7 @@ async function createRichFixtureArchive(requestMethod = "POST"): Promise<Uint8Ar
         requestId: "R-1",
         request: {
           method: requestMethod,
-          url: "https://example.com/api",
+          url: requestUrl,
           headers: {
             "content-type": "application/json",
             authorization: "Bearer token"
@@ -1975,7 +2055,7 @@ async function createRichFixtureArchive(requestMethod = "POST"): Promise<Uint8Ar
       data: {
         requestId: "R-1",
         response: {
-          url: "https://example.com/api",
+          url: requestUrl,
           status: 200,
           statusText: "OK",
           mimeType: "application/json",
@@ -2684,4 +2764,18 @@ function forgeZipEntryUncompressedSize(bytes: Uint8Array, targetName: string, si
       }
     }
   }
+}
+
+function createHarExportLimits(overrides: Partial<HarExportLimits> = {}): HarExportLimits {
+  return {
+    maxEntries: 100,
+    maxBodyBytes: 1024 * 1024,
+    maxTotalBodyBytes: 2 * 1024 * 1024,
+    maxEntryMetadataBytes: 256 * 1024,
+    maxHeaderFields: 512,
+    maxDerivedFields: 1_024,
+    maxHarBytes: 3 * 1024 * 1024,
+    maxEncodedBytes: 4 * 1024 * 1024,
+    ...overrides
+  };
 }
