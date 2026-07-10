@@ -44,7 +44,7 @@
     "lint:scripts": "eslint \"scripts/*.mjs\" \"apps/*/scripts/*.mjs\" \"apps/*/scripts/*/*.mjs\"",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test && pnpm test:scripts",
-    "test:scripts": "node --test scripts/e2e-runtime.test.mjs scripts/verify-release-ref.test.mjs",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "coverage:core": "pnpm --filter @webblackbox/protocol test:coverage && pnpm --filter @webblackbox/cdp-router test:coverage && pnpm --filter @webblackbox/recorder test:coverage && pnpm --filter @webblackbox/pipeline test:coverage && pnpm --filter webblackbox test:coverage && pnpm --filter @webblackbox/player-sdk test:coverage && pnpm --filter @webblackbox/mcp-server test:coverage",
     "bench": "pnpm run bench:recorder && pnpm run bench:pipeline",
     "bench:ci": "node scripts/bench-regression-check.mjs",

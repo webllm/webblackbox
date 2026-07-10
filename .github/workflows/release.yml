@@ -17,7 +17,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+  group: release-stable-publish
   cancel-in-progress: false
 
 jobs:
