@@ -21,6 +21,8 @@ concurrency:
 jobs:
   verify-release:
     runs-on: ubuntu-latest
+    outputs:
+      verified_sha: ${{ steps.verified_source.outputs.sha }}
     permissions:
       actions: read
       contents: read
@@ -63,6 +65,10 @@ jobs:
             exit 1
           fi
 
+      - name: Export verified release commit
+        id: verified_source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   chrome-extension:
     runs-on: ubuntu-latest
     needs: verify-release
@@ -71,11 +77,11 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
     steps:
-      - name: Checkout released ref
+      - name: Checkout verified release commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+          ref: ${{ needs.verify-release.outputs.verified_sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -137,11 +143,11 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
       PLAYER_SITE_URL: https://webllm.github.io/webblackbox/
     steps:
-      - name: Checkout released ref
+      - name: Checkout verified release commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+          ref: ${{ needs.verify-release.outputs.verified_sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
