@@ -1500,9 +1500,16 @@ export class WebBlackboxPlayer {
     return `await fetch(${JSON.stringify(entry.url)}, ${JSON.stringify(options, null, 2)});`;
   }
 
-  /** Exports a HAR 1.2 document from network events. */
-  public exportHar(range?: PlayerRange): string {
-    const entries = this.getNetworkWaterfall(range).map((entry) => toHarEntry(entry));
+  /** Exports a HAR 1.2 document, including captured response bodies, from network events. */
+  public async exportHar(range?: PlayerRange): Promise<string> {
+    const entries = await Promise.all(
+      this.getNetworkWaterfall(range).map(async (entry) => {
+        const responseBody = entry.responseBodyHash
+          ? await this.getBlob(entry.responseBodyHash)
+          : null;
+        return toHarEntry(entry, responseBody ?? undefined);
+      })
+    );
     const started = new Date(this.events[0]?.t ?? Date.now()).toISOString();
 
     const har = {
@@ -2438,7 +2445,10 @@ function readSelector(event: WebBlackboxEvent): string | null {
   return selector;
 }
 
-function toHarEntry(entry: NetworkWaterfallEntry): Record<string, unknown> {
+function toHarEntry(
+  entry: NetworkWaterfallEntry,
+  responseBody?: { mime: string; bytes: Uint8Array }
+): Record<string, unknown> {
   const queryString = parseQueryString(entry.url);
   const requestCookies = parseCookieHeader(entry.requestHeaders.cookie);
   const responseCookies = parseSetCookieHeader(entry.responseHeaders["set-cookie"]);
@@ -2471,10 +2481,7 @@ function toHarEntry(entry: NetworkWaterfallEntry): Record<string, unknown> {
       httpVersion: "HTTP/1.1",
       cookies: responseCookies,
       headers: headersToHarArray(entry.responseHeaders),
-      content: {
-        size: entry.responseBodySize ?? entry.encodedDataLength ?? 0,
-        mimeType: entry.mimeType ?? "application/octet-stream"
-      },
+      content: buildHarResponseContent(entry, responseBody),
       redirectURL: entry.responseHeaders.location ?? "",
       headersSize: -1,
       bodySize: entry.responseBodySize ?? -1
@@ -2490,6 +2497,60 @@ function toHarEntry(entry: NetworkWaterfallEntry): Record<string, unknown> {
       receive: 0
     }
   };
+}
+
+function buildHarResponseContent(
+  entry: NetworkWaterfallEntry,
+  responseBody?: { mime: string; bytes: Uint8Array }
+): Record<string, unknown> {
+  const mimeType = responseBody?.mime ?? entry.mimeType ?? "application/octet-stream";
+  const content: Record<string, unknown> = {
+    size: responseBody?.bytes.byteLength ?? entry.responseBodySize ?? entry.encodedDataLength ?? 0,
+    mimeType
+  };
+
+  if (!responseBody) {
+    return content;
+  }
+
+  if (isTextualHarMimeType(mimeType)) {
+    content.text = new TextDecoder("utf-8", { fatal: false }).decode(responseBody.bytes);
+  } else {
+    content.text = encodeBase64(responseBody.bytes);
+    content.encoding = "base64";
+  }
+
+  return content;
+}
+
+function isTextualHarMimeType(mimeType: string): boolean {
+  const normalized = mimeType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  return (
+    normalized.startsWith("text/") ||
+    normalized.includes("json") ||
+    normalized.includes("xml") ||
+    normalized.includes("javascript") ||
+    normalized.includes("x-www-form-urlencoded")
+  );
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index] ?? 0;
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    const combined = (first << 16) | ((second ?? 0) << 8) | (third ?? 0);
+
+    output += alphabet[(combined >> 18) & 63] ?? "";
+    output += alphabet[(combined >> 12) & 63] ?? "";
+    output += second === undefined ? "=" : (alphabet[(combined >> 6) & 63] ?? "");
+    output += third === undefined ? "=" : (alphabet[combined & 63] ?? "");
+  }
+
+  return output;
 }
 
 function buildDomDiff(

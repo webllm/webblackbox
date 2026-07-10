@@ -543,17 +543,26 @@ describe("WebBlackboxPlayer", () => {
     expect(fetchSnippet).toContain("await fetch");
     expect(fetchSnippet).toContain("https://example.com/api");
 
-    const har = JSON.parse(player.exportHar()) as {
+    const har = JSON.parse(await player.exportHar()) as {
       log: {
         entries: Array<{
           request: { method: string };
-          response: { status: number };
+          response: {
+            status: number;
+            content: { text?: string; encoding?: string; mimeType: string; size: number };
+          };
         }>;
       };
     };
     expect(har.log.entries).toHaveLength(1);
     expect(har.log.entries[0]?.request.method).toBe("POST");
     expect(har.log.entries[0]?.response.status).toBe(200);
+    expect(har.log.entries[0]?.response.content).toMatchObject({
+      mimeType: "application/json",
+      size: 11,
+      text: '{"ok":true}'
+    });
+    expect(har.log.entries[0]?.response.content.encoding).toBeUndefined();
   });
 
   it("builds storage timeline, report, and playwright script", async () => {

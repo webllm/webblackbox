@@ -251,6 +251,7 @@ type PlayerMessages = {
   screenRecordingMeta: string;
   feedbackBugReportExported: string;
   feedbackHarExported: string;
+  feedbackHarExportFailed: string;
   feedbackGitHubIssueExported: string;
   feedbackJiraIssueExported: string;
   feedbackQuickTriageDismissed: string;
@@ -539,6 +540,7 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
       "Recording {current} / {duration} | {chunks} chunks | {size}B | {dimensions}",
     feedbackBugReportExported: "Bug report exported.",
     feedbackHarExported: "HAR exported.",
+    feedbackHarExportFailed: "Failed to export HAR: {error}",
     feedbackGitHubIssueExported: "GitHub issue template exported.",
     feedbackJiraIssueExported: "Jira issue template exported.",
     feedbackQuickTriageDismissed: "Quick triage dismissed.",
@@ -854,6 +856,7 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     screenRecordingMeta: "录屏 {current} / {duration} | {chunks} 个分片 | {size}B | {dimensions}",
     feedbackBugReportExported: "已导出缺陷报告。",
     feedbackHarExported: "已导出 HAR。",
+    feedbackHarExportFailed: "导出 HAR 失败：{error}",
     feedbackGitHubIssueExported: "已导出 GitHub issue 模板。",
     feedbackJiraIssueExported: "已导出 Jira issue 模板。",
     feedbackQuickTriageDismissed: "已关闭快速分诊。",

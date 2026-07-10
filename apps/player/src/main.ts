@@ -1135,8 +1135,15 @@ function bindGlobalActions(): void {
       return;
     }
 
-    downloadTextFile("webblackbox-session.har", player.exportHar(), "application/json");
-    setFeedback(i18n.messages.feedbackHarExported);
+    void player
+      .exportHar()
+      .then((har) => {
+        downloadTextFile("webblackbox-session.har", har, "application/json");
+        setFeedback(i18n.messages.feedbackHarExported);
+      })
+      .catch((error: unknown) => {
+        setFeedback(i18n.t("feedbackHarExportFailed", { error: String(error) }));
+      });
   });
 
   refs.exportPlaywright.addEventListener("click", () => {

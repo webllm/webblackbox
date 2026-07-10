@@ -694,7 +694,7 @@ export async function exportHarFromArchive(args: ExportHarArgs): Promise<{
   const archivePath = resolveArchivePath(args.path);
   const range = buildRange(args.monoStart, args.monoEnd);
   const player = await openArchivePlayer(archivePath, args.passphrase, range ?? undefined);
-  const har = player.exportHar(range ?? undefined);
+  const har = await player.exportHar(range ?? undefined);
 
   return {
     archive: archivePath,
