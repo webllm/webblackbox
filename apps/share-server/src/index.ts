@@ -180,6 +180,7 @@ const uploadRateWindows = new Map<string, { count: number; resetAt: number; last
 const shareReadSessions = new Map<string, ShareReadSession>();
 let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
+let sharePublicOrigin = DEFAULT_BASE_URL;
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -192,6 +193,7 @@ async function startShareServer(): Promise<void> {
 
   const port = parsePort(process.env.PORT);
   const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
+  sharePublicOrigin = resolvePublicOrigin(process.env.WEBBLACKBOX_SHARE_PUBLIC_ORIGIN, host, port);
   const server = createServer((request, response) => {
     void routeRequest(request, response).catch((error) => {
       console.warn("[share-server] request failed", error);
@@ -211,13 +213,14 @@ async function startShareServer(): Promise<void> {
 
   server.listen(port, host, () => {
     console.info(`[share-server] listening on http://${host}:${port}`);
+    console.info(`[share-server] public origin: ${sharePublicOrigin}`);
     console.info(`[share-server] data root: ${DATA_ROOT}`);
   });
 }
 
 async function routeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const requestUrl = new URL(request.url ?? "/", requestBaseUrl(request));
-  applyCorsHeaders(response, request, requestUrl);
+  const requestUrl = new URL(request.url ?? "/", sharePublicOrigin);
+  applyCorsHeaders(response, request);
 
   if (request.method === "OPTIONS") {
     response.writeHead(204);
@@ -261,7 +264,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   }
 
   if (method === "POST" && pathname === "/api/share/upload") {
-    await handleUpload(request, response, requestUrl);
+    await handleUpload(request, response);
     return;
   }
 
@@ -303,11 +306,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   });
 }
 
-async function handleUpload(
-  request: IncomingMessage,
-  response: ServerResponse,
-  requestUrl: URL
-): Promise<void> {
+async function handleUpload(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const rateLimited = consumeUploadRateLimitToken(resolveClientKey(request));
 
   if (!rateLimited.ok) {
@@ -328,7 +327,7 @@ async function handleUpload(
   }
 
   try {
-    await handleUploadWithinInspectionSlot(request, response, requestUrl);
+    await handleUploadWithinInspectionSlot(request, response);
   } finally {
     activeUploadInspections -= 1;
   }
@@ -336,8 +335,7 @@ async function handleUpload(
 
 async function handleUploadWithinInspectionSlot(
   request: IncomingMessage,
-  response: ServerResponse,
-  requestUrl: URL
+  response: ServerResponse
 ): Promise<void> {
   const id = randomUUID().replaceAll("-", "");
   const upload = {
@@ -348,7 +346,7 @@ async function handleUploadWithinInspectionSlot(
   };
 
   try {
-    await processUploadWithinInspectionSlot(request, response, requestUrl, upload);
+    await processUploadWithinInspectionSlot(request, response, upload);
   } finally {
     if (!upload.committed) {
       await Promise.all([
@@ -362,7 +360,6 @@ async function handleUploadWithinInspectionSlot(
 async function processUploadWithinInspectionSlot(
   request: IncomingMessage,
   response: ServerResponse,
-  requestUrl: URL,
   upload: { id: string; tempPath: string; archivePath: string; committed: boolean }
 ): Promise<void> {
   const { id, tempPath, archivePath } = upload;
@@ -562,7 +559,7 @@ async function processUploadWithinInspectionSlot(
 
   const createdAt = Date.now();
   const ttlMs = resolveShareTtlMs(request);
-  const shareUrl = `${requestOrigin(request, requestUrl)}/share/${id}`;
+  const shareUrl = `${sharePublicOrigin}/share/${id}`;
   const record: ShareRecord = {
     id,
     createdAt,
@@ -1636,6 +1633,62 @@ function parseBindHost(rawValue: string | undefined): string {
   return trimmed.length > 0 ? trimmed : DEFAULT_HOST;
 }
 
+function resolvePublicOrigin(rawValue: string | undefined, bindHost: string, port: number): string {
+  const configured = rawValue?.trim();
+
+  if (!configured) {
+    if (!isLoopbackHost(bindHost)) {
+      throw new Error(
+        "WEBBLACKBOX_SHARE_PUBLIC_ORIGIN is required when the share server binds to a non-loopback host."
+      );
+    }
+
+    return new URL(`http://${formatHostForUrl(bindHost)}:${port}`).origin;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    throw new Error("WEBBLACKBOX_SHARE_PUBLIC_ORIGIN must be a valid absolute URL.");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("WEBBLACKBOX_SHARE_PUBLIC_ORIGIN must use HTTP or HTTPS.");
+  }
+
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(
+      "WEBBLACKBOX_SHARE_PUBLIC_ORIGIN must contain only a scheme, host, and optional port."
+    );
+  }
+
+  if (parsed.protocol !== "https:" && !isLoopbackHost(parsed.hostname)) {
+    throw new Error("WEBBLACKBOX_SHARE_PUBLIC_ORIGIN must use HTTPS for non-loopback hosts.");
+  }
+
+  return parsed.origin;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+}
+
+function formatHostForUrl(host: string): string {
+  const normalized = host.trim().replace(/^\[|\]$/g, "");
+  return normalized.includes(":") ? `[${normalized}]` : normalized;
+}
+
 function normalizeAllowedOrigin(rawValue: string | undefined): string {
   const resolved = (rawValue ?? "same-origin").trim();
 
@@ -1843,37 +1896,15 @@ function readScannerStatus(value: unknown): "passed" | "blocked" | "unknown" {
   return value === "passed" || value === "blocked" || value === "unknown" ? value : "unknown";
 }
 
-function requestBaseUrl(request: IncomingMessage): string {
-  const host = request.headers.host;
-  return host && host.length > 0 ? `http://${host}` : DEFAULT_BASE_URL;
-}
-
-function requestOrigin(request: IncomingMessage, requestUrl: URL): string {
-  const forwardedProto = request.headers["x-forwarded-proto"];
-  const protocol =
-    typeof forwardedProto === "string" && forwardedProto.length > 0
-      ? forwardedProto
-      : requestUrl.protocol.replace(":", "");
-  const host = request.headers.host ?? requestUrl.host;
-  return `${protocol}://${host}`;
-}
-
 function publicArchiveFileName(id: string, rawName: string | undefined): string {
   const trimmed = rawName?.trim().toLowerCase() ?? "";
   const extension = trimmed.endsWith(".zip") ? ".zip" : ".webblackbox";
   return `webblackbox-share-${id.slice(0, 12)}${extension}`;
 }
 
-function applyCorsHeaders(
-  response: ServerResponse,
-  request: IncomingMessage,
-  requestUrl: URL
-): void {
+function applyCorsHeaders(response: ServerResponse, request: IncomingMessage): void {
   const requestOrigin = request.headers.origin;
-  const allowOrigin = resolveAllowedOrigin(
-    requestOrigin,
-    requestOriginFromUrl(request, requestUrl)
-  );
+  const allowOrigin = resolveAllowedOrigin(requestOrigin, sharePublicOrigin);
 
   if (allowOrigin) {
     response.setHeader("access-control-allow-origin", allowOrigin);
@@ -2090,7 +2121,7 @@ function issueShareReadSessionCookie(response: ServerResponse, shareId: string):
 
   response.setHeader(
     "set-cookie",
-    `${SHARE_READ_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`
+    `${SHARE_READ_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${sharePublicOrigin.startsWith("https:") ? "; Secure" : ""}`
   );
 }
 
@@ -2133,10 +2164,6 @@ function readCookie(request: IncomingMessage, name: string): string | null {
   }
 
   return null;
-}
-
-function requestOriginFromUrl(request: IncomingMessage, requestUrl: URL): string {
-  return requestOrigin(request, requestUrl);
 }
 
 function isLoopbackRequest(request: IncomingMessage): boolean {

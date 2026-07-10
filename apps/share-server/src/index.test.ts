@@ -615,6 +615,81 @@ describe("share-server", () => {
     expect(response.status).toBe(401);
   });
 
+  it("does not trust Host or forwarded-protocol headers for public URLs and CORS", async () => {
+    const server = await startShareServer();
+    const encryptedArchive = await createEncryptedEnvelopeArchive();
+    const uploadResponse = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        host: "attacker.example",
+        origin: "https://attacker.example",
+        "x-forwarded-proto": "https",
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      },
+      body: Buffer.from(encryptedArchive)
+    });
+    const upload = (await uploadResponse.json()) as { shareUrl: string };
+
+    expect(uploadResponse.status).toBe(201);
+    expect(upload.shareUrl).toMatch(new RegExp(`^${escapeRegExp(server.baseUrl)}/share/`));
+    expect(upload.shareUrl).not.toContain("attacker.example");
+    expect(uploadResponse.headers.get("access-control-allow-origin")).toBeNull();
+
+    const allowedPreflight = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "OPTIONS",
+      headers: {
+        host: "attacker.example",
+        origin: server.baseUrl,
+        "x-forwarded-proto": "javascript"
+      }
+    });
+    expect(allowedPreflight.headers.get("access-control-allow-origin")).toBe(server.baseUrl);
+  });
+
+  it("uses the configured HTTPS public origin and secures browser session cookies", async () => {
+    const publicOrigin = "https://shares.example.test";
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY: "true",
+      WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: publicOrigin
+    });
+    const uploadPayload = await uploadEncryptedFixture(server);
+
+    const metadataResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`,
+      {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+    const metadata = (await metadataResponse.json()) as { shareUrl: string };
+    expect(metadata.shareUrl).toBe(`${publicOrigin}/share/${uploadPayload.shareId}`);
+
+    const redirectResponse = await fetch(
+      `${server.baseUrl}/share/${uploadPayload.shareId}?key=${apiKey}`,
+      { redirect: "manual" }
+    );
+    expect(redirectResponse.headers.get("set-cookie")).toContain("; Secure");
+  });
+
+  it("requires an explicit secure public origin for non-loopback binds", async () => {
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_BIND_HOST: "0.0.0.0",
+        WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: ""
+      })
+    ).rejects.toThrow(/WEBBLACKBOX_SHARE_PUBLIC_ORIGIN is required/);
+
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_BIND_HOST: "0.0.0.0",
+        WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: "http://shares.example.test"
+      })
+    ).rejects.toThrow(/must use HTTPS for non-loopback hosts/);
+  });
+
   it("supports opt-in query API key bootstrap without propagating the key", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY: "true"
@@ -659,6 +734,7 @@ async function startShareServer(
       PORT: String(port),
       WEBBLACKBOX_SHARE_API_KEY: apiKey,
       WEBBLACKBOX_SHARE_BIND_HOST: "127.0.0.1",
+      WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: "",
       WEBBLACKBOX_SHARE_DATA_DIR: dataDir,
       ...envOverrides
     },
@@ -763,6 +839,10 @@ async function reservePort(): Promise<number> {
 
 function readSetCookiePair(response: Response): string {
   return response.headers.get("set-cookie")?.split(";")[0] ?? "";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function uploadEncryptedFixture(
