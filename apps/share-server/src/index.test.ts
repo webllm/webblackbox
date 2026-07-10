@@ -2162,6 +2162,60 @@ syncBuiltinESMExports();
     expect(server.logs.join("")).toContain("[share-server] shutdown drain complete");
   });
 
+  it("bounds data-root lock release within the shutdown deadline", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-lock-shutdown-"));
+    const lockPath = resolve(dataDir, ".share-server.lock");
+    const unlinkDelayHookPath = resolve(dataDir, "delay-lock-unlink.mjs");
+    await writeFile(
+      unlinkDelayHookPath,
+      `import fileSystemPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+
+const originalUnlink = fileSystemPromises.unlink;
+fileSystemPromises.unlink = async (path) => {
+  if (String(path) === process.env.WEBBLACKBOX_TEST_DELAY_UNLINK_PATH) {
+    await new Promise((resolvePromise) =>
+      setTimeout(resolvePromise, Number(process.env.WEBBLACKBOX_TEST_UNLINK_DELAY_MS))
+    );
+  }
+  return originalUnlink(path);
+};
+syncBuiltinESMExports();
+`
+    );
+    const inheritedNodeOptions = process.env.NODE_OPTIONS?.trim();
+    const server = await startShareServer(
+      {
+        NODE_OPTIONS: [inheritedNodeOptions, `--import=${pathToFileURL(unlinkDelayHookPath).href}`]
+          .filter((value): value is string => Boolean(value))
+          .join(" "),
+        WEBBLACKBOX_SHARE_SHUTDOWN_TIMEOUT_MS: "150",
+        WEBBLACKBOX_TEST_DELAY_UNLINK_PATH: lockPath,
+        WEBBLACKBOX_TEST_UNLINK_DELAY_MS: "1500"
+      },
+      dataDir
+    );
+
+    const startedAt = Date.now();
+    const exit = await terminateShareServer(server);
+
+    expect(exit.signal === "SIGKILL" || exit.code === 128 + 9).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(server.logs.join("")).toContain("shutdown drain timed out after 150ms");
+    await expect(stat(lockPath)).resolves.toBeDefined();
+
+    await stopShareServer(server, false);
+    const restarted = await startShareServer({}, dataDir);
+    const listResponse = await fetch(`${restarted.baseUrl}/api/share/list`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(listResponse.status).toBe(200);
+  }, 10_000);
+
   it("exits within the shutdown bound when the audit sink is unsafe", async () => {
     if (process.platform === "win32") {
       return;

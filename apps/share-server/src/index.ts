@@ -519,6 +519,7 @@ async function shutdownShareServer(
     await waitForActiveRequests(activeRequests);
     await auditWriter.drain();
     await closePromise;
+    await dataRootLock.release();
   })();
   const drained = await waitWithinTimeout(drainPromise, SHARE_SHUTDOWN_TIMEOUT_MS);
 
@@ -530,7 +531,6 @@ async function shutdownShareServer(
     return false;
   }
 
-  await dataRootLock.release();
   console.info("[share-server] shutdown drain complete");
   return true;
 }
