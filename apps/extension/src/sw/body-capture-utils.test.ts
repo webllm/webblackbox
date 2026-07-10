@@ -95,37 +95,179 @@ describe("body-capture utils", () => {
 
   it("redacts and truncates utf8 response bodies for capture", () => {
     const transformed = transformResponseBodyForCapture({
-      body: `token=secret-123&${"x".repeat(5_000)}`,
+      body: `token=secret-123&message=${"界".repeat(5_000)}`,
       base64Encoded: false,
+      mimeType: "application/x-www-form-urlencoded; charset=utf-8",
       redactPatterns: ["secret-123"],
       maxBytes: 4_096,
       decodeBase64: decodeBase64ForTest
     });
 
+    expect(transformed).not.toBeNull();
+
+    if (!transformed) {
+      throw new Error("Expected response body transformation to succeed");
+    }
+
     const sampledText = new TextDecoder().decode(transformed.sampledBytes);
 
     expect(transformed.redacted).toBe(true);
     expect(transformed.truncated).toBe(true);
-    expect(sampledText).toContain("[REDACTED]");
+    expect(sampledText).toContain("%5BREDACTED%5D");
     expect(transformed.sampledBytes.byteLength).toBe(4_096);
+    expect(() =>
+      new TextDecoder("utf-8", { fatal: true }).decode(transformed.sampledBytes)
+    ).not.toThrow();
     expect(transformed.originalBytes.byteLength).toBeGreaterThan(
       transformed.sampledBytes.byteLength
     );
   });
 
-  it("does not redact base64 response bodies", () => {
+  it("decodes and redacts textual base64 response bodies", () => {
+    const body = JSON.stringify({ profile: { password: "plain-secret" }, status: "ok" });
     const transformed = transformResponseBodyForCapture({
-      body: Buffer.from("plain-secret", "utf8").toString("base64"),
+      body: Buffer.from(body, "utf8").toString("base64"),
       base64Encoded: true,
-      redactPatterns: ["secret"],
+      mimeType: "application/json",
+      redactPatterns: ["password", "secret"],
       maxBytes: 64 * 1024,
       decodeBase64: decodeBase64ForTest
     });
 
-    const sampledText = new TextDecoder().decode(transformed.sampledBytes);
+    expect(transformed).not.toBeNull();
 
-    expect(transformed.redacted).toBe(false);
+    if (!transformed) {
+      throw new Error("Expected response body transformation to succeed");
+    }
+
+    const sampled = JSON.parse(new TextDecoder().decode(transformed.sampledBytes)) as {
+      profile: { password: string };
+      status: string;
+    };
+
+    expect(transformed.redacted).toBe(true);
     expect(transformed.truncated).toBe(false);
-    expect(sampledText).toBe("plain-secret");
+    expect(sampled).toEqual({ profile: { password: "[REDACTED]" }, status: "ok" });
+    expect(JSON.stringify(sampled)).not.toContain("plain-secret");
+  });
+
+  it("redacts nested JSON field values including UTF-8 secrets", () => {
+    const body = JSON.stringify({
+      account: {
+        password: "密碼-不可保留",
+        nested: [{ apiKey: "key-123" }]
+      },
+      displayName: "使用者"
+    });
+    const transformed = transformResponseBodyForCapture({
+      body,
+      base64Encoded: false,
+      mimeType: "application/problem+json",
+      redactPatterns: ["password", "apikey"],
+      maxBytes: 64 * 1024,
+      decodeBase64: decodeBase64ForTest
+    });
+
+    expect(transformed).not.toBeNull();
+
+    if (!transformed) {
+      throw new Error("Expected response body transformation to succeed");
+    }
+
+    const sampled = JSON.parse(new TextDecoder().decode(transformed.sampledBytes)) as {
+      account: { password: string; nested: Array<{ apiKey: string }> };
+      displayName: string;
+    };
+
+    expect(sampled.account.password).toBe("[REDACTED]");
+    expect(sampled.account.nested[0]?.apiKey).toBe("[REDACTED]");
+    expect(sampled.displayName).toBe("使用者");
+    expect(new TextDecoder().decode(transformed.sampledBytes)).not.toContain("不可保留");
+    expect(new TextDecoder().decode(transformed.sampledBytes)).not.toContain("key-123");
+  });
+
+  it("redacts sensitive form field values while retaining safe fields", () => {
+    const transformed = transformResponseBodyForCapture({
+      body: "username=alice&password=hunter2&refresh_token=token-value&locale=zh-CN",
+      base64Encoded: false,
+      mimeType: "application/x-www-form-urlencoded",
+      redactPatterns: ["password", "token"],
+      maxBytes: 64 * 1024,
+      decodeBase64: decodeBase64ForTest
+    });
+
+    expect(transformed).not.toBeNull();
+
+    if (!transformed) {
+      throw new Error("Expected response body transformation to succeed");
+    }
+
+    const sampled = new URLSearchParams(new TextDecoder().decode(transformed.sampledBytes));
+
+    expect(sampled.get("username")).toBe("alice");
+    expect(sampled.get("password")).toBe("[REDACTED]");
+    expect(sampled.get("refresh_token")).toBe("[REDACTED]");
+    expect(sampled.get("locale")).toBe("zh-CN");
+  });
+
+  it("fails closed when structured response parsing fails", () => {
+    expect(
+      transformResponseBodyForCapture({
+        body: '{"password":"unterminated}',
+        base64Encoded: false,
+        mimeType: "application/json",
+        redactPatterns: ["password"],
+        maxBytes: 64 * 1024,
+        decodeBase64: decodeBase64ForTest
+      })
+    ).toBeNull();
+
+    expect(
+      transformResponseBodyForCapture({
+        body: "password=%E0%A4%A",
+        base64Encoded: false,
+        mimeType: "application/x-www-form-urlencoded",
+        redactPatterns: ["password"],
+        maxBytes: 64 * 1024,
+        decodeBase64: decodeBase64ForTest
+      })
+    ).toBeNull();
+  });
+
+  it("fails closed for invalid UTF-8 base64 and non-text MIME bodies", () => {
+    expect(
+      transformResponseBodyForCapture({
+        body: Buffer.from([0xff, 0xfe, 0xfd]).toString("base64"),
+        base64Encoded: true,
+        mimeType: "application/json",
+        redactPatterns: ["password"],
+        maxBytes: 64 * 1024,
+        decodeBase64: decodeBase64ForTest
+      })
+    ).toBeNull();
+
+    expect(
+      transformResponseBodyForCapture({
+        body: Buffer.from("plain-secret", "utf8").toString("base64"),
+        base64Encoded: true,
+        mimeType: "application/octet-stream",
+        redactPatterns: ["secret"],
+        maxBytes: 64 * 1024,
+        decodeBase64: decodeBase64ForTest
+      })
+    ).toBeNull();
+  });
+
+  it("fails closed for unstructured text when sensitive patterns require field redaction", () => {
+    expect(
+      transformResponseBodyForCapture({
+        body: "password: hunter2",
+        base64Encoded: false,
+        mimeType: "text/plain",
+        redactPatterns: ["password"],
+        maxBytes: 64 * 1024,
+        decodeBase64: decodeBase64ForTest
+      })
+    ).toBeNull();
   });
 });

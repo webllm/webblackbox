@@ -57,7 +57,6 @@ import {
   normalizeBodyCaptureMaxBytes as normalizeBodyCaptureMaxBytesUtil,
   isTextualMimeType as isTextualMimeTypeUtil,
   normalizeMimeType as normalizeMimeTypeUtil,
-  redactBodyText as redactBodyTextUtil,
   resolveFullBodyCaptureRule as resolveFullBodyCaptureRuleUtil,
   resolveLiteBodyCaptureRule as resolveLiteBodyCaptureRuleUtil,
   transformResponseBodyForCapture
@@ -1555,7 +1554,7 @@ async function materializeLiteNetworkBody(
   const url = asString(payload.url) ?? "";
   const mimeType = normalizeMimeType(asString(payload.mimeType));
 
-  if (!reqId || !body || (encoding !== "utf8" && encoding !== "base64")) {
+  if (!reqId || !body || !mimeType || (encoding !== "utf8" && encoding !== "base64")) {
     return null;
   }
 
@@ -1565,30 +1564,23 @@ async function materializeLiteNetworkBody(
     return null;
   }
 
-  let bytes: Uint8Array;
-  let redacted = payload.redacted === true;
+  const transformed = transformResponseBodyForCapture({
+    body,
+    base64Encoded: encoding === "base64",
+    mimeType,
+    redactPatterns: runtime.config.redaction.redactBodyPatterns,
+    maxBytes: captureRule.maxBytes,
+    redactionToken: LITE_BODY_REDACTED_TOKEN,
+    decodeBase64
+  });
 
-  if (encoding === "utf8") {
-    const redaction = redactBodyText(body, runtime.config.redaction.redactBodyPatterns);
-    redacted = redacted || redaction.redacted;
-    bytes = new TextEncoder().encode(redaction.value);
-  } else {
-    bytes = decodeBase64(body);
-  }
-
-  if (bytes.byteLength === 0) {
+  if (!transformed) {
     return null;
   }
 
-  const size = normalizeNonNegativeInt(payload.size) ?? bytes.byteLength;
+  const size = normalizeNonNegativeInt(payload.size) ?? transformed.originalBytes.byteLength;
   const truncatedByInput = payload.truncated === true;
-  const maxBytes = captureRule.maxBytes;
-  const truncatedByLimit = bytes.byteLength > maxBytes;
-  const sampledBytes = truncatedByLimit ? bytes.slice(0, maxBytes) : bytes;
-  const contentHash = await runtime.pipeline.putBlob(
-    mimeType ?? "application/octet-stream",
-    sampledBytes
-  );
+  const contentHash = await runtime.pipeline.putBlob(mimeType, transformed.sampledBytes);
 
   return {
     ...rawEvent,
@@ -1598,9 +1590,9 @@ async function materializeLiteNetworkBody(
       contentHash,
       mimeType,
       size,
-      sampledSize: sampledBytes.byteLength,
-      truncated: truncatedByInput || truncatedByLimit || sampledBytes.byteLength < size,
-      redacted
+      sampledSize: transformed.sampledBytes.byteLength,
+      truncated: truncatedByInput || transformed.truncated,
+      redacted: payload.redacted === true || transformed.redacted
     }
   };
 }
@@ -2441,11 +2433,17 @@ async function captureResponseBody(
   const transformed = transformResponseBodyForCapture({
     body: response.body,
     base64Encoded: response.base64Encoded === true,
+    mimeType: normalizedMime,
     redactPatterns: runtime.config.redaction.redactBodyPatterns,
     maxBytes: captureRule.maxBytes,
     redactionToken: LITE_BODY_REDACTED_TOKEN,
     decodeBase64
   });
+
+  if (!transformed) {
+    return;
+  }
+
   const hash = await runtime.pipeline.putBlob(
     metadata?.mimeType ?? "application/octet-stream",
     transformed.sampledBytes
@@ -3441,16 +3439,6 @@ function isMimeAllowed(allowlist: string[], mimeType: string | undefined): boole
 
 function normalizeMimeType(value: string | null): string | undefined {
   return normalizeMimeTypeUtil(value);
-}
-
-function redactBodyText(
-  value: string,
-  patterns: string[]
-): {
-  value: string;
-  redacted: boolean;
-} {
-  return redactBodyTextUtil(value, patterns, LITE_BODY_REDACTED_TOKEN);
 }
 
 function normalizeFullModePayload(method: string, params: unknown): unknown {

@@ -166,7 +166,8 @@ describe("lite-materializer", () => {
     expect(result).not.toBeNull();
     expect(putBlobCalls).toHaveLength(1);
     expect(putBlobCalls[0]?.mime).toBe("application/x-www-form-urlencoded");
-    expect(putBlobCalls[0]?.text).toContain("[REDACTED]");
+    expect(new URLSearchParams(putBlobCalls[0]?.text).get("token")).toBe("[REDACTED]");
+    expect(putBlobCalls[0]?.text).not.toContain("secret-token");
     expect(putBlobCalls[0]?.bytes.byteLength).toBeLessThanOrEqual(4 * 1024);
     expect(putBlobCalls[0]?.bytes.byteLength).toBeLessThan(
       new TextEncoder().encode(body).byteLength
@@ -178,6 +179,89 @@ describe("lite-materializer", () => {
       redacted: true,
       truncated: true
     });
+  });
+
+  it("decodes base64 JSON and redacts nested sensitive values before persistence", async () => {
+    const config = cloneConfig();
+    config.sampling.bodyCaptureMaxBytes = 64 * 1024;
+    const putBlobCalls: Array<{ mime: string; text: string }> = [];
+    const body = JSON.stringify({
+      user: {
+        password: "密碼-不可保留",
+        details: [{ api_key: "api-secret-value" }]
+      },
+      locale: "zh-CN"
+    });
+
+    const result = await materializeLiteRawEvent(
+      createRawEvent("networkBody", {
+        reqId: "R-base64-json",
+        url: "https://example.test/api/profile",
+        mimeType: "application/json; charset=utf-8",
+        encoding: "base64",
+        body: Buffer.from(body, "utf8").toString("base64"),
+        size: new TextEncoder().encode(body).byteLength
+      }),
+      {
+        config,
+        putBlob: async (mime, bytes) => {
+          putBlobCalls.push({ mime, text: new TextDecoder().decode(bytes) });
+          return "hash-base64-json";
+        }
+      }
+    );
+
+    expect(result).not.toBeNull();
+    expect(putBlobCalls).toHaveLength(1);
+    expect(putBlobCalls[0]?.mime).toBe("application/json");
+
+    const persisted = JSON.parse(putBlobCalls[0]?.text ?? "") as {
+      user: { password: string; details: Array<{ api_key: string }> };
+      locale: string;
+    };
+
+    expect(persisted.user.password).toBe("[REDACTED]");
+    expect(persisted.user.details[0]?.api_key).toBe("[REDACTED]");
+    expect(persisted.locale).toBe("zh-CN");
+    expect(putBlobCalls[0]?.text).not.toContain("不可保留");
+    expect(putBlobCalls[0]?.text).not.toContain("api-secret-value");
+    expect(result?.payload).toMatchObject({
+      contentHash: "hash-base64-json",
+      redacted: true,
+      truncated: false
+    });
+  });
+
+  it("does not persist malformed structured or undecodable textual bodies", async () => {
+    const config = cloneConfig();
+    config.sampling.bodyCaptureMaxBytes = 64 * 1024;
+    const putBlob = vi.fn(async () => "unexpected-hash");
+    const context = { config, putBlob };
+
+    const malformedJson = await materializeLiteRawEvent(
+      createRawEvent("networkBody", {
+        reqId: "R-malformed-json",
+        url: "https://example.test/api/profile",
+        mimeType: "application/json",
+        encoding: "utf8",
+        body: '{"password":"unterminated}'
+      }),
+      context
+    );
+    const invalidUtf8 = await materializeLiteRawEvent(
+      createRawEvent("networkBody", {
+        reqId: "R-invalid-utf8",
+        url: "https://example.test/api/profile",
+        mimeType: "application/json",
+        encoding: "base64",
+        body: Buffer.from([0xff, 0xfe, 0xfd]).toString("base64")
+      }),
+      context
+    );
+
+    expect(malformedJson).toBeNull();
+    expect(invalidUtf8).toBeNull();
+    expect(putBlob).not.toHaveBeenCalled();
   });
 
   it("does not persist network bodies without an allowed MIME type", async () => {

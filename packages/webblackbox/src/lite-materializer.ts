@@ -2,6 +2,9 @@ import type { RecorderConfig } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 import type { LiteMaterializerContext } from "./types.js";
+import { transformResponseBodyForCapture } from "./response-body-redaction.js";
+
+export { transformResponseBodyForCapture } from "./response-body-redaction.js";
 
 const DEFAULT_NETWORK_BODY_MAX_BYTES = 256 * 1024;
 const DEFAULT_BODY_MIME_ALLOWLIST = [
@@ -13,7 +16,6 @@ const DEFAULT_BODY_MIME_ALLOWLIST = [
   "application/javascript",
   "application/x-www-form-urlencoded"
 ];
-const REDACTED_TOKEN = "[REDACTED]";
 const DEFAULT_SCREENSHOT_MAX_DATA_URL_LENGTH = 12 * 1024 * 1024;
 const DEFAULT_SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const DEFAULT_DOM_SNAPSHOT_MAX_BYTES = 1_500 * 1024;
@@ -258,7 +260,7 @@ async function materializeLiteNetworkBody(
   const url = asString(payload.url) ?? "";
   const mimeType = normalizeMimeType(asString(payload.mimeType));
 
-  if (!reqId || !body || (encoding !== "utf8" && encoding !== "base64")) {
+  if (!reqId || !body || !mimeType || (encoding !== "utf8" && encoding !== "base64")) {
     return null;
   }
 
@@ -268,26 +270,22 @@ async function materializeLiteNetworkBody(
     return null;
   }
 
-  let bytes: Uint8Array;
-  let redacted = payload.redacted === true;
+  const transformed = transformResponseBodyForCapture({
+    body,
+    base64Encoded: encoding === "base64",
+    mimeType,
+    redactPatterns: context.config.redaction.redactBodyPatterns,
+    maxBytes: captureRule.maxBytes,
+    decodeBase64
+  });
 
-  if (encoding === "utf8") {
-    const redaction = redactBodyText(body, context.config.redaction.redactBodyPatterns);
-    redacted = redacted || redaction.redacted;
-    bytes = new TextEncoder().encode(redaction.value);
-  } else {
-    bytes = decodeBase64(body);
-  }
-
-  if (bytes.byteLength === 0) {
+  if (!transformed) {
     return null;
   }
 
-  const size = normalizeNonNegativeInt(payload.size) ?? bytes.byteLength;
+  const size = normalizeNonNegativeInt(payload.size) ?? transformed.originalBytes.byteLength;
   const truncatedByInput = payload.truncated === true;
-  const truncatedByLimit = bytes.byteLength > captureRule.maxBytes;
-  const sampledBytes = truncatedByLimit ? bytes.slice(0, captureRule.maxBytes) : bytes;
-  const contentHash = await context.putBlob(mimeType ?? "application/octet-stream", sampledBytes);
+  const contentHash = await context.putBlob(mimeType, transformed.sampledBytes);
 
   return {
     ...rawEvent,
@@ -297,9 +295,9 @@ async function materializeLiteNetworkBody(
       contentHash,
       mimeType,
       size,
-      sampledSize: sampledBytes.byteLength,
-      truncated: truncatedByInput || truncatedByLimit || sampledBytes.byteLength < size,
-      redacted
+      sampledSize: transformed.sampledBytes.byteLength,
+      truncated: truncatedByInput || transformed.truncated,
+      redacted: payload.redacted === true || transformed.redacted
     }
   };
 }
@@ -479,46 +477,6 @@ function normalizeMimeType(value: string | null): string | undefined {
   const [mime] = value.split(";");
   const normalized = mime?.trim().toLowerCase();
   return normalized && normalized.length > 0 ? normalized : undefined;
-}
-
-function redactBodyText(
-  value: string,
-  patterns: string[]
-): {
-  value: string;
-  redacted: boolean;
-} {
-  if (patterns.length === 0 || value.length === 0) {
-    return {
-      value,
-      redacted: false
-    };
-  }
-
-  let output = value;
-  let touched = false;
-
-  for (const pattern of patterns) {
-    const normalized = pattern.trim();
-
-    if (!normalized) {
-      continue;
-    }
-
-    const regex = new RegExp(normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-
-    if (!regex.test(output)) {
-      continue;
-    }
-
-    output = output.replace(regex, REDACTED_TOKEN);
-    touched = true;
-  }
-
-  return {
-    value: output,
-    redacted: touched
-  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
