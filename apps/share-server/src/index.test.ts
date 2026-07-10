@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { request as createHttpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -1399,6 +1400,76 @@ describe("share-server", () => {
     expect(metadataResponse.status).toBe(200);
     expect(server.child.exitCode).toBeNull();
     expect(server.logs.join("")).toContain("[share-server] audit append failed");
+    await expect(terminateShareServer(server)).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it("drains an accepted operation audit before exiting on SIGTERM", async () => {
+    const server = await startShareServer();
+    const uploadPayload = await uploadEncryptedFixture(server);
+    const metadataResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`,
+      {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+
+    expect(metadataResponse.status).toBe(200);
+    await metadataResponse.arrayBuffer();
+
+    const exit = await terminateShareServer(server);
+    const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
+    const auditEvents = auditLog
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { action: string; shareId?: string });
+
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(auditEvents).toContainEqual(
+      expect.objectContaining({
+        action: "metadata",
+        shareId: uploadPayload.shareId
+      })
+    );
+    expect(server.logs.join("")).toContain("[share-server] shutdown drain complete");
+  });
+
+  it("bounds shutdown when the audit sink cannot drain", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_SHUTDOWN_TIMEOUT_MS: "150"
+    });
+    const uploadPayload = await uploadEncryptedFixture(server);
+    const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");
+    await waitForAuditEvent(server, "upload", uploadPayload.shareId);
+    await rm(auditPath, { force: true });
+    const auditReader = await createFullNamedPipe(auditPath);
+
+    try {
+      const metadataResponse = await fetch(
+        `${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`,
+        {
+          headers: {
+            "x-webblackbox-api-key": apiKey
+          }
+        }
+      );
+      expect(metadataResponse.status).toBe(200);
+      await metadataResponse.arrayBuffer();
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+
+      const startedAt = Date.now();
+      const exit = await terminateShareServer(server);
+
+      expect(exit.signal === "SIGKILL" || exit.code === 128 + 9).toBe(true);
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      await auditReader.close();
+    }
   });
 
   it("enforces scoped API keys", async () => {
@@ -1730,6 +1801,102 @@ describe("share-server", () => {
     expect(html).not.toContain(apiKey);
   });
 });
+
+async function terminateShareServer(
+  server: RunningShareServer
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (server.child.exitCode !== null || server.child.signalCode !== null) {
+    return {
+      code: server.child.exitCode,
+      signal: server.child.signalCode
+    };
+  }
+
+  return await new Promise((resolvePromise, reject) => {
+    const timeout = setTimeout(() => {
+      server.child.kill("SIGKILL");
+      reject(new Error(`share-server did not exit after SIGTERM: ${server.logs.join("")}`));
+    }, 2_500);
+    server.child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolvePromise({ code, signal });
+    });
+
+    if (!server.child.kill("SIGTERM")) {
+      clearTimeout(timeout);
+      reject(new Error("Failed to send SIGTERM to share-server."));
+    }
+  });
+}
+
+async function waitForAuditEvent(
+  server: RunningShareServer,
+  action: string,
+  shareId: string
+): Promise<void> {
+  const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    try {
+      const lines = (await readFile(auditPath, "utf8")).trim().split("\n");
+      const found = lines.some((line) => {
+        const event = JSON.parse(line) as { action?: string; shareId?: string };
+        return event.action === action && event.shareId === shareId;
+      });
+      if (found) {
+        return;
+      }
+    } catch {
+      // Audit creation may still be in flight after the HTTP response completes.
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+
+  throw new Error(`Timed out waiting for ${action} audit event for ${shareId}.`);
+}
+
+async function createFullNamedPipe(path: string): Promise<Awaited<ReturnType<typeof open>>> {
+  const fifoResult = spawnSync("mkfifo", [path]);
+  if (fifoResult.status !== 0) {
+    throw new Error(`Failed to create audit FIFO: ${String(fifoResult.stderr)}`);
+  }
+
+  const reader = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  const writer = await open(path, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+  const chunk = Buffer.alloc(4 * 1024, 0x78);
+
+  try {
+    for (let written = 0; written < 16 * 1024 * 1024; ) {
+      try {
+        const result = await writer.write(chunk);
+        if (result.bytesWritten <= 0) {
+          break;
+        }
+        written += result.bytesWritten;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          ((error as Error & { code?: string }).code === "EAGAIN" ||
+            (error as Error & { code?: string }).code === "EWOULDBLOCK")
+        ) {
+          return reader;
+        }
+        throw error;
+      }
+    }
+  } catch (error) {
+    await reader.close();
+    throw error;
+  } finally {
+    await writer.close();
+  }
+
+  await reader.close();
+  throw new Error("Failed to fill audit FIFO before the safety limit.");
+}
 
 async function startShareServer(
   envOverrides: Record<string, string> = {},

@@ -11,7 +11,7 @@ import {
   stat,
   type FileHandle
 } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -244,6 +244,11 @@ const MAX_SHARE_AUDIT_LOG_BYTES = Math.min(
   parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES, 16 * 1024 * 1024),
   64 * 1024 * 1024
 );
+const MAX_SHARE_SHUTDOWN_TIMEOUT_MS = 60_000;
+const SHARE_SHUTDOWN_TIMEOUT_MS = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_SHUTDOWN_TIMEOUT_MS, 10_000),
+  MAX_SHARE_SHUTDOWN_TIMEOUT_MS
+);
 const MAX_SHARE_READ_SESSIONS = 4096;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
@@ -276,33 +281,28 @@ async function startShareServer(): Promise<void> {
   await reconcileStorageLayout();
   await pruneExpiredShareRecords(Date.now());
 
+  const activeRequests = new Set<Promise<void>>();
+  let acceptingRequests = true;
   const server = createServer((request, response) => {
-    void routeRequest(request, response).catch(async (error) => {
-      console.warn("[share-server] request failed", error);
-
-      const auditContext = resolveShareAuditRequest(request);
-      if (auditContext) {
-        await writeShareAuditEvent(request, {
-          ...auditContext,
-          outcome: "error",
-          details: {
-            reason: "request-failed"
-          }
-        });
-      }
-
-      if (response.headersSent || response.writableEnded) {
-        if (!response.writableEnded) {
-          response.destroy(error instanceof Error ? error : undefined);
-        }
-        return;
-      }
-
-      respondJson(response, 500, {
-        error: "Internal server error."
+    if (!acceptingRequests) {
+      response.setHeader("connection", "close");
+      respondJson(response, 503, {
+        error: "Share server is shutting down."
       });
-    });
+      return;
+    }
+
+    const requestTask = handleRequest(request, response);
+    activeRequests.add(requestTask);
+    void requestTask.then(
+      () => activeRequests.delete(requestTask),
+      () => activeRequests.delete(requestTask)
+    );
   });
+  const removeSignalHandlers = installGracefulShutdownHandlers(server, activeRequests, () => {
+    acceptingRequests = false;
+  });
+  server.once("close", removeSignalHandlers);
 
   server.listen(port, host, () => {
     console.info(`[share-server] listening on http://${host}:${port}`);
@@ -314,6 +314,140 @@ async function startShareServer(): Promise<void> {
       );
     }
   });
+}
+
+async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  try {
+    await routeRequest(request, response);
+  } catch (error) {
+    console.warn("[share-server] request failed", error);
+
+    const auditContext = resolveShareAuditRequest(request);
+    if (auditContext) {
+      await writeShareAuditEvent(request, {
+        ...auditContext,
+        outcome: "error",
+        details: {
+          reason: "request-failed"
+        }
+      });
+    }
+
+    if (response.headersSent || response.writableEnded) {
+      if (!response.writableEnded) {
+        response.destroy(error instanceof Error ? error : undefined);
+      }
+      return;
+    }
+
+    respondJson(response, 500, {
+      error: "Internal server error."
+    });
+  }
+}
+
+function installGracefulShutdownHandlers(
+  server: Server,
+  activeRequests: Set<Promise<void>>,
+  stopAcceptingRequests: () => void
+): () => void {
+  let shutdownStarted = false;
+  const handleSigterm = () => beginShutdown("SIGTERM");
+  const handleSigint = () => beginShutdown("SIGINT");
+  const removeHandlers = () => {
+    process.off("SIGTERM", handleSigterm);
+    process.off("SIGINT", handleSigint);
+  };
+  const beginShutdown = (signal: "SIGINT" | "SIGTERM") => {
+    if (shutdownStarted) {
+      return;
+    }
+
+    shutdownStarted = true;
+    stopAcceptingRequests();
+    removeHandlers();
+    void shutdownShareServer(server, activeRequests, signal).then(
+      (drained) => {
+        if (drained) {
+          process.exit(0);
+        }
+
+        process.kill(process.pid, "SIGKILL");
+      },
+      (error) => {
+        console.error("[share-server] shutdown failed", error);
+        process.exit(1);
+      }
+    );
+  };
+
+  process.once("SIGTERM", handleSigterm);
+  process.once("SIGINT", handleSigint);
+  return removeHandlers;
+}
+
+async function shutdownShareServer(
+  server: Server,
+  activeRequests: Set<Promise<void>>,
+  signal: "SIGINT" | "SIGTERM"
+): Promise<boolean> {
+  console.info(`[share-server] received ${signal}; draining requests and audit events`);
+  const closePromise = closeHttpServer(server);
+  const drainPromise = (async () => {
+    await waitForActiveRequests(activeRequests);
+    await auditWriteQueue;
+    await closePromise;
+  })();
+  const drained = await waitWithinTimeout(drainPromise, SHARE_SHUTDOWN_TIMEOUT_MS);
+
+  if (!drained) {
+    server.closeAllConnections();
+    console.warn(
+      `[share-server] shutdown drain timed out after ${SHARE_SHUTDOWN_TIMEOUT_MS}ms; forcing exit`
+    );
+    return false;
+  }
+
+  console.info("[share-server] shutdown drain complete");
+  return true;
+}
+
+async function waitForActiveRequests(activeRequests: Set<Promise<void>>): Promise<void> {
+  while (activeRequests.size > 0) {
+    await Promise.allSettled([...activeRequests]);
+  }
+}
+
+function closeHttpServer(server: Server): Promise<void> {
+  if (!server.listening) {
+    return Promise.resolve();
+  }
+
+  const closed = new Promise<void>((resolvePromise) => {
+    server.close((error) => {
+      if (error) {
+        console.warn("[share-server] HTTP close failed", error);
+      }
+      resolvePromise();
+    });
+  });
+  server.closeIdleConnections();
+  return closed;
+}
+
+async function waitWithinTimeout(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<false>((resolvePromise) => {
+    timeout = setTimeout(() => resolvePromise(false), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise.then(() => true), timedOut]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 async function routeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -363,7 +497,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
         return;
       }
       issueShareReadSessionCookie(response, readShareId);
-      await writeShareAuditEvent(request, {
+      const auditPromise = writeShareAuditEvent(request, {
         action: "page",
         shareId: readShareId,
         outcome: "ok",
@@ -372,6 +506,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
         }
       });
       redirectToUrlWithoutQueryKey(response, requestUrl);
+      await auditPromise;
       return;
     }
 
@@ -776,7 +911,7 @@ async function processUploadWithinInspectionSlot(
   await syncDirectoryBestEffort(ARCHIVES_DIR);
   await writeRecord(record);
   upload.committed = true;
-  await writeShareAuditEvent(request, {
+  const auditPromise = writeShareAuditEvent(request, {
     action: "upload",
     shareId: id,
     outcome: "ok",
@@ -785,7 +920,6 @@ async function processUploadWithinInspectionSlot(
       ttlMs
     }
   });
-
   respondJson(response, 201, {
     shareId: id,
     shareUrl,
@@ -794,6 +928,7 @@ async function processUploadWithinInspectionSlot(
     sizeBytes,
     summary
   });
+  await auditPromise;
 }
 
 async function handleList(
@@ -825,7 +960,7 @@ async function handleList(
     .slice(pagination.offset, endOffset)
     .map((record) => buildPublicShareMetadata(record));
 
-  await writeShareAuditEvent(request, {
+  const auditPromise = writeShareAuditEvent(request, {
     action: "list",
     outcome: "ok"
   });
@@ -836,6 +971,7 @@ async function handleList(
     limit: pagination.limit,
     nextOffset: endOffset < records.length ? endOffset : null
   });
+  await auditPromise;
 }
 
 async function handleGetMetadata(
@@ -849,12 +985,13 @@ async function handleGetMetadata(
     return;
   }
 
-  respondJson(response, 200, buildPublicShareMetadata(record));
-  await writeShareAuditEvent(request, {
+  const auditPromise = writeShareAuditEvent(request, {
     action: "metadata",
     shareId: id,
     outcome: "ok"
   });
+  respondJson(response, 200, buildPublicShareMetadata(record));
+  await auditPromise;
 }
 
 async function handleDownloadArchive(
@@ -1007,12 +1144,13 @@ async function handleSharePage(
   </body>
 </html>`;
 
-  respondHtml(response, 200, page);
-  await writeShareAuditEvent(request, {
+  const auditPromise = writeShareAuditEvent(request, {
     action: "page",
     shareId: id,
     outcome: "ok"
   });
+  respondHtml(response, 200, page);
+  await auditPromise;
 }
 
 async function handleRevokeShare(
@@ -1033,7 +1171,7 @@ async function handleRevokeShare(
   };
 
   await writeRecord(revokedRecord);
-  await writeShareAuditEvent(request, {
+  const auditPromise = writeShareAuditEvent(request, {
     action: "revoke",
     shareId: id,
     outcome: "ok"
@@ -1042,6 +1180,7 @@ async function handleRevokeShare(
     shareId: id,
     revokedAt
   });
+  await auditPromise;
 }
 
 async function readAvailableShareRecord(
