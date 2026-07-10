@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { readWebBlackboxArchive } from "@webblackbox/pipeline";
+import { MemoryPipelineStorage, readWebBlackboxArchive } from "@webblackbox/pipeline";
 import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
@@ -427,6 +427,73 @@ describe("WebBlackboxLiteSdk", () => {
     expect(freezeSpy).not.toHaveBeenCalled();
 
     await sdk.dispose();
+  });
+
+  it("surfaces raw materialization failures through flush and export", async () => {
+    const storage = new MemoryPipelineStorage();
+    const putBlob = vi
+      .spyOn(storage, "putBlob")
+      .mockRejectedValue(new Error("simulated blob persistence failure"));
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-raw-queue-failure",
+      injectHooks: false,
+      useDefaultPlugins: false,
+      pipelineStorage: storage,
+      config: {
+        capturePolicy: HIGH_FIDELITY_TEST_POLICY
+      }
+    });
+
+    await sdk.start();
+    sdk.ingestRawEvent(
+      createRawEvent("screenshot", {
+        dataUrl: `data:image/png;base64,${Buffer.from([1, 2, 3, 4]).toString("base64")}`
+      })
+    );
+
+    await expect(sdk.flush()).rejects.toThrow(
+      /raw event ingestion failed: simulated blob persistence failure/i
+    );
+    await expect(sdk.export({ stopCapture: false })).rejects.toThrow(/raw event ingestion failed/i);
+    expect(putBlob).toHaveBeenCalledTimes(1);
+    await expect(sdk.dispose()).rejects.toThrow(/raw event ingestion failed/i);
+    expect(mockRuntime.instances.at(-1)?.disposeCalls).toBe(1);
+  });
+
+  it("retains unacknowledged normalized events and rejects flush on persistence failure", async () => {
+    const storage = new MemoryPipelineStorage();
+    const putChunk = vi
+      .spyOn(storage, "putChunk")
+      .mockRejectedValue(new Error("simulated chunk persistence failure"));
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-pipeline-queue-failure",
+      injectHooks: false,
+      useDefaultPlugins: false,
+      pipelineStorage: storage,
+      maxChunkBytes: 1,
+      config: {
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
+    });
+
+    await sdk.start();
+    sdk.ingestRawEvent(
+      createRawEvent("marker", {
+        message: "must-not-be-silently-lost"
+      })
+    );
+
+    await expect(sdk.flush()).rejects.toThrow(
+      /normalized event persistence failed: simulated chunk persistence failure/i
+    );
+    expect(putChunk).toHaveBeenCalledTimes(1);
+    expect((sdk as unknown as { pipelineEventBuffer: unknown[] }).pipelineEventBuffer).toHaveLength(
+      1
+    );
+    await expect(sdk.export({ stopCapture: false })).rejects.toThrow(
+      /normalized event persistence failed/i
+    );
+    await expect(sdk.dispose()).rejects.toThrow(/normalized event persistence failed/i);
   });
 
   it("respects explicit perf-freeze overrides", async () => {

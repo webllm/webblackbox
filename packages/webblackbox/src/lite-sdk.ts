@@ -69,6 +69,12 @@ export class WebBlackboxLiteSdk {
 
   private pipelineFlushScheduled = false;
 
+  private queueFailure: Error | null = null;
+
+  private rawQueueFailed = false;
+
+  private pipelineQueueFailed = false;
+
   private started = false;
 
   private recording = false;
@@ -235,7 +241,7 @@ export class WebBlackboxLiteSdk {
   public ingestRawEvents(rawEvents: RawRecorderEvent[]): void {
     this.assertNotDisposed();
 
-    if (!this.started || rawEvents.length === 0) {
+    if (!this.started || rawEvents.length === 0 || this.rawQueueFailed) {
       return;
     }
 
@@ -248,7 +254,7 @@ export class WebBlackboxLiteSdk {
         }
       })
       .catch((error) => {
-        console.warn("[WebBlackboxLiteSdk] failed to ingest raw event batch", error);
+        this.recordQueueFailure("raw event ingestion", error);
       });
   }
 
@@ -333,12 +339,14 @@ export class WebBlackboxLiteSdk {
       return;
     }
 
-    if (this.started) {
-      await this.stop();
+    try {
+      if (this.started) {
+        await this.stop();
+      }
+    } finally {
+      this.captureAgent.dispose();
+      this.disposed = true;
     }
-
-    this.captureAgent.dispose();
-    this.disposed = true;
   }
 
   private async ingestOne(rawEvent: RawRecorderEvent): Promise<void> {
@@ -359,6 +367,10 @@ export class WebBlackboxLiteSdk {
   }
 
   private enqueuePipelineIngest(event: WebBlackboxEvent): void {
+    if (this.pipelineQueueFailed) {
+      return;
+    }
+
     this.pipelineEventBuffer.push(event);
 
     if (this.pipelineEventBuffer.length >= PIPELINE_BATCH_MAX_EVENTS) {
@@ -382,7 +394,11 @@ export class WebBlackboxLiteSdk {
       this.pipelineFlushTimer = null;
     }
 
-    if (this.pipelineFlushScheduled || this.pipelineEventBuffer.length === 0) {
+    if (
+      this.pipelineQueueFailed ||
+      this.pipelineFlushScheduled ||
+      this.pipelineEventBuffer.length === 0
+    ) {
       return;
     }
 
@@ -391,13 +407,14 @@ export class WebBlackboxLiteSdk {
     this.pipelineQueue = this.pipelineQueue
       .then(async () => {
         while (this.pipelineEventBuffer.length > 0) {
-          const batch = this.pipelineEventBuffer.splice(0, PIPELINE_BATCH_DRAIN_CHUNK_EVENTS);
+          const batch = this.pipelineEventBuffer.slice(0, PIPELINE_BATCH_DRAIN_CHUNK_EVENTS);
 
           if (batch.length === 0) {
             break;
           }
 
           await this.pipeline.ingestBatch(batch);
+          this.pipelineEventBuffer.splice(0, batch.length);
 
           if (this.pipelineEventBuffer.length > 0) {
             await waitForNextTick();
@@ -405,12 +422,12 @@ export class WebBlackboxLiteSdk {
         }
       })
       .catch((error) => {
-        console.warn("[WebBlackboxLiteSdk] failed to ingest normalized event batch", error);
+        this.recordQueueFailure("normalized event persistence", error);
       })
       .finally(() => {
         this.pipelineFlushScheduled = false;
 
-        if (this.pipelineEventBuffer.length > 0) {
+        if (!this.pipelineQueueFailed && this.pipelineEventBuffer.length > 0) {
           this.flushPipelineBufferIntoQueue();
         }
       });
@@ -426,6 +443,32 @@ export class WebBlackboxLiteSdk {
 
     this.flushPipelineBufferIntoQueue();
     await this.pipelineQueue;
+    this.assertQueuesHealthy();
+  }
+
+  private recordQueueFailure(
+    stage: "raw event ingestion" | "normalized event persistence",
+    error: unknown
+  ): void {
+    if (stage === "raw event ingestion") {
+      this.rawQueueFailed = true;
+    } else {
+      this.pipelineQueueFailed = true;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (!this.queueFailure) {
+      this.queueFailure = new Error(`WebBlackbox Lite SDK ${stage} failed: ${message}`);
+    }
+
+    console.warn(`[WebBlackboxLiteSdk] ${stage} failed`, error);
+  }
+
+  private assertQueuesHealthy(): void {
+    if (this.queueFailure) {
+      throw this.queueFailure;
+    }
   }
 
   private assertNotDisposed(): void {
