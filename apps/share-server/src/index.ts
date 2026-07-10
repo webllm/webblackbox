@@ -348,7 +348,8 @@ async function startShareServer(): Promise<void> {
       configuredAuditHmacSecret ?? (await loadOrCreatePersistedAuditHmacSecret());
     await migrateLegacyAuditLogs();
     await reconcileAuditLogLayout();
-    await reconcileStorageLayout();
+    const startupNow = Date.now();
+    await reconcileStorageLayout(startupNow);
     await pruneExpiredShareRecords(Date.now());
 
     const activeRequests = new Set<Promise<void>>();
@@ -2625,7 +2626,7 @@ function unsafeStoragePathError(
   });
 }
 
-async function reconcileStorageLayout(): Promise<void> {
+async function reconcileStorageLayout(startupNow: number): Promise<void> {
   await assertManagedStorageLayout();
   resetShareRecordIndex();
   const archiveIds = await collectStoredIds(ARCHIVES_DIR, ".webblackbox", ".upload");
@@ -2638,9 +2639,17 @@ async function reconcileStorageLayout(): Promise<void> {
   for (const id of recordIds) {
     if (archiveIds.has(id)) {
       const record = await readRecord(id);
-      if (record && (await hasValidStoredArchive(record))) {
-        indexEntries.push(createShareRecordIndexEntry(record));
-        continue;
+      if (record) {
+        const indexEntry = createShareRecordIndexEntry(record);
+        if (indexEntry.retentionDeadline <= startupNow) {
+          await removeStoredShare(id);
+          archiveIds.delete(id);
+          continue;
+        }
+        if (await hasValidStoredArchive(record)) {
+          indexEntries.push(indexEntry);
+          continue;
+        }
       }
     }
 

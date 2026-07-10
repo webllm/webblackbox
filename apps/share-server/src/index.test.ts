@@ -19,7 +19,7 @@ import { request as createHttpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import JSZip from "jszip";
 import { afterEach, describe, expect, it } from "vitest";
@@ -1590,6 +1590,68 @@ describe("share-server", () => {
       expect(downloadResponse.status).toBe(404);
     }
   );
+
+  it("prunes retention-expired archives before reading them during startup reconciliation", async () => {
+    const retentionConfiguration = {
+      WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000",
+      WEBBLACKBOX_SHARE_MAX_TTL_MS: "1000",
+      WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS: "0"
+    };
+    const server = await startShareServer(retentionConfiguration);
+    const upload = await uploadEncryptedFixture(server);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const archivePath = resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as { expiresAt?: unknown };
+    const expiresAt = record.expiresAt;
+    if (typeof expiresAt !== "number") {
+      throw new Error("Expected the uploaded Share record to have an expiry timestamp.");
+    }
+
+    await stopShareServer(server, false);
+    await new Promise((resolvePromise) =>
+      setTimeout(resolvePromise, Math.max(0, expiresAt - Date.now() + 25))
+    );
+
+    const readGuardPath = resolve(server.dataDir, "deny-expired-archive-read.mjs");
+    await writeFile(
+      readGuardPath,
+      `import fileSystemPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+
+const originalOpen = fileSystemPromises.open;
+fileSystemPromises.open = async (...arguments_) => {
+  const handle = await originalOpen(...arguments_);
+  if (String(arguments_[0]) === process.env.WEBBLACKBOX_TEST_DENY_ARCHIVE_READ_PATH) {
+    handle.read = async () => {
+      const error = new Error("Expired archive validation read was attempted.");
+      error.code = "EIO";
+      throw error;
+    };
+  }
+  return handle;
+};
+syncBuiltinESMExports();
+`
+    );
+    const inheritedNodeOptions = process.env.NODE_OPTIONS?.trim();
+    const restarted = await startShareServer(
+      {
+        ...retentionConfiguration,
+        NODE_OPTIONS: [inheritedNodeOptions, `--import=${pathToFileURL(readGuardPath).href}`]
+          .filter((value): value is string => Boolean(value))
+          .join(" "),
+        WEBBLACKBOX_TEST_DENY_ARCHIVE_READ_PATH: archivePath
+      },
+      server.dataDir
+    );
+
+    await expect(stat(recordPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(archivePath)).rejects.toMatchObject({ code: "ENOENT" });
+    const listResponse = await fetch(`${restarted.baseUrl}/api/share/list`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    await expect(listResponse.json()).resolves.toMatchObject({ items: [], total: 0 });
+  });
 
   it("does not expose stale metadata or downloads after archives change at runtime", async () => {
     const server = await startShareServer();
