@@ -13,8 +13,16 @@
       "@hono/node-server": "1.19.10",
       "express-rate-limit": "8.5.2",
       "fast-uri": "3.1.2",
+      "flatted@<3.4.2": "3.4.2",
       "hono": "4.12.29",
-      "path-to-regexp": "8.4.2"
+      "minimatch@<3.1.4": "3.1.4",
+      "minimatch@>=9.0.0 <9.0.7": "9.0.7",
+      "path-to-regexp": "8.4.2",
+      "picomatch@<2.3.2": "2.3.2",
+      "picomatch@>=4.0.0 <4.0.4": "4.0.5",
+      "rollup@>=4.0.0 <4.59.0": "4.62.2",
+      "vite@>=7.0.0 <7.3.5": "7.3.5",
+      "ws@>=8.0.0 <8.21.0": "8.21.0"
     }
   },
   "scripts": {
@@ -25,7 +33,7 @@
     "player:pages:deploy": "pnpm --filter @webblackbox/player pages:deploy",
     "player:deploy": "pnpm player:pages:build && pnpm player:pages:deploy",
     "lint": "turbo run lint && pnpm lint:scripts",
-    "lint:scripts": "eslint \"scripts/**/*.mjs\" \"apps/*/scripts/**/*.mjs\"",
+    "lint:scripts": "eslint \"scripts/*.mjs\" \"apps/*/scripts/*.mjs\" \"apps/*/scripts/*/*.mjs\"",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "coverage:core": "pnpm --filter @webblackbox/protocol test:coverage && pnpm --filter @webblackbox/cdp-router test:coverage && pnpm --filter @webblackbox/recorder test:coverage && pnpm --filter @webblackbox/pipeline test:coverage && pnpm --filter webblackbox test:coverage && pnpm --filter @webblackbox/player-sdk test:coverage && pnpm --filter @webblackbox/mcp-server test:coverage",
@@ -58,11 +66,11 @@
     ]
   },
   "devDependencies": {
-    "@changesets/cli": "^2.29.7",
+    "@changesets/cli": "^2.31.0",
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.1",
-    "@vitest/coverage-v8": "^4.0.18",
-    "commitizen": "^4.3.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "commitizen": "^4.3.2",
     "cz-conventional-changelog": "^3.3.0",
     "eslint": "^9.39.1",
     "globals": "^16.5.0",
@@ -72,9 +80,10 @@
     "tsup": "^8.5.1",
     "tsx": "^4.20.6",
     "turbo": "^2.6.1",
-    "typedoc": "^0.28.17",
+    "typedoc": "^0.28.20",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vitest": "^4.0.8"
+    "vite": "7.3.5",
+    "vitest": "^4.1.10"
   }
 }
