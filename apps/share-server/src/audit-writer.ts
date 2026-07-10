@@ -35,6 +35,7 @@ export class BoundedAuditWriter {
   private readonly queueWaitTimeoutMs: number;
   private readonly writeTimeoutMs: number;
   private readonly retryCooldownMs: number;
+  private readonly pendingPhysicalWrites = new Set<Promise<unknown>>();
   private tail: Promise<void> = Promise.resolve();
   private queuedEntries = 0;
   private activePhysicalWrites = 0;
@@ -95,7 +96,15 @@ export class BoundedAuditWriter {
   }
 
   async drain(): Promise<void> {
-    await this.tail;
+    while (true) {
+      await this.tail;
+      const pendingPhysicalWrites = [...this.pendingPhysicalWrites];
+      if (pendingPhysicalWrites.length === 0) {
+        return;
+      }
+
+      await Promise.allSettled(pendingPhysicalWrites);
+    }
   }
 
   private tryReserveCircuitProbe(now: number): boolean | null {
@@ -155,7 +164,9 @@ export class BoundedAuditWriter {
       )
       .finally(() => {
         this.activePhysicalWrites -= 1;
+        this.pendingPhysicalWrites.delete(physicalWrite);
       });
+    this.pendingPhysicalWrites.add(physicalWrite);
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const timedWrite = new Promise<{ status: "timeout" }>((resolve) => {

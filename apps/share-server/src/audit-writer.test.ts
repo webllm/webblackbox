@@ -109,7 +109,16 @@ describe("BoundedAuditWriter", () => {
     });
     expect(appendCalls).toBe(1);
 
+    let drained = false;
+    const drain = writer.drain().then(() => {
+      drained = true;
+    });
+    await delay(5);
+    expect(drained).toBe(false);
+
     releaseHungWrite?.();
+    await drain;
+    expect(drained).toBe(true);
     await delay(25);
     await expect(writer.write("recovery-probe\n")).resolves.toEqual({
       status: "written",
@@ -120,6 +129,52 @@ describe("BoundedAuditWriter", () => {
       recovered: false
     });
     expect(appendCalls).toBe(3);
+  });
+
+  it("drains every late-settling physical append across recovery attempts", async () => {
+    const pendingWrites: Array<() => void> = [];
+    const writer = new BoundedAuditWriter({
+      append: () =>
+        new Promise<void>((resolve) => {
+          pendingWrites.push(resolve);
+        }),
+      maxQueuedEntries: 1,
+      queueWaitTimeoutMs: 100,
+      writeTimeoutMs: 10,
+      retryCooldownMs: 10
+    });
+
+    await expect(writer.write("first-timeout\n")).resolves.toEqual({
+      status: "failed",
+      reason: "write-timeout"
+    });
+    expect(pendingWrites).toHaveLength(1);
+
+    let firstDrainSettled = false;
+    const firstDrain = writer.drain().then(() => {
+      firstDrainSettled = true;
+    });
+    await delay(5);
+    expect(firstDrainSettled).toBe(false);
+    pendingWrites.shift()?.();
+    await firstDrain;
+
+    await delay(15);
+    await expect(writer.write("recovery-timeout\n")).resolves.toEqual({
+      status: "failed",
+      reason: "write-timeout"
+    });
+    expect(pendingWrites).toHaveLength(1);
+
+    let secondDrainSettled = false;
+    const secondDrain = writer.drain().then(() => {
+      secondDrainSettled = true;
+    });
+    await delay(5);
+    expect(secondDrainSettled).toBe(false);
+    pendingWrites.shift()?.();
+    await secondDrain;
+    expect(secondDrainSettled).toBe(true);
   });
 });
 
