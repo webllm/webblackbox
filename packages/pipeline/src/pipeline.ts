@@ -101,12 +101,23 @@ export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
   private readonly chunkCodec: (typeof CHUNK_CODECS)[number];
   private storageReadyPromise: Promise<void> | null = null;
+  private chunkOperationTail: Promise<void> = Promise.resolve();
+  private acceptingEvents = true;
+  private closePromise: Promise<void> | null = null;
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = resolveChunkCodec(options.chunkCodec);
     const maxChunkBytes = options.maxChunkBytes ?? 512 * 1024;
     this.chunkCodec = codec;
-    this.chunker = new EventChunker(maxChunkBytes, codec);
+    this.chunker = new EventChunker(maxChunkBytes, codec, async (chunk) => {
+      await this.persistChunk(
+        chunk.meta.chunkId,
+        chunk.meta.seq,
+        chunk.meta.codec,
+        chunk.events,
+        chunk.bytes
+      );
+    });
   }
 
   public async start(): Promise<void> {
@@ -120,19 +131,13 @@ export class FlightRecorderPipeline {
 
   public async ingest(event: WebBlackboxEvent): Promise<void> {
     assertPrivacyClassifiedEvent(event);
-    const chunk = await this.chunker.append(event);
-
-    if (!chunk) {
-      return;
+    if (!this.acceptingEvents) {
+      throw new Error("FlightRecorderPipeline cannot ingest events after close() has started.");
     }
 
-    await this.persistChunk(
-      chunk.meta.chunkId,
-      chunk.meta.seq,
-      chunk.meta.codec,
-      chunk.events,
-      chunk.bytes
-    );
+    await this.enqueueChunkOperation(async () => {
+      await this.chunker.append(event);
+    });
   }
 
   public async ingestBatch(events: WebBlackboxEvent[]): Promise<void> {
@@ -144,45 +149,44 @@ export class FlightRecorderPipeline {
       assertPrivacyClassifiedEvent(event);
     }
 
-    for (const event of events) {
-      const chunk = await this.chunker.append(event);
-
-      if (!chunk) {
-        continue;
-      }
-
-      await this.persistChunk(
-        chunk.meta.chunkId,
-        chunk.meta.seq,
-        chunk.meta.codec,
-        chunk.events,
-        chunk.bytes
-      );
+    if (!this.acceptingEvents) {
+      throw new Error("FlightRecorderPipeline cannot ingest events after close() has started.");
     }
+
+    await this.enqueueChunkOperation(async () => {
+      for (const event of events) {
+        await this.chunker.append(event);
+      }
+    });
   }
 
   public async flush(): Promise<void> {
-    const chunk = await this.chunker.flush();
-
-    if (!chunk) {
-      return;
-    }
-
-    await this.persistChunk(
-      chunk.meta.chunkId,
-      chunk.meta.seq,
-      chunk.meta.codec,
-      chunk.events,
-      chunk.bytes
-    );
+    await this.enqueueChunkOperation(async () => {
+      await this.chunker.flush();
+    });
   }
 
-  public async close(options: { purge?: boolean } = {}): Promise<void> {
-    await this.flush();
-
-    if (options.purge) {
-      await this.options.storage.deleteSession(this.options.session.sid);
+  public close(options: { purge?: boolean } = {}): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
     }
+
+    this.acceptingEvents = false;
+    const attempt = this.enqueueChunkOperation(async () => {
+      await this.chunker.close();
+
+      if (options.purge) {
+        await this.options.storage.deleteSession(this.options.session.sid);
+      }
+    });
+    const tracked = attempt.finally(() => {
+      if (this.closePromise === tracked) {
+        this.closePromise = null;
+      }
+    });
+
+    this.closePromise = tracked;
+    return tracked;
   }
 
   public async putBlob(mime: string, bytes: Uint8Array): Promise<string> {
@@ -689,6 +693,15 @@ export class FlightRecorderPipeline {
     };
 
     await this.options.storage.putChunk(chunk);
+  }
+
+  private enqueueChunkOperation(operation: () => Promise<void>): Promise<void> {
+    const result = this.chunkOperationTail.then(operation);
+    this.chunkOperationTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 
   private ensureStorageReady(): Promise<void> {

@@ -9,13 +9,15 @@ import {
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
 
+import { decodeChunkEvents } from "./codec.js";
 import { readWebBlackboxArchive } from "./exporter.js";
 import { FlightRecorderPipeline, type FlightRecorderPipelineOptions } from "./pipeline.js";
 import {
   derivePipelineStorageKey,
   EncryptedPipelineStorage,
   IndexedDbPipelineStorage,
-  MemoryPipelineStorage
+  MemoryPipelineStorage,
+  type StoredChunk
 } from "./storage.js";
 
 const SESSION: SessionMetadata = {
@@ -51,6 +53,19 @@ function createTestPipeline(options: FlightRecorderPipelineOptions): FlightRecor
     trustedPlaintextExemptionEvidenceRefs: [TRUSTED_SYNTHETIC_EVIDENCE_REF],
     ...options
   });
+}
+
+class FailOnceChunkStorage extends MemoryPipelineStorage {
+  private shouldFail = true;
+
+  public override async putChunk(chunk: StoredChunk): Promise<void> {
+    if (this.shouldFail) {
+      this.shouldFail = false;
+      throw new Error("simulated chunk persistence failure");
+    }
+
+    await super.putChunk(chunk);
+  }
 }
 
 function createEvent(
@@ -210,6 +225,61 @@ describe("pipeline", () => {
 
     expect(chunks.length).toBeGreaterThan(0);
     expect(indexes.request.some((entry) => entry.reqId === "R-1")).toBe(true);
+  });
+
+  it("serializes concurrent ingests with close and persists each event exactly once", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 1
+    });
+    const events = Array.from({ length: 30 }, (_, index) =>
+      createEvent(`E-concurrent-${index}`, "user.marker", index)
+    );
+
+    await pipeline.start();
+    const ingests = events.map((event) => pipeline.ingest(event));
+    const closing = pipeline.close();
+
+    await expect(
+      pipeline.ingest(createEvent("E-after-close", "user.marker", events.length))
+    ).rejects.toThrow(/after close\(\) has started/i);
+    await Promise.all([...ingests, closing]);
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const persisted = (
+      await Promise.all(chunks.map((chunk) => decodeChunkEvents(chunk.bytes, chunk.meta.codec)))
+    ).flat();
+
+    expect(chunks.map((chunk) => chunk.meta.seq)).toEqual(
+      Array.from({ length: events.length }, (_, index) => index + 1)
+    );
+    expect(persisted.map((event) => event.id)).toEqual(events.map((event) => event.id));
+    expect(new Set(persisted.map((event) => event.id)).size).toBe(events.length);
+  });
+
+  it("can retry an ingest after chunk persistence fails without a sequence gap or duplicate", async () => {
+    const storage = new FailOnceChunkStorage();
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 1
+    });
+    const event = createEvent("E-persistence-retry", "user.marker", 1);
+
+    await pipeline.start();
+    await expect(pipeline.ingest(event)).rejects.toThrow("simulated chunk persistence failure");
+    await pipeline.ingest(event);
+    await pipeline.close();
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const persisted = (
+      await Promise.all(chunks.map((chunk) => decodeChunkEvents(chunk.bytes, chunk.meta.codec)))
+    ).flat();
+
+    expect(chunks.map((chunk) => chunk.meta.seq)).toEqual([1]);
+    expect(persisted.map((item) => item.id)).toEqual([event.id]);
   });
 
   it("indexes request ids from nested request payloads", async () => {
