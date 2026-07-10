@@ -16,6 +16,7 @@ import { createRoot } from "react-dom/client";
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { hasPlaybackEvents } from "./lib/archive-health.js";
 import { readArchiveBlobBounded, readArchiveResponseBounded } from "./lib/archive-input.js";
+import { consumeAutoShareLocation } from "./lib/auto-share-location.js";
 import { toArrayBuffer } from "./lib/binary.js";
 import { formatCompareSummary } from "./lib/compare-summary.js";
 import { escapeHtml, getElement } from "./lib/dom.js";
@@ -615,9 +616,10 @@ const networkSortButtons = Array.from(
 );
 const panelCards = Array.from(document.querySelectorAll<HTMLElement>("[data-log-panel-target]"));
 
+const autoShareReference = consumeAutoShareReferenceFromLocation();
 bindGlobalActions();
 void renderAll({ forcePanels: true, forceScreenshot: true });
-void maybeAutoLoadSharedArchiveFromLocation();
+void maybeAutoLoadSharedArchiveFromLocation(autoShareReference);
 
 function bindGlobalActions(): void {
   bindStageSplitter();
@@ -2044,16 +2046,18 @@ async function loadArchiveFromShareReference(
   }
 }
 
-async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
-  let shareRef: string | null = null;
-
+function consumeAutoShareReferenceFromLocation(): string | null {
   try {
-    shareRef = new URL(window.location.href).searchParams.get("share");
+    return consumeAutoShareLocation(window.location.href, (cleanedUrl) => {
+      window.history.replaceState(window.history.state, "", cleanedUrl);
+    });
   } catch {
-    return;
+    return null;
   }
+}
 
-  if (!shareRef || shareRef.trim().length === 0) {
+async function maybeAutoLoadSharedArchiveFromLocation(shareRef: string | null): Promise<void> {
+  if (!shareRef) {
     return;
   }
 
