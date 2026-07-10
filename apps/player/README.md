@@ -61,7 +61,8 @@ The deploy script will:
 - build the Player
 - prepare the Pages artifact
 - publish `apps/player/build` to the `gh-pages` branch
-- verify `https://webllm.github.io/webblackbox/` is serving the Player
+- publish a commit-bound `deployment.json` marker
+- verify `https://webllm.github.io/webblackbox/` serves that exact source commit
 
 From the repo root you can also run:
 

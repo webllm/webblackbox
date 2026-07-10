@@ -4,6 +4,8 @@ import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
+import { createDeploymentMarker, waitForSiteDeployment } from "./lib/pages-deployment.mjs";
+
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(scriptDir, "..");
 const workspaceRoot = resolve(appRoot, "..", "..");
@@ -15,6 +17,12 @@ const branchName = readFlagValue(args, "--branch") ?? "gh-pages";
 const siteUrl = readFlagValue(args, "--site-url") ?? "https://webllm.github.io/webblackbox/";
 const skipBuild = args.includes("--skip-build");
 const skipVerify = args.includes("--skip-verify");
+const sourceCommit = (
+  await runCommand("git", ["rev-parse", "HEAD"], workspaceRoot, {
+    captureStdout: true
+  })
+).trim();
+const deploymentMarker = createDeploymentMarker(sourceCommit, process.env.RELEASE_TAG);
 const commitMessage =
   readFlagValue(args, "--message") ?? `Deploy player to ${branchName}${await resolveHeadSuffix()}`;
 
@@ -71,6 +79,11 @@ try {
   await clearDirectoryExceptGit(repoDir);
   await copyDirectory(buildDir, repoDir);
   await writeFile(resolve(repoDir, ".nojekyll"), "", "utf8");
+  await writeFile(
+    resolve(repoDir, "deployment.json"),
+    `${JSON.stringify(deploymentMarker, null, 2)}\n`,
+    "utf8"
+  );
 
   await runCommand("git", ["add", "-A"], repoDir);
 
@@ -98,7 +111,10 @@ try {
   }
 
   if (!skipVerify) {
-    await waitForSite(siteUrl, 180_000);
+    await waitForSiteDeployment({
+      siteUrl,
+      expectedCommit: sourceCommit
+    });
   }
 
   console.info(
@@ -109,6 +125,7 @@ try {
         remote: remoteName,
         branch: branchName,
         siteUrl,
+        sourceCommit,
         verified: !skipVerify
       },
       null,
@@ -235,40 +252,6 @@ function normalizeGitHubHttpsRemote(remoteUrl) {
   } catch {
     return null;
   }
-}
-
-async function waitForSite(url, timeoutMs) {
-  const startedAt = Date.now();
-  let lastStatus = "unknown";
-
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      const response = await fetch(url, {
-        redirect: "follow",
-        headers: {
-          "cache-control": "no-cache"
-        }
-      });
-      const body = await response.text();
-      lastStatus = `${response.status}`;
-
-      if (response.ok && body.includes("<title>WebBlackbox Player</title>")) {
-        return;
-      }
-    } catch (error) {
-      lastStatus = error instanceof Error ? error.message : String(error);
-    }
-
-    await sleep(5_000);
-  }
-
-  throw new Error(`Timed out waiting for ${url} to serve the player. Last status: ${lastStatus}`);
-}
-
-function sleep(ms) {
-  return new Promise((resolvePromise) => {
-    setTimeout(resolvePromise, ms);
-  });
 }
 
 function readFlagValue(argv, flagName) {
