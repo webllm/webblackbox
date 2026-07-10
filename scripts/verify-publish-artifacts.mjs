@@ -12,6 +12,8 @@ const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const SAFE_PACKAGE_PATH_PATTERN = /^[A-Za-z0-9._@/-]+$/;
+const WINDOWS_COMMAND_SHIM_PATTERN = /\.(?:cmd|bat)$/i;
+const UNSAFE_WINDOWS_COMMAND_TOKEN_PATTERN = /["&|<>^()%!$`;*?]/u;
 
 export const PUBLIC_PACKAGE_DEFINITIONS = Object.freeze([
   Object.freeze({ name: "@webblackbox/protocol", directory: "packages/protocol" }),
@@ -136,11 +138,51 @@ export function getPublicExportSpecifiers(manifest) {
   });
 }
 
+export function createCommandRunner({
+  platform = process.platform,
+  commandInterpreter = process.env.ComSpec || "cmd.exe",
+  execFileRunner = execFileAsync
+} = {}) {
+  return async function runCommand(command, arguments_, options = {}, label = command) {
+    const invocation = createCommandInvocation({
+      command,
+      arguments_,
+      platform,
+      commandInterpreter
+    });
+
+    try {
+      const result = await execFileRunner(invocation.command, invocation.arguments, {
+        ...options,
+        ...invocation.options,
+        encoding: "utf8",
+        maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+        windowsHide: true
+      });
+      return {
+        stdout: String(result.stdout ?? ""),
+        stderr: String(result.stderr ?? "")
+      };
+    } catch (error) {
+      const stdout =
+        error && typeof error === "object" && "stdout" in error ? String(error.stdout) : "";
+      const stderr =
+        error && typeof error === "object" && "stderr" in error ? String(error.stderr) : "";
+      throw new Error(
+        `${label} failed.${stdout ? `\nstdout:\n${stdout}` : ""}${stderr ? `\nstderr:\n${stderr}` : ""}`,
+        { cause: error }
+      );
+    }
+  };
+}
+
 export async function verifyPublishArtifacts({
+  platform = process.platform,
   workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
-  pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm",
-  npmCommand = process.platform === "win32" ? "npm.cmd" : "npm",
-  tarCommand = "tar"
+  pnpmCommand = platform === "win32" ? "pnpm.cmd" : "pnpm",
+  npmCommand = platform === "win32" ? "npm.cmd" : "npm",
+  tarCommand = "tar",
+  commandRunner = createCommandRunner({ platform })
 } = {}) {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "webblackbox-publish-artifacts-"));
   const artifactDirectory = join(temporaryRoot, "tarballs");
@@ -160,7 +202,7 @@ export async function verifyPublishArtifacts({
       }
 
       const existingTarballs = new Set(await listTarballs(artifactDirectory));
-      await runFile(
+      await commandRunner(
         pnpmCommand,
         ["pack", "--pack-destination", artifactDirectory],
         { cwd: packageDirectory },
@@ -176,7 +218,7 @@ export async function verifyPublishArtifacts({
       }
 
       const tarballPath = join(artifactDirectory, addedTarballs[0]);
-      const artifact = await readPackedArtifact(tarballPath, tarCommand);
+      const artifact = await readPackedArtifact(tarballPath, tarCommand, commandRunner);
       validatePackedManifest({
         manifest: artifact.manifest,
         entries: artifact.entries,
@@ -209,7 +251,9 @@ export async function verifyPublishArtifacts({
       artifacts,
       importSpecifiers,
       installDirectory,
-      npmCommand
+      npmCommand,
+      platform,
+      commandRunner
     });
     const version = artifacts[0]?.manifest.version;
     console.log(
@@ -220,8 +264,8 @@ export async function verifyPublishArtifacts({
   }
 }
 
-async function readPackedArtifact(tarballPath, tarCommand) {
-  const listing = await runFile(
+async function readPackedArtifact(tarballPath, tarCommand, commandRunner) {
+  const listing = await commandRunner(
     tarCommand,
     ["-tzf", tarballPath],
     undefined,
@@ -235,7 +279,7 @@ async function readPackedArtifact(tarballPath, tarCommand) {
     throw new Error(`${basename(tarballPath)} must contain exactly one package/package.json.`);
   }
 
-  const manifestResult = await runFile(
+  const manifestResult = await commandRunner(
     tarCommand,
     ["-xOzf", tarballPath, "package/package.json"],
     undefined,
@@ -256,7 +300,9 @@ async function installAndSmokeArtifacts({
   artifacts,
   importSpecifiers,
   installDirectory,
-  npmCommand
+  npmCommand,
+  platform,
+  commandRunner
 }) {
   await mkdir(installDirectory, { recursive: true });
   await writeFile(
@@ -274,7 +320,7 @@ async function installAndSmokeArtifacts({
     "utf8"
   );
 
-  await runFile(
+  await commandRunner(
     npmCommand,
     [
       "install",
@@ -320,7 +366,12 @@ console.log(\`Imported \${importSpecifiers.length} public package exports.\`);
 `,
     "utf8"
   );
-  await runFile(process.execPath, [smokeScriptPath], { cwd: installDirectory }, "import smoke");
+  await commandRunner(
+    process.execPath,
+    [smokeScriptPath],
+    { cwd: installDirectory },
+    "import smoke"
+  );
 
   const mcpArtifact = artifacts.find(({ manifest }) => manifest.name === "@webblackbox/mcp-server");
   if (!mcpArtifact) {
@@ -331,10 +382,10 @@ console.log(\`Imported \${importSpecifiers.length} public package exports.\`);
     installDirectory,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? `${binName}.cmd` : binName
+    platform === "win32" ? `${binName}.cmd` : binName
   );
-  await access(binPath, fsConstants.X_OK);
-  const binResult = await runFile(
+  await access(binPath, platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
+  const binResult = await commandRunner(
     binPath,
     ["--version"],
     { cwd: installDirectory },
@@ -533,28 +584,38 @@ async function readJsonFile(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-async function runFile(command, arguments_, options = {}, label = command) {
-  try {
-    const result = await execFileAsync(command, arguments_, {
-      ...options,
-      encoding: "utf8",
-      maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
-      windowsHide: true
-    });
-    return {
-      stdout: String(result.stdout ?? ""),
-      stderr: String(result.stderr ?? "")
-    };
-  } catch (error) {
-    const stdout =
-      error && typeof error === "object" && "stdout" in error ? String(error.stdout) : "";
-    const stderr =
-      error && typeof error === "object" && "stderr" in error ? String(error.stderr) : "";
-    throw new Error(
-      `${label} failed.${stdout ? `\nstdout:\n${stdout}` : ""}${stderr ? `\nstderr:\n${stderr}` : ""}`,
-      { cause: error }
-    );
+function createCommandInvocation({ command, arguments_, platform, commandInterpreter }) {
+  if (platform !== "win32" || !WINDOWS_COMMAND_SHIM_PATTERN.test(command)) {
+    return { command, arguments: arguments_, options: {} };
   }
+  if (typeof commandInterpreter !== "string" || commandInterpreter.length === 0) {
+    throw new Error("Windows command interpreter must be a non-empty string.");
+  }
+
+  const commandLine = [command, ...arguments_].map(quoteWindowsCommandToken).join(" ");
+  return {
+    command: commandInterpreter,
+    arguments: ["/d", "/s", "/v:off", "/c", `"${commandLine}"`],
+    options: { windowsVerbatimArguments: true }
+  };
+}
+
+function quoteWindowsCommandToken(value) {
+  if (typeof value !== "string") {
+    throw new Error("Windows command shim arguments must be strings.");
+  }
+  if (
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint !== undefined && (codePoint <= 31 || codePoint === 127);
+    }) ||
+    UNSAFE_WINDOWS_COMMAND_TOKEN_PATTERN.test(value)
+  ) {
+    throw new Error(`Unsafe Windows command shim token: ${JSON.stringify(value)}.`);
+  }
+
+  const escapedTrailingBackslashes = value.replace(/(\\+)$/, "$1$1");
+  return `"${escapedTrailingBackslashes}"`;
 }
 
 function isDirectInvocation() {

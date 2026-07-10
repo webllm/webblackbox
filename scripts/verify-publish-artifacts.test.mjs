@@ -6,6 +6,7 @@ import {
   PUBLIC_PACKAGE_NAMES,
   assertCompletePackageSet,
   assertNoWorkspaceSpecifiers,
+  createCommandRunner,
   getPublicExportSpecifiers,
   validatePackedManifest
 } from "./verify-publish-artifacts.mjs";
@@ -147,4 +148,126 @@ test("derives every public package export subpath for import smoke tests", () =>
     }),
     ["webblackbox", "webblackbox/injected-hooks", "webblackbox/lite-sdk"]
   );
+});
+
+test("launches Windows package command shims through a safely quoted cmd adapter", async () => {
+  const calls = [];
+  const commandInterpreter = "C:\\Windows\\System32\\cmd.exe";
+  const runCommand = createCommandRunner({
+    platform: "win32",
+    commandInterpreter,
+    execFileRunner: async (command, arguments_, options) => {
+      calls.push({ command, arguments_, options });
+      return { stdout: "ok\n", stderr: "" };
+    }
+  });
+
+  await runCommand(
+    "C:\\Program Files\\pnpm\\pnpm.cmd",
+    ["pack", "--pack-destination", "C:\\Temp Folder\\tarballs"],
+    { cwd: "C:\\Repo With Spaces" }
+  );
+  await runCommand(
+    "npm.cmd",
+    ["install", "--package-lock=false", "C:\\Temp Folder\\package.tgz"],
+    {}
+  );
+  await runCommand(
+    "C:\\Temp Folder\\node_modules\\.bin\\webblackbox-mcp-server.cmd",
+    ["--version"],
+    {}
+  );
+
+  assert.deepEqual(
+    calls.map(({ command, arguments_ }) => ({ command, arguments_ })),
+    [
+      {
+        command: commandInterpreter,
+        arguments_: [
+          "/d",
+          "/s",
+          "/v:off",
+          "/c",
+          '""C:\\Program Files\\pnpm\\pnpm.cmd" "pack" "--pack-destination" "C:\\Temp Folder\\tarballs""'
+        ]
+      },
+      {
+        command: commandInterpreter,
+        arguments_: [
+          "/d",
+          "/s",
+          "/v:off",
+          "/c",
+          '""npm.cmd" "install" "--package-lock=false" "C:\\Temp Folder\\package.tgz""'
+        ]
+      },
+      {
+        command: commandInterpreter,
+        arguments_: [
+          "/d",
+          "/s",
+          "/v:off",
+          "/c",
+          '""C:\\Temp Folder\\node_modules\\.bin\\webblackbox-mcp-server.cmd" "--version""'
+        ]
+      }
+    ]
+  );
+  assert.equal(calls[0].options.cwd, "C:\\Repo With Spaces");
+  assert.ok(calls.every(({ options }) => options.windowsVerbatimArguments === true));
+});
+
+test("keeps non-Windows commands on the direct execFile path", async () => {
+  const calls = [];
+  const runCommand = createCommandRunner({
+    platform: "linux",
+    execFileRunner: async (command, arguments_, options) => {
+      calls.push({ command, arguments_, options });
+      return { stdout: "", stderr: "" };
+    }
+  });
+
+  await runCommand("pnpm", ["pack", "--pack-destination", "/tmp/path with spaces"]);
+
+  assert.equal(calls[0].command, "pnpm");
+  assert.deepEqual(calls[0].arguments_, ["pack", "--pack-destination", "/tmp/path with spaces"]);
+  assert.equal(calls[0].options.windowsVerbatimArguments, undefined);
+});
+
+test("rejects Windows shim tokens that could escape cmd quoting or expand variables", async () => {
+  let calls = 0;
+  const runCommand = createCommandRunner({
+    platform: "win32",
+    execFileRunner: async () => {
+      calls += 1;
+      return { stdout: "", stderr: "" };
+    }
+  });
+  const unsafeTokens = [
+    "line\rbreak",
+    "line\nbreak",
+    "nul\0byte",
+    "%TEMP%",
+    "!TEMP!",
+    "$(whoami)",
+    'quote"break',
+    "value&whoami",
+    "value|whoami",
+    "value<input",
+    "value>output",
+    "value^escape",
+    "value(parenthesized)"
+  ];
+
+  for (const unsafeToken of unsafeTokens) {
+    await assert.rejects(
+      runCommand("pnpm.cmd", [unsafeToken]),
+      /Unsafe Windows command shim token/
+    );
+  }
+  await assert.rejects(
+    runCommand("C:\\Unsafe&Path\\pnpm.cmd", ["pack"]),
+    /Unsafe Windows command shim token/
+  );
+  assert.equal(calls, 0);
 });
