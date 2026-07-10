@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 const releaseTagPattern =
   /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
+const privateReleaseSurfaces = new Map([
+  ["apps/extension", "@webblackbox/extension"],
+  ["apps/player", "@webblackbox/player"],
+  ["apps/share-server", "@webblackbox/share-server"]
+]);
+
 export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
   if (!releaseTagPattern.test(tag)) {
     throw new Error(`Release tag must be an exact semantic version tag (vX.Y.Z): ${tag}`);
@@ -30,15 +36,15 @@ export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
   }
 
   const expectedVersion = tag.slice(1);
-  const packages = await readPublicPackages(root);
-  if (packages.length === 0) {
+  const packages = await readReleasePackages(root);
+  if (!packages.some((entry) => !entry.private)) {
     throw new Error("No public packages were found for release verification");
   }
 
   const mismatches = packages.filter((entry) => entry.version !== expectedVersion);
   if (mismatches.length > 0) {
     throw new Error(
-      `Public package versions must match ${tag}: ${mismatches
+      `Release package versions must match ${tag}: ${mismatches
         .map((entry) => `${entry.name}@${entry.version}`)
         .join(", ")}`
     );
@@ -52,8 +58,9 @@ export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
   };
 }
 
-async function readPublicPackages(root) {
+async function readReleasePackages(root) {
   const packages = [];
+  const foundPrivateReleaseSurfaces = new Set();
   for (const parent of ["packages", "apps"]) {
     const parentPath = resolve(root, parent);
     const entries = await readdir(parentPath, { withFileTypes: true });
@@ -73,15 +80,39 @@ async function readPublicPackages(root) {
         throw error;
       }
 
-      if (manifest.private === true) {
+      const packageDirectory = `${parent}/${entry.name}`;
+      const expectedPrivateReleaseName = privateReleaseSurfaces.get(packageDirectory);
+      if (manifest.private === true && !expectedPrivateReleaseName) {
         continue;
       }
       if (typeof manifest.name !== "string" || typeof manifest.version !== "string") {
-        throw new Error(`Invalid public package manifest: ${packagePath}`);
+        throw new Error(`Invalid release package manifest: ${packagePath}`);
       }
-      packages.push({ name: manifest.name, version: manifest.version });
+      if (expectedPrivateReleaseName && manifest.name !== expectedPrivateReleaseName) {
+        throw new Error(
+          `Invalid private release surface manifest: expected ${expectedPrivateReleaseName} at ${packagePath}`
+        );
+      }
+      if (expectedPrivateReleaseName) {
+        foundPrivateReleaseSurfaces.add(packageDirectory);
+      }
+      packages.push({
+        name: manifest.name,
+        version: manifest.version,
+        private: manifest.private === true
+      });
     }
   }
+
+  const missingPrivateReleaseSurfaces = [...privateReleaseSurfaces.keys()].filter(
+    (packageDirectory) => !foundPrivateReleaseSurfaces.has(packageDirectory)
+  );
+  if (missingPrivateReleaseSurfaces.length > 0) {
+    throw new Error(
+      `Missing private release surface manifests: ${missingPrivateReleaseSurfaces.join(", ")}`
+    );
+  }
+
   return packages;
 }
 
