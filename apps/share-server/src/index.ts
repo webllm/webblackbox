@@ -6,6 +6,8 @@ import { join, resolve } from "node:path";
 import JSZip from "jszip";
 import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
 
+import { parseShareApiCredentials, type ShareApiScope } from "./auth-config.js";
+
 type ShareRecord = {
   id: string;
   createdAt: number;
@@ -20,12 +22,6 @@ type ShareRecord = {
 
 type ShareAuditAction = "upload" | "list" | "metadata" | "download" | "page" | "revoke";
 type ShareAuditOutcome = "ok" | "not-found" | "expired" | "revoked" | "blocked" | "error";
-type ShareApiScope = "upload" | "read" | "list" | "revoke" | "admin";
-
-type ShareApiCredential = {
-  secret: string;
-  scopes: Set<ShareApiScope>;
-};
 type ShareAuthorizationSource = "loopback" | "token" | "query" | "read-session";
 type ShareAuthorizationResult = {
   authorized: boolean;
@@ -1819,77 +1815,6 @@ function readOptionalSecret(value: string | undefined): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function parseShareApiCredentials(
-  rawValue: string | undefined,
-  legacyAdminKey: string | null
-): ShareApiCredential[] {
-  const credentials: ShareApiCredential[] = [];
-
-  if (legacyAdminKey) {
-    credentials.push({
-      secret: legacyAdminKey,
-      scopes: new Set(["admin"])
-    });
-  }
-
-  if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
-    return credentials;
-  }
-
-  for (const entry of rawValue.split(";")) {
-    const trimmed = entry.trim();
-
-    if (!trimmed) {
-      continue;
-    }
-
-    const separatorIndex = trimmed.indexOf(":");
-    const secret = separatorIndex >= 0 ? trimmed.slice(0, separatorIndex).trim() : trimmed;
-    const rawScopes = separatorIndex >= 0 ? trimmed.slice(separatorIndex + 1).trim() : "admin";
-
-    if (!secret) {
-      continue;
-    }
-
-    const scopes = new Set<ShareApiScope>();
-
-    for (const scope of rawScopes.split(",")) {
-      const normalized = normalizeShareApiScope(scope);
-
-      if (normalized) {
-        scopes.add(normalized);
-      }
-    }
-
-    if (scopes.size === 0) {
-      scopes.add("admin");
-    }
-
-    credentials.push({
-      secret,
-      scopes
-    });
-  }
-
-  return credentials;
-}
-
-function normalizeShareApiScope(value: string): ShareApiScope | null {
-  const normalized = value.trim().toLowerCase();
-
-  if (
-    normalized === "upload" ||
-    normalized === "read" ||
-    normalized === "list" ||
-    normalized === "revoke" ||
-    normalized === "admin"
-  ) {
-    return normalized;
-  }
-
-  return null;
 }
 
 function parseRateLimitCount(value: string | undefined, fallback: number): number {
