@@ -210,9 +210,10 @@ const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
 const SHARE_READ_SESSION_TTL_MS = 10 * 60 * 1000;
 const MAX_SHARE_RECORD_BYTES = 256 * 1024;
 const SHARE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-const MAX_SHARE_RECORDS = Math.min(
+const MAX_SHARE_RECORD_FILES = 10_000;
+const SHARE_RECORD_ADMISSION_LIMIT = Math.min(
   parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_RECORDS, 10_000),
-  10_000
+  MAX_SHARE_RECORD_FILES
 );
 const MAX_SHARE_RECORD_DIRECTORY_ENTRIES = 20_000;
 const DEFAULT_SHARE_LIST_LIMIT = 100;
@@ -434,11 +435,11 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
         outcome: "blocked",
         details: {
           reason: "record-capacity",
-          limit: MAX_SHARE_RECORDS
+          limit: SHARE_RECORD_ADMISSION_LIMIT
         }
       });
       respondJson(response, 507, {
-        error: `Share record capacity is exhausted (${MAX_SHARE_RECORDS}). Revoke or expire retained shares before uploading.`
+        error: `Share record capacity is exhausted (${SHARE_RECORD_ADMISSION_LIMIT}). Revoke or expire retained shares before uploading.`
       });
       return;
     }
@@ -1855,8 +1856,8 @@ async function loadAllRecords(): Promise<ShareRecord[]> {
     }
 
     recordFiles += 1;
-    if (recordFiles > MAX_SHARE_RECORDS) {
-      throw new Error(`Share record capacity exceeded (${MAX_SHARE_RECORDS}).`);
+    if (recordFiles > MAX_SHARE_RECORD_FILES) {
+      throw new Error(`Share record hard limit exceeded (${MAX_SHARE_RECORD_FILES}).`);
     }
 
     const id = entry.name.slice(0, -".json".length);
@@ -1870,19 +1871,18 @@ async function loadAllRecords(): Promise<ShareRecord[]> {
 }
 
 async function hasShareRecordCapacity(): Promise<boolean> {
-  const initialCount = await countShareRecordFiles();
-  if (initialCount < MAX_SHARE_RECORDS) {
+  const initialCount = await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT);
+  if (initialCount < SHARE_RECORD_ADMISSION_LIMIT) {
     return true;
-  }
-  if (initialCount > MAX_SHARE_RECORDS) {
-    return false;
   }
 
   await pruneExpiredShareRecords(Date.now());
-  return (await countShareRecordFiles()) < MAX_SHARE_RECORDS;
+  return (
+    (await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT)) < SHARE_RECORD_ADMISSION_LIMIT
+  );
 }
 
-async function countShareRecordFiles(): Promise<number> {
+async function countShareRecordFilesUpTo(stopAt: number): Promise<number> {
   const directory = await opendir(RECORDS_DIR);
   let directoryEntries = 0;
   let recordFiles = 0;
@@ -1892,7 +1892,7 @@ async function countShareRecordFiles(): Promise<number> {
     assertShareRecordDirectoryEntryBudget(directoryEntries);
     if (entry.isFile() && entry.name.endsWith(".json")) {
       recordFiles += 1;
-      if (recordFiles > MAX_SHARE_RECORDS) {
+      if (recordFiles >= stopAt) {
         return recordFiles;
       }
     }
@@ -2162,7 +2162,7 @@ function parseShareListPagination(requestUrl: URL): { offset: number; limit: num
     requestUrl.searchParams.get("offset"),
     0,
     0,
-    MAX_SHARE_RECORDS
+    MAX_SHARE_RECORD_FILES
   );
   const limit = parseBoundedQueryInteger(
     requestUrl.searchParams.get("limit"),

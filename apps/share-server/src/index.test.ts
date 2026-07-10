@@ -794,6 +794,90 @@ describe("share-server", () => {
     await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toHaveLength(2);
   });
 
+  it("keeps existing shares operable when the upload admission limit is lowered", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_MAX_RECORDS: "4"
+    });
+    const firstUpload = await uploadEncryptedFixture(server);
+    const secondUpload = await uploadEncryptedFixture(server);
+    const thirdUpload = await uploadEncryptedFixture(server);
+
+    await stopShareServer(server, false);
+    const restarted = await startShareServer(
+      {
+        WEBBLACKBOX_SHARE_MAX_RECORDS: "1"
+      },
+      server.dataDir
+    );
+
+    const firstListResponse = await fetch(`${restarted.baseUrl}/api/share/list?limit=2&offset=0`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const firstList = (await firstListResponse.json()) as {
+      items: Array<{ id: string }>;
+      total: number;
+      nextOffset: number | null;
+    };
+    expect(firstListResponse.status).toBe(200);
+    expect(firstList).toMatchObject({ total: 3, nextOffset: 2 });
+    expect(firstList.items).toHaveLength(2);
+
+    const secondListResponse = await fetch(`${restarted.baseUrl}/api/share/list?limit=2&offset=2`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const secondList = (await secondListResponse.json()) as {
+      items: Array<{ id: string }>;
+      total: number;
+      nextOffset: number | null;
+    };
+    expect(secondListResponse.status).toBe(200);
+    expect(secondList).toMatchObject({ total: 3, nextOffset: null });
+    expect(secondList.items).toHaveLength(1);
+    expect([...firstList.items, ...secondList.items].map(({ id }) => id).sort()).toEqual(
+      [firstUpload.shareId, secondUpload.shareId, thirdUpload.shareId].sort()
+    );
+
+    const metadataResponse = await fetch(
+      `${restarted.baseUrl}/api/share/${firstUpload.shareId}/meta`,
+      {
+        headers: { "x-webblackbox-api-key": apiKey }
+      }
+    );
+    expect(metadataResponse.status).toBe(200);
+    await expect(metadataResponse.json()).resolves.toMatchObject({ id: firstUpload.shareId });
+
+    const revokeResponse = await fetch(
+      `${restarted.baseUrl}/api/share/${secondUpload.shareId}/revoke`,
+      {
+        method: "POST",
+        headers: { "x-webblackbox-api-key": apiKey }
+      }
+    );
+    expect(revokeResponse.status).toBe(200);
+    await expect(revokeResponse.json()).resolves.toMatchObject({
+      shareId: secondUpload.shareId
+    });
+
+    const archive = await createEncryptedEnvelopeArchive();
+    const rejectedUploadResponse = await fetch(`${restarted.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
+      },
+      body: Buffer.from(archive)
+    });
+    expect(rejectedUploadResponse.status).toBe(507);
+    await expect(rejectedUploadResponse.json()).resolves.toEqual({
+      error:
+        "Share record capacity is exhausted (1). Revoke or expire retained shares before uploading."
+    });
+    await expect(readdir(resolve(restarted.dataDir, "archives"))).resolves.toHaveLength(3);
+  });
+
   it("atomically persists records and reconciles interrupted storage on restart", async () => {
     const server = await startShareServer();
     const upload = await uploadEncryptedFixture(server);
