@@ -1,5 +1,6 @@
 import {
   DEFAULT_EXPORT_POLICY,
+  DEFAULT_CAPTURE_POLICY,
   DEFAULT_RECORDER_CONFIG,
   createSessionId,
   sanitizeUrlForPrivacy,
@@ -13,6 +14,9 @@ import {
   FlightRecorderPipeline,
   IndexedDbPipelineStorage,
   MemoryPipelineStorage,
+  PIPELINE_STORAGE_SECURITY,
+  deleteIndexedDbDatabase,
+  getOrCreateIndexedDbPipelineStorageKey,
   type PipelineStorage
 } from "@webblackbox/pipeline";
 import {
@@ -38,6 +42,8 @@ const DEFAULT_TAB_ID = 0;
 const PIPELINE_BATCH_MAX_EVENTS = 160;
 const PIPELINE_BATCH_FLUSH_DELAY_MS = 120;
 const PIPELINE_BATCH_DRAIN_CHUNK_EVENTS = 160;
+const PIPELINE_STORAGE_KEY_PURPOSE = "webblackbox-lite:pipeline-payload:aes-gcm:v1";
+const managedIndexedDbStorageKeys = new Map<string, Promise<CryptoKey>>();
 
 /**
  * Browser-focused SDK for recording, buffering, and exporting Lite sessions.
@@ -89,7 +95,11 @@ export class WebBlackboxLiteSdk {
     this.tabId = normalizeTabId(options.tabId);
     this.config = mergeRecorderConfig(options.config, options.sampling);
     this.session = createSessionMetadata(this.sid, this.tabId, options);
-    this.storage = resolveStorage(options, this.sid);
+    this.storage = resolveStorage(
+      options,
+      this.sid,
+      this.config.capturePolicy ?? DEFAULT_CAPTURE_POLICY
+    );
     this.pipeline = new FlightRecorderPipeline({
       session: this.session,
       storage: this.storage,
@@ -675,7 +685,11 @@ function normalizeExportBoundedInt(
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-function resolveStorage(options: WebBlackboxLiteSdkOptions, sid: string): PipelineStorage {
+function resolveStorage(
+  options: WebBlackboxLiteSdkOptions,
+  sid: string,
+  capturePolicy: NonNullable<RecorderConfig["capturePolicy"]>
+): PipelineStorage {
   if (options.pipelineStorage) {
     return maybeWrapEncryptedStorage(options.pipelineStorage, options);
   }
@@ -686,19 +700,59 @@ function resolveStorage(options: WebBlackboxLiteSdkOptions, sid: string): Pipeli
       return maybeWrapEncryptedStorage(new MemoryPipelineStorage(), options);
     }
 
-    return maybeWrapEncryptedStorage(
-      new IndexedDbPipelineStorage(options.indexedDbName ?? `webblackbox-lite-${sid}`),
-      options
-    );
+    const databaseName = options.indexedDbName ?? `webblackbox-lite-${sid}`;
+    const key =
+      options.pipelineStorageEncryptionKey ??
+      (capturePolicy.encryption.localAtRest === "required"
+        ? resolveManagedIndexedDbStorageKey(databaseName)
+        : undefined);
+
+    return maybeWrapEncryptedStorage(new IndexedDbPipelineStorage(databaseName), {
+      ...options,
+      pipelineStorageEncryptionKey: key
+    });
   }
 
   return maybeWrapEncryptedStorage(new MemoryPipelineStorage(), options);
+}
+
+function resolveManagedIndexedDbStorageKey(databaseName: string): Promise<CryptoKey> {
+  const existing = managedIndexedDbStorageKeys.get(databaseName);
+
+  if (existing) {
+    return existing;
+  }
+
+  const key = getOrCreateIndexedDbPipelineStorageKey({
+    databaseName: `${databaseName}-keyring-v1`,
+    purpose: PIPELINE_STORAGE_KEY_PURPOSE
+  }).then(async (managedKey) => {
+    if (managedKey.created) {
+      // A missing key makes any existing payloads unverifiable. Purge instead of
+      // silently mixing legacy plaintext or data encrypted with a lost key.
+      await deleteIndexedDbDatabase(databaseName);
+    }
+
+    return managedKey.key;
+  });
+
+  managedIndexedDbStorageKeys.set(databaseName, key);
+  key.catch(() => {
+    if (managedIndexedDbStorageKeys.get(databaseName) === key) {
+      managedIndexedDbStorageKeys.delete(databaseName);
+    }
+  });
+  return key;
 }
 
 function maybeWrapEncryptedStorage(
   storage: PipelineStorage,
   options: WebBlackboxLiteSdkOptions
 ): PipelineStorage {
+  if (storage[PIPELINE_STORAGE_SECURITY]?.payloadProtection === "authenticated-encryption") {
+    return storage;
+  }
+
   if (!options.pipelineStorageEncryptionKey) {
     return storage;
   }

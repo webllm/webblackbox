@@ -86,30 +86,38 @@ is present in `trustedPlaintextExemptionEvidenceRefs`. The deprecated
 `allowPlaintextLocalExport` option is retained for source compatibility but cannot bypass these
 checks.
 
-### Optional At-Rest Storage Encryption
+### Required At-Rest Storage Encryption
 
-`EncryptedPipelineStorage` encrypts chunk/blob cache payload bytes before persistence (for example when using IndexedDB storage).
+`FlightRecorderPipeline.start()` verifies the storage security capability. Volatile memory storage is accepted, but a persistent storage such as raw `IndexedDbPipelineStorage` is rejected when `capturePolicy.encryption.localAtRest` is `"required"`. Wrap persistent storage with `EncryptedPipelineStorage`, which uses authenticated AES-GCM for chunk/blob payload bytes and rejects legacy plaintext on read.
 
 ```typescript
 import {
+  deleteIndexedDbDatabase,
   EncryptedPipelineStorage,
   IndexedDbPipelineStorage,
-  derivePipelineStorageKey
+  getOrCreateIndexedDbPipelineStorageKey
 } from "@webblackbox/pipeline";
 
-const derived = await derivePipelineStorageKey("cache-passphrase");
+const databaseName = "webblackbox-flight-recorder-encrypted-v1";
+const managedKey = await getOrCreateIndexedDbPipelineStorageKey({
+  databaseName: "webblackbox-flight-recorder-keyring-v1",
+  purpose: "my-app:pipeline-payload:aes-gcm:v1"
+});
 
-const storage = new EncryptedPipelineStorage(
-  new IndexedDbPipelineStorage("webblackbox-flight-recorder"),
-  {
-    key: derived.key
-  }
-);
+// A newly created key cannot decrypt any pre-existing payload. Purge possible
+// legacy plaintext or data whose key was lost before opening the data database.
+if (managedKey.created) {
+  await deleteIndexedDbDatabase(databaseName);
+}
 
-// Persist derived.salt + derived.iterations with your own secure key policy.
+const storage = new EncryptedPipelineStorage(new IndexedDbPipelineStorage(databaseName), {
+  key: managedKey.key
+});
 ```
 
-Note: this protects event/blob payload bytes at rest; indexes and session metadata remain plaintext for queryability.
+The managed key is non-extractable, persisted in a purpose-specific IndexedDB keyring, and recoverable after a worker/page restart. Supplying a missing, rejected, extractable, wrong-algorithm, or wrong-usage key fails closed before the pipeline starts. Applications with an external key manager may instead supply their own non-extractable 256-bit AES-GCM key with `encrypt` and `decrypt` usages.
+
+Note: this protects event/blob payload bytes at rest; indexes and session metadata remain plaintext for queryability and must not contain captured payload values.
 
 ### Blob Storage
 

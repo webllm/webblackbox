@@ -61,9 +61,11 @@ import { installInjectedLiteCaptureHooks } from "webblackbox/injected-hooks";
 import { materializeLiteRawEvent } from "webblackbox/lite-materializer";
 ```
 
-## Optional IndexedDB Cache Encryption
+## IndexedDB Cache Encryption
 
-When using `storage: "indexeddb"`, you can provide `pipelineStorageEncryptionKey` to encrypt cached chunk/blob payload bytes at rest.
+When using `storage: "indexeddb"` under the default `localAtRest: "required"` policy, the SDK automatically creates a non-extractable AES-GCM key in a purpose-specific IndexedDB keyring and encrypts cached chunk/blob payload bytes. Recreating the SDK with the same `indexedDbName` recovers the key and cache after a page restart. If the key is missing, the SDK purges any unverifiable legacy/plaintext data before opening the cache.
+
+You can provide `pipelineStorageEncryptionKey` when key lifecycle is managed externally:
 
 ```ts
 import { derivePipelineStorageKey } from "@webblackbox/pipeline";
@@ -77,7 +79,7 @@ const sdk = new WebBlackboxLiteSdk({
 });
 ```
 
-Persist `derived.salt` + `derived.iterations` using your own key-management policy if you need to reopen the same encrypted cache.
+Persist `derived.salt` + `derived.iterations` using your own key-management policy to derive the same key after restart. The key must be non-extractable AES-GCM-256 with `encrypt` and `decrypt` usages. Passing a raw persistent `pipelineStorage` without an authenticated-encryption capability is rejected at `start()`.
 
 ## Default Safety Tuning
 

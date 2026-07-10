@@ -57,6 +57,8 @@ The extension consists of multiple main components:
 
 - Runs the `FlightRecorderPipeline` for event processing
 - Handles chunking, compression, indexing, and blob storage
+- Encrypts event chunks and blobs before IndexedDB persistence with a non-extractable, purpose-specific AES-GCM key that survives offscreen/service-worker restarts
+- Purges the legacy plaintext cache (or an encrypted cache whose managed key was lost) instead of reopening unverifiable payloads
 - Generates `.webblackbox` ZIP archives on export
 - Isolated from the main page for performance
 

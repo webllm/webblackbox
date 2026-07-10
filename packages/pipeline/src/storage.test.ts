@@ -4,8 +4,10 @@ import type { ChunkTimeIndexEntry, SessionMetadata } from "@webblackbox/protocol
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  deleteIndexedDbDatabase,
   derivePipelineStorageKey,
   EncryptedPipelineStorage,
+  getOrCreateIndexedDbPipelineStorageKey,
   IndexedDbPipelineStorage,
   MemoryPipelineStorage,
   type StoredBlob,
@@ -231,10 +233,8 @@ describe("storage", () => {
 
     await baseStorage.putChunk(createChunk(sid, "C-plain", 2, '{"plain":true}\n'));
     await baseStorage.putBlob(createBlob("b".repeat(64), Uint8Array.from([9, 9, 9])), sid);
-    expect(Array.from((await storage.getChunk(sid, "C-plain"))?.bytes ?? [])).toEqual(
-      Array.from(new TextEncoder().encode('{"plain":true}\n'))
-    );
-    expect(Array.from((await storage.getBlob("b".repeat(64)))?.bytes ?? [])).toEqual([9, 9, 9]);
+    await expect(storage.getChunk(sid, "C-plain")).rejects.toThrow(/refusing.*plaintext/i);
+    await expect(storage.getBlob("b".repeat(64))).rejects.toThrow(/refusing.*plaintext/i);
 
     await expect(storage.getChunk(sid, "missing")).resolves.toBeUndefined();
     await expect(storage.getBlob("c".repeat(64))).resolves.toBeUndefined();
@@ -402,5 +402,91 @@ describe("storage", () => {
 
     await storage.deleteSession(sid);
     expect(await innerStorage.getBlob(hash)).toBeUndefined();
+  });
+
+  it("persists a non-extractable purpose key and recovers encrypted chunks and blobs", async () => {
+    const dataDatabaseName = createDbName();
+    const keyDatabaseName = `${dataDatabaseName}-keys`;
+    const purpose = "pipeline-test:payload:aes-gcm:v1";
+    const sid = "S-idb-key-recovery";
+    const hash = "f".repeat(64);
+    const eventSecret = "EVENT_SECRET_MUST_NOT_BE_PLAINTEXT";
+    const blobSecret = "BLOB_SECRET_MUST_NOT_BE_PLAINTEXT";
+    const firstManagedKey = await getOrCreateIndexedDbPipelineStorageKey({
+      databaseName: keyDatabaseName,
+      purpose
+    });
+    const rawStorage = new IndexedDbPipelineStorage(dataDatabaseName);
+    const firstStorage = new EncryptedPipelineStorage(rawStorage, {
+      key: firstManagedKey.key
+    });
+
+    expect(firstManagedKey.created).toBe(true);
+    expect(firstManagedKey.key.extractable).toBe(false);
+    await firstStorage.assertReady();
+    await firstStorage.putChunk(createChunk(sid, "C-secret", 1, `${eventSecret}\n`));
+    await firstStorage.putBlob(createBlob(hash, new TextEncoder().encode(blobSecret)), sid);
+
+    const persistedChunk = await rawStorage.getChunk(sid, "C-secret");
+    const persistedBlob = await rawStorage.getBlob(hash);
+    expect(new TextDecoder().decode(persistedChunk?.bytes)).not.toContain(eventSecret);
+    expect(new TextDecoder().decode(persistedBlob?.bytes)).not.toContain(blobSecret);
+
+    const recoveredManagedKey = await getOrCreateIndexedDbPipelineStorageKey({
+      databaseName: keyDatabaseName,
+      purpose
+    });
+    const recoveredStorage = new EncryptedPipelineStorage(
+      new IndexedDbPipelineStorage(dataDatabaseName),
+      { key: recoveredManagedKey.key }
+    );
+
+    expect(recoveredManagedKey.created).toBe(false);
+    await recoveredStorage.assertReady();
+    expect(
+      new TextDecoder().decode((await recoveredStorage.getChunk(sid, "C-secret"))?.bytes)
+    ).toBe(`${eventSecret}\n`);
+    expect(new TextDecoder().decode((await recoveredStorage.getBlob(hash))?.bytes)).toBe(
+      blobSecret
+    );
+  });
+
+  it("fails closed when an encrypted persistent storage key is missing", async () => {
+    const storage = new EncryptedPipelineStorage(new IndexedDbPipelineStorage(createDbName()), {
+      key: Promise.reject(new Error("simulated missing key"))
+    });
+
+    await expect(storage.assertReady()).rejects.toThrow(/key is unavailable/i);
+  });
+
+  it("rejects extractable keys for persistent payload encryption", async () => {
+    const extractableKey = await crypto.subtle.generateKey(
+      {
+        name: "AES-GCM",
+        length: 256
+      },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const storage = new EncryptedPipelineStorage(new IndexedDbPipelineStorage(createDbName()), {
+      key: extractableKey
+    });
+
+    await expect(storage.assertReady()).rejects.toThrow(/non-extractable 256-bit AES-GCM/i);
+  });
+
+  it("purges a legacy IndexedDB database before encrypted storage initialization", async () => {
+    const databaseName = createDbName();
+    const legacy = await openRawDb(databaseName, 1, (db) => {
+      db.createObjectStore("legacy", { keyPath: "id" });
+    });
+    await writeRawRows(legacy, "legacy", [{ id: "secret", value: "PLAINTEXT_LEGACY_DATA" }]);
+    legacy.close();
+
+    await deleteIndexedDbDatabase(databaseName);
+
+    const reopened = await openRawDb(databaseName, 1, () => undefined);
+    expect(reopened.objectStoreNames.contains("legacy")).toBe(false);
+    reopened.close();
   });
 });

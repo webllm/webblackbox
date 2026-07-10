@@ -13,6 +13,7 @@ import { FlightRecorderPipeline, type FlightRecorderPipelineOptions } from "./pi
 import {
   derivePipelineStorageKey,
   EncryptedPipelineStorage,
+  IndexedDbPipelineStorage,
   MemoryPipelineStorage
 } from "./storage.js";
 
@@ -112,6 +113,37 @@ function createNoisyPayload(size: number, seed: number): string {
 }
 
 describe("pipeline", () => {
+  it("rejects plaintext persistent storage when local-at-rest encryption is required", async () => {
+    const pipeline = createTestPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-plaintext-persistent-storage"
+      },
+      storage: new IndexedDbPipelineStorage(
+        `wb-pipeline-policy-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      )
+    });
+
+    await expect(
+      pipeline.putBlob("text/plain", new TextEncoder().encode("must-not-persist"))
+    ).rejects.toThrow(/persistent.*authenticated AES-GCM/i);
+    await expect(pipeline.start()).rejects.toThrow(/persistent.*authenticated AES-GCM/i);
+  });
+
+  it("fails pipeline startup when the at-rest encryption key is unavailable", async () => {
+    const pipeline = createTestPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-missing-at-rest-key"
+      },
+      storage: new EncryptedPipelineStorage(new MemoryPipelineStorage(), {
+        key: Promise.reject(new Error("simulated missing key"))
+      })
+    });
+
+    await expect(pipeline.start()).rejects.toThrow(/key is unavailable/i);
+  });
+
   it("rejects events without privacy classification", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = createTestPipeline({

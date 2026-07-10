@@ -18,7 +18,12 @@ import { createWebBlackboxArchive } from "./exporter.js";
 import { sha256Hex } from "./hash.js";
 import { EventIndexer } from "./indexer.js";
 import { assertPrivacyScannerPassed, buildPrivacyManifest } from "./privacy.js";
-import type { PipelineStorage, StoredBlob, StoredChunk } from "./storage.js";
+import {
+  PIPELINE_STORAGE_SECURITY,
+  type PipelineStorage,
+  type StoredBlob,
+  type StoredChunk
+} from "./storage.js";
 
 export type FlightRecorderPipelineOptions = {
   session: SessionMetadata;
@@ -95,6 +100,7 @@ const SYNTHETIC_EVIDENCE_PATTERN = /^(?:synthetic-fixture|ci-run):[A-Za-z0-9][A-
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
   private readonly chunkCodec: (typeof CHUNK_CODECS)[number];
+  private storageReadyPromise: Promise<void> | null = null;
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = resolveChunkCodec(options.chunkCodec);
@@ -104,6 +110,7 @@ export class FlightRecorderPipeline {
   }
 
   public async start(): Promise<void> {
+    await this.ensureStorageReady();
     const lastSequence =
       (await this.options.storage.getLatestChunkMeta(this.options.session.sid))?.seq ?? 0;
 
@@ -179,6 +186,7 @@ export class FlightRecorderPipeline {
   }
 
   public async putBlob(mime: string, bytes: Uint8Array): Promise<string> {
+    await this.ensureStorageReady();
     const hash = await sha256Hex(bytes);
     const blob: StoredBlob = {
       hash,
@@ -198,6 +206,7 @@ export class FlightRecorderPipeline {
     request: RequestIndexEntry[];
     inverted: InvertedIndexEntry[];
   }> {
+    await this.ensureStorageReady();
     await this.flush();
     const chunks = await this.options.storage.listChunks(this.options.session.sid);
     const snapshot = await this.buildIndexesFromChunks(chunks);
@@ -207,6 +216,7 @@ export class FlightRecorderPipeline {
 
   public async exportBundle(options: ExportBundleOptions = {}): Promise<ExportResult> {
     this.assertExportEncryptionPolicy(options);
+    await this.ensureStorageReady();
     await this.flush();
     const rawChunks = await this.options.storage.listChunks(this.options.session.sid);
     const exportPolicy = resolveExportPolicy(options, {
@@ -656,6 +666,7 @@ export class FlightRecorderPipeline {
     events: WebBlackboxEvent[],
     bytes: Uint8Array
   ): Promise<void> {
+    await this.ensureStorageReady();
     const first = events[0];
     const last = events[events.length - 1];
     const hash = await sha256Hex(bytes);
@@ -678,6 +689,14 @@ export class FlightRecorderPipeline {
     };
 
     await this.options.storage.putChunk(chunk);
+  }
+
+  private ensureStorageReady(): Promise<void> {
+    this.storageReadyPromise ??= assertLocalAtRestStorage(
+      this.options.storage,
+      this.options.capturePolicy
+    );
+    return this.storageReadyPromise;
   }
 
   private async buildIndexesFromChunks(chunks: StoredChunk[]): Promise<ExportIndexes> {
@@ -730,6 +749,37 @@ export class FlightRecorderPipeline {
       }
     };
   }
+}
+
+async function assertLocalAtRestStorage(
+  storage: PipelineStorage,
+  capturePolicy: CapturePolicy | undefined
+): Promise<void> {
+  const localAtRest = capturePolicy?.encryption.localAtRest ?? "required";
+
+  if (localAtRest !== "required") {
+    return;
+  }
+
+  const capability = storage[PIPELINE_STORAGE_SECURITY];
+
+  if (!capability) {
+    throw new Error(
+      "Pipeline storage does not declare a verifiable local-at-rest security capability."
+    );
+  }
+
+  if (
+    capability.persistence === "persistent" &&
+    (capability.payloadProtection !== "authenticated-encryption" ||
+      capability.algorithm !== "AES-GCM")
+  ) {
+    throw new Error(
+      "capturePolicy.encryption.localAtRest is required; persistent pipeline storage must use authenticated AES-GCM payload encryption."
+    );
+  }
+
+  await storage.assertReady?.();
 }
 
 function resolveExportPolicy(

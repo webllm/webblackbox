@@ -66,6 +66,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^26.1.0"
   },
   "dependencies": {

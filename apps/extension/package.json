@@ -37,6 +37,7 @@
     "webblackbox": "workspace:*"
   },
   "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
     "jszip": "^3.10.1"
   }
 }

@@ -1,6 +1,12 @@
+import "fake-indexeddb/auto";
+
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { MemoryPipelineStorage, readWebBlackboxArchive } from "@webblackbox/pipeline";
+import {
+  IndexedDbPipelineStorage,
+  MemoryPipelineStorage,
+  readWebBlackboxArchive
+} from "@webblackbox/pipeline";
 import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
@@ -178,6 +184,72 @@ describe("WebBlackboxLiteSdk", () => {
 
     await sdk.dispose();
     expect(agent?.disposeCalls).toBe(1);
+  });
+
+  it("auto-encrypts indexeddb payloads and recovers them after an SDK restart", async () => {
+    const databaseName = `wb-lite-encrypted-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sid = "S-lite-indexeddb-encrypted-restart";
+    const eventSecret = "LITE_EVENT_SECRET_MUST_BE_ENCRYPTED";
+    const first = new WebBlackboxLiteSdk({
+      sid,
+      storage: "indexeddb",
+      indexedDbName: databaseName,
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    await first.start();
+    first.ingestRawEvent(
+      createRawEvent("marker", {
+        message: eventSecret
+      })
+    );
+    await first.flush();
+
+    const rawStorage = new IndexedDbPipelineStorage(databaseName);
+    const persistedChunks = await rawStorage.listChunks(sid);
+    expect(persistedChunks.length).toBeGreaterThan(0);
+    expect(
+      persistedChunks.some((chunk) => new TextDecoder().decode(chunk.bytes).includes(eventSecret))
+    ).toBe(false);
+    await first.dispose();
+
+    const restarted = new WebBlackboxLiteSdk({
+      sid,
+      storage: "indexeddb",
+      indexedDbName: databaseName,
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+    const exported = await restarted.export({
+      passphrase: "restart-archive-passphrase"
+    });
+    const parsed = await readWebBlackboxArchive(exported.bytes, {
+      passphrase: "restart-archive-passphrase"
+    });
+
+    expect(parsed.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "user.marker"
+        })
+      ])
+    );
+    await restarted.dispose();
+  });
+
+  it("rejects a raw persistent custom storage under the required at-rest policy", async () => {
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-lite-raw-persistent-rejected",
+      pipelineStorage: new IndexedDbPipelineStorage(
+        `wb-lite-raw-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      ),
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+
+    await expect(sdk.start()).rejects.toThrow(/persistent.*authenticated AES-GCM/i);
+    await sdk.dispose();
   });
 
   it("exports normalized events and materialized screenshot payloads", async () => {

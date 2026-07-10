@@ -16,7 +16,7 @@ By default, WebBlackbox does not collect raw input values, DOM text, screenshots
 
 ## Local Storage
 
-Captured sessions remain local until the user exports or shares an archive. Local stopped sessions are subject to retention controls, and enterprise policies can cap local retention.
+Captured sessions remain local until the user exports or shares an archive. Under the required local-at-rest policy, persisted event chunks and blobs are authenticated and encrypted with AES-GCM; raw persistent storage is rejected. Extension upgrades purge the former plaintext cache, and a missing managed key causes unverifiable cached payloads to be purged instead of silently reopened. Query indexes and session metadata remain plaintext and must not contain captured payload values. Local stopped sessions are subject to retention controls, and enterprise policies can cap local retention.
 
 ## Export And Share
 

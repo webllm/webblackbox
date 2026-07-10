@@ -1,4 +1,4 @@
-import { FlightRecorderPipeline, IndexedDbPipelineStorage } from "@webblackbox/pipeline";
+import { FlightRecorderPipeline } from "@webblackbox/pipeline";
 import type {
   CapturePolicy,
   PrivacyScannerResult,
@@ -10,6 +10,7 @@ import type {
 import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES } from "../shared/messages.js";
+import { getExtensionPipelineStorage } from "./pipeline-storage.js";
 
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
@@ -199,7 +200,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       return null;
     }
 
-    const storage = new IndexedDbPipelineStorage("webblackbox-flight-recorder");
+    const storage = await getExtensionPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
       session: message.session,
       storage,

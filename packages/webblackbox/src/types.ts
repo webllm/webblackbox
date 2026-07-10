@@ -91,6 +91,7 @@ export type WebBlackboxLiteSdkOptions = {
   indexedDbName?: string;
   storage?: "memory" | "indexeddb";
   pipelineStorage?: PipelineStorage;
+  /** External non-extractable AES-GCM-256 key; IndexedDB storage auto-manages one when omitted. */
   pipelineStorageEncryptionKey?: CryptoKey | Promise<CryptoKey>;
   injectHooks?: boolean;
   injectHookFlag?: string;

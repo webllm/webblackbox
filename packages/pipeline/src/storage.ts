@@ -29,7 +29,17 @@ export type StoredIndexes = {
   inverted: InvertedIndexEntry[];
 };
 
+export type PipelineStorageSecurityCapability = Readonly<{
+  persistence: "volatile" | "persistent";
+  payloadProtection: "plaintext" | "authenticated-encryption";
+  algorithm?: "AES-GCM";
+}>;
+
+export const PIPELINE_STORAGE_SECURITY = Symbol.for("@webblackbox/pipeline/storage-security");
+
 export type PipelineStorage = {
+  readonly [PIPELINE_STORAGE_SECURITY]: PipelineStorageSecurityCapability;
+  assertReady?(): Promise<void>;
   putSession(metadata: SessionMetadata): Promise<void>;
   getSession(sid: string): Promise<SessionMetadata | undefined>;
   putChunk(chunk: StoredChunk): Promise<void>;
@@ -56,6 +66,8 @@ const MAX_QUOTA_RECOVERY_ATTEMPTS = 2;
 const STORAGE_ENCRYPTION_MAGIC = new Uint8Array([0x57, 0x42, 0x45, 0x31]); // WBE1
 const STORAGE_ENCRYPTION_IV_BYTES = 12;
 const STORAGE_ENCRYPTION_KDF_ITERATIONS = 120_000;
+const STORAGE_KEYRING_VERSION = 1;
+const STORAGE_KEYRING_STORE = "keys";
 
 export type PipelineStorageKeyOptions = {
   salt?: Uint8Array;
@@ -72,7 +84,29 @@ export type EncryptedPipelineStorageOptions = {
   key: CryptoKey | Promise<CryptoKey>;
 };
 
+export type IndexedDbPipelineStorageKeyOptions = {
+  databaseName: string;
+  purpose: string;
+};
+
+export type IndexedDbPipelineStorageKey = {
+  key: CryptoKey;
+  created: boolean;
+};
+
+type IndexedDbPipelineStorageKeyRecord = {
+  purpose: string;
+  algorithm: "AES-GCM";
+  createdAt: number;
+  key: CryptoKey;
+};
+
 export class MemoryPipelineStorage implements PipelineStorage {
+  public readonly [PIPELINE_STORAGE_SECURITY] = Object.freeze({
+    persistence: "volatile",
+    payloadProtection: "plaintext"
+  } as const);
+
   private readonly sessions = new Map<string, SessionMetadata>();
 
   private readonly chunks = new Map<string, StoredChunk[]>();
@@ -258,10 +292,103 @@ export async function derivePipelineStorageKey(
 }
 
 /**
+ * Loads or creates a non-extractable AES-GCM key in a dedicated IndexedDB keyring.
+ * The caller must use a purpose reserved for pipeline payload encryption.
+ */
+export async function getOrCreateIndexedDbPipelineStorageKey(
+  options: IndexedDbPipelineStorageKeyOptions
+): Promise<IndexedDbPipelineStorageKey> {
+  const databaseName = requireNonEmptyStorageIdentifier(options.databaseName, "databaseName");
+  const purpose = requireNonEmptyStorageIdentifier(options.purpose, "purpose");
+  const db = await openPipelineStorageKeyring(databaseName);
+
+  try {
+    const existing = await readPipelineStorageKeyRecord(db, purpose);
+
+    if (existing) {
+      assertValidPipelineStorageKeyRecord(existing, purpose);
+      return {
+        key: existing.key,
+        created: false
+      };
+    }
+
+    const cryptoApi = requireCryptoApi();
+    const generated = await cryptoApi.subtle.generateKey(
+      {
+        name: "AES-GCM",
+        length: 256
+      },
+      false,
+      ["encrypt", "decrypt"]
+    );
+    assertValidPipelineStorageKey(generated);
+
+    const record: IndexedDbPipelineStorageKeyRecord = {
+      purpose,
+      algorithm: "AES-GCM",
+      createdAt: Date.now(),
+      key: generated
+    };
+
+    try {
+      await runTransaction(db, STORAGE_KEYRING_STORE, "readwrite", (store) => {
+        return requestToPromise(store.add(record));
+      });
+      return {
+        key: generated,
+        created: true
+      };
+    } catch (error) {
+      if (!isIndexedDbConstraintError(error)) {
+        throw error;
+      }
+
+      const concurrent = await readPipelineStorageKeyRecord(db, purpose);
+
+      if (!concurrent) {
+        throw new Error("Pipeline storage key creation raced but no persisted key was found.");
+      }
+
+      assertValidPipelineStorageKeyRecord(concurrent, purpose);
+      return {
+        key: concurrent.key,
+        created: false
+      };
+    }
+  } finally {
+    db.close();
+  }
+}
+
+/** Deletes an IndexedDB database, failing when another context blocks the purge. */
+export async function deleteIndexedDbDatabase(databaseName: string): Promise<void> {
+  const normalized = requireNonEmptyStorageIdentifier(databaseName, "databaseName");
+
+  if (!globalThis.indexedDB) {
+    throw new Error("indexedDB is unavailable in this runtime");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const request = globalThis.indexedDB.deleteDatabase(normalized);
+
+    request.onsuccess = () => resolve();
+    request.onerror = () => {
+      reject(request.error ?? new Error(`Failed to delete IndexedDB database: ${normalized}`));
+    };
+    request.onblocked = () => {
+      reject(new Error(`IndexedDB database purge was blocked: ${normalized}`));
+    };
+  });
+}
+
+/**
  * PipelineStorage wrapper that encrypts chunk/blob payload bytes before writing
  * and decrypts on read. Metadata/indexes remain plaintext for queryability.
  */
 export class EncryptedPipelineStorage implements PipelineStorage {
+  public readonly [PIPELINE_STORAGE_SECURITY]: PipelineStorageSecurityCapability;
+
   private readonly keyPromise: Promise<CryptoKey>;
 
   public constructor(
@@ -269,6 +396,16 @@ export class EncryptedPipelineStorage implements PipelineStorage {
     options: EncryptedPipelineStorageOptions
   ) {
     this.keyPromise = Promise.resolve(options.key);
+    this[PIPELINE_STORAGE_SECURITY] = Object.freeze({
+      persistence: storage[PIPELINE_STORAGE_SECURITY]?.persistence ?? "persistent",
+      payloadProtection: "authenticated-encryption",
+      algorithm: "AES-GCM"
+    });
+  }
+
+  public async assertReady(): Promise<void> {
+    await this.resolveKey();
+    await this.storage.assertReady?.();
   }
 
   public async putSession(metadata: SessionMetadata): Promise<void> {
@@ -371,7 +508,7 @@ export class EncryptedPipelineStorage implements PipelineStorage {
   }
 
   private async encryptStoredBytes(bytes: Uint8Array): Promise<Uint8Array> {
-    const key = await this.keyPromise;
+    const key = await this.resolveKey();
     const iv = randomBytes(STORAGE_ENCRYPTION_IV_BYTES);
     const cryptoApi = requireCryptoApi();
     const encrypted = await cryptoApi.subtle.encrypt(
@@ -388,10 +525,12 @@ export class EncryptedPipelineStorage implements PipelineStorage {
 
   private async decryptStoredBytes(bytes: Uint8Array): Promise<Uint8Array> {
     if (!looksEncryptedStorageBytes(bytes)) {
-      return bytes;
+      throw new Error(
+        "Refusing to read plaintext payload from encrypted pipeline storage. Purge or explicitly migrate legacy storage before use."
+      );
     }
 
-    const key = await this.keyPromise;
+    const key = await this.resolveKey();
     const ivStart = STORAGE_ENCRYPTION_MAGIC.byteLength;
     const ivEnd = ivStart + STORAGE_ENCRYPTION_IV_BYTES;
     const iv = bytes.slice(ivStart, ivEnd);
@@ -412,6 +551,19 @@ export class EncryptedPipelineStorage implements PipelineStorage {
     } catch {
       throw new Error("Unable to decrypt pipeline storage payload.");
     }
+  }
+
+  private async resolveKey(): Promise<CryptoKey> {
+    let key: CryptoKey;
+
+    try {
+      key = await this.keyPromise;
+    } catch {
+      throw new Error("Encrypted pipeline storage key is unavailable.");
+    }
+
+    assertValidPipelineStorageKey(key);
+    return key;
   }
 }
 
@@ -436,9 +588,18 @@ const DB_VERSION = 3;
 const CHUNKS_BY_SID_SEQ_INDEX = "by-sid-seq";
 
 export class IndexedDbPipelineStorage implements PipelineStorage {
+  public readonly [PIPELINE_STORAGE_SECURITY] = Object.freeze({
+    persistence: "persistent",
+    payloadProtection: "plaintext"
+  } as const);
+
   private dbPromise: Promise<IDBDatabase> | null = null;
 
   public constructor(private readonly dbName = "webblackbox-pipeline") {}
+
+  public async assertReady(): Promise<void> {
+    await this.db();
+  }
 
   public async putSession(metadata: SessionMetadata): Promise<void> {
     await this.put<SessionRow>(
@@ -787,6 +948,9 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       };
 
       request.onsuccess = () => {
+        request.result.onversionchange = () => {
+          request.result.close();
+        };
         resolve(request.result);
       };
 
@@ -1067,6 +1231,84 @@ function looksEncryptedStorageBytes(bytes: Uint8Array): boolean {
   }
 
   return true;
+}
+
+function assertValidPipelineStorageKey(key: CryptoKey): void {
+  const algorithm = key?.algorithm as AesKeyAlgorithm | undefined;
+  const usages = Array.from(key?.usages ?? []);
+
+  if (
+    !key ||
+    key.type !== "secret" ||
+    key.extractable ||
+    algorithm?.name !== "AES-GCM" ||
+    algorithm.length !== 256 ||
+    !usages.includes("encrypt") ||
+    !usages.includes("decrypt")
+  ) {
+    throw new Error(
+      "Pipeline storage encryption requires a non-extractable 256-bit AES-GCM key with encrypt/decrypt usage."
+    );
+  }
+}
+
+function assertValidPipelineStorageKeyRecord(
+  record: IndexedDbPipelineStorageKeyRecord,
+  purpose: string
+): void {
+  if (record.purpose !== purpose || record.algorithm !== "AES-GCM") {
+    throw new Error(`Invalid persisted pipeline storage key record for purpose: ${purpose}`);
+  }
+
+  assertValidPipelineStorageKey(record.key);
+}
+
+function requireNonEmptyStorageIdentifier(value: string, field: string): string {
+  const normalized = typeof value === "string" ? value.trim() : "";
+
+  if (!normalized || normalized.length > 256) {
+    throw new Error(`Pipeline storage ${field} must be a non-empty string up to 256 characters.`);
+  }
+
+  return normalized;
+}
+
+function openPipelineStorageKeyring(databaseName: string): Promise<IDBDatabase> {
+  if (!globalThis.indexedDB) {
+    return Promise.reject(new Error("indexedDB is unavailable in this runtime"));
+  }
+
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = globalThis.indexedDB.open(databaseName, STORAGE_KEYRING_VERSION);
+
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(STORAGE_KEYRING_STORE)) {
+        request.result.createObjectStore(STORAGE_KEYRING_STORE, { keyPath: "purpose" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      reject(
+        request.error ?? new Error(`Failed to open pipeline storage keyring: ${databaseName}`)
+      );
+    };
+  });
+}
+
+async function readPipelineStorageKeyRecord(
+  db: IDBDatabase,
+  purpose: string
+): Promise<IndexedDbPipelineStorageKeyRecord | undefined> {
+  return runTransaction(db, STORAGE_KEYRING_STORE, "readonly", (store) => {
+    return requestToPromise<IndexedDbPipelineStorageKeyRecord | undefined>(store.get(purpose));
+  });
+}
+
+function isIndexedDbConstraintError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "ConstraintError") ||
+    (error instanceof Error && error.name === "ConstraintError")
+  );
 }
 
 async function runTransaction<TResult>(
