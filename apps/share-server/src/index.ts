@@ -21,6 +21,7 @@ import { exportManifestSchema, type ExportManifest } from "@webblackbox/protocol
 
 import { BoundedAuditWriter, type AuditWriteResult } from "./audit-writer.js";
 import { parseShareApiCredentials, type ShareApiScope } from "./auth-config.js";
+import { acquireShareDataRootLock, type ShareDataRootLock } from "./storage-lock.js";
 
 type ShareRecord = {
   id: string;
@@ -324,36 +325,54 @@ async function startShareServer(): Promise<void> {
       "A scoped WEBBLACKBOX_SHARE_API_KEY or WEBBLACKBOX_SHARE_API_KEYS credential is required for a non-loopback public origin."
     );
   }
-  await ensureStorageLayout();
-  await migrateLegacyStoragePermissions();
-  await reconcileAuditLogLayout();
-  await reconcileStorageLayout();
-  await pruneExpiredShareRecords(Date.now());
+  const dataRootIdentity = await initializeDataRoot();
+  const dataRootLock = await acquireShareDataRootLock(DATA_ROOT, dataRootIdentity);
+  let server: Server | null = null;
 
-  const activeRequests = new Set<Promise<void>>();
-  let acceptingRequests = true;
-  const server = createServer((request, response) => {
-    if (!acceptingRequests) {
-      response.setHeader("connection", "close");
-      respondJson(response, 503, {
-        error: "Share server is shutting down."
-      });
-      return;
-    }
+  try {
+    await ensureStorageLayout(dataRootIdentity);
+    await migrateLegacyStoragePermissions();
+    await reconcileAuditLogLayout();
+    await reconcileStorageLayout();
+    await pruneExpiredShareRecords(Date.now());
 
-    const requestTask = handleRequest(request, response);
-    activeRequests.add(requestTask);
-    void requestTask.then(
-      () => activeRequests.delete(requestTask),
-      () => activeRequests.delete(requestTask)
+    const activeRequests = new Set<Promise<void>>();
+    let acceptingRequests = true;
+    server = createServer((request, response) => {
+      if (!acceptingRequests) {
+        response.setHeader("connection", "close");
+        respondJson(response, 503, {
+          error: "Share server is shutting down."
+        });
+        return;
+      }
+
+      const requestTask = handleRequest(request, response);
+      activeRequests.add(requestTask);
+      void requestTask.then(
+        () => activeRequests.delete(requestTask),
+        () => activeRequests.delete(requestTask)
+      );
+    });
+    await listenForShareRequests(server, port, host);
+    const shutdownHandlers = installGracefulShutdownHandlers(
+      server,
+      activeRequests,
+      () => {
+        acceptingRequests = false;
+      },
+      dataRootLock
     );
-  });
-  const removeSignalHandlers = installGracefulShutdownHandlers(server, activeRequests, () => {
-    acceptingRequests = false;
-  });
-  server.once("close", removeSignalHandlers);
+    server.once("close", () => {
+      shutdownHandlers.remove();
+      if (!shutdownHandlers.hasStarted()) {
+        void finalizeNormallyClosedShareServer(activeRequests, dataRootLock).catch((error) => {
+          console.error("[share-server] normal close cleanup failed", error);
+          process.exitCode = 1;
+        });
+      }
+    });
 
-  server.listen(port, host, () => {
     console.info(`[share-server] listening on http://${host}:${port}`);
     console.info(`[share-server] public origin: ${sharePublicOrigin}`);
     console.info(`[share-server] data root: ${DATA_ROOT}`);
@@ -362,6 +381,29 @@ async function startShareServer(): Promise<void> {
         "[share-server] WARNING: unauthenticated loopback development access is enabled."
       );
     }
+  } catch (error) {
+    if (server) {
+      server.closeAllConnections();
+      await closeHttpServer(server);
+    }
+    await dataRootLock.release();
+    throw error;
+  }
+}
+
+function listenForShareRequests(server: Server, port: number, host: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const handleError = (error: Error) => {
+      server.off("listening", handleListening);
+      reject(error);
+    };
+    const handleListening = () => {
+      server.off("error", handleError);
+      resolvePromise();
+    };
+    server.once("error", handleError);
+    server.once("listening", handleListening);
+    server.listen(port, host);
   });
 }
 
@@ -398,8 +440,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 function installGracefulShutdownHandlers(
   server: Server,
   activeRequests: Set<Promise<void>>,
-  stopAcceptingRequests: () => void
-): () => void {
+  stopAcceptingRequests: () => void,
+  dataRootLock: ShareDataRootLock
+): { remove: () => void; hasStarted: () => boolean } {
   let shutdownStarted = false;
   const handleSigterm = () => beginShutdown("SIGTERM");
   const handleSigint = () => beginShutdown("SIGINT");
@@ -415,7 +458,7 @@ function installGracefulShutdownHandlers(
     shutdownStarted = true;
     stopAcceptingRequests();
     removeHandlers();
-    void shutdownShareServer(server, activeRequests, signal).then(
+    void shutdownShareServer(server, activeRequests, signal, dataRootLock).then(
       (drained) => {
         if (drained) {
           process.exit(0);
@@ -432,13 +475,17 @@ function installGracefulShutdownHandlers(
 
   process.once("SIGTERM", handleSigterm);
   process.once("SIGINT", handleSigint);
-  return removeHandlers;
+  return {
+    remove: removeHandlers,
+    hasStarted: () => shutdownStarted
+  };
 }
 
 async function shutdownShareServer(
   server: Server,
   activeRequests: Set<Promise<void>>,
-  signal: "SIGINT" | "SIGTERM"
+  signal: "SIGINT" | "SIGTERM",
+  dataRootLock: ShareDataRootLock
 ): Promise<boolean> {
   console.info(`[share-server] received ${signal}; draining requests and audit events`);
   const closePromise = closeHttpServer(server);
@@ -457,8 +504,18 @@ async function shutdownShareServer(
     return false;
   }
 
+  await dataRootLock.release();
   console.info("[share-server] shutdown drain complete");
   return true;
+}
+
+async function finalizeNormallyClosedShareServer(
+  activeRequests: Set<Promise<void>>,
+  dataRootLock: ShareDataRootLock
+): Promise<void> {
+  await waitForActiveRequests(activeRequests);
+  await auditWriter.drain();
+  await dataRootLock.release();
 }
 
 async function waitForActiveRequests(activeRequests: Set<Promise<void>>): Promise<void> {
@@ -2012,7 +2069,7 @@ function roundTo(value: number, digits: number): number {
   return Math.round(value * factor) / factor;
 }
 
-async function ensureStorageLayout(): Promise<void> {
+async function initializeDataRoot(): Promise<BigIntStats> {
   storageDirectoryIdentities.clear();
   await mkdir(DATA_ROOT, {
     recursive: true,
@@ -2020,7 +2077,11 @@ async function ensureStorageLayout(): Promise<void> {
   });
   const dataRootIdentity = await hardenStorageDirectory(DATA_ROOT);
   storageDirectoryIdentities.set(DATA_ROOT, dataRootIdentity);
+  return dataRootIdentity;
+}
 
+async function ensureStorageLayout(dataRootIdentity: BigIntStats): Promise<void> {
+  await assertStoragePathIdentity(DATA_ROOT, dataRootIdentity, "directory");
   for (const directoryPath of [ARCHIVES_DIR, RECORDS_DIR, AUDIT_DIR]) {
     await assertStoragePathIdentity(DATA_ROOT, dataRootIdentity, "directory");
     try {

@@ -140,6 +140,8 @@ The server stores data under:
 - `WEBBLACKBOX_SHARE_DATA_DIR` env var (if provided), otherwise
 - `.webblackbox-share-data/` in the current working directory
 
+Run exactly one Share server process for each data directory. Startup atomically acquires a mode-`0600`, no-follow process lock bound to the directory identity before it creates, migrates, reconciles, prunes, or rotates managed data. A second live process fails startup without touching that directory. Graceful shutdown releases the lock; after a crash, a later process removes it only when its same-host PID is confirmed absent. A lock attributed to another host or with invalid path, ownership, or directory-binding metadata is refused rather than reclaimed, so a data directory must not be shared by concurrently running hosts.
+
 Each share writes:
 
 - `archives/<id>.webblackbox`

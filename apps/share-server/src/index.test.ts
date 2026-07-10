@@ -37,6 +37,7 @@ type RunningShareServer = {
   child: ChildProcess;
   dataDir: string;
   logs: string[];
+  exit: { code: number | null; signal: NodeJS.Signals | null } | null;
 };
 
 let runningServers: RunningShareServer[] = [];
@@ -1264,6 +1265,114 @@ describe("share-server", () => {
     expect(metadataResponse.status).toBe(200);
   });
 
+  it("rejects a second writer without touching the first process storage", async () => {
+    const first = await startShareServer();
+    const archiveTemporaryPath = resolve(first.dataDir, "archives", ".first-writer.upload");
+    const recordTemporaryPath = resolve(first.dataDir, "records", ".first-writer.record");
+    await writeFile(archiveTemporaryPath, "first-writer-upload");
+    await writeFile(recordTemporaryPath, "first-writer-record");
+
+    const second = await spawnShareServer({}, first.dataDir);
+    const secondExit = await waitForShareServerExit(second);
+
+    expect(secondExit).toEqual({ code: 1, signal: null });
+    expect(second.logs.join("")).toContain("is already in use by a running share-server process");
+    await expect(readFile(archiveTemporaryPath, "utf8")).resolves.toBe("first-writer-upload");
+    await expect(readFile(recordTemporaryPath, "utf8")).resolves.toBe("first-writer-record");
+
+    const upload = await uploadEncryptedFixture(first);
+    const metadataResponse = await fetch(`${first.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: {
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+    expect(metadataResponse.status).toBe(200);
+
+    await stopShareServer(second, false);
+    await stopShareServer(first, false);
+    const lockPath = resolve(first.dataDir, ".share-server.lock");
+    await expect(stat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      (await readdir(first.dataDir)).filter((name) => name.startsWith(".share-server.lock"))
+    ).toEqual([]);
+
+    const restarted = await startShareServer({}, first.dataDir);
+    const restartedMetadataResponse = await fetch(
+      `${restarted.baseUrl}/api/share/${upload.shareId}/meta`,
+      {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+    expect(restartedMetadataResponse.status).toBe(200);
+  });
+
+  it("recovers a complete stale writer lock after a crashed process exits", async () => {
+    const crashed = await startShareServer();
+    const lockPath = resolve(crashed.dataDir, ".share-server.lock");
+    const originalLock = JSON.parse(await readFile(lockPath, "utf8")) as {
+      nonce: string;
+      ownerFile: string;
+      pid: number;
+    };
+    const originalLockStat = await stat(lockPath);
+    if (process.platform !== "win32") {
+      expect(originalLockStat.mode & 0o777).toBe(0o600);
+    }
+    expect(originalLockStat.nlink).toBe(2);
+
+    process.kill(originalLock.pid, "SIGKILL");
+    await waitForLocalProcessExit(originalLock.pid);
+    await waitForShareServerExit(crashed);
+    await stopShareServer(crashed, false);
+    await expect(stat(lockPath)).resolves.toBeDefined();
+
+    const restarted = await startShareServer({}, crashed.dataDir);
+    const replacementLock = JSON.parse(await readFile(lockPath, "utf8")) as {
+      nonce: string;
+      ownerFile: string;
+      pid: number;
+    };
+    expect(replacementLock.pid).not.toBe(originalLock.pid);
+    expect(() => process.kill(replacementLock.pid, 0)).not.toThrow();
+    expect(replacementLock.nonce).not.toBe(originalLock.nonce);
+    await expect(stat(resolve(crashed.dataDir, originalLock.ownerFile))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+
+    const listResponse = await fetch(`${restarted.baseUrl}/api/share/list`, {
+      headers: {
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+    expect(listResponse.status).toBe(200);
+  });
+
+  it("refuses a process-lock symlink without changing its target", async () => {
+    const initialized = await startShareServer();
+    await stopShareServer(initialized, false);
+    const externalDirectory = await mkdtemp(resolve(tmpdir(), "webblackbox-share-lock-target-"));
+    const externalTarget = resolve(externalDirectory, "external-lock-target");
+
+    try {
+      await writeFile(externalTarget, "external-target-must-not-change");
+      await symlink(externalTarget, resolve(initialized.dataDir, ".share-server.lock"));
+
+      const refused = await spawnShareServer({}, initialized.dataDir);
+      const refusedExit = await waitForShareServerExit(refused);
+      expect(refusedExit).toEqual({ code: 1, signal: null });
+      expect(refused.logs.join("")).toContain("Unsafe share data directory lock path");
+      await expect(readFile(externalTarget, "utf8")).resolves.toBe(
+        "external-target-must-not-change"
+      );
+      await stopShareServer(refused, false);
+    } finally {
+      await rm(initialized.dataDir, { recursive: true, force: true });
+      await rm(externalDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("migrates legacy storage directories and committed files to private modes on restart", async () => {
     if (process.platform === "win32") {
       return;
@@ -2301,6 +2410,15 @@ async function startShareServer(
   envOverrides: Record<string, string> = {},
   existingDataDir?: string
 ): Promise<RunningShareServer> {
+  const server = await spawnShareServer(envOverrides, existingDataDir);
+  await waitForShareServer(server);
+  return server;
+}
+
+async function spawnShareServer(
+  envOverrides: Record<string, string> = {},
+  existingDataDir?: string
+): Promise<RunningShareServer> {
   const port = await reservePort();
   const dataDir = existingDataDir ?? (await mkdtemp(resolve(tmpdir(), "webblackbox-share-test-")));
   const child = spawn(process.execPath, [tsxCli, resolve(appRoot, "src/index.ts")], {
@@ -2324,9 +2442,13 @@ async function startShareServer(
     baseUrl: `http://127.0.0.1:${port}`,
     child,
     dataDir,
-    logs: []
+    logs: [],
+    exit: null
   };
 
+  child.once("exit", (code, signal) => {
+    server.exit = { code, signal };
+  });
   child.stdout?.on("data", (chunk) => {
     server.logs.push(String(chunk));
   });
@@ -2334,9 +2456,42 @@ async function startShareServer(
     server.logs.push(String(chunk));
   });
   runningServers.push(server);
-
-  await waitForShareServer(server);
   return server;
+}
+
+async function waitForShareServerExit(
+  server: RunningShareServer,
+  timeoutMs = 5_000
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (server.exit) {
+    return server.exit;
+  }
+
+  return await new Promise((resolvePromise, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`share-server did not exit: ${server.logs.join("")}`));
+    }, timeoutMs);
+    server.child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolvePromise({ code, signal });
+    });
+  });
+}
+
+async function waitForLocalProcessExit(pid: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+        return;
+      }
+      throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms.`);
 }
 
 async function stopShareServer(server: RunningShareServer, removeData = true): Promise<void> {
