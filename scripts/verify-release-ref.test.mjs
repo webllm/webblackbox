@@ -22,6 +22,19 @@ test("accepts an exact release tag on the main history with matching package ver
   ]);
 });
 
+test("accepts the Chrome extension version component boundary", async () => {
+  const root = await createRepository("65535.65535.65535");
+  git(root, "tag", "v65535.65535.65535");
+
+  const result = await verifyReleaseRef({
+    root,
+    tag: "v65535.65535.65535",
+    mainRef: "main"
+  });
+
+  assert.equal(result.version, "65535.65535.65535");
+});
+
 test("rejects mutable or malformed release refs", async () => {
   const root = await createRepository("1.2.3");
 
@@ -29,6 +42,29 @@ test("rejects mutable or malformed release refs", async () => {
     verifyReleaseRef({ root, tag: "main", mainRef: "main" }),
     /exact semantic version tag/
   );
+});
+
+test("rejects prerelease and build-metadata tags", async () => {
+  const root = await createRepository("1.2.3");
+
+  for (const tag of ["v1.2.3-beta.1", "v1.2.3+build.7", "v1.2.3-beta.1+build.7"]) {
+    await assert.rejects(
+      verifyReleaseRef({ root, tag, mainRef: "main" }),
+      /exact semantic version tag \(vX\.Y\.Z\)/
+    );
+  }
+});
+
+test("rejects Chrome-incompatible stable versions", async () => {
+  for (const version of ["0.0.0", "65536.1.0"]) {
+    const root = await createRepository(version);
+    git(root, "tag", `v${version}`);
+
+    await assert.rejects(
+      verifyReleaseRef({ root, tag: `v${version}`, mainRef: "main" }),
+      /compatible with Chrome/
+    );
+  }
 });
 
 test("rejects a checkout that is newer than the requested tag", async () => {

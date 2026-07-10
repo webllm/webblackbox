@@ -174,6 +174,12 @@ export function validateExtensionManifest(
     issues.push(`Manifest version must match package version ${version}.`);
   }
 
+  if (!isValidChromeExtensionVersion(manifest?.version)) {
+    issues.push(
+      "Manifest version must use 1-4 dot-separated integers from 0 to 65535, without leading zeroes, and must not be all zero."
+    );
+  }
+
   if (release && Object.hasOwn(manifest ?? {}, "key")) {
     issues.push("Release manifest must not include the extension key.");
   }
@@ -214,6 +220,31 @@ export function validateExtensionManifest(
   }
 
   return issues;
+}
+
+function isValidChromeExtensionVersion(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const components = value.split(".");
+  if (components.length < 1 || components.length > 4) {
+    return false;
+  }
+
+  let nonZero = false;
+  for (const component of components) {
+    if (!/^(?:0|[1-9]\d*)$/.test(component)) {
+      return false;
+    }
+    const numeric = Number(component);
+    if (!Number.isSafeInteger(numeric) || numeric > 65_535) {
+      return false;
+    }
+    nonZero ||= numeric !== 0;
+  }
+
+  return nonZero;
 }
 
 export async function copyPublicAssets(outputDir) {

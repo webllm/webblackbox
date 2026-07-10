@@ -89,6 +89,30 @@ describe("extension build manifest", () => {
     expect(validateExtensionManifest(manifest, { version: "1.2.3", release: true })).toEqual([]);
   });
 
+  it.each(["1", "0.0.0.1", "65535.65535.65535.65535"])(
+    "accepts Chrome extension version boundary %s",
+    (version) => {
+      const manifest = createExtensionManifest({ version, release: true });
+      expect(validateExtensionManifest(manifest, { version, release: true })).toEqual([]);
+    }
+  );
+
+  it.each([
+    "0",
+    "0.0.0.0",
+    "01.2.3",
+    "1..2",
+    "1.2.65536",
+    "1.2.3.4.5",
+    "1.2.3-beta.1",
+    "1.2.3+build.7"
+  ])("rejects Chrome-incompatible extension version %s", (version) => {
+    const manifest = createExtensionManifest({ version, release: true });
+    expect(validateExtensionManifest(manifest, { version, release: true })).toContain(
+      "Manifest version must use 1-4 dot-separated integers from 0 to 65535, without leading zeroes, and must not be all zero."
+    );
+  });
+
   it("rejects store-safe packages without restart-safe cleanup alarms", () => {
     const manifest = createExtensionManifest({
       version: "1.2.3",

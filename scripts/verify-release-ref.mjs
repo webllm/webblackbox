@@ -5,8 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const releaseTagPattern =
-  /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const releaseTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 const privateReleaseSurfaces = new Map([
   ["apps/extension", "@webblackbox/extension"],
@@ -15,8 +14,11 @@ const privateReleaseSurfaces = new Map([
 ]);
 
 export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
-  if (!releaseTagPattern.test(tag)) {
-    throw new Error(`Release tag must be an exact semantic version tag (vX.Y.Z): ${tag}`);
+  const expectedVersion = parseReleaseVersion(tag);
+  if (!expectedVersion) {
+    throw new Error(
+      `Release tag must be an exact semantic version tag (vX.Y.Z) compatible with Chrome (components 0..65535 and not all zero): ${tag}`
+    );
   }
 
   const tagRef = `refs/tags/${tag}^{commit}`;
@@ -35,7 +37,6 @@ export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
     throw new Error(`Release commit ${tagCommit} is not contained in ${mainRef}`);
   }
 
-  const expectedVersion = tag.slice(1);
   const packages = await readReleasePackages(root);
   if (!packages.some((entry) => !entry.private)) {
     throw new Error("No public packages were found for release verification");
@@ -56,6 +57,23 @@ export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
     version: expectedVersion,
     packages: packages.map((entry) => entry.name).sort()
   };
+}
+
+function parseReleaseVersion(tag) {
+  const match = releaseTagPattern.exec(tag);
+  if (!match) {
+    return undefined;
+  }
+
+  const components = match.slice(1).map(Number);
+  if (components.some((component) => !Number.isSafeInteger(component) || component > 65_535)) {
+    return undefined;
+  }
+  if (components.every((component) => component === 0)) {
+    return undefined;
+  }
+
+  return tag.slice(1);
 }
 
 async function readReleasePackages(root) {
