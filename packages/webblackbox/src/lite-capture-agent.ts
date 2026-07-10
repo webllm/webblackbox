@@ -824,7 +824,7 @@ export class LiteCaptureAgent {
       this.mode !== "full" &&
       this.isTopLevelFrame &&
       this.sampling.screenshotIdleMs > 0 &&
-      this.capturePolicy.categories.screenshots !== "off"
+      this.capturePolicy.categories.screenshots === "allow"
     );
   }
 

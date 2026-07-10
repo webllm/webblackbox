@@ -261,7 +261,7 @@ function findPolicyViolationReason(
   payload: unknown,
   policy: CapturePolicy
 ): string | null {
-  if (eventType === "screen.screenshot" && policy.categories.screenshots === "off") {
+  if (eventType === "screen.screenshot" && policy.categories.screenshots !== "allow") {
     return "screenshots-disabled";
   }
 

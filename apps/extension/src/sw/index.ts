@@ -1213,7 +1213,7 @@ function resolveSessionExportPolicy(runtime: SessionRuntime, policy: ExportPolic
 
   return {
     ...policy,
-    includeScreenshots: categories.screenshots !== "off",
+    includeScreenshots: categories.screenshots === "allow",
     includeScreenRecordings: categories.screenRecordings === "allow"
   };
 }
@@ -1379,6 +1379,10 @@ async function materializeLiteScreenshot(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent
 ): Promise<RawRecorderEvent | null> {
+  if (runtime.config.capturePolicy?.categories.screenshots !== "allow") {
+    return null;
+  }
+
   const payload = asRecord(rawEvent.payload);
   const dataUrl = asString(payload?.dataUrl);
 
@@ -1662,7 +1666,7 @@ function shouldCaptureActionScreenshot(
     return false;
   }
 
-  if (runtime.config.capturePolicy?.categories.screenshots === "off") {
+  if (runtime.config.capturePolicy?.categories.screenshots !== "allow") {
     return false;
   }
 
@@ -2638,7 +2642,7 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
     return;
   }
 
-  if (runtime.config.capturePolicy?.categories.screenshots === "off") {
+  if (runtime.config.capturePolicy?.categories.screenshots !== "allow") {
     return;
   }
 

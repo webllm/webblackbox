@@ -101,6 +101,10 @@ async function materializeLiteScreenshot(
   rawEvent: RawRecorderEvent,
   context: LiteMaterializerContext
 ): Promise<RawRecorderEvent | null> {
+  if (context.config.capturePolicy?.categories.screenshots !== "allow") {
+    return null;
+  }
+
   const payload = asRecord(rawEvent.payload);
   const dataUrl = asString(payload?.dataUrl);
   const maxDataUrlLength =

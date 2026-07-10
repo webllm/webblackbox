@@ -26,6 +26,14 @@ const SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
   }
 };
 
+const MASKED_SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
+  ...SCREENSHOT_TEST_CAPTURE_POLICY,
+  categories: {
+    ...SCREENSHOT_TEST_CAPTURE_POLICY.categories,
+    screenshots: "masked"
+  }
+};
+
 function createAgent(
   state: Partial<LiteCaptureState> = {},
   options: Partial<LiteCaptureAgentOptions> = {}
@@ -250,6 +258,21 @@ describe("LiteCaptureAgent", () => {
     await vi.advanceTimersByTimeAsync(3_500);
 
     expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
+
+    agent.dispose();
+  });
+
+  it("does not capture raw pixels when screenshot policy is masked", async () => {
+    const { agent } = createAgent({
+      capturePolicy: MASKED_SCREENSHOT_TEST_CAPTURE_POLICY,
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(snapdomToBlobMock).not.toHaveBeenCalled();
 
     agent.dispose();
   });

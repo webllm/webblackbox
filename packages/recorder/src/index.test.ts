@@ -817,6 +817,22 @@ describe("recorder", () => {
       },
       {
         raw: createRawEvent({
+          rawType: "screenshot",
+          payload: {
+            contentHash: "unmasked-shot-hash"
+          }
+        }),
+        policy: createPolicy({
+          categories: {
+            ...TEST_CAPTURE_POLICY.categories,
+            screenshots: "masked"
+          }
+        }),
+        reason: "screenshots-disabled",
+        blockedType: "screen.screenshot"
+      },
+      {
+        raw: createRawEvent({
           source: "system",
           rawType: "screen.recording.start",
           payload: {

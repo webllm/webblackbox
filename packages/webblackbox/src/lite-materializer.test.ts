@@ -73,6 +73,14 @@ describe("lite-materializer", () => {
 
   it("materializes screenshot data-url payloads into blob references", async () => {
     const putBlobCalls: Array<{ mime: string; bytes: Uint8Array }> = [];
+    const config = cloneConfig();
+    config.capturePolicy = {
+      ...config.capturePolicy!,
+      categories: {
+        ...config.capturePolicy!.categories,
+        screenshots: "allow"
+      }
+    };
 
     const rawEvent = createRawEvent("screenshot", {
       dataUrl: `data:image/png;base64,${Buffer.from([1, 2, 3, 4]).toString("base64")}`,
@@ -82,7 +90,7 @@ describe("lite-materializer", () => {
     });
 
     const result = await materializeLiteRawEvent(rawEvent, {
-      config: cloneConfig(),
+      config,
       putBlob: async (mime, bytes) => {
         putBlobCalls.push({ mime, bytes });
         return "hash-shot";
@@ -100,6 +108,31 @@ describe("lite-materializer", () => {
       reason: "start",
       size: 4
     });
+  });
+
+  it("does not persist screenshot bytes for masked policy", async () => {
+    const config = cloneConfig();
+    config.capturePolicy = {
+      ...config.capturePolicy!,
+      categories: {
+        ...config.capturePolicy!.categories,
+        screenshots: "masked"
+      }
+    };
+    const putBlob = vi.fn(async () => "unexpected-hash");
+
+    const result = await materializeLiteRawEvent(
+      createRawEvent("screenshot", {
+        dataUrl: `data:image/png;base64,${Buffer.from([1, 2, 3, 4]).toString("base64")}`
+      }),
+      {
+        config,
+        putBlob
+      }
+    );
+
+    expect(result).toBeNull();
+    expect(putBlob).not.toHaveBeenCalled();
   });
 
   it("materializes network bodies with redaction and byte caps", async () => {
