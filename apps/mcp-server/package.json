@@ -56,7 +56,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.21.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@webblackbox/player-sdk": "workspace:*",
     "jszip": "^3.10.1",
     "zod": "^4.1.11"
