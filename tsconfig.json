@@ -19,6 +19,9 @@
       "path": "./packages/player-sdk"
     },
     {
+      "path": "./packages/webblackbox"
+    },
+    {
       "path": "./apps/mcp-server"
     },
     {
@@ -26,6 +29,9 @@
     },
     {
       "path": "./apps/player"
+    },
+    {
+      "path": "./apps/share-server"
     }
   ]
 }
