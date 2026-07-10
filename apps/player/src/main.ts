@@ -69,11 +69,7 @@ import {
   getShareServerApiKeyForBaseUrl,
   setShareServerApiKeyForBaseUrl
 } from "./lib/share-api-key.js";
-import {
-  normalizeShareServerBaseUrl,
-  resolveShareArchiveRequest,
-  resolveShareServerOrigin
-} from "./lib/share.js";
+import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
 import {
   readScreenshotContext,
   readScreenshotMarker,
@@ -410,7 +406,9 @@ const ACTION_MARKER_TYPES = new Set([
 
 const initialShareServerBaseUrl =
   readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? DEFAULT_SHARE_SERVER_BASE_URL;
-const initialShareServerApiKeysByOrigin = readStoredShareServerApiKeys(initialShareServerBaseUrl);
+const initialShareServerApiKeysByOrigin: Record<string, string> = {};
+removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
+removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
 const primaryArchiveLoadGate = new LatestTaskGate();
 const compareArchiveLoadGate = new LatestTaskGate();
 
@@ -1895,7 +1893,6 @@ async function shareLoadedArchive(): Promise<void> {
 
   state.shareServerBaseUrl = normalizedBaseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
-  rememberShareServerApiKey(normalizedBaseUrl, shareConfig.apiKey);
 
   const headers: Record<string, string> = {
     "content-type": "application/octet-stream",
@@ -1951,6 +1948,7 @@ async function shareLoadedArchive(): Promise<void> {
       throw new Error(i18n.messages.feedbackShareMissingUrl);
     }
 
+    rememberShareServerApiKey(normalizedBaseUrl, shareConfig.apiKey);
     await copyText(shareUrl);
     setFeedback(i18n.t("feedbackShareSucceeded", { shareUrl }));
   } catch (error) {
@@ -1968,7 +1966,11 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
   await loadArchiveFromShareReference(shareInput.reference, shareInput.apiKey);
 }
 
-async function loadArchiveFromShareReference(reference: string, apiKey: string): Promise<void> {
+async function loadArchiveFromShareReference(
+  reference: string,
+  apiKey: string,
+  rememberApiKeyOnSuccess = true
+): Promise<void> {
   const loadToken = primaryArchiveLoadGate.begin();
   const trimmedReference = reference.trim();
   const trimmedApiKey = apiKey.trim();
@@ -1982,7 +1984,6 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
 
   state.shareServerBaseUrl = resolved.baseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, resolved.baseUrl);
-  rememberShareServerApiKey(resolved.baseUrl, trimmedApiKey);
 
   try {
     const headers: Record<string, string> = {};
@@ -2008,6 +2009,9 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
     );
 
     if (loaded && primaryArchiveLoadGate.isCurrent(loadToken)) {
+      if (rememberApiKeyOnSuccess) {
+        rememberShareServerApiKey(resolved.baseUrl, trimmedApiKey);
+      }
       setFeedback(i18n.t("feedbackSharedArchiveLoaded", { shareId: resolved.shareId }));
     }
   } catch (error) {
@@ -2031,7 +2035,7 @@ async function maybeAutoLoadSharedArchiveFromLocation(): Promise<void> {
   }
 
   setFeedback(i18n.messages.feedbackSharedArchiveLoadingFromUrl);
-  await loadArchiveFromShareReference(shareRef, "");
+  await loadArchiveFromShareReference(shareRef, "", false);
 }
 
 async function promptShareUploadConfig(): Promise<{
@@ -2059,17 +2063,21 @@ async function promptShareUploadConfig(): Promise<{
   }
 
   if (result !== "confirm") {
+    refs.shareUploadApiKey.value = "";
     return null;
   }
 
   if (!refs.shareUploadPrivacyReviewed.checked) {
+    refs.shareUploadApiKey.value = "";
     return null;
   }
 
-  return {
+  const config = {
     baseUrl: refs.shareUploadBaseUrl.value.trim(),
     apiKey: refs.shareUploadApiKey.value.trim()
   };
+  refs.shareUploadApiKey.value = "";
+  return config;
 }
 
 function renderSharePrivacyPreflight(): void {
@@ -2253,18 +2261,22 @@ async function promptShareReferenceInput(): Promise<{ reference: string; apiKey:
   }
 
   if (result !== "confirm") {
+    refs.shareLoadApiKey.value = "";
     return null;
   }
 
   const reference = refs.shareLoadReference.value.trim();
   if (reference.length === 0) {
+    refs.shareLoadApiKey.value = "";
     return null;
   }
 
-  return {
+  const shareInput = {
     reference,
     apiKey: refs.shareLoadApiKey.value.trim()
   };
+  refs.shareLoadApiKey.value = "";
+  return shareInput;
 }
 
 function togglePlayback(): void {
@@ -5669,92 +5681,4 @@ function setFeedback(text: string): void {
 
 function rememberShareServerApiKey(baseUrl: string, apiKey: string): void {
   setShareServerApiKeyForBaseUrl(state.shareServerApiKeysByOrigin, baseUrl, apiKey);
-  persistShareServerApiKeys(state.shareServerApiKeysByOrigin);
-}
-
-function readStoredShareServerApiKeys(baseUrl: string): Record<string, string> {
-  const parsed = parseStoredShareServerApiKeys(readStoredText(SHARE_SERVER_API_KEYS_STORAGE_KEY));
-  const legacyApiKey = readStoredText(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
-
-  if (legacyApiKey) {
-    const origin = resolveShareServerOrigin(baseUrl);
-
-    if (origin && !parsed[origin]) {
-      parsed[origin] = legacyApiKey;
-    }
-
-    removeStoredItem(LEGACY_SHARE_SERVER_API_KEY_STORAGE_KEY);
-    persistShareServerApiKeys(parsed);
-  }
-
-  return parsed;
-}
-
-function parseStoredShareServerApiKeys(raw: string | null): Record<string, string> {
-  if (!raw) {
-    return {};
-  }
-
-  try {
-    const candidate = asRecord(JSON.parse(raw));
-
-    if (!candidate) {
-      return {};
-    }
-
-    const parsed: Record<string, string> = {};
-
-    for (const [originCandidate, apiKeyCandidate] of Object.entries(candidate)) {
-      if (typeof apiKeyCandidate !== "string") {
-        continue;
-      }
-
-      const origin = resolveShareServerOrigin(originCandidate);
-      const apiKey = apiKeyCandidate.trim();
-
-      if (!origin || apiKey.length === 0) {
-        continue;
-      }
-
-      parsed[origin] = apiKey;
-    }
-
-    return parsed;
-  } catch {
-    removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
-    return {};
-  }
-}
-
-function persistShareServerApiKeys(apiKeysByOrigin: Record<string, string>): void {
-  const entries: Array<{ origin: string; apiKey: string }> = [];
-
-  for (const [originCandidate, apiKeyCandidate] of Object.entries(apiKeysByOrigin)) {
-    const origin = resolveShareServerOrigin(originCandidate);
-    const apiKey = apiKeyCandidate.trim();
-
-    if (!origin || apiKey.length === 0) {
-      continue;
-    }
-
-    entries.push({
-      origin,
-      apiKey
-    });
-  }
-
-  entries.sort((left, right) => left.origin.localeCompare(right.origin));
-
-  if (entries.length === 0) {
-    removeStoredItem(SHARE_SERVER_API_KEYS_STORAGE_KEY);
-    return;
-  }
-
-  const serialized: Record<string, string> = {};
-
-  for (const entry of entries) {
-    serialized[entry.origin] = entry.apiKey;
-  }
-
-  writeStoredText(SHARE_SERVER_API_KEYS_STORAGE_KEY, JSON.stringify(serialized));
 }

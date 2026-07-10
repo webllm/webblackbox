@@ -39,14 +39,9 @@ export function bindShareApiKeyInputToTargetOrigin(
   resolveBaseUrl: (value: string) => string | null,
   resolveApiKeyForBaseUrl: (baseUrl: string | null) => string
 ): () => void {
-  let apiKeyEdited = false;
   let resolvedBaseUrl = resolveBaseUrl(sourceInput.value);
   let targetOrigin = resolveShareServerOrigin(resolvedBaseUrl);
   apiKeyInput.value = resolveApiKeyForBaseUrl(resolvedBaseUrl);
-
-  const onApiKeyInput = (): void => {
-    apiKeyEdited = true;
-  };
 
   const onSourceInput = (): void => {
     const nextBaseUrl = resolveBaseUrl(sourceInput.value);
@@ -58,17 +53,12 @@ export function bindShareApiKeyInputToTargetOrigin(
 
     resolvedBaseUrl = nextBaseUrl;
     targetOrigin = nextOrigin;
-
-    if (!apiKeyEdited) {
-      apiKeyInput.value = resolveApiKeyForBaseUrl(resolvedBaseUrl);
-    }
+    apiKeyInput.value = resolveApiKeyForBaseUrl(resolvedBaseUrl);
   };
 
-  apiKeyInput.addEventListener("input", onApiKeyInput);
   sourceInput.addEventListener("input", onSourceInput);
 
   return () => {
-    apiKeyInput.removeEventListener("input", onApiKeyInput);
     sourceInput.removeEventListener("input", onSourceInput);
   };
 }

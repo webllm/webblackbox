@@ -138,6 +138,7 @@ pnpm player:pages:deploy
 - Jira issue templates
 - HAR export
 - Share upload and link-based reload via `@webblackbox/share-server`
+- Share API keys are retained only in page memory after a successful request; they are never persisted to `localStorage`, and legacy persisted keys are removed on startup
 
 ### Session Comparison
 
