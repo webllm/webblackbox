@@ -6,8 +6,17 @@ const ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
 const ZIP_CENTRAL_DIRECTORY_ENTRY_SIGNATURE = 0x02014b50;
 const ZIP_CENTRAL_DIRECTORY_DIGITAL_SIGNATURE = 0x05054b50;
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP64_EXTRA_FIELD_ID = 0x0001;
+const ZIP_UNICODE_PATH_EXTRA_FIELD_ID = 0x7075;
+const ZIP_UINT32_SENTINEL = 0xffffffff;
 const ZIP_END_OF_CENTRAL_DIRECTORY_MIN_BYTES = 22;
 const ZIP_MAX_COMMENT_BYTES = 0xffff;
+
+type ZipExtraField = {
+  dataOffset: number;
+  length: number;
+};
 
 /** Resource limits applied before and while an archive is opened. Overrides may only tighten them. */
 export type ArchiveResourceLimits = {
@@ -303,10 +312,17 @@ function readDeclaredZipEntryCount(bytes: Uint8Array): number | null {
         continue;
       }
 
+      const physicalCentralDirectoryOffset = offset - centralDirectoryBytes;
+      const archiveZero = physicalCentralDirectoryOffset - centralDirectoryOffset;
+      if (!Number.isSafeInteger(archiveZero) || archiveZero < 0) {
+        return Number.POSITIVE_INFINITY;
+      }
+
       const physicalEntryCount = countPhysicalCentralDirectoryEntries(
         view,
-        offset - centralDirectoryBytes,
-        offset
+        physicalCentralDirectoryOffset,
+        offset,
+        archiveZero
       );
       return physicalEntryCount === null
         ? Number.POSITIVE_INFINITY
@@ -321,7 +337,8 @@ function readDeclaredZipEntryCount(bytes: Uint8Array): number | null {
     const physicalEntryCount = countPhysicalCentralDirectoryEntries(
       view,
       zip64.recordOffset - zip64.centralDirectoryBytes,
-      zip64.recordOffset
+      zip64.recordOffset,
+      zip64.recordOffset - zip64.centralDirectoryBytes - zip64.centralDirectoryOffset
     );
     return physicalEntryCount === null
       ? Number.POSITIVE_INFINITY
@@ -334,9 +351,17 @@ function readDeclaredZipEntryCount(bytes: Uint8Array): number | null {
 function countPhysicalCentralDirectoryEntries(
   view: DataView,
   centralDirectoryOffset: number,
-  centralDirectoryEnd: number
+  centralDirectoryEnd: number,
+  archiveZero: number
 ): number | null {
-  if (centralDirectoryOffset < 0 || centralDirectoryEnd > view.byteLength) {
+  if (
+    !Number.isSafeInteger(centralDirectoryOffset) ||
+    !Number.isSafeInteger(centralDirectoryEnd) ||
+    !Number.isSafeInteger(archiveZero) ||
+    centralDirectoryOffset < 0 ||
+    centralDirectoryEnd > view.byteLength ||
+    archiveZero < 0
+  ) {
     return null;
   }
 
@@ -365,22 +390,190 @@ function countPhysicalCentralDirectoryEntries(
     const extraBytes = view.getUint16(offset + 30, true);
     const commentBytes = view.getUint16(offset + 32, true);
     const fileNameOffset = offset + 46;
-    const nextOffset = fileNameOffset + fileNameBytes + extraBytes + commentBytes;
+    const extraOffset = fileNameOffset + fileNameBytes;
+    const commentOffset = extraOffset + extraBytes;
+    const nextOffset = commentOffset + commentBytes;
     if (nextOffset > centralDirectoryEnd) {
       return null;
     }
 
     const fileName = readCanonicalArchiveEntryName(view, fileNameOffset, fileNameBytes);
+    const extraFields = readZipExtraFields(
+      view,
+      extraOffset,
+      extraBytes,
+      `central directory entry '${fileName}'`
+    );
     if (names.has(fileName)) {
       throw new Error(`Invalid WebBlackbox archive: duplicate ZIP entry '${fileName}'.`);
     }
     names.add(fileName);
+
+    const localHeaderOffset = readCentralDirectoryLocalHeaderOffset(view, offset, extraFields);
+    assertMatchingLocalFileHeader(
+      view,
+      archiveZero,
+      localHeaderOffset,
+      centralDirectoryOffset,
+      fileNameOffset,
+      fileNameBytes,
+      fileName
+    );
 
     offset = nextOffset;
     count += 1;
   }
 
   return offset === centralDirectoryEnd ? count : null;
+}
+
+function readZipExtraFields(
+  view: DataView,
+  extraOffset: number,
+  extraBytes: number,
+  location: string
+): Map<number, ZipExtraField> {
+  const extraEnd = extraOffset + extraBytes;
+  if (
+    !Number.isSafeInteger(extraOffset) ||
+    !Number.isSafeInteger(extraEnd) ||
+    extraOffset < 0 ||
+    extraEnd > view.byteLength
+  ) {
+    throw new Error(`Invalid WebBlackbox archive: malformed ZIP extra fields in ${location}.`);
+  }
+
+  const fields = new Map<number, ZipExtraField>();
+  let offset = extraOffset;
+  while (offset < extraEnd) {
+    if (offset + 4 > extraEnd) {
+      throw new Error(`Invalid WebBlackbox archive: malformed ZIP extra fields in ${location}.`);
+    }
+
+    const fieldId = view.getUint16(offset, true);
+    const fieldBytes = view.getUint16(offset + 2, true);
+    const dataOffset = offset + 4;
+    const nextOffset = dataOffset + fieldBytes;
+    if (nextOffset > extraEnd) {
+      throw new Error(`Invalid WebBlackbox archive: malformed ZIP extra fields in ${location}.`);
+    }
+    if (fieldId === ZIP_UNICODE_PATH_EXTRA_FIELD_ID) {
+      throw new Error(
+        `Invalid WebBlackbox archive: Unicode Path ZIP extra fields are not supported in ${location}.`
+      );
+    }
+
+    // JSZip retains the last field for duplicate IDs, so mirror that behavior for ZIP64 offsets.
+    fields.set(fieldId, { dataOffset, length: fieldBytes });
+    offset = nextOffset;
+  }
+
+  return fields;
+}
+
+function readCentralDirectoryLocalHeaderOffset(
+  view: DataView,
+  centralEntryOffset: number,
+  extraFields: ReadonlyMap<number, ZipExtraField>
+): number {
+  const localHeaderOffset = view.getUint32(centralEntryOffset + 42, true);
+  if (localHeaderOffset !== ZIP_UINT32_SENTINEL) {
+    return localHeaderOffset;
+  }
+
+  const zip64 = extraFields.get(ZIP64_EXTRA_FIELD_ID);
+  if (!zip64) {
+    throw new Error(
+      "Invalid WebBlackbox archive: ZIP64 local header offset is missing from the central directory."
+    );
+  }
+
+  let offset = zip64.dataOffset;
+  const end = zip64.dataOffset + zip64.length;
+  if (view.getUint32(centralEntryOffset + 24, true) === ZIP_UINT32_SENTINEL) {
+    offset = skipZip64Integer(offset, end, "uncompressed size");
+  }
+  if (view.getUint32(centralEntryOffset + 20, true) === ZIP_UINT32_SENTINEL) {
+    offset = skipZip64Integer(offset, end, "compressed size");
+  }
+  if (offset + 8 > end) {
+    throw new Error(
+      "Invalid WebBlackbox archive: malformed ZIP64 local header offset in the central directory."
+    );
+  }
+
+  const value = view.getBigUint64(offset, true);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Number(value);
+}
+
+function skipZip64Integer(offset: number, end: number, field: string): number {
+  if (offset + 8 > end) {
+    throw new Error(
+      `Invalid WebBlackbox archive: malformed ZIP64 ${field} in the central directory.`
+    );
+  }
+  return offset + 8;
+}
+
+function assertMatchingLocalFileHeader(
+  view: DataView,
+  archiveZero: number,
+  localHeaderOffset: number,
+  centralDirectoryOffset: number,
+  centralFileNameOffset: number,
+  centralFileNameBytes: number,
+  fileName: string
+): void {
+  const physicalOffset = archiveZero + localHeaderOffset;
+  if (
+    !Number.isSafeInteger(physicalOffset) ||
+    physicalOffset < archiveZero ||
+    physicalOffset + 30 > centralDirectoryOffset ||
+    view.getUint32(physicalOffset, true) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE
+  ) {
+    throw new Error(`Invalid WebBlackbox archive: invalid local ZIP header for '${fileName}'.`);
+  }
+
+  const localFileNameBytes = view.getUint16(physicalOffset + 26, true);
+  const localExtraBytes = view.getUint16(physicalOffset + 28, true);
+  const localFileNameOffset = physicalOffset + 30;
+  const localExtraOffset = localFileNameOffset + localFileNameBytes;
+  const localHeaderEnd = localExtraOffset + localExtraBytes;
+  if (!Number.isSafeInteger(localHeaderEnd) || localHeaderEnd > centralDirectoryOffset) {
+    throw new Error(`Invalid WebBlackbox archive: malformed local ZIP header for '${fileName}'.`);
+  }
+  if (
+    localFileNameBytes !== centralFileNameBytes ||
+    !equalBytes(view, localFileNameOffset, centralFileNameOffset, centralFileNameBytes)
+  ) {
+    throw new Error(
+      `Invalid WebBlackbox archive: local and central ZIP filenames differ for '${fileName}'.`
+    );
+  }
+
+  readZipExtraFields(
+    view,
+    localExtraOffset,
+    localExtraBytes,
+    `local file header for '${fileName}'`
+  );
+}
+
+function equalBytes(
+  view: DataView,
+  leftOffset: number,
+  rightOffset: number,
+  length: number
+): boolean {
+  for (let index = 0; index < length; index += 1) {
+    if (view.getUint8(leftOffset + index) !== view.getUint8(rightOffset + index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function readCanonicalArchiveEntryName(
@@ -425,6 +618,7 @@ function readZip64CentralDirectory(
 ): {
   entryCount: number;
   centralDirectoryBytes: number;
+  centralDirectoryOffset: number;
   recordOffset: number;
 } | null {
   const locatorOffset = eocdOffset - 20;
@@ -440,6 +634,7 @@ function readZip64CentralDirectory(
     return {
       entryCount: Number.POSITIVE_INFINITY,
       centralDirectoryBytes: Number.POSITIVE_INFINITY,
+      centralDirectoryOffset: Number.POSITIVE_INFINITY,
       recordOffset: 0
     };
   }
@@ -455,13 +650,16 @@ function readZip64CentralDirectory(
 
   const entryCount = view.getBigUint64(zip64Offset + 32, true);
   const centralDirectoryBytes = view.getBigUint64(zip64Offset + 40, true);
+  const centralDirectoryOffset = view.getBigUint64(zip64Offset + 48, true);
   if (
     entryCount > BigInt(Number.MAX_SAFE_INTEGER) ||
-    centralDirectoryBytes > BigInt(Number.MAX_SAFE_INTEGER)
+    centralDirectoryBytes > BigInt(Number.MAX_SAFE_INTEGER) ||
+    centralDirectoryOffset > BigInt(Number.MAX_SAFE_INTEGER)
   ) {
     return {
       entryCount: Number.POSITIVE_INFINITY,
       centralDirectoryBytes: Number.POSITIVE_INFINITY,
+      centralDirectoryOffset: Number.POSITIVE_INFINITY,
       recordOffset: zip64Offset
     };
   }
@@ -469,6 +667,7 @@ function readZip64CentralDirectory(
   return {
     entryCount: Number(entryCount),
     centralDirectoryBytes: Number(centralDirectoryBytes),
+    centralDirectoryOffset: Number(centralDirectoryOffset),
     recordOffset: zip64Offset
   };
 }
