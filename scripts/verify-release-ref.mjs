@@ -37,6 +37,13 @@ export async function verifyReleaseRef({ root, tag, mainRef = "origin/main" }) {
     throw new Error(`Release commit ${tagCommit} is not contained in ${mainRef}`);
   }
 
+  const newestRelease = findNewestStableRelease(root, mainRef);
+  if (newestRelease && compareStableVersions(newestRelease.version, expectedVersion) > 0) {
+    throw new Error(
+      `Release tag ${tag} is superseded by ${newestRelease.tag} on ${mainRef}; refusing to publish or deploy an older stable release`
+    );
+  }
+
   const packages = await readReleasePackages(root);
   if (!packages.some((entry) => !entry.private)) {
     throw new Error("No public packages were found for release verification");
@@ -74,6 +81,38 @@ function parseReleaseVersion(tag) {
   }
 
   return tag.slice(1);
+}
+
+function findNewestStableRelease(root, mainRef) {
+  const output = runGit(root, ["tag", "--merged", mainRef, "--list", "v*"]);
+  let newest;
+
+  for (const tag of output.split(/\r?\n/)) {
+    const version = parseReleaseVersion(tag);
+    if (!version) {
+      continue;
+    }
+
+    if (!newest || compareStableVersions(version, newest.version) > 0) {
+      newest = { tag, version };
+    }
+  }
+
+  return newest;
+}
+
+function compareStableVersions(left, right) {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+
+  for (let index = 0; index < 3; index += 1) {
+    const delta = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  return 0;
 }
 
 async function readReleasePackages(root) {

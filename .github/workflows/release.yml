@@ -36,7 +36,7 @@ jobs:
 
       - name: Verify immutable release source
         run: |
-          git fetch --no-tags origin main:refs/remotes/origin/main
+          git fetch --force --tags origin main:refs/remotes/origin/main
           node scripts/verify-release-ref.mjs "$RELEASE_TAG" origin/main
 
       - name: Verify successful CI for release commit

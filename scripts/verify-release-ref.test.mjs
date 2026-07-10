@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -94,6 +94,35 @@ test("rejects a tagged commit outside the main branch history", async () => {
   );
 });
 
+test("rejects a stable release tag superseded by a newer stable tag on main", async () => {
+  const root = await createRepository("1.2.3");
+  git(root, "tag", "v1.2.3");
+  await updateRepositoryVersion(root, "1.10.0");
+  git(root, "add", ".");
+  git(root, "commit", "-m", "newer stable release");
+  git(root, "tag", "v1.10.0");
+  git(root, "checkout", "--detach", "v1.2.3");
+
+  await assert.rejects(
+    verifyReleaseRef({ root, tag: "v1.2.3", mainRef: "main" }),
+    /v1\.2\.3 is superseded by v1\.10\.0/
+  );
+});
+
+test("ignores non-stable tags when checking for a superseding release", async () => {
+  const root = await createRepository("1.2.3");
+  git(root, "tag", "v1.2.3");
+  await writeFile(resolve(root, "prerelease.txt"), "candidate\n");
+  git(root, "add", ".");
+  git(root, "commit", "-m", "prerelease candidate");
+  git(root, "tag", "v1.3.0-beta.1");
+  git(root, "checkout", "--detach", "v1.2.3");
+
+  const result = await verifyReleaseRef({ root, tag: "v1.2.3", mainRef: "main" });
+
+  assert.equal(result.version, "1.2.3");
+});
+
 test("rejects tags whose public package versions do not match", async () => {
   const root = await createRepository("1.2.4");
   git(root, "tag", "v1.2.3");
@@ -171,6 +200,19 @@ async function createRepository(version, options = {}) {
   git(root, "add", ".");
   git(root, "commit", "-m", "initial");
   return root;
+}
+
+async function updateRepositoryVersion(root, version) {
+  for (const relativePath of [
+    "packages/library/package.json",
+    "apps/extension/package.json",
+    "apps/player/package.json",
+    "apps/share-server/package.json"
+  ]) {
+    const manifestPath = resolve(root, relativePath);
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    await writeFile(manifestPath, `${JSON.stringify({ ...manifest, version }, null, 2)}\n`);
+  }
 }
 
 function git(root, ...args) {
