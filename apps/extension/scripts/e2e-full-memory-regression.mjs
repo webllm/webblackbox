@@ -780,8 +780,12 @@ async function stopActiveSessionFromPopup(popupClient, expectedSid) {
   const expression = `
     (async () => {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
-      const rows = store['webblackbox.runtime.sessions'];
-      const sessions = Array.isArray(rows) ? rows : [];
+      const snapshot = store['webblackbox.runtime.sessions'];
+      const sessions = Array.isArray(snapshot)
+        ? snapshot
+        : Array.isArray(snapshot?.sessions)
+          ? snapshot.sessions
+          : [];
       const expectedSid = ${JSON.stringify(expectedSid)};
       const active =
         (expectedSid
@@ -825,8 +829,12 @@ async function readRuntimeSessions(popupClient) {
   const expression = `
     (async () => {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
-      const rows = store['webblackbox.runtime.sessions'];
-      return Array.isArray(rows) ? rows : [];
+      const snapshot = store['webblackbox.runtime.sessions'];
+      return Array.isArray(snapshot)
+        ? snapshot
+        : Array.isArray(snapshot?.sessions)
+          ? snapshot.sessions
+          : [];
     })()
   `;
 
