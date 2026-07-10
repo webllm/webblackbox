@@ -314,6 +314,26 @@ async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Ar
     reqId,
     eventIds
   }));
+  const chunkId = "chunk-000001";
+  const eventContent = events.map((event) => JSON.stringify(event)).join("\n");
+  const eventBytes = Buffer.from(eventContent);
+  const timeIndex =
+    firstEvent && lastEvent
+      ? [
+          {
+            chunkId,
+            seq: 1,
+            tStart: firstEvent.t,
+            tEnd: lastEvent.t,
+            monoStart: firstEvent.mono,
+            monoEnd: lastEvent.mono,
+            eventCount: events.length,
+            byteLength: eventBytes.byteLength,
+            codec: "none" as const,
+            sha256: sha256Hex(eventContent)
+          }
+        ]
+      : [];
   const manifest: ExportManifest = {
     protocolVersion: 1,
     createdAt: new Date(0).toISOString(),
@@ -350,13 +370,10 @@ async function createArchiveFixture(events: WebBlackboxEvent[]): Promise<Uint8Ar
   };
 
   addJsonFile("manifest.json", manifest);
-  addJsonFile("index/time.json", []);
+  addJsonFile("index/time.json", timeIndex);
   addJsonFile("index/req.json", reqIndex);
   addJsonFile("index/inv.json", []);
-  addTextFile(
-    "events/chunk-000001.ndjson",
-    events.map((event) => JSON.stringify(event)).join("\n")
-  );
+  addTextFile(`events/${chunkId}.ndjson`, eventContent);
 
   const fileHashes = Object.fromEntries(
     [...files.entries()].map(([path, content]) => [path, sha256Hex(content)])
@@ -438,6 +455,7 @@ function createBaselineEvents(): WebBlackboxEvent[] {
       data: {
         requestId: "REQ-B-1",
         response: {
+          url: "https://example.com/api/items",
           status: 200,
           statusText: "OK",
           mimeType: "application/json"
@@ -560,6 +578,7 @@ function createRegressionEvents(): WebBlackboxEvent[] {
       data: {
         requestId: "REQ-R-1",
         response: {
+          url: "https://example.com/api/items",
           status: 500,
           statusText: "Internal Server Error",
           mimeType: "application/json"

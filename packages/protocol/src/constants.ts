@@ -1,5 +1,9 @@
 export const WEBBLACKBOX_PROTOCOL_VERSION = 1;
 
+export const ARCHIVE_PBKDF2_MIN_ITERATIONS = 100_000;
+
+export const ARCHIVE_PBKDF2_MAX_ITERATIONS = 1_000_000;
+
 export const EVENT_LEVELS = ["debug", "info", "warn", "error"] as const;
 
 export const CAPTURE_MODES = ["lite", "full"] as const;

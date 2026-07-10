@@ -168,27 +168,10 @@ describe("WebBlackboxPlayer", () => {
     );
   });
 
-  it("parses chunks lazily when queried", async () => {
+  it("rejects malformed event chunks while opening the archive", async () => {
     const bytes = await createLazyParseFixtureArchive();
-    const player = await WebBlackboxPlayer.open(bytes);
 
-    expect(
-      player.query({
-        range: {
-          monoStart: 0,
-          monoEnd: 50
-        }
-      })
-    ).toEqual([expect.objectContaining({ id: "E-L-1" })]);
-
-    expect(() =>
-      player.query({
-        range: {
-          monoStart: 90,
-          monoEnd: 120
-        }
-      })
-    ).toThrow(/chunk-000002/i);
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/chunk-000002.*malformed JSON/i);
   });
 
   it("memoizes full-range queries and derived analyzers", async () => {
@@ -312,6 +295,181 @@ describe("WebBlackboxPlayer", () => {
         value: originalAtob
       });
     }
+  });
+
+  it("rejects plaintext archives that claim encryption with an empty file map", async () => {
+    const bytes = await rewriteArchiveManifest(await createFixtureArchive(), (manifest) => {
+      manifest.encryption = createEncryptionMetadata({});
+    });
+
+    await expect(WebBlackboxPlayer.open(bytes, { passphrase: "test-passphrase" })).rejects.toThrow(
+      /schema validation|at least one private file/i
+    );
+  });
+
+  it("rejects encrypted archives with incomplete private-file metadata", async () => {
+    const bytes = await rewriteArchiveManifest(await createFixtureArchive(), (manifest) => {
+      manifest.encryption = createEncryptionMetadata({
+        "events/chunk-000001.ndjson": {
+          ivBase64: toBase64(randomBytes(12))
+        }
+      });
+    });
+
+    await expect(WebBlackboxPlayer.open(bytes, { passphrase: "test-passphrase" })).rejects.toThrow(
+      /missing file metadata for 'index\/time\.json'/i
+    );
+  });
+
+  it("rejects encrypted archives that reuse an AES-GCM initialization vector", async () => {
+    const bytes = await rewriteArchiveManifest(
+      await createEncryptedArchive(await createFixtureArchive(), "test-passphrase"),
+      (manifest) => {
+        const encryption = manifest.encryption;
+        const reused = encryption?.files["index/time.json"];
+
+        if (!encryption || !reused) {
+          throw new Error("Missing encrypted fixture metadata");
+        }
+
+        encryption.files["events/chunk-000001.ndjson"] = { ...reused };
+      }
+    );
+
+    await expect(WebBlackboxPlayer.open(bytes, { passphrase: "test-passphrase" })).rejects.toThrow(
+      /reuses an initialization vector/i
+    );
+  });
+
+  it("rejects unsupported and unsafe archive encryption parameters", async () => {
+    const mutations: Array<(encryption: Record<string, unknown>) => void> = [
+      (encryption) => {
+        encryption.algorithm = "AES-CBC";
+      },
+      (encryption) => {
+        const kdf = encryption.kdf as Record<string, unknown>;
+        kdf.name = "scrypt";
+      },
+      (encryption) => {
+        const kdf = encryption.kdf as Record<string, unknown>;
+        kdf.hash = "SHA-1";
+      },
+      (encryption) => {
+        const kdf = encryption.kdf as Record<string, unknown>;
+        kdf.iterations = 1;
+      },
+      (encryption) => {
+        const kdf = encryption.kdf as Record<string, unknown>;
+        kdf.iterations = 10_000_000;
+      },
+      (encryption) => {
+        const kdf = encryption.kdf as Record<string, unknown>;
+        kdf.saltBase64 = "invalid-salt";
+      },
+      (encryption) => {
+        const files = encryption.files as Record<string, { ivBase64: string }>;
+        files["events/chunk-000001.ndjson"] = { ivBase64: "invalid-iv" };
+      }
+    ];
+
+    for (const mutate of mutations) {
+      const bytes = await rewriteArchiveManifest(await createFixtureArchive(), (manifest) => {
+        const encryption = createEncryptionMetadata({
+          "events/chunk-000001.ndjson": {
+            ivBase64: toBase64(randomBytes(12))
+          }
+        }) as unknown as Record<string, unknown>;
+        mutate(encryption);
+        manifest.encryption = encryption as unknown as ExportManifest["encryption"];
+      });
+
+      await expect(
+        WebBlackboxPlayer.open(bytes, { passphrase: "test-passphrase" })
+      ).rejects.toThrow(/schema validation/i);
+    }
+  });
+
+  it("rejects schema-invalid archived events during open", async () => {
+    const zip = await JSZip.loadAsync(await createFixtureArchive());
+    const path = "events/chunk-000001.ndjson";
+    const events = JSON.parse(
+      `[${(await zip.file(path)!.async("string")).split("\n").join(",")}]`
+    ) as WebBlackboxEvent[];
+    const request = events.find((event) => event.type === "network.request");
+
+    if (!request) {
+      throw new Error("Missing network request fixture event");
+    }
+
+    request.data = {};
+    zip.file(path, events.map((event) => JSON.stringify(event)).join("\n"));
+    await writeIntegrityManifest(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(
+      /event line 3 failed schema validation/i
+    );
+  });
+
+  it("rejects invalid chunk sequences, chunk mappings, and index event references", async () => {
+    const invalidSequenceZip = await JSZip.loadAsync(await createFixtureArchive());
+    const timeIndex = JSON.parse(
+      await invalidSequenceZip.file("index/time.json")!.async("string")
+    ) as ChunkTimeIndexEntry[];
+
+    if (!timeIndex[0]) {
+      throw new Error("Missing time-index fixture entry");
+    }
+
+    timeIndex[0].seq = 0;
+    invalidSequenceZip.file("index/time.json", JSON.stringify(timeIndex));
+    await writeIntegrityHashes(invalidSequenceZip);
+    const invalidSequenceBytes = await invalidSequenceZip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(invalidSequenceBytes)).rejects.toThrow(
+      /index\/time\.json failed schema validation/i
+    );
+
+    const invalidChunkMapZip = await JSZip.loadAsync(await createFixtureArchive());
+    const invalidChunkMap = JSON.parse(
+      await invalidChunkMapZip.file("index/time.json")!.async("string")
+    ) as ChunkTimeIndexEntry[];
+
+    if (!invalidChunkMap[0]) {
+      throw new Error("Missing time-index fixture entry");
+    }
+
+    invalidChunkMap[0].chunkId = "chunk-does-not-exist";
+    invalidChunkMapZip.file("index/time.json", JSON.stringify(invalidChunkMap));
+    await writeIntegrityHashes(invalidChunkMapZip);
+    const invalidChunkMapBytes = await invalidChunkMapZip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(invalidChunkMapBytes)).rejects.toThrow(
+      /time index is missing event chunk|does not match archive event chunks/i
+    );
+
+    const unknownReferenceZip = await JSZip.loadAsync(await createFixtureArchive());
+    unknownReferenceZip.file(
+      "index/req.json",
+      JSON.stringify([{ reqId: "R-1", eventIds: ["E-does-not-exist"] }])
+    );
+    await writeIntegrityHashes(unknownReferenceZip);
+    const unknownReferenceBytes = await unknownReferenceZip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(unknownReferenceBytes)).rejects.toThrow(
+      /index references an unknown event id/i
+    );
+  });
+
+  it("rejects schema-invalid privacy manifests", async () => {
+    const zip = await JSZip.loadAsync(await createFixtureArchive());
+    zip.file("privacy/manifest.json", JSON.stringify({ schemaVersion: 999 }));
+    await writeIntegrityManifest(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(
+      /privacy\/manifest\.json failed schema validation/i
+    );
   });
 
   it("fails encrypted archive open when Web Crypto API is unavailable", async () => {
@@ -693,7 +851,10 @@ async function createFixtureArchive(): Promise<Uint8Array> {
       mono: 1,
       type: "meta.session.start",
       id: "E-1",
-      data: {}
+      data: {
+        url: "https://example.com",
+        mode: "full"
+      }
     },
     {
       v: 1,
@@ -720,7 +881,9 @@ async function createFixtureArchive(): Promise<Uint8Array> {
         act: "A-1"
       },
       data: {
-        url: "https://example.com/api"
+        reqId: "R-1",
+        url: "https://example.com/api",
+        method: "GET"
       }
     },
     {
@@ -736,6 +899,7 @@ async function createFixtureArchive(): Promise<Uint8Array> {
         act: "A-1"
       },
       data: {
+        reqId: "R-1",
         status: 200
       }
     },
@@ -852,6 +1016,8 @@ async function createPrivacyFixtureArchive(): Promise<Uint8Array> {
       id: "E-privacy-1",
       data: {
         reqId: "R-privacy",
+        url: "https://privacy.example.test/api",
+        method: "GET",
         headers: {
           authorization: hashed,
           "x-api-key": "[REDACTED]"
@@ -1630,6 +1796,7 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       data: {
         requestId: "R-1",
         response: {
+          url: "https://example.com/api",
           status: 200,
           statusText: "OK",
           mimeType: "application/json",
@@ -1971,6 +2138,11 @@ async function tamperArchiveFile(
 }
 
 async function writeIntegrityManifest(zip: JSZip): Promise<void> {
+  await synchronizePlainArchiveMetadata(zip);
+  await writeIntegrityHashes(zip);
+}
+
+async function writeIntegrityHashes(zip: JSZip): Promise<void> {
   const fileHashes: Record<string, string> = {};
 
   for (const path of Object.keys(zip.files).sort()) {
@@ -2000,6 +2172,108 @@ async function writeIntegrityManifest(zip: JSZip): Promise<void> {
   );
 }
 
+async function synchronizePlainArchiveMetadata(zip: JSZip): Promise<void> {
+  const manifestFile = zip.file("manifest.json");
+  const timeIndexFile = zip.file("index/time.json");
+
+  if (!manifestFile || !timeIndexFile) {
+    return;
+  }
+
+  const manifest = JSON.parse(await manifestFile.async("string")) as ExportManifest;
+
+  if (manifest.encryption) {
+    return;
+  }
+
+  const currentTimeIndex = JSON.parse(await timeIndexFile.async("string")) as ChunkTimeIndexEntry[];
+  const currentByChunkId = new Map(currentTimeIndex.map((entry) => [entry.chunkId, entry]));
+  const eventPaths = Object.keys(zip.files)
+    .filter((path) => /^events\/.+\.ndjson$/.test(path))
+    .sort();
+  const timeIndex: ChunkTimeIndexEntry[] = [];
+
+  for (const [pathIndex, path] of eventPaths.entries()) {
+    const chunkId = /^events\/(.+)\.ndjson$/.exec(path)?.[1];
+    const file = zip.file(path);
+
+    if (!chunkId || !file) {
+      continue;
+    }
+
+    const bytes = await file.async("uint8array");
+    const current = currentByChunkId.get(chunkId);
+    const codec = current?.codec ?? manifest.chunkCodec;
+    let events: WebBlackboxEvent[] | null = null;
+
+    try {
+      const decoded = decompressFixtureChunk(bytes, codec);
+      events = new TextDecoder()
+        .decode(decoded)
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as WebBlackboxEvent);
+    } catch {
+      // Malformed fixture chunks retain their explicit bounds so rejection is tested by the reader.
+    }
+
+    const first = events?.[0];
+    const last = events?.[events.length - 1];
+
+    timeIndex.push({
+      chunkId,
+      seq: current?.seq ?? pathIndex + 1,
+      tStart: first?.t ?? current?.tStart ?? 0,
+      tEnd: last?.t ?? current?.tEnd ?? 0,
+      monoStart: first?.mono ?? current?.monoStart ?? 0,
+      monoEnd: last?.mono ?? current?.monoEnd ?? 0,
+      eventCount: events?.length ?? current?.eventCount ?? 1,
+      byteLength: bytes.byteLength,
+      codec,
+      sha256: await sha256HexForTest(bytes)
+    });
+  }
+
+  manifest.stats = {
+    ...manifest.stats,
+    eventCount: timeIndex.reduce((total, entry) => total + entry.eventCount, 0),
+    chunkCount: timeIndex.length,
+    blobCount: Object.entries(zip.files).filter(
+      ([path, file]) => path.startsWith("blobs/") && !file.dir
+    ).length
+  };
+
+  zip.file("manifest.json", JSON.stringify(manifest));
+  zip.file("index/time.json", JSON.stringify(timeIndex));
+}
+
+function decompressFixtureChunk(
+  bytes: Uint8Array,
+  codec: ChunkTimeIndexEntry["codec"]
+): Uint8Array {
+  if (codec === "gzip") {
+    return toUint8Array(zlib.gunzipSync(bytes));
+  }
+
+  if (codec === "br") {
+    return toUint8Array(zlib.brotliDecompressSync(bytes));
+  }
+
+  if (codec === "zst") {
+    const zstdDecompressSync = (
+      zlib as unknown as { zstdDecompressSync?: (input: Uint8Array) => Uint8Array }
+    ).zstdDecompressSync;
+
+    if (typeof zstdDecompressSync !== "function") {
+      throw new Error("zstd decompression is unavailable in this runtime");
+    }
+
+    return toUint8Array(zstdDecompressSync(bytes));
+  }
+
+  return bytes;
+}
+
 async function sha256HexForTest(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", toArrayBuffer(bytes));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
@@ -2026,6 +2300,39 @@ function createDomSnapshotPayload(bodyChildren: string[]): Record<string, unknow
       }
     ]
   };
+}
+
+function createEncryptionMetadata(
+  files: Record<string, { ivBase64: string }>
+): NonNullable<ExportManifest["encryption"]> {
+  return {
+    algorithm: "AES-GCM",
+    kdf: {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations: 120_000,
+      saltBase64: toBase64(randomBytes(16))
+    },
+    files
+  };
+}
+
+async function rewriteArchiveManifest(
+  source: Uint8Array,
+  mutate: (manifest: ExportManifest) => void
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const file = zip.file("manifest.json");
+
+  if (!file) {
+    throw new Error("Missing fixture archive manifest");
+  }
+
+  const manifest = JSON.parse(await file.async("string")) as ExportManifest;
+  mutate(manifest);
+  zip.file("manifest.json", JSON.stringify(manifest));
+  await writeIntegrityHashes(zip);
+  return zip.generateAsync({ type: "uint8array" });
 }
 
 async function createEncryptedArchive(source: Uint8Array, passphrase: string): Promise<Uint8Array> {

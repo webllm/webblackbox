@@ -700,7 +700,7 @@ async function createEnvelopeArchive(
       origin: "https://fixture.example",
       title: "Fixture"
     },
-    chunkCodec: "ndjson",
+    chunkCodec: "none",
     redactionProfile: {
       redactHeaders: [],
       redactCookieNames: [],
@@ -711,7 +711,7 @@ async function createEnvelopeArchive(
     stats: {
       eventCount: 0,
       chunkCount: 0,
-      blobCount: 0,
+      blobCount: 2,
       durationMs: 0
     },
     ...(encrypted

@@ -201,7 +201,7 @@ async function materializeLiteStorageSnapshot(
       ...rawEvent,
       payload: {
         count,
-        mode: "counts-only",
+        mode: "schema-only",
         redacted: true,
         reason,
         truncated: payload.truncated === true
@@ -217,7 +217,7 @@ async function materializeLiteStorageSnapshot(
       ...rawEvent,
       payload: {
         count,
-        mode: "counts-only",
+        mode: "schema-only",
         redacted: true,
         reason,
         truncated: payload.truncated === true
@@ -233,7 +233,7 @@ async function materializeLiteStorageSnapshot(
       ...rawEvent,
       payload: {
         count,
-        mode: "counts-only",
+        mode: "schema-only",
         redacted: true,
         reason,
         truncated: payload.truncated === true

@@ -4,6 +4,7 @@ import JSZip from "jszip";
 import {
   type CapturePolicy,
   DEFAULT_CAPTURE_POLICY,
+  type ExportManifest,
   type SessionMetadata,
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
@@ -58,6 +59,40 @@ function createEvent(
   t: number,
   data?: WebBlackboxEvent["data"]
 ): WebBlackboxEvent {
+  const defaultData: Record<string, unknown> =
+    type === "network.request"
+      ? {
+          reqId: "R-1",
+          url: "https://example.com/api",
+          method: "GET"
+        }
+      : type === "network.response"
+        ? {
+            reqId: "R-1",
+            status: 200
+          }
+        : type === "console.entry"
+          ? {
+              level: "info",
+              text: "hello"
+            }
+          : { message: "hello" };
+  const dataRecord =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : null;
+  const shouldMergeDefaults =
+    (type === "network.request" && !dataRecord?.request) ||
+    (type === "network.response" && !dataRecord?.response) ||
+    type === "console.entry";
+  const eventData =
+    dataRecord && shouldMergeDefaults
+      ? {
+          ...defaultData,
+          ...dataRecord
+        }
+      : (data ?? defaultData);
+
   return {
     v: 1,
     sid: SESSION.sid,
@@ -91,10 +126,7 @@ function createEvent(
           : "low",
       redacted: true
     },
-    data: data ?? {
-      reqId: "R-1",
-      message: "hello"
-    }
+    data: eventData
   };
 }
 
@@ -970,6 +1002,62 @@ describe("pipeline", () => {
     ).toBe(true);
   });
 
+  it("rejects plaintext fallback when an encrypted manifest omits private file metadata", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-encryption-map", "user.click", 100));
+    const exported = await pipeline.exportBundle({
+      ...FULL_EXPORT_OPTIONS,
+      passphrase: "secret-passphrase"
+    });
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const manifestFile = zip.file("manifest.json");
+
+    if (!manifestFile) {
+      throw new Error("Missing encrypted archive manifest");
+    }
+
+    const manifest = JSON.parse(await manifestFile.async("string")) as ExportManifest;
+
+    if (!manifest.encryption) {
+      throw new Error("Expected encrypted archive metadata");
+    }
+
+    manifest.encryption.files = {};
+    zip.file("manifest.json", JSON.stringify(manifest));
+    await writeArchiveIntegrityForTest(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(
+      readWebBlackboxArchive(bytes, { passphrase: "secret-passphrase" })
+    ).rejects.toThrow(/schema validation|at least one private file/i);
+  });
+
+  it("rejects schema-invalid event payloads while reading an archive", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 128
+    });
+    const invalidEvent = createEvent("E-invalid-payload", "network.request", 100);
+    invalidEvent.data = {};
+
+    await pipeline.start();
+    await pipeline.ingest(invalidEvent);
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
+
+    await expect(readWebBlackboxArchive(exported.bytes)).rejects.toThrow(
+      /event line 1 failed schema validation/i
+    );
+  });
+
   it("supports optional at-rest encryption for chunk/blob cache payloads", async () => {
     const baseStorage = new MemoryPipelineStorage();
     const key = await derivePipelineStorageKey("cache-passphrase", {
@@ -1253,3 +1341,33 @@ describe("pipeline", () => {
     expect((await storage.listBlobs()).length).toBe(0);
   });
 });
+
+async function writeArchiveIntegrityForTest(zip: JSZip): Promise<void> {
+  const files: Record<string, string> = {};
+
+  for (const [path, file] of Object.entries(zip.files)) {
+    if (file.dir || path === "integrity/hashes.json") {
+      continue;
+    }
+
+    const bytes = await file.async("uint8array");
+    const digest = await crypto.subtle.digest("SHA-256", toArrayBufferForTest(bytes));
+    files[path] = [...new Uint8Array(digest)]
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  zip.file(
+    "integrity/hashes.json",
+    JSON.stringify({
+      manifestSha256: files["manifest.json"] ?? "",
+      files
+    })
+  );
+}
+
+function toArrayBufferForTest(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}

@@ -341,7 +341,7 @@ describe("lite-materializer", () => {
     expect(putBlob).not.toHaveBeenCalled();
     expect(result?.payload).toMatchObject({
       count: 1,
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
     expect(result?.payload).not.toHaveProperty("hash");
@@ -373,12 +373,12 @@ describe("lite-materializer", () => {
     expect(putBlob).not.toHaveBeenCalled();
     expect(cookieResult?.payload).toMatchObject({
       count: 2,
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
     expect(idbResult?.payload).toMatchObject({
       count: 1,
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
     expect(JSON.stringify(cookieResult)).not.toContain("sessionSecret");

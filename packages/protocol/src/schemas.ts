@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import {
+  ARCHIVE_PBKDF2_MAX_ITERATIONS,
+  ARCHIVE_PBKDF2_MIN_ITERATIONS,
   CAPTURE_MODES,
   CHUNK_CODECS,
   EVENT_LEVELS,
@@ -13,6 +15,14 @@ import {
 const recordStringUnknown = z.record(z.string(), z.unknown());
 
 const stringArray = z.array(z.string());
+
+const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+// 16 bytes encoded as canonical padded base64 (22 data characters plus "==").
+const archiveSaltBase64Schema = z.string().regex(/^[A-Za-z0-9+/]{21}[AQgw]==$/);
+
+// 12 bytes encoded as canonical unpadded base64.
+const archiveIvBase64Schema = z.string().regex(/^[A-Za-z0-9+/]{16}$/);
 
 export const eventLevelSchema = z.enum(EVENT_LEVELS);
 
@@ -214,37 +224,58 @@ export const sessionMetadataSchema = z
 
 export const chunkTimeIndexEntrySchema = z
   .object({
-    chunkId: z.string().min(1),
-    seq: z.number().int().nonnegative(),
+    chunkId: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    seq: z.number().int().positive(),
     tStart: z.number().finite(),
     tEnd: z.number().finite(),
     monoStart: z.number().finite(),
     monoEnd: z.number().finite(),
-    eventCount: z.number().int().nonnegative(),
+    eventCount: z.number().int().positive(),
     byteLength: z.number().int().nonnegative(),
     codec: chunkCodecSchema,
-    sha256: z.string().min(1)
+    sha256: sha256HexSchema
   })
-  .strict();
+  .strict()
+  .superRefine((entry, context) => {
+    if (entry.tStart > entry.tEnd) {
+      context.addIssue({
+        code: "custom",
+        path: ["tEnd"],
+        message: "must be greater than or equal to tStart"
+      });
+    }
+
+    if (entry.monoStart > entry.monoEnd) {
+      context.addIssue({
+        code: "custom",
+        path: ["monoEnd"],
+        message: "must be greater than or equal to monoStart"
+      });
+    }
+  });
 
 export const requestIndexEntrySchema = z
   .object({
     reqId: z.string().min(1),
-    eventIds: z.array(z.string().min(1))
+    eventIds: z.array(z.string().min(1)).min(1)
   })
   .strict();
 
 export const invertedIndexEntrySchema = z
   .object({
     term: z.string().min(1),
-    eventIds: z.array(z.string().min(1))
+    eventIds: z.array(z.string().min(1)).min(1)
   })
   .strict();
 
 export const hashesManifestSchema = z
   .object({
-    manifestSha256: z.string().min(1),
-    files: z.record(z.string(), z.string())
+    manifestSha256: sha256HexSchema,
+    files: z.record(z.string().min(1), sha256HexSchema)
   })
   .strict();
 
@@ -253,7 +284,7 @@ export const exportStatsSchema = z
     eventCount: z.number().int().nonnegative(),
     chunkCount: z.number().int().nonnegative(),
     blobCount: z.number().int().nonnegative(),
-    durationMs: z.number().int().nonnegative()
+    durationMs: z.number().finite().nonnegative()
   })
   .strict();
 
@@ -264,18 +295,26 @@ export const exportEncryptionSchema = z
       .object({
         name: z.literal("PBKDF2"),
         hash: z.literal("SHA-256"),
-        iterations: z.number().int().positive(),
-        saltBase64: z.string().min(1)
+        iterations: z
+          .number()
+          .int()
+          .min(ARCHIVE_PBKDF2_MIN_ITERATIONS)
+          .max(ARCHIVE_PBKDF2_MAX_ITERATIONS),
+        saltBase64: archiveSaltBase64Schema
       })
       .strict(),
-    files: z.record(
-      z.string(),
-      z
-        .object({
-          ivBase64: z.string().min(1)
-        })
-        .strict()
-    )
+    files: z
+      .record(
+        z.string().min(1),
+        z
+          .object({
+            ivBase64: archiveIvBase64Schema
+          })
+          .strict()
+      )
+      .refine((files) => Object.keys(files).length > 0, {
+        message: "encrypted archives must declare at least one private file"
+      })
   })
   .strict();
 
@@ -404,9 +443,9 @@ export const networkBodyCaptureRuleSchema = z
 
 const metaSessionStartSchema = z
   .object({
-    url: z.string().min(1),
+    url: z.string().min(1).optional(),
     title: z.string().optional(),
-    mode: captureModeSchema,
+    mode: captureModeSchema.optional(),
     permissions: recordStringUnknown.optional(),
     viewport: z
       .object({
@@ -419,9 +458,10 @@ const metaSessionStartSchema = z
   })
   .strict();
 
-const networkRequestDataSchema = z
+const normalizedNetworkRequestDataSchema = z
   .object({
     reqId: z.string().min(1),
+    requestId: z.string().min(1).optional(),
     url: z.string().min(1),
     method: z.string().min(1),
     resourceType: z.string().optional(),
@@ -429,11 +469,33 @@ const networkRequestDataSchema = z
     headers: z.record(z.string(), z.string()).optional(),
     postDataSize: z.number().int().nonnegative().optional()
   })
-  .strict();
+  .passthrough();
 
-const networkResponseDataSchema = z
+const cdpNetworkRequestDataSchema = z
+  .object({
+    requestId: z.string().min(1).optional(),
+    request: z
+      .object({
+        requestId: z.string().min(1).optional(),
+        url: z.string().min(1),
+        method: z.string().min(1)
+      })
+      .passthrough()
+  })
+  .passthrough()
+  .refine((value) => Boolean(value.requestId || value.request.requestId), {
+    message: "requestId is required"
+  });
+
+const networkRequestDataSchema = z.union([
+  normalizedNetworkRequestDataSchema,
+  cdpNetworkRequestDataSchema
+]);
+
+const normalizedNetworkResponseDataSchema = z
   .object({
     reqId: z.string().min(1),
+    requestId: z.string().min(1).optional(),
     status: z.number().int(),
     statusText: z.string().optional(),
     mimeType: z.string().optional(),
@@ -443,7 +505,24 @@ const networkResponseDataSchema = z
     timing: recordStringUnknown.optional(),
     headers: z.record(z.string(), z.string()).optional()
   })
-  .strict();
+  .passthrough();
+
+const cdpNetworkResponseDataSchema = z
+  .object({
+    requestId: z.string().min(1),
+    response: z
+      .object({
+        url: z.string().min(1),
+        status: z.number().finite()
+      })
+      .passthrough()
+  })
+  .passthrough();
+
+const networkResponseDataSchema = z.union([
+  normalizedNetworkResponseDataSchema,
+  cdpNetworkResponseDataSchema
+]);
 
 const consoleEntryDataSchema = z
   .object({
@@ -463,16 +542,36 @@ const consoleEntryDataSchema = z
   })
   .strict();
 
-const errorExceptionDataSchema = z
+const normalizedErrorExceptionDataSchema = z
   .object({
-    message: z.string().min(1),
+    message: z.string().min(1).optional(),
+    text: z.string().min(1).optional(),
     name: z.string().optional(),
     stack: z.string().optional(),
     url: z.string().optional(),
     line: z.number().int().optional(),
     col: z.number().int().optional()
   })
-  .strict();
+  .passthrough()
+  .refine((value) => Boolean(value.message || value.text), {
+    message: "message or text is required"
+  });
+
+const cdpErrorExceptionDataSchema = z
+  .object({
+    exceptionDetails: z
+      .object({
+        text: z.string(),
+        exceptionId: z.number().int().optional()
+      })
+      .passthrough()
+  })
+  .passthrough();
+
+const errorExceptionDataSchema = z.union([
+  normalizedErrorExceptionDataSchema,
+  cdpErrorExceptionDataSchema
+]);
 
 const screenshotDataSchema = z
   .object({
@@ -558,30 +657,37 @@ const domSnapshotDataSchema = z
   .object({
     snapshotId: z.string().min(1),
     contentHash: z.string().min(1),
-    source: z.enum(["cdp", "rrweb", "html"]),
+    source: z.enum(["cdp", "rrweb", "html"]).optional(),
     nodeCount: z.number().int().nonnegative().optional(),
-    computedStyles: z.array(z.string()).optional()
+    computedStyles: z.array(z.string()).optional(),
+    reason: z.string().min(1).optional()
   })
-  .strict();
+  .passthrough();
 
 const storageSnapshotDataSchema = z
   .object({
     mode: storageSnapshotModeSchema.optional(),
     hash: z.string().min(1).optional(),
     count: z.number().int().nonnegative().optional(),
-    redacted: z.boolean().optional()
+    redacted: z.boolean().optional(),
+    reason: z.string().min(1).optional()
   })
-  .strict();
+  .passthrough();
 
 const perfVitalsDataSchema = z
   .object({
+    metric: z.string().min(1).optional(),
+    name: z.string().optional(),
+    startTime: z.number().finite().optional(),
+    duration: z.number().finite().optional(),
+    value: z.number().finite().optional(),
     lcp: z.number().finite().optional(),
     cls: z.number().finite().optional(),
     inp: z.number().finite().optional(),
     fid: z.number().finite().optional(),
     ttfb: z.number().finite().optional()
   })
-  .strict();
+  .passthrough();
 
 const genericStrictDataSchema = z.union([
   recordStringUnknown,

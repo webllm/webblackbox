@@ -1,6 +1,18 @@
 import JSZip from "jszip";
 
-import { inferBlobFileExtension } from "@webblackbox/protocol";
+import {
+  assertArchiveChunk,
+  assertArchiveEventIndexes,
+  assertArchiveLayout,
+  inferBlobFileExtension,
+  parseArchivedEvent,
+  parseExportManifest,
+  parseHashesManifest,
+  parseInvertedIndex,
+  parsePrivacyManifest,
+  parseRequestIndex,
+  parseTimeIndex
+} from "@webblackbox/protocol";
 
 import type {
   ChunkCodec,
@@ -14,7 +26,7 @@ import type {
   WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { decodeChunkEvents } from "./codec.js";
+import { decodeChunkBytes } from "./codec.js";
 import { sha256Hex } from "./hash.js";
 import type { StoredBlob, StoredChunk } from "./storage.js";
 
@@ -144,41 +156,42 @@ export async function readWebBlackboxArchive(
   options: ArchiveReadOptions = {}
 ): Promise<ParsedWebBlackboxArchive> {
   const zip = await JSZip.loadAsync(bytes);
-  const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
+  const integrity = parseHashesManifest(await readJsonValue(zip, "integrity/hashes.json"));
 
   await verifyArchiveIntegrity(zip, integrity);
 
-  const manifest = await readJson<ExportManifest>(zip, "manifest.json");
+  const manifest = parseExportManifest(await readJsonValue(zip, "manifest.json"));
   const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
-  const timeIndex = await readArchiveJson<ChunkTimeIndexEntry[]>(
-    zip,
-    "index/time.json",
-    manifest,
-    archiveKey
+  const timeIndex = parseTimeIndex(
+    await readArchiveJsonValue(zip, "index/time.json", manifest, archiveKey)
   );
-  const requestIndex = await readArchiveJson<RequestIndexEntry[]>(
-    zip,
-    "index/req.json",
-    manifest,
-    archiveKey
+  const requestIndex = parseRequestIndex(
+    await readArchiveJsonValue(zip, "index/req.json", manifest, archiveKey)
   );
-  const invertedIndex = await readArchiveJson<InvertedIndexEntry[]>(
-    zip,
-    "index/inv.json",
-    manifest,
-    archiveKey
+  const invertedIndex = parseInvertedIndex(
+    await readArchiveJsonValue(zip, "index/inv.json", manifest, archiveKey)
   );
-  const privacyManifest = await readOptionalArchiveJson<PrivacyManifest>(
+  const privacyValue = await readOptionalArchiveJsonValue(
     zip,
     "privacy/manifest.json",
     manifest,
     archiveKey
   );
+  const privacyManifest = privacyValue === null ? null : parsePrivacyManifest(privacyValue);
+
+  assertArchiveLayout({
+    paths: archiveFilePaths(zip),
+    manifest,
+    timeIndex,
+    requestIndex,
+    invertedIndex,
+    privacyManifest
+  });
 
   const eventEntries = Object.keys(zip.files)
     .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
     .sort();
-  const chunkCodecById = new Map(timeIndex.map((entry) => [entry.chunkId, entry.codec] as const));
+  const chunkIndexById = new Map(timeIndex.map((entry) => [entry.chunkId, entry] as const));
 
   const events: WebBlackboxEvent[] = [];
 
@@ -186,16 +199,32 @@ export async function readWebBlackboxArchive(
     const file = zip.file(path);
 
     if (!file) {
-      continue;
+      throw new Error(`Invalid WebBlackbox archive: missing indexed event chunk '${path}'.`);
     }
 
     const content = await file.async("uint8array");
     const decoded = await decryptArchiveFile(path, content, manifest, archiveKey);
     const chunkId = parseChunkIdFromPath(path);
-    const codec =
-      (chunkId ? chunkCodecById.get(chunkId) : undefined) ?? (manifest.chunkCodec as ChunkCodec);
-    events.push(...(await decodeChunkEvents(decoded, codec)));
+    const index = chunkId ? chunkIndexById.get(chunkId) : undefined;
+
+    if (!index) {
+      throw new Error(`Invalid WebBlackbox archive: time index is missing event chunk '${path}'.`);
+    }
+
+    const chunkEvents = await parseArchiveChunkEvents(decoded, index.codec, path);
+
+    assertArchiveChunk({
+      path,
+      index,
+      encodedByteLength: decoded.byteLength,
+      encodedSha256: await sha256Hex(decoded),
+      events: chunkEvents
+    });
+
+    events.push(...chunkEvents);
   }
+
+  assertArchiveEventIndexes(manifest, events, requestIndex, invertedIndex);
 
   return {
     manifest,
@@ -221,7 +250,7 @@ async function addJsonFile(
   fileHashes[path] = await sha256Hex(bytes);
 }
 
-async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
+async function readJsonValue(zip: JSZip, path: string): Promise<unknown> {
   const file = zip.file(path);
 
   if (!file) {
@@ -229,30 +258,73 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   }
 
   const content = await file.async("string");
-  return JSON.parse(content) as TValue;
+  return parseArchiveJson(content, path);
 }
 
-async function readArchiveJson<TValue>(
+async function readArchiveJsonValue(
   zip: JSZip,
   path: string,
   manifest: ExportManifest,
   archiveKey: CryptoKey | null
-): Promise<TValue> {
+): Promise<unknown> {
   const content = await readArchiveFileText(zip, path, manifest, archiveKey);
-  return JSON.parse(content) as TValue;
+  return parseArchiveJson(content, path);
 }
 
-async function readOptionalArchiveJson<TValue>(
+async function readOptionalArchiveJsonValue(
   zip: JSZip,
   path: string,
   manifest: ExportManifest,
   archiveKey: CryptoKey | null
-): Promise<TValue | null> {
+): Promise<unknown | null> {
   if (!zip.file(path)) {
     return null;
   }
 
-  return readArchiveJson<TValue>(zip, path, manifest, archiveKey);
+  return readArchiveJsonValue(zip, path, manifest, archiveKey);
+}
+
+function parseArchiveJson(content: string, path: string): unknown {
+  try {
+    return JSON.parse(content) as unknown;
+  } catch {
+    throw new Error(`Invalid WebBlackbox archive: '${path}' contains malformed JSON.`);
+  }
+}
+
+async function parseArchiveChunkEvents(
+  encoded: Uint8Array,
+  codec: ChunkCodec,
+  path: string
+): Promise<WebBlackboxEvent[]> {
+  const decoded = await decodeChunkBytes(encoded, codec);
+  const lines = new TextDecoder()
+    .decode(decoded)
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+  const events: WebBlackboxEvent[] = [];
+
+  for (const [lineIndex, line] of lines.entries()) {
+    let value: unknown;
+
+    try {
+      value = JSON.parse(line) as unknown;
+    } catch {
+      throw new Error(
+        `Invalid WebBlackbox archive: '${path}' contains malformed JSON at event line ${lineIndex + 1}.`
+      );
+    }
+
+    events.push(parseArchivedEvent(value, path, lineIndex + 1));
+  }
+
+  return events;
+}
+
+function archiveFilePaths(zip: JSZip): string[] {
+  return Object.entries(zip.files)
+    .filter(([, file]) => !file.dir)
+    .map(([path]) => path);
 }
 
 async function readArchiveFileText(
@@ -395,7 +467,9 @@ async function decryptArchiveFile(
   const fileMeta = encryption.files[path];
 
   if (!fileMeta) {
-    return bytes;
+    throw new Error(
+      `Invalid WebBlackbox archive: encrypted archive is missing file metadata for '${path}'.`
+    );
   }
 
   if (!archiveKey) {
