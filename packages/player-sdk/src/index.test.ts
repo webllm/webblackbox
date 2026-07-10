@@ -883,7 +883,7 @@ describe("WebBlackboxPlayer", () => {
     expect(waterfall[0]?.responseBodyHash).toBe("blob-body-1");
 
     const curl = player.generateCurl("R-1");
-    expect(curl).toContain("curl 'https://example.com/api'");
+    expect(curl).toContain("curl --url 'https://example.com/api'");
     expect(curl).toContain("-X 'POST'");
 
     const fetchSnippet = player.generateFetch("R-1");
@@ -977,6 +977,15 @@ describe("WebBlackboxPlayer", () => {
 
     expect(curl).toContain("-X 'GET`ID`'");
     expect(curl).not.toContain("-X GET`ID`");
+  });
+
+  it("binds dash-leading request URLs to curl's URL option", async () => {
+    const bytes = await createRichFixtureArchive("GET", "--config");
+    const player = await WebBlackboxPlayer.open(bytes);
+    const curl = player.generateCurl("R-1");
+
+    expect(curl?.split("\n", 1)[0]).toBe("curl --url '--config' \\");
+    expect(curl).not.toMatch(/^curl\s+'--config'/);
   });
 
   it("builds storage timeline, report, and playwright script", async () => {

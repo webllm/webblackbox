@@ -1565,7 +1565,7 @@ export class WebBlackboxPlayer {
     }
 
     const lines = [
-      `curl ${shellQuote(entry.url)} \\`,
+      `curl --url ${shellQuote(entry.url)} \\`,
       `  -X ${shellQuote(entry.method.toUpperCase())} \\`
     ];
 
