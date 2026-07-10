@@ -13,6 +13,7 @@ type LiteNetworkStartDetails = {
   method?: string;
   url: string;
   timeStamp?: number;
+  mono: number;
 };
 
 type LiteNetworkEndDetails = LiteNetworkStartDetails & {
@@ -32,7 +33,7 @@ export function buildLiteNetworkRequestRawEvent(
   context: LiteNetworkRuntimeContext,
   details: LiteNetworkStartDetails
 ): RawRecorderEvent {
-  const { t, mono } = normalizeNetworkTime(details.timeStamp);
+  const { t, mono } = normalizeNetworkTime(details.timeStamp, details.mono);
 
   return {
     source: "content",
@@ -56,7 +57,7 @@ export function buildLiteNetworkResponseRawEvent(
   context: LiteNetworkRuntimeContext,
   details: LiteNetworkEndDetails
 ): RawRecorderEvent {
-  const { t, mono } = normalizeNetworkTime(details.timeStamp);
+  const { t, mono } = normalizeNetworkTime(details.timeStamp, details.mono);
   const status = normalizeStatusCode(details.statusCode);
 
   return {
@@ -87,7 +88,7 @@ export function buildLiteNetworkFailureRawEvent(
   context: LiteNetworkRuntimeContext,
   details: LiteNetworkErrorDetails
 ): RawRecorderEvent {
-  const { t, mono } = normalizeNetworkTime(details.timeStamp);
+  const { t, mono } = normalizeNetworkTime(details.timeStamp, details.mono);
   const message =
     typeof details.error === "string" && details.error.length > 0
       ? details.error
@@ -117,16 +118,20 @@ function sanitizeOptionalUrl(value: string | undefined): string | undefined {
   return value ? sanitizeUrlForPrivacy(value) : undefined;
 }
 
-function normalizeNetworkTime(candidate?: number): { t: number; mono: number } {
-  const value =
-    typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
-      ? Math.round(candidate)
-      : Date.now();
-
+function normalizeNetworkTime(
+  wallClockCandidate: number | undefined,
+  monotonicCandidate: number
+): { t: number; mono: number } {
   return {
-    t: value,
-    mono: value
+    t: normalizePositiveTimestamp(wallClockCandidate),
+    mono: normalizePositiveTimestamp(monotonicCandidate)
   };
+}
+
+function normalizePositiveTimestamp(candidate: number | undefined): number {
+  return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
+    ? candidate
+    : Date.now();
 }
 
 function normalizeMethod(candidate?: string): string {

@@ -18,7 +18,8 @@ describe("lite-network-baseline", () => {
       requestId: "123",
       method: "post",
       url: "https://example.com/api/items/123?token=secret#frag",
-      timeStamp: 101
+      timeStamp: 101.25,
+      mono: 501.75
     });
 
     expect(rawEvent).toMatchObject({
@@ -27,8 +28,8 @@ describe("lite-network-baseline", () => {
       sid: "S-lite-network",
       tabId: 7,
       frame: "content-frame-2",
-      t: 101,
-      mono: 101,
+      t: 101.25,
+      mono: 501.75,
       payload: {
         phase: "start",
         reqId: "123",
@@ -47,6 +48,7 @@ describe("lite-network-baseline", () => {
       method: "get",
       url: "https://example.com/api/items",
       timeStamp: 205,
+      mono: 605,
       statusCode: 204,
       statusLine: "HTTP/1.1 204 No Content",
       duration: 104
@@ -54,6 +56,8 @@ describe("lite-network-baseline", () => {
 
     expect(rawEvent).toMatchObject({
       rawType: "fetch",
+      t: 205,
+      mono: 605,
       payload: {
         phase: "end",
         reqId: "123",
@@ -76,12 +80,15 @@ describe("lite-network-baseline", () => {
       method: "get",
       url: "https://example.com/api/items",
       timeStamp: 215,
+      mono: 615,
       duration: 114,
       error: "net::ERR_ABORTED"
     });
 
     expect(rawEvent).toMatchObject({
       rawType: "fetchError",
+      t: 215,
+      mono: 615,
       payload: {
         reqId: "123",
         requestId: "123",

@@ -11,6 +11,8 @@
 
 ### Patch Changes
 
+- Kept Lite webRequest wall-clock timestamps separate from monotonic capture time so delayed
+  multi-source events retain a coherent replay timeline.
 - Restored active and stopped runtime sessions safely across MV3 service-worker restarts, with
   strict policy-bound checkpoints and alarm-backed retention cleanup.
 - Required an export passphrase in the popup and sessions UI and removed the automatic plaintext

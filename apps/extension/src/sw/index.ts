@@ -4873,7 +4873,8 @@ function installLiteWebRequestCapture(): void {
           requestId: details.requestId,
           method: details.method,
           url: details.url,
-          timeStamp: startedAt
+          timeStamp: startedAt,
+          mono: monotonicTime()
         }
       )
     );
@@ -4912,6 +4913,7 @@ function installLiteWebRequestCapture(): void {
           statusCode: details.statusCode,
           statusLine: details.statusLine,
           timeStamp: endedAt,
+          mono: monotonicTime(),
           duration:
             typeof metadata?.startedAt === "number"
               ? Math.max(0, endedAt - metadata.startedAt)
@@ -4953,6 +4955,7 @@ function installLiteWebRequestCapture(): void {
           method: details.method ?? metadata?.method,
           url: details.url ?? metadata?.url ?? "unknown://request",
           timeStamp: endedAt,
+          mono: monotonicTime(),
           duration:
             typeof metadata?.startedAt === "number"
               ? Math.max(0, endedAt - metadata.startedAt)
@@ -5043,7 +5046,7 @@ function resolveLiteRuntimeForWebRequest(
 
 function normalizeLiteNetworkTimestamp(candidate: unknown): number {
   return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
-    ? Math.round(candidate)
+    ? candidate
     : Date.now();
 }
 
