@@ -29,7 +29,7 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_API_KEYS`: semicolon-separated scoped keys for rotation and least privilege. Format: `secret:scope,scope;next-secret:scope`. Supported scopes are `upload`, `read`, `list`, `revoke`, and `admin`. `admin` covers all scopes. Unknown or empty scopes and duplicate secrets fail startup instead of falling back to `admin`. A key without `:scope` retains the legacy explicit-admin behavior. Keep an old key and a new key configured during rotation, then remove the old key after clients are updated.
 - `WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY`: optional browser bootstrap for `GET /share/:id?key=<key>`. Keep this disabled in production unless the key is short-lived; when enabled, the server redirects to a clean URL and uses a short HttpOnly read-session cookie for page links.
 - `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
-- `WEBBLACKBOX_SHARE_PUBLIC_ORIGIN`: canonical external origin used for share URLs, same-origin CORS, and secure-cookie policy. It is required when binding to a non-loopback host, must be HTTPS unless it names a loopback host, and must not include credentials, a path, query, or fragment. Request `Host` and `X-Forwarded-Proto` headers are never used as public-origin authority.
+- `WEBBLACKBOX_SHARE_PUBLIC_ORIGIN`: canonical external origin used for share URLs, same-origin CORS, and secure-cookie policy. It is required when binding to a non-loopback host, must be HTTPS unless it names a loopback host, and must not include credentials, a path, query, or fragment. A non-loopback public origin also requires an API credential, including when a local reverse proxy fronts a loopback bind. Request `Host` and `X-Forwarded-Proto` headers are never used as public-origin authority.
 - `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Use `*` only for trusted environments.
 - `WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES`: max accepted upload body size in bytes (default `262144000`, hard-capped by the Player SDK's 256 MiB input ceiling).
 - `WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS`: maximum upload bodies that may be received and inspected concurrently (default `1`). Additional uploads receive `503` with `Retry-After`.
@@ -43,7 +43,8 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES`: rotate the serialized audit log at this byte size (default `16777216`, hard ceiling `67108864`). One previous segment is retained.
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX`: max uploads per client in each window (default `10`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS`: upload rate limit window in ms (default `60000`).
-- `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: set `true` only behind a trusted proxy; otherwise upload rate limiting uses socket IP.
+- `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: enables proxy-aware client addresses for rate limiting and redacted audit hashes only; authorization never trusts forwarded headers. Forwarded chains are used only when the socket peer is loopback or listed in `WEBBLACKBOX_TRUSTED_PROXY_IPS`, and the first untrusted hop is selected from right to left.
+- `WEBBLACKBOX_TRUSTED_PROXY_IPS`: comma-separated exact proxy IPs allowed to extend the trusted forwarded chain. The edge proxy must append or overwrite `X-Forwarded-For`; invalid IP configuration fails startup. Loopback proxy peers are trusted automatically when forwarded support is enabled.
 
 For production, prefer scoped keys over a single admin key:
 

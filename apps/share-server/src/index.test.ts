@@ -1138,6 +1138,49 @@ describe("share-server", () => {
     ).rejects.toThrow(/must use HTTPS for non-loopback hosts/);
   });
 
+  it("requires credentials for remote public origins and validates trusted proxy IPs", async () => {
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_API_KEY: "",
+        WEBBLACKBOX_SHARE_API_KEYS: "",
+        WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: "https://shares.example.test"
+      })
+    ).rejects.toThrow(/credential is required for a non-loopback public origin/);
+
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_TRUSTED_PROXY_IPS: "not-an-ip"
+      })
+    ).rejects.toThrow(/contains an invalid IP address/);
+  });
+
+  it("derives forwarded clients from the first untrusted hop next to trusted proxies", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true"
+    });
+    const response = await fetch(`${server.baseUrl}/api/share/list`, {
+      headers: {
+        "x-webblackbox-api-key": apiKey,
+        "x-forwarded-for": "198.51.100.99, 203.0.113.10"
+      }
+    });
+    expect(response.status).toBe(200);
+
+    const auditLog = await readFile(resolve(server.dataDir, "audit", "share-access.jsonl"), "utf8");
+    const events = auditLog
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { action: string; clientHash: string });
+    const expectedHash = createHash("sha256")
+      .update("webblackbox-share-audit:ip:203.0.113.10")
+      .digest("hex");
+    const spoofedHash = createHash("sha256")
+      .update("webblackbox-share-audit:ip:198.51.100.99")
+      .digest("hex");
+    expect(events.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
+    expect(events.at(-1)?.clientHash).not.toBe(spoofedHash);
+  });
+
   it("supports opt-in query API key bootstrap without propagating the key", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY: "true"

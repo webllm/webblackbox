@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { appendFile, mkdir, open, opendir, rename, rm, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -170,6 +171,9 @@ const SHARE_API_CREDENTIALS = parseShareApiCredentials(
 );
 const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
+const TRUSTED_PROXY_ADDRESSES = parseTrustedProxyAddresses(
+  process.env.WEBBLACKBOX_TRUSTED_PROXY_IPS
+);
 const ALLOW_QUERY_API_KEY = parseBooleanFlag(process.env.WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
@@ -236,6 +240,11 @@ async function startShareServer(): Promise<void> {
   const port = parsePort(process.env.PORT);
   const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
   sharePublicOrigin = resolvePublicOrigin(process.env.WEBBLACKBOX_SHARE_PUBLIC_ORIGIN, host, port);
+  if (SHARE_API_CREDENTIALS.length === 0 && !isLoopbackHost(new URL(sharePublicOrigin).hostname)) {
+    throw new Error(
+      "A scoped WEBBLACKBOX_SHARE_API_KEY or WEBBLACKBOX_SHARE_API_KEYS credential is required for a non-loopback public origin."
+    );
+  }
   await ensureStorageLayout();
   await reconcileStorageLayout();
   await pruneExpiredShareRecords(Date.now());
@@ -2910,32 +2919,50 @@ function readCookie(request: IncomingMessage, name: string): string | null {
 }
 
 function isLoopbackRequest(request: IncomingMessage): boolean {
-  const address = resolveClientAddress(request);
+  const address = resolvePeerAddress(request);
   return Boolean(address && isLoopbackAddress(address));
 }
 
 function resolveClientAddress(request: IncomingMessage): string | null {
-  if (TRUST_X_FORWARDED_FOR) {
-    const forwardedFor = request.headers["x-forwarded-for"];
-    if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-      const first = forwardedFor.split(",")[0]?.trim();
-      if (first) {
-        return first;
-      }
-    }
+  const peerAddress = resolvePeerAddress(request);
+  if (!TRUST_X_FORWARDED_FOR || !peerAddress || !isTrustedProxyAddress(peerAddress)) {
+    return peerAddress;
   }
 
-  const socketAddress = request.socket.remoteAddress;
-  return typeof socketAddress === "string" && socketAddress.length > 0 ? socketAddress : null;
+  const forwardedFor = request.headers["x-forwarded-for"];
+  if (typeof forwardedFor !== "string" || forwardedFor.length === 0) {
+    return peerAddress;
+  }
+
+  const forwardedChain = forwardedFor.split(",").map(normalizeIpAddress);
+  if (forwardedChain.some((address) => address === null)) {
+    return peerAddress;
+  }
+
+  const chain = [...(forwardedChain as string[]), peerAddress];
+  let index = chain.length - 1;
+  while (index > 0 && isTrustedProxyAddress(chain[index] ?? "")) {
+    index -= 1;
+  }
+  return chain[index] ?? peerAddress;
+}
+
+function resolvePeerAddress(request: IncomingMessage): string | null {
+  return normalizeIpAddress(request.socket.remoteAddress ?? "");
+}
+
+function normalizeIpAddress(value: string): string | null {
+  const trimmed = value.trim().toLowerCase();
+  const ipv4Mapped = trimmed.startsWith("::ffff:") ? trimmed.slice("::ffff:".length) : trimmed;
+  return isIP(ipv4Mapped) > 0 ? ipv4Mapped : null;
+}
+
+function isTrustedProxyAddress(address: string): boolean {
+  return isLoopbackAddress(address) || TRUSTED_PROXY_ADDRESSES.has(address);
 }
 
 function isLoopbackAddress(address: string): boolean {
-  return (
-    address === "127.0.0.1" ||
-    address === "::1" ||
-    address === "::ffff:127.0.0.1" ||
-    address.startsWith("127.")
-  );
+  return address === "::1" || address.startsWith("127.");
 }
 
 function readAuthTokenFromRequest(request: IncomingMessage): string | null {
@@ -3078,4 +3105,20 @@ function parseBooleanFlag(value: string | undefined): boolean {
 
   const normalized = value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function parseTrustedProxyAddresses(value: string | undefined): ReadonlySet<string> {
+  if (!value?.trim()) {
+    return new Set();
+  }
+
+  const addresses = new Set<string>();
+  for (const rawAddress of value.split(",")) {
+    const address = normalizeIpAddress(rawAddress);
+    if (!address) {
+      throw new Error(`WEBBLACKBOX_TRUSTED_PROXY_IPS contains an invalid IP address.`);
+    }
+    addresses.add(address);
+  }
+  return addresses;
 }
