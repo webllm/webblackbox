@@ -13,17 +13,17 @@
     "verify": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run package:chrome",
     "e2e:check": "node scripts/e2e-extension-check.mjs",
     "e2e:fullchain": "node scripts/e2e-fullchain-demo.mjs",
-    "e2e:fullchain:lite": "WB_E2E_MODE=lite node scripts/e2e-fullchain-demo.mjs",
-    "e2e:fullchain:lite:reload": "WB_E2E_MODE=lite WB_E2E_RELOAD_AFTER_START=1 node scripts/e2e-fullchain-demo.mjs",
-    "e2e:fullchain:full": "WB_E2E_MODE=full node scripts/e2e-fullchain-demo.mjs",
-    "e2e:fullchain:full:defaults": "WB_E2E_MODE=full WB_E2E_CONFIGURE_OPTIONS=0 node scripts/e2e-fullchain-demo.mjs",
+    "e2e:fullchain:lite": "cross-env WB_E2E_MODE=lite node scripts/e2e-fullchain-demo.mjs",
+    "e2e:fullchain:lite:reload": "cross-env WB_E2E_MODE=lite WB_E2E_RELOAD_AFTER_START=1 node scripts/e2e-fullchain-demo.mjs",
+    "e2e:fullchain:full": "cross-env WB_E2E_MODE=full node scripts/e2e-fullchain-demo.mjs",
+    "e2e:fullchain:full:defaults": "cross-env WB_E2E_MODE=full WB_E2E_CONFIGURE_OPTIONS=0 node scripts/e2e-fullchain-demo.mjs",
     "e2e:realworld": "node scripts/e2e-realworld-stability.mjs",
-    "e2e:realworld:quick": "WB_E2E_REALWORLD_QUICK=1 node scripts/e2e-realworld-stability.mjs",
+    "e2e:realworld:quick": "cross-env WB_E2E_REALWORLD_QUICK=1 node scripts/e2e-realworld-stability.mjs",
     "e2e:realworld:ci": "node scripts/e2e-realworld-stability.mjs",
     "e2e:memory:full": "node scripts/e2e-full-memory-regression.mjs",
-    "e2e:memory:full:ci": "WB_E2E_STRESS_REQUESTS=96 WB_E2E_STRESS_CONCURRENCY=4 WB_E2E_MEMORY_SAMPLE_MS=1500 WB_E2E_MEMORY_SETTLE_SAMPLES=1 WB_E2E_MEMORY_TIMEOUT_MS=90000 node scripts/e2e-full-memory-regression.mjs",
+    "e2e:memory:full:ci": "cross-env WB_E2E_STRESS_REQUESTS=96 WB_E2E_STRESS_CONCURRENCY=4 WB_E2E_MEMORY_SAMPLE_MS=1500 WB_E2E_MEMORY_SETTLE_SAMPLES=1 WB_E2E_MEMORY_TIMEOUT_MS=90000 node scripts/e2e-full-memory-regression.mjs",
     "e2e:perf:lite": "node scripts/e2e-lite-perf-regression.mjs",
-    "e2e:perf:lite:ci": "WB_E2E_PERF_REQUESTS=32 WB_E2E_PERF_WARMUP_REQUESTS=12 WB_E2E_PERF_INTERACTION_ROUNDS=8 WB_E2E_PERF_IFRAME_ROUNDS=6 WB_E2E_PERF_EDITOR_ROUNDS=12 WB_E2E_PERF_NAV_ROUNDS=3 WB_E2E_PERF_NAV_WAIT_MS=6000 node scripts/e2e-lite-perf-regression.mjs",
+    "e2e:perf:lite:ci": "cross-env WB_E2E_PERF_REQUESTS=32 WB_E2E_PERF_WARMUP_REQUESTS=12 WB_E2E_PERF_INTERACTION_ROUNDS=8 WB_E2E_PERF_IFRAME_ROUNDS=6 WB_E2E_PERF_EDITOR_ROUNDS=12 WB_E2E_PERF_NAV_ROUNDS=3 WB_E2E_PERF_NAV_WAIT_MS=6000 node scripts/e2e-lite-perf-regression.mjs",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
@@ -37,6 +37,7 @@
     "webblackbox": "workspace:*"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "fake-indexeddb": "^6.2.5",
     "jszip": "^3.10.1"
   }
