@@ -29,6 +29,20 @@ export const SERVER_NAME = "webblackbox-mcp-server";
 export const SERVER_VERSION =
   typeof __MCP_SERVER_VERSION__ !== "undefined" ? __MCP_SERVER_VERSION__ : "0.1.0";
 export const nowUtcInput = {};
+export const MAX_MCP_TEXT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+export class McpOutputLimitError extends Error {
+  public override readonly name = "McpOutputLimitError";
+
+  public constructor(
+    public readonly actualBytes: number,
+    public readonly maxBytes = MAX_MCP_TEXT_PAYLOAD_BYTES
+  ) {
+    super(
+      `MCP tool output exceeds the ${maxBytes}-byte limit (${actualBytes} bytes). Narrow the requested range or result count.`
+    );
+  }
+}
 
 export function nowUtcIsoString(): string {
   return new Date().toISOString();
@@ -316,12 +330,23 @@ export async function startServer(): Promise<void> {
   await server.connect(transport);
 }
 
-function toTextPayload(value: unknown): { content: Array<{ type: "text"; text: string }> } {
+export function toTextPayload(value: unknown): {
+  content: Array<{ type: "text"; text: string }>;
+} {
+  const serialized = JSON.stringify(value, null, 2);
+  if (serialized === undefined) {
+    throw new TypeError("MCP tool output must be JSON-serializable.");
+  }
+  const outputBytes = Buffer.byteLength(serialized, "utf8");
+  if (outputBytes > MAX_MCP_TEXT_PAYLOAD_BYTES) {
+    throw new McpOutputLimitError(outputBytes);
+  }
+
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify(value, null, 2)
+        text: serialized
       }
     ]
   };

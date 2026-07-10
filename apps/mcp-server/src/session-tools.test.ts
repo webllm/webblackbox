@@ -7,12 +7,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExportManifest, WebBlackboxEvent } from "@webblackbox/protocol";
 
 import {
+  MAX_MCP_PATH_CHARS,
+  MCP_ARCHIVE_SCAN_LIMITS,
+  assertArchiveScanBudget,
   compareSessions,
   exportHarFromArchive,
   findRootCauseCandidates,
   generateBugReportBundle,
   generatePlaywrightFromArchive,
   listArchives,
+  sessionSummaryInput,
   summarizeActions
 } from "./session-tools.js";
 
@@ -30,6 +34,25 @@ afterEach(async () => {
 });
 
 describe("session tools", () => {
+  it("rejects oversized paths and bounded-scan exhaustion", async () => {
+    expect(sessionSummaryInput.path.safeParse("x".repeat(MAX_MCP_PATH_CHARS + 1)).success).toBe(
+      false
+    );
+    await expect(
+      listArchives({
+        dir: "x".repeat(MAX_MCP_PATH_CHARS + 1),
+        recursive: false
+      })
+    ).rejects.toThrow(/path exceeds the MCP limit/i);
+
+    expect(() =>
+      assertArchiveScanBudget(Date.now(), MCP_ARCHIVE_SCAN_LIMITS.entries + 1, 1)
+    ).toThrow(/entry limit/i);
+    expect(() =>
+      assertArchiveScanBudget(Date.now(), 1, MCP_ARCHIVE_SCAN_LIMITS.directories + 1)
+    ).toThrow(/directory limit/i);
+  });
+
   it("lists archive files and ignores non-archive files", async () => {
     const root = await mkdtemp(join(tmpdir(), "wb-mcp-list-"));
     tempDirs.push(root);

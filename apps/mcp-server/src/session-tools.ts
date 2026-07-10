@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, opendir, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { DEFAULT_ARCHIVE_RESOURCE_LIMITS, WebBlackboxPlayer } from "@webblackbox/player-sdk";
 import { z } from "zod";
@@ -18,9 +18,19 @@ const MAX_DATA_PREVIEW_CHARS = 10_000;
 const DEFAULT_COMPARE_TOP = 15;
 const MAX_COMPARE_TOP = 100;
 const MAX_ARCHIVE_BYTES = Math.min(DEFAULT_ARCHIVE_RESOURCE_LIMITS.maxInputBytes, 64 * 1024 * 1024);
+export const MAX_MCP_PATH_CHARS = 4_096;
+export const MCP_ARCHIVE_SCAN_LIMITS = Object.freeze({
+  entries: 10_000,
+  directories: 1_000,
+  durationMs: 5_000
+});
+
+function archivePathSchema(description: string): z.ZodString {
+  return z.string().min(1).max(MAX_MCP_PATH_CHARS).describe(description);
+}
 
 export const listArchivesInput = {
-  dir: z.string().min(1).optional().describe("Directory to scan. Defaults to current working dir."),
+  dir: archivePathSchema("Directory to scan. Defaults to current working dir.").optional(),
   recursive: z.boolean().optional().describe("Recursively scan subdirectories. Defaults to true."),
   limit: z
     .number()
@@ -38,7 +48,7 @@ export type ListArchivesArgs = {
 };
 
 export const sessionSummaryInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   slowRequestMs: z
     .number()
@@ -64,7 +74,7 @@ export type SessionSummaryArgs = {
 };
 
 export const queryEventsInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   text: z.string().min(1).max(512).optional().describe("Free-text query."),
   types: z.array(z.string().min(1).max(128)).max(100).optional().describe("Filter by event types."),
@@ -113,7 +123,7 @@ export type QueryEventsArgs = {
 };
 
 export const networkIssuesInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   minDurationMs: z
     .number()
@@ -139,7 +149,7 @@ export type NetworkIssuesArgs = {
 };
 
 export const generateBugReportInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   title: z.string().min(1).max(512).optional().describe("Optional report title."),
   maxItems: z
@@ -173,7 +183,7 @@ export type GenerateBugReportArgs = {
 };
 
 export const exportHarInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   monoStart: z.number().finite().optional().describe("Optional mono range start."),
   monoEnd: z.number().finite().optional().describe("Optional mono range end.")
@@ -187,7 +197,7 @@ export type ExportHarArgs = {
 };
 
 export const summarizeActionsInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   monoStart: z.number().finite().optional().describe("Optional mono range start."),
   monoEnd: z.number().finite().optional().describe("Optional mono range end."),
@@ -209,7 +219,7 @@ export type SummarizeActionsArgs = {
 };
 
 export const rootCauseCandidatesInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   monoStart: z.number().finite().optional().describe("Optional mono range start."),
   monoEnd: z.number().finite().optional().describe("Optional mono range end."),
@@ -239,7 +249,7 @@ export type RootCauseCandidatesArgs = {
 };
 
 export const generatePlaywrightInput = {
-  path: z.string().min(1).describe("Path to a .webblackbox or .zip archive."),
+  path: archivePathSchema("Path to a .webblackbox or .zip archive."),
   passphrase: z.string().min(1).max(4096).optional().describe("Passphrase for encrypted archives."),
   name: z.string().min(1).max(128).optional().describe("Playwright test name."),
   startUrl: z.string().min(1).max(2048).optional().describe("Optional navigation URL override."),
@@ -270,8 +280,8 @@ export type GeneratePlaywrightArgs = {
 };
 
 export const compareSessionsInput = {
-  leftPath: z.string().min(1).describe("Baseline archive path."),
-  rightPath: z.string().min(1).describe("Compared archive path."),
+  leftPath: archivePathSchema("Baseline archive path."),
+  rightPath: archivePathSchema("Compared archive path."),
   leftPassphrase: z
     .string()
     .min(1)
@@ -1253,6 +1263,16 @@ async function openArchivePlayer(
 }
 
 function resolveArchivePath(pathLike: string): string {
+  if (pathLike.length === 0) {
+    throw new Error("Archive path must not be empty.");
+  }
+  if (pathLike.length > MAX_MCP_PATH_CHARS) {
+    throw new Error(`Archive path exceeds the MCP limit (${MAX_MCP_PATH_CHARS} characters).`);
+  }
+  if (pathLike.includes("\0")) {
+    throw new Error("Archive path must not contain NUL characters.");
+  }
+
   return resolve(process.cwd(), pathLike);
 }
 
@@ -1268,6 +1288,9 @@ async function collectArchiveFiles(
   }>
 > {
   const directories = [rootDir];
+  const scanStartedAt = Date.now();
+  let visitedEntries = 0;
+  let visitedDirectories = 0;
   const rows: Array<{
     path: string;
     sizeBytes: number;
@@ -1281,11 +1304,13 @@ async function collectArchiveFiles(
       break;
     }
 
-    const entries = await readdir(currentDir, {
-      withFileTypes: true
-    });
+    visitedDirectories += 1;
+    assertArchiveScanBudget(scanStartedAt, visitedEntries, visitedDirectories);
+    const directory = await opendir(currentDir);
 
-    for (const entry of entries) {
+    for await (const entry of directory) {
+      visitedEntries += 1;
+      assertArchiveScanBudget(scanStartedAt, visitedEntries, visitedDirectories);
       const fullPath = resolve(currentDir, entry.name);
 
       if (entry.isDirectory()) {
@@ -1315,6 +1340,28 @@ async function collectArchiveFiles(
         left.path.localeCompare(right.path)
     )
     .slice(0, limit);
+}
+
+export function assertArchiveScanBudget(
+  scanStartedAt: number,
+  visitedEntries: number,
+  visitedDirectories: number
+): void {
+  if (visitedEntries > MCP_ARCHIVE_SCAN_LIMITS.entries) {
+    throw new Error(
+      `Archive scan exceeded the MCP entry limit (${MCP_ARCHIVE_SCAN_LIMITS.entries}). Choose a narrower directory or disable recursion.`
+    );
+  }
+  if (visitedDirectories > MCP_ARCHIVE_SCAN_LIMITS.directories) {
+    throw new Error(
+      `Archive scan exceeded the MCP directory limit (${MCP_ARCHIVE_SCAN_LIMITS.directories}). Choose a narrower directory or disable recursion.`
+    );
+  }
+  if (Date.now() - scanStartedAt > MCP_ARCHIVE_SCAN_LIMITS.durationMs) {
+    throw new Error(
+      `Archive scan exceeded the MCP time limit (${MCP_ARCHIVE_SCAN_LIMITS.durationMs} ms). Choose a narrower directory or disable recursion.`
+    );
+  }
 }
 
 function isArchiveFile(path: string): boolean {

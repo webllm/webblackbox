@@ -90,8 +90,9 @@ node dist/cli.js --version
 
 ## Notes
 
-- Archive paths are resolved from the current working directory if relative.
+- Archive paths are resolved from the current working directory if relative and are limited to 4096 characters. Recursive archive discovery streams directory entries and fails closed after 10,000 entries, 1,000 directories, or five seconds; choose a narrower directory or disable recursion if a scan reaches a ceiling.
 - Archive size is checked against a 64 MiB MCP ceiling on one open file descriptor before bytes are read; the Player SDK then enforces ZIP expansion and event budgets. The production MCP server admits one archive-heavy tool call at a time; excess concurrent calls fail fast instead of multiplying retained Player memory. `compare_sessions` is one admitted operation and can hold its two bounded archives.
+- Serialized tool responses are limited to 4 MiB of UTF-8 JSON. Narrow a time range or result count when an export would exceed that ceiling.
 - Encrypted archives require `passphrase`.
 - `query_events` defaults to payload-hidden output (`includeData=false`) to avoid huge responses.
 - Range-scoped tools (`monoStart` / `monoEnd`) preload only intersecting chunks when opening archives.
