@@ -1,10 +1,31 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import {
+  appendFile,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile
+} from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 
 import JSZip from "jszip";
-import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
+import {
+  ArchiveDecodeTimeoutError,
+  ArchiveResourceLimitError,
+  BoundedZipReader,
+  DEFAULT_ARCHIVE_RESOURCE_LIMITS,
+  WebBlackboxPlayer,
+  assertArchiveInputResourceLimits,
+  assertLoadedArchiveResourceLimits,
+  resolveArchiveResourceLimits
+} from "@webblackbox/player-sdk";
 
 import { parseShareApiCredentials, type ShareApiScope } from "./auth-config.js";
 
@@ -90,9 +111,24 @@ type ShareSummary = {
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "127.0.0.1";
-const MAX_UPLOAD_BYTES = parsePositiveInteger(
-  process.env.WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES,
-  250 * 1024 * 1024
+const MAX_UPLOAD_BYTES = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES, 250 * 1024 * 1024),
+  DEFAULT_ARCHIVE_RESOURCE_LIMITS.maxInputBytes
+);
+const SHARE_ARCHIVE_RESOURCE_LIMITS = resolveArchiveResourceLimits({
+  maxInputBytes: MAX_UPLOAD_BYTES
+});
+const MAX_CONCURRENT_UPLOAD_INSPECTIONS = parsePositiveInteger(
+  process.env.WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS,
+  1
+);
+const UPLOAD_IDLE_TIMEOUT_MS = parsePositiveInteger(
+  process.env.WEBBLACKBOX_SHARE_UPLOAD_IDLE_TIMEOUT_MS,
+  15_000
+);
+const UPLOAD_TOTAL_TIMEOUT_MS = parsePositiveInteger(
+  process.env.WEBBLACKBOX_SHARE_UPLOAD_TOTAL_TIMEOUT_MS,
+  120_000
 );
 const DEFAULT_BASE_URL = `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
 const DATA_ROOT = resolve(process.env.WEBBLACKBOX_SHARE_DATA_DIR ?? ".webblackbox-share-data");
@@ -133,6 +169,7 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
 );
 const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
 const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
+const PLAINTEXT_INSPECTION_SAMPLE_BYTES = 64 * 1024;
 const AES_GCM_IV_BYTES = 12;
 const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
 const SHARE_READ_SESSION_TTL_MS = 10 * 60 * 1000;
@@ -142,6 +179,7 @@ const MAX_TRACKED_RATE_BUCKETS = 4096;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
 const shareReadSessions = new Map<string, ShareReadSession>();
 let rateLimitCleanupCounter = 0;
+let activeUploadInspections = 0;
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -273,20 +311,76 @@ async function handleUpload(
   const rateLimited = consumeUploadRateLimitToken(resolveClientKey(request));
 
   if (!rateLimited.ok) {
+    closeRequestAfterResponse(request, response);
     respondJson(response, 429, {
       error: `Upload rate limit exceeded. Retry in ${rateLimited.retryAfterSec}s.`
     });
     return;
   }
 
-  let bytes: Uint8Array;
+  if (!tryAcquireUploadInspectionSlot()) {
+    closeRequestAfterResponse(request, response);
+    response.setHeader("retry-after", "1");
+    respondJson(response, 503, {
+      error: "Archive inspection capacity is temporarily exhausted."
+    });
+    return;
+  }
+
   try {
-    bytes = await readRequestBody(request, MAX_UPLOAD_BYTES);
+    await handleUploadWithinInspectionSlot(request, response, requestUrl);
+  } finally {
+    activeUploadInspections -= 1;
+  }
+}
+
+async function handleUploadWithinInspectionSlot(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestUrl: URL
+): Promise<void> {
+  const id = randomUUID().replaceAll("-", "");
+  const upload = {
+    id,
+    tempPath: join(ARCHIVES_DIR, `.${id}.upload`),
+    archivePath: archivePathForId(id),
+    committed: false
+  };
+
+  try {
+    await processUploadWithinInspectionSlot(request, response, requestUrl, upload);
+  } finally {
+    if (!upload.committed) {
+      await Promise.all([
+        rm(upload.tempPath, { force: true }),
+        rm(upload.archivePath, { force: true })
+      ]);
+    }
+  }
+}
+
+async function processUploadWithinInspectionSlot(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestUrl: URL,
+  upload: { id: string; tempPath: string; archivePath: string; committed: boolean }
+): Promise<void> {
+  const { id, tempPath, archivePath } = upload;
+  let bytes: Uint8Array;
+  let checksumSha256: string;
+  try {
+    const stored = await readRequestBodyToTempFile(request, tempPath, MAX_UPLOAD_BYTES);
+    bytes = stored.bytes;
+    checksumSha256 = stored.checksumSha256;
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {
+      closeRequestAfterResponse(request, response);
       respondJson(response, 413, {
         error: `Upload payload exceeds ${error.maxBytes} bytes.`
       });
+      return;
+    }
+    if (error instanceof UploadTimeoutError || request.aborted) {
       return;
     }
 
@@ -300,14 +394,11 @@ async function handleUpload(
     return;
   }
 
-  const id = randomUUID().replaceAll("-", "");
   const filenameHeader = request.headers["x-webblackbox-filename"];
   const fileName = publicArchiveFileName(
     id,
     typeof filenameHeader === "string" ? filenameHeader : undefined
   );
-  const archivePath = archivePathForId(id);
-  const checksumSha256 = createHash("sha256").update(bytes).digest("hex");
   let clientSummary: ShareSummary | null;
 
   try {
@@ -323,8 +414,66 @@ async function handleUpload(
     throw error;
   }
 
-  const archiveEnvelope = await inspectArchiveEnvelope(bytes);
-  const archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
+  let archiveEnvelope: ArchiveEnvelopeSummary;
+  let archiveEnvelopeSummary: ShareSummary;
+
+  try {
+    archiveEnvelope = await inspectArchiveEnvelope(bytes);
+    if (archiveEnvelope.analysisError) {
+      await writeShareAuditEvent(request, {
+        action: "upload",
+        shareId: id,
+        outcome: "blocked"
+      });
+      respondJson(response, 400, {
+        error: "Upload is not a valid WebBlackbox archive."
+      });
+      return;
+    }
+    archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
+  } catch (error) {
+    if (
+      !(error instanceof ArchiveResourceLimitError) &&
+      !(error instanceof ArchiveDecodeTimeoutError)
+    ) {
+      throw error;
+    }
+
+    const resource =
+      error instanceof ArchiveResourceLimitError ? error.resource : "decodeTimeoutMs";
+    const limit = error instanceof ArchiveResourceLimitError ? error.limit : error.timeoutMs;
+
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked",
+      details: {
+        resource,
+        ...(error instanceof ArchiveResourceLimitError ? { actual: error.actual } : {}),
+        limit
+      }
+    });
+    respondJson(response, error instanceof ArchiveResourceLimitError ? 413 : 422, {
+      error: error.message,
+      resource,
+      limit
+    });
+    return;
+  }
+
+  if (!archiveEnvelope.encrypted && !archiveEnvelopeSummary.analyzed) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 400, {
+      error: "Upload is not a valid WebBlackbox archive."
+    });
+    return;
+  }
+  const sizeBytes = bytes.byteLength;
+  bytes = new Uint8Array(0);
   const summary = clientSummary
     ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
     : archiveEnvelopeSummary;
@@ -419,20 +568,21 @@ async function handleUpload(
     createdAt,
     expiresAt: createdAt + ttlMs,
     fileName,
-    sizeBytes: bytes.byteLength,
+    sizeBytes,
     checksumSha256,
     shareUrl,
     summary
   };
 
-  await writeFile(archivePath, bytes);
+  await rename(tempPath, archivePath);
   await writeRecord(record);
+  upload.committed = true;
   await writeShareAuditEvent(request, {
     action: "upload",
     shareId: id,
     outcome: "ok",
     details: {
-      sizeBytes: bytes.byteLength,
+      sizeBytes,
       ttlMs
     }
   });
@@ -442,7 +592,7 @@ async function handleUpload(
     shareUrl,
     expiresAt: record.expiresAt,
     fileName,
-    sizeBytes: bytes.byteLength,
+    sizeBytes,
     summary
   });
 }
@@ -493,30 +643,86 @@ async function handleDownloadArchive(
     return;
   }
 
+  const archivePath = archivePathForId(id);
+
   try {
-    const bytes = await readFile(archivePathForId(id));
+    const archiveStat = await stat(archivePath);
+    if (!archiveStat.isFile()) {
+      throw new ArchiveFileNotFoundError();
+    }
+
     response.writeHead(200, {
       "content-type": "application/zip",
-      "content-length": String(bytes.byteLength),
+      "content-length": String(archiveStat.size),
       "content-disposition": `attachment; filename="${record.fileName}"`
     });
-    response.end(bytes);
+
+    await streamArchiveDownload(request, response, archivePath);
     await writeShareAuditEvent(request, {
       action: "download",
       shareId: id,
       outcome: "ok"
     });
-  } catch {
-    respondJson(response, 404, {
-      error: "Archive file not found."
-    });
+  } catch (error) {
+    const clientAborted = error instanceof ClientAbortedDownloadError;
+
+    if (!clientAborted && !response.headersSent && !response.writableEnded) {
+      respondJson(response, 404, {
+        error: "Archive file not found."
+      });
+    } else if (!clientAborted && !response.writableEnded) {
+      response.destroy(error instanceof Error ? error : undefined);
+    }
+
     await writeShareAuditEvent(request, {
       action: "download",
       shareId: id,
-      outcome: "not-found"
+      outcome: clientAborted ? "error" : "not-found"
     });
   }
 }
+
+async function streamArchiveDownload(
+  request: IncomingMessage,
+  response: ServerResponse,
+  archivePath: string
+): Promise<void> {
+  const source = createReadStream(archivePath);
+  const abortError = new ClientAbortedDownloadError();
+  const abort = () => {
+    if (!source.destroyed) {
+      source.destroy(abortError);
+    }
+  };
+  const close = () => {
+    if (!response.writableFinished) {
+      abort();
+    }
+  };
+
+  request.once("aborted", abort);
+  response.once("close", close);
+
+  try {
+    await pipeline(source, response);
+  } catch (error) {
+    if (request.aborted || abortError === error || !response.writableFinished) {
+      throw abortError;
+    }
+    throw error;
+  } finally {
+    request.off("aborted", abort);
+    response.off("close", close);
+  }
+}
+
+class ClientAbortedDownloadError extends Error {
+  public constructor() {
+    super("Archive download was aborted by the client.");
+  }
+}
+
+class ArchiveFileNotFoundError extends Error {}
 
 async function handleSharePage(
   request: IncomingMessage,
@@ -684,7 +890,9 @@ async function buildShareSummary(
   envelope: ArchiveEnvelopeSummary
 ): Promise<ShareSummary> {
   try {
-    const player = await WebBlackboxPlayer.open(bytes);
+    const player = await WebBlackboxPlayer.open(bytes, {
+      resourceLimits: SHARE_ARCHIVE_RESOURCE_LIMITS
+    });
     const manifest = player.archive.manifest;
     const derived = player.buildDerived();
     const actions = player.getActionTimeline();
@@ -724,6 +932,10 @@ async function buildShareSummary(
       }
     };
   } catch (error) {
+    if (error instanceof ArchiveResourceLimitError || error instanceof ArchiveDecodeTimeoutError) {
+      throw error;
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     return {
       schemaVersion: 1,
@@ -737,8 +949,11 @@ async function buildShareSummary(
 
 async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelopeSummary> {
   try {
+    assertArchiveInputResourceLimits(bytes, SHARE_ARCHIVE_RESOURCE_LIMITS);
     const zip = await JSZip.loadAsync(bytes);
-    const manifest = asRecord(JSON.parse(await readZipText(zip, "manifest.json")));
+    assertLoadedArchiveResourceLimits(zip, SHARE_ARCHIVE_RESOURCE_LIMITS);
+    const zipReader = new BoundedZipReader(zip, SHARE_ARCHIVE_RESOURCE_LIMITS, false);
+    const manifest = asRecord(JSON.parse(await readZipText(zipReader, "manifest.json")));
     const encryption = asRecord(manifest.encryption);
     const encrypted = Object.keys(encryption).length > 0;
     const encryptedFiles = asRecord(encryption.files);
@@ -746,9 +961,13 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
     const missingEncryptedPaths = encrypted
       ? privatePaths.filter((path) => !isEncryptedFileMeta(encryptedFiles[path]))
       : [];
-    const plaintextEncryptedPaths = encrypted
-      ? await collectPlaintextEncryptedPrivatePaths(zip, privatePaths, encryptedFiles)
-      : [];
+    const plaintextEncryptedPaths = await inspectActualArchiveEntries(
+      zip,
+      zipReader,
+      encrypted,
+      new Set(privatePaths),
+      encryptedFiles
+    );
 
     return {
       encrypted,
@@ -758,6 +977,10 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
       plaintextEncryptedPaths
     };
   } catch (error) {
+    if (error instanceof ArchiveResourceLimitError || error instanceof ArchiveDecodeTimeoutError) {
+      throw error;
+    }
+
     return {
       encrypted: false,
       encryptedPrivatePathsComplete: false,
@@ -767,6 +990,15 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
       analysisError: redactText(error instanceof Error ? error.message : String(error), 240)
     };
   }
+}
+
+function tryAcquireUploadInspectionSlot(): boolean {
+  if (activeUploadInspections >= MAX_CONCURRENT_UPLOAD_INSPECTIONS) {
+    return false;
+  }
+
+  activeUploadInspections += 1;
+  return true;
 }
 
 function collectArchivePrivatePaths(zip: JSZip): string[] {
@@ -798,25 +1030,27 @@ function isEncryptedFileMeta(value: unknown): boolean {
   return iv !== null && iv.byteLength === AES_GCM_IV_BYTES;
 }
 
-async function collectPlaintextEncryptedPrivatePaths(
+async function inspectActualArchiveEntries(
   zip: JSZip,
-  privatePaths: string[],
+  zipReader: BoundedZipReader,
+  encrypted: boolean,
+  privatePaths: Set<string>,
   encryptedFiles: Record<string, unknown>
 ): Promise<string[]> {
   const plaintextPaths: string[] = [];
 
-  for (const path of privatePaths) {
-    if (!isEncryptedFileMeta(encryptedFiles[path])) {
+  for (const [path, file] of Object.entries(zip.files)) {
+    if (file.dir || path === "manifest.json") {
       continue;
     }
 
-    const file = zip.file(path);
-    if (!file) {
-      continue;
-    }
-
-    const bytes = await file.async("uint8array");
-    if (looksLikePlaintextPrivateArchiveFile(path, bytes)) {
+    const bytes = await zipReader.read(path);
+    if (
+      encrypted &&
+      privatePaths.has(path) &&
+      isEncryptedFileMeta(encryptedFiles[path]) &&
+      looksLikePlaintextPrivateArchiveFile(path, bytes)
+    ) {
       plaintextPaths.push(path);
     }
   }
@@ -825,34 +1059,37 @@ async function collectPlaintextEncryptedPrivatePaths(
 }
 
 function looksLikePlaintextPrivateArchiveFile(path: string, bytes: Uint8Array): boolean {
+  const truncated = bytes.byteLength > PLAINTEXT_INSPECTION_SAMPLE_BYTES;
+  const sample = truncated ? bytes.subarray(0, PLAINTEXT_INSPECTION_SAMPLE_BYTES) : bytes;
+
   if (path === "index/time.json" || path === "index/req.json" || path === "index/inv.json") {
-    return isPlainJsonBytes(bytes);
+    return isPlainJsonBytes(sample, truncated);
   }
 
   if (path === "privacy/manifest.json") {
-    return isPlainJsonBytes(bytes);
+    return isPlainJsonBytes(sample, truncated);
   }
 
   if (path.startsWith("events/") && path.endsWith(".ndjson")) {
-    return isPlainNdjsonBytes(bytes);
+    return isPlainNdjsonBytes(sample, truncated);
   }
 
   if (path.startsWith("blobs/")) {
-    return looksLikePlaintextBlobFile(path, bytes);
+    return looksLikePlaintextBlobFile(path, sample, truncated);
   }
 
   return false;
 }
 
-function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array): boolean {
+function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array, truncated: boolean): boolean {
   const normalizedPath = path.toLowerCase();
 
   if (normalizedPath.endsWith(".json")) {
-    return isPlainJsonBytes(bytes);
+    return isPlainJsonBytes(bytes, truncated);
   }
 
   if (normalizedPath.endsWith(".html")) {
-    return isPlainHtmlBytes(bytes);
+    return isPlainHtmlBytes(bytes, truncated);
   }
 
   if (normalizedPath.endsWith(".png")) {
@@ -863,11 +1100,15 @@ function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array): boolean {
     return hasWebpSignature(bytes);
   }
 
-  return isPlainJsonBytes(bytes) || isPlainHtmlBytes(bytes) || isPlainTextBytes(bytes);
+  return (
+    isPlainJsonBytes(bytes, truncated) ||
+    isPlainHtmlBytes(bytes, truncated) ||
+    isPlainTextBytes(bytes, truncated)
+  );
 }
 
-function isPlainJsonBytes(bytes: Uint8Array): boolean {
-  const text = decodeUtf8Strict(bytes);
+function isPlainJsonBytes(bytes: Uint8Array, truncated = false): boolean {
+  const text = decodeUtf8Strict(bytes, truncated);
   if (!text) {
     return false;
   }
@@ -875,6 +1116,10 @@ function isPlainJsonBytes(bytes: Uint8Array): boolean {
   const trimmed = text.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
     return false;
+  }
+
+  if (truncated) {
+    return isMostlyPrintableText(trimmed);
   }
 
   try {
@@ -885,8 +1130,8 @@ function isPlainJsonBytes(bytes: Uint8Array): boolean {
   }
 }
 
-function isPlainNdjsonBytes(bytes: Uint8Array): boolean {
-  const text = decodeUtf8Strict(bytes);
+function isPlainNdjsonBytes(bytes: Uint8Array, truncated = false): boolean {
+  const text = decodeUtf8Strict(bytes, truncated);
   if (!text) {
     return false;
   }
@@ -905,12 +1150,12 @@ function isPlainNdjsonBytes(bytes: Uint8Array): boolean {
     }
     return true;
   } catch {
-    return false;
+    return truncated && text.trimStart().startsWith("{") && isMostlyPrintableText(text);
   }
 }
 
-function isPlainHtmlBytes(bytes: Uint8Array): boolean {
-  const text = decodeUtf8Strict(bytes);
+function isPlainHtmlBytes(bytes: Uint8Array, truncated = false): boolean {
+  const text = decodeUtf8Strict(bytes, truncated);
   if (!text) {
     return false;
   }
@@ -924,8 +1169,8 @@ function isPlainHtmlBytes(bytes: Uint8Array): boolean {
   );
 }
 
-function isPlainTextBytes(bytes: Uint8Array): boolean {
-  const text = decodeUtf8Strict(bytes);
+function isPlainTextBytes(bytes: Uint8Array, truncated = false): boolean {
+  const text = decodeUtf8Strict(bytes, truncated);
   if (!text) {
     return false;
   }
@@ -935,17 +1180,21 @@ function isPlainTextBytes(bytes: Uint8Array): boolean {
     return false;
   }
 
+  return isMostlyPrintableText(trimmed);
+}
+
+function isMostlyPrintableText(value: string): boolean {
   let printable = 0;
 
-  for (let index = 0; index < trimmed.length; index += 1) {
-    const code = trimmed.charCodeAt(index);
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
 
     if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f)) {
       printable += 1;
     }
   }
 
-  return printable / trimmed.length >= 0.9;
+  return value.length > 0 && printable / value.length >= 0.9;
 }
 
 function hasPngSignature(bytes: Uint8Array): boolean {
@@ -976,12 +1225,20 @@ function hasWebpSignature(bytes: Uint8Array): boolean {
   );
 }
 
-function decodeUtf8Strict(bytes: Uint8Array): string | null {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return null;
+function decodeUtf8Strict(bytes: Uint8Array, truncated = false): string | null {
+  const maxTrim = truncated ? Math.min(3, bytes.byteLength) : 0;
+
+  for (let trim = 0; trim <= maxTrim; trim += 1) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        trim === 0 ? bytes : bytes.subarray(0, bytes.byteLength - trim)
+      );
+    } catch {
+      // A bounded UTF-8 prefix can end in the middle of one multi-byte code point.
+    }
   }
+
+  return null;
 }
 
 function decodeBase64Strict(value: string): Buffer | null {
@@ -996,14 +1253,8 @@ function decodeBase64Strict(value: string): Buffer | null {
   return normalizedInput === normalizedOutput ? decoded : null;
 }
 
-async function readZipText(zip: JSZip, path: string): Promise<string> {
-  const file = zip.file(path);
-
-  if (!file) {
-    throw new Error(`Archive is missing required file: ${path}`);
-  }
-
-  return file.async("string");
+async function readZipText(zipReader: BoundedZipReader, path: string): Promise<string> {
+  return new TextDecoder().decode(await zipReader.read(path));
 }
 
 function readClientShareSummary(request: IncomingMessage): ShareSummary | null {
@@ -1395,31 +1646,153 @@ function normalizeAllowedOrigin(rawValue: string | undefined): string {
   return resolved.toLowerCase() === "same-origin" ? "same-origin" : resolved;
 }
 
-async function readRequestBody(request: IncomingMessage, maxBytes: number): Promise<Uint8Array> {
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-
-  for await (const chunk of request) {
-    if (!(chunk instanceof Buffer)) {
-      continue;
-    }
-
-    totalBytes += chunk.byteLength;
-    if (totalBytes > maxBytes) {
-      throw new PayloadTooLargeError(maxBytes);
-    }
-
-    chunks.push(chunk);
+async function readRequestBodyToTempFile(
+  request: IncomingMessage,
+  tempPath: string,
+  maxBytes: number
+): Promise<{ bytes: Uint8Array; checksumSha256: string }> {
+  const declaredBytes = readDeclaredContentLength(request);
+  if (declaredBytes !== null && declaredBytes > maxBytes) {
+    throw new PayloadTooLargeError(maxBytes);
   }
 
-  const merged = Buffer.concat(chunks);
-  return new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength);
+  const handle = await open(tempPath, "wx+", 0o600);
+  const checksum = createHash("sha256");
+  let totalBytes = 0;
+  let storedBytes: Buffer | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let timeoutError: UploadTimeoutError | null = null;
+  const expire = (kind: "idle" | "total") => {
+    timeoutError ??= new UploadTimeoutError(kind);
+    request.destroy(timeoutError);
+  };
+  const armIdleTimer = () => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+    }
+    idleTimer = setTimeout(() => expire("idle"), UPLOAD_IDLE_TIMEOUT_MS);
+  };
+  const totalTimer = setTimeout(() => expire("total"), UPLOAD_TOTAL_TIMEOUT_MS);
+  const clearUploadTimers = () => {
+    clearTimeout(totalTimer);
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
+  armIdleTimer();
+
+  try {
+    for await (const chunk of request) {
+      armIdleTimer();
+      const bytes = chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
+
+      const nextTotalBytes = totalBytes + bytes.byteLength;
+      if (nextTotalBytes > maxBytes) {
+        throw new PayloadTooLargeError(maxBytes);
+      }
+
+      await writeFileHandleFully(handle, bytes);
+      checksum.update(bytes);
+      totalBytes = nextTotalBytes;
+    }
+
+    clearUploadTimers();
+    if (timeoutError || request.aborted) {
+      throw timeoutError ?? new Error("Upload request was aborted.");
+    }
+
+    const storedStat = await handle.stat();
+    if (storedStat.size !== totalBytes) {
+      throw new Error("Upload temporary file size changed unexpectedly.");
+    }
+    storedBytes = await readFileHandleExactly(handle, totalBytes);
+  } catch (error) {
+    throw timeoutError ?? error;
+  } finally {
+    clearUploadTimers();
+    await handle.close();
+  }
+
+  if (!storedBytes) {
+    throw new Error("Upload temporary file was not read.");
+  }
+  const checksumSha256 = checksum.digest("hex");
+  const storedChecksumSha256 = createHash("sha256").update(storedBytes).digest("hex");
+  if (storedChecksumSha256 !== checksumSha256) {
+    throw new Error("Upload temporary file contents changed unexpectedly.");
+  }
+
+  return {
+    bytes: storedBytes,
+    checksumSha256
+  };
+}
+
+async function readFileHandleExactly(
+  handle: Awaited<ReturnType<typeof open>>,
+  expectedBytes: number
+): Promise<Buffer> {
+  const output = Buffer.allocUnsafe(expectedBytes);
+  let offset = 0;
+
+  while (offset < expectedBytes) {
+    const { bytesRead } = await handle.read(output, offset, expectedBytes - offset, offset);
+    if (bytesRead === 0) {
+      throw new Error("Upload temporary file ended before its recorded size.");
+    }
+    offset += bytesRead;
+  }
+
+  const probe = Buffer.allocUnsafe(1);
+  const { bytesRead: trailingBytes } = await handle.read(probe, 0, 1, expectedBytes);
+  if (trailingBytes > 0) {
+    throw new PayloadTooLargeError(MAX_UPLOAD_BYTES);
+  }
+
+  return output;
+}
+
+async function writeFileHandleFully(
+  handle: Awaited<ReturnType<typeof open>>,
+  bytes: Buffer
+): Promise<void> {
+  let offset = 0;
+
+  while (offset < bytes.byteLength) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset, null);
+    if (bytesWritten <= 0) {
+      throw new Error("Upload temporary file write made no progress.");
+    }
+    offset += bytesWritten;
+  }
+}
+
+function readDeclaredContentLength(request: IncomingMessage): number | null {
+  const raw = request.headers["content-length"];
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    return null;
+  }
+
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 class PayloadTooLargeError extends Error {
   public constructor(public readonly maxBytes: number) {
     super(`Payload exceeds ${maxBytes} bytes.`);
   }
+}
+
+class UploadTimeoutError extends Error {
+  public constructor(kind: "idle" | "total") {
+    super(`Upload ${kind} timeout exceeded.`);
+  }
+}
+
+function closeRequestAfterResponse(request: IncomingMessage, response: ServerResponse): void {
+  response.setHeader("connection", "close");
+  response.once("finish", () => request.destroy());
 }
 
 class ShareSummaryHeaderError extends Error {}

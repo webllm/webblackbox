@@ -179,7 +179,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/player-sdk
       jszip:
-        specifier: ^3.10.1
+        specifier: 3.10.1
         version: 3.10.1
 
   packages/cdp-router:
@@ -207,7 +207,7 @@ importers:
         specifier: workspace:*
         version: link:../protocol
       jszip:
-        specifier: ^3.10.1
+        specifier: 3.10.1
         version: 3.10.1
 
   packages/protocol:

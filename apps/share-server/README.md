@@ -30,7 +30,10 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY`: optional browser bootstrap for `GET /share/:id?key=<key>`. Keep this disabled in production unless the key is short-lived; when enabled, the server redirects to a clean URL and uses a short HttpOnly read-session cookie for page links.
 - `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
 - `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Use `*` only for trusted environments.
-- `WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES`: max accepted upload body size in bytes (default `262144000`).
+- `WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES`: max accepted upload body size in bytes (default `262144000`, hard-capped by the Player SDK's 256 MiB input ceiling).
+- `WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS`: maximum upload bodies that may be received and inspected concurrently (default `1`). Additional uploads receive `503` with `Retry-After`.
+- `WEBBLACKBOX_SHARE_UPLOAD_IDLE_TIMEOUT_MS`: maximum idle time while receiving an upload body (default `15000`).
+- `WEBBLACKBOX_SHARE_UPLOAD_TOTAL_TIMEOUT_MS`: maximum total upload-body receive time (default `120000`).
 - `WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS`: default `false`. Public deployments should keep this disabled so uploads must be encrypted before reaching the server.
 - `WEBBLACKBOX_SHARE_DEFAULT_TTL_MS`: default share lifetime in ms (default `604800000`, seven days).
 - `WEBBLACKBOX_SHARE_MAX_TTL_MS`: maximum accepted share lifetime in ms (default `2592000000`, 30 days).
@@ -69,6 +72,7 @@ Headers:
 Body:
 
 - Raw encrypted `.webblackbox` bytes. Public deployments do not accept plaintext uploads by default.
+- Outer ZIP entry count, actual per-entry inflater output, metadata bytes, total expanded bytes, and compression ratio are checked against non-relaxable safety ceilings before the upload is retained. Plaintext uploads that opt into server analysis additionally receive Player event-codec, event-count, and index-cardinality checks. The server has no key for encrypted inner files, so clients must apply those inner checks before encryption and upload. The current client preflight summary is not cryptographically bound to the encrypted plaintext; signed or remotely attested preflight remains a separate deployment concern.
 - Encrypted uploads must include encryption metadata for every private archive path: `events/*`, `blobs/*`, `index/time.json`, `index/req.json`, `index/inv.json`, and `privacy/manifest.json` when present. Legacy encrypted archives that left private indexes in plaintext must be re-exported with the current exporter before public share upload.
 
 Response:
@@ -98,6 +102,7 @@ Response:
 - `POST /api/share/:id/revoke`
 
 Expired or revoked shares return `410`.
+Archive downloads are streamed from disk and the stream is cancelled when the client disconnects.
 
 ## Data storage
 
@@ -111,6 +116,8 @@ Each share writes:
 - `archives/<id>.webblackbox`
 - `records/<id>.json` (redacted public summary only)
 - `audit/share-access.jsonl` (action, outcome, share id, timestamp, and client hash only)
+
+Uploads are streamed to mode-`0600` temporary files under `archives/`, removed on every rejection or disconnect, and atomically renamed only after validation succeeds.
 
 Audit logs must not contain archive plaintext, passphrases, API keys, raw URLs, filenames supplied by the client, or request payloads.
 Audit append failures are reported through operational logs but do not turn an already committed upload, revoke, metadata response, page response, or download into a failed HTTP operation.

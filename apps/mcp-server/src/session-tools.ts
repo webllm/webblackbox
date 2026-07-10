@@ -1,7 +1,9 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
-import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
+import { DEFAULT_ARCHIVE_RESOURCE_LIMITS, WebBlackboxPlayer } from "@webblackbox/player-sdk";
 import { z } from "zod";
+
+import { readFileHandleBounded } from "./archive-file-reader.js";
 
 const ARCHIVE_EXTENSIONS = new Set([".webblackbox", ".zip"]);
 const DEFAULT_LIST_LIMIT = 50;
@@ -15,6 +17,7 @@ const DEFAULT_DATA_PREVIEW_CHARS = 2_000;
 const MAX_DATA_PREVIEW_CHARS = 10_000;
 const DEFAULT_COMPARE_TOP = 15;
 const MAX_COMPARE_TOP = 100;
+const MAX_ARCHIVE_BYTES = Math.min(DEFAULT_ARCHIVE_RESOURCE_LIMITS.maxInputBytes, 64 * 1024 * 1024);
 
 export const listArchivesInput = {
   dir: z.string().min(1).optional().describe("Directory to scan. Defaults to current working dir."),
@@ -1218,16 +1221,34 @@ async function openArchivePlayer(
   passphrase?: string,
   range?: { monoStart?: number; monoEnd?: number }
 ): Promise<WebBlackboxPlayer> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+
   try {
-    const bytes = await readFile(path);
-    return await WebBlackboxPlayer.open(new Uint8Array(bytes), {
+    handle = await open(path, "r");
+    const archiveStat = await handle.stat();
+    if (!archiveStat.isFile()) {
+      throw new Error("Archive path is not a regular file.");
+    }
+    if (archiveStat.size > MAX_ARCHIVE_BYTES) {
+      throw new Error(
+        `Archive input exceeds the MCP limit (${archiveStat.size} > ${MAX_ARCHIVE_BYTES} bytes).`
+      );
+    }
+
+    const bytes = await readFileHandleBounded(handle, archiveStat.size, MAX_ARCHIVE_BYTES);
+    return await WebBlackboxPlayer.open(bytes, {
       passphrase,
-      range
+      range,
+      resourceLimits: {
+        maxInputBytes: MAX_ARCHIVE_BYTES
+      }
     });
   } catch (error) {
     throw new Error(
       `Failed to open archive '${path}': ${error instanceof Error ? error.message : String(error)}`
     );
+  } finally {
+    await handle?.close();
   }
 }
 

@@ -50,6 +50,6 @@
   },
   "dependencies": {
     "@webblackbox/protocol": "workspace:*",
-    "jszip": "^3.10.1"
+    "jszip": "3.10.1"
   }
 }

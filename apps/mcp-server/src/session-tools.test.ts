@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import JSZip from "jszip";
@@ -93,6 +93,22 @@ describe("session tools", () => {
     });
 
     expect(result.archives.map((row) => row.path)).toEqual([newer]);
+  });
+
+  it("rejects oversized archives from stat metadata before reading them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wb-mcp-oversized-"));
+    tempDirs.push(root);
+    const archivePath = join(root, "oversized.webblackbox");
+
+    await writeFile(archivePath, "");
+    await truncate(archivePath, 64 * 1024 * 1024 + 1);
+
+    await expect(
+      summarizeActions({
+        path: archivePath,
+        limit: 1
+      })
+    ).rejects.toThrow(/archive input exceeds the MCP limit/i);
   });
 
   it("summarizes actions from a real archive fixture", async () => {

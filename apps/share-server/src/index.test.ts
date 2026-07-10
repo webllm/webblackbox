@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { request as createHttpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -53,6 +54,129 @@ describe("share-server", () => {
       error: "Upload payload exceeds 4 bytes."
     });
     expect(response.status).toBe(413);
+  });
+
+  it("rejects forged-size ZIP bombs from actual inflater output", async () => {
+    const server = await startShareServer();
+    const zip = new JSZip();
+    zip.file("manifest.json", "x".repeat(9 * 1024 * 1024));
+    const archive = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 }
+    });
+    forgeZipUncompressedSize(archive, "manifest.json", 1);
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "compressed-bomb.webblackbox"
+      },
+      body: Buffer.from(archive)
+    });
+    const payload = (await response.json()) as {
+      error: string;
+      resource: string;
+      limit: number;
+    };
+
+    expect(response.status).toBe(413);
+    expect(payload.resource).toBe("maxMetadataEntryBytes");
+    expect(payload.limit).toBe(8 * 1024 * 1024);
+    expect(payload.error).toMatch(/resource limit exceeded/i);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    const archiveFiles = await readdir(resolve(server.dataDir, "archives"));
+    expect(archiveFiles).toEqual([]);
+  });
+
+  it("validates actual output for unreferenced lazy ZIP entries before retention", async () => {
+    const server = await startShareServer();
+    const zip = new JSZip();
+    zip.file("manifest.json", "{}");
+    zip.file("index/unreferenced.json", "x".repeat(9 * 1024 * 1024));
+    const archive = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 }
+    });
+    forgeZipUncompressedSize(archive, "index/unreferenced.json", 1);
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey
+      },
+      body: Buffer.from(archive)
+    });
+    const payload = (await response.json()) as { resource: string };
+
+    expect(response.status).toBe(413);
+    expect(payload.resource).toBe("maxMetadataEntryBytes");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toEqual([]);
+  });
+
+  it("bounds concurrent upload buffering and inspection", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS: "1"
+    });
+    const pendingUpload = createHttpRequest(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": "1024",
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+    pendingUpload.on("error", () => undefined);
+    pendingUpload.flushHeaders();
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey
+      },
+      body: Buffer.from("second")
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "Archive inspection capacity is temporarily exhausted."
+    });
+    expect(response.headers.get("retry-after")).toBe("1");
+    pendingUpload.destroy();
+  });
+
+  it("releases the upload slot and removes temporary files after an idle timeout", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_UPLOAD_IDLE_TIMEOUT_MS: "50",
+      WEBBLACKBOX_SHARE_UPLOAD_TOTAL_TIMEOUT_MS: "500"
+    });
+    const pendingUpload = createHttpRequest(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": "1024",
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+    const timedOut = new Promise<void>((resolvePromise) => {
+      pendingUpload.once("error", () => resolvePromise());
+    });
+    pendingUpload.flushHeaders();
+    await timedOut;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+
+    const upload = await uploadEncryptedFixture(server);
+    expect(upload.shareId).toMatch(/^[a-f0-9]+$/);
+    const archiveFiles = await readdir(resolve(server.dataDir, "archives"));
+    expect(archiveFiles.some((name) => name.endsWith(".upload"))).toBe(false);
   });
 
   it("does not advertise passphrase upload headers", async () => {
@@ -315,6 +439,49 @@ describe("share-server", () => {
     expect(response.status).toBe(410);
   });
 
+  it("cancels a streamed archive download when the client disconnects", async () => {
+    const server = await startShareServer();
+    const archive = await createLargeEncryptedEnvelopeArchive(8 * 1024 * 1024);
+    const uploadResponse = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      },
+      body: Buffer.from(archive)
+    });
+    const upload = (await uploadResponse.json()) as { shareId: string };
+    expect(uploadResponse.status).toBe(201);
+
+    await new Promise<void>((resolvePromise, reject) => {
+      const download = createHttpRequest(`${server.baseUrl}/api/share/${upload.shareId}/archive`, {
+        method: "GET",
+        headers: { "x-webblackbox-api-key": apiKey }
+      });
+      download.once("error", () => undefined);
+      download.once("response", (archiveResponse) => {
+        archiveResponse.once("error", () => undefined);
+        archiveResponse.once("data", () => {
+          archiveResponse.destroy();
+          download.destroy();
+          resolvePromise();
+        });
+        archiveResponse.once("end", () => {
+          reject(new Error("Expected to abort before the complete archive was streamed."));
+        });
+      });
+      download.end();
+    });
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    const metadataResponse = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(metadataResponse.status).toBe(200);
+    expect(server.child.exitCode).toBeNull();
+  });
+
   it("revokes shares and writes redacted audit events", async () => {
     const server = await startShareServer();
     const uploadPayload = await uploadEncryptedFixture(server);
@@ -434,6 +601,7 @@ describe("share-server", () => {
       }
     );
     expect(archiveResponse.status).toBe(200);
+    expect((await archiveResponse.arrayBuffer()).byteLength).toBeGreaterThan(0);
   });
 
   it("rejects query API keys by default", async () => {
@@ -671,6 +839,25 @@ async function createPlaintextEnvelopeArchive(): Promise<Uint8Array> {
   return createEnvelopeArchive(false);
 }
 
+async function createLargeEncryptedEnvelopeArchive(blobBytes: number): Promise<Uint8Array> {
+  const source = await createEncryptedEnvelopeArchive();
+  const zip = await JSZip.loadAsync(source);
+  const integrityFile = zip.file("integrity/hashes.json");
+  if (!integrityFile) {
+    throw new Error("Missing fixture integrity manifest.");
+  }
+
+  const integrity = JSON.parse(await integrityFile.async("string")) as {
+    manifestSha256: string;
+    files: Record<string, string>;
+  };
+  const ciphertext = randomBytes(blobBytes);
+  zip.file(BLOB_FIXTURE_PATH, ciphertext);
+  integrity.files[BLOB_FIXTURE_PATH] = createHash("sha256").update(ciphertext).digest("hex");
+  zip.file("integrity/hashes.json", JSON.stringify(integrity));
+  return zip.generateAsync({ type: "uint8array", compression: "STORE" });
+}
+
 async function createEnvelopeArchive(
   encrypted: boolean,
   options: {
@@ -792,4 +979,27 @@ function addPrivateFile(
 
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
+}
+
+function forgeZipUncompressedSize(bytes: Uint8Array, targetName: string, size: number): void {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder();
+
+  for (let offset = 0; offset + 46 <= bytes.byteLength; offset += 1) {
+    const signature = view.getUint32(offset, true);
+    if (signature === 0x04034b50) {
+      const nameBytes = view.getUint16(offset + 26, true);
+      const name = decoder.decode(bytes.subarray(offset + 30, offset + 30 + nameBytes));
+      if (name === targetName) {
+        view.setUint32(offset + 22, size, true);
+      }
+    }
+    if (signature === 0x02014b50) {
+      const nameBytes = view.getUint16(offset + 28, true);
+      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameBytes));
+      if (name === targetName) {
+        view.setUint32(offset + 24, size, true);
+      }
+    }
+  }
 }

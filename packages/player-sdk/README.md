@@ -56,10 +56,26 @@ const scopedPlayer = await WebBlackboxPlayer.open(archiveBytes, {
   range: { monoStart: 12000, monoEnd: 45000 }
 });
 
+// Resource limits have safe ceilings and may only be tightened per open.
+const constrainedPlayer = await WebBlackboxPlayer.open(archiveBytes, {
+  resourceLimits: {
+    maxInputBytes: 32 * 1024 * 1024,
+    maxEntryCount: 2_000,
+    maxEventCount: 250_000
+  }
+});
+
 console.log(player.status); // "loaded"
 console.log(player.archive.manifest); // ExportManifest
 console.log(player.events.length); // Total event count
 ```
+
+The built-in ceilings are 256 MiB input, 10,000 physical ZIP entries, 128 MiB per expanded
+entry, 256 MiB total ZIP expansion, 8 MiB per/24 MiB total JSON metadata, 10,000x compression
+ratio, 1,000,000 events, 500,000 index records, 2,000,000 index event references, 32 MiB per
+decoded event chunk, 64 MiB total decoded event bytes, and 5 seconds per ZIP/codec stream.
+Actual inflater output is counted; declared ZIP sizes are only an early-rejection hint. Values
+supplied through `resourceLimits` may only be lower than these ceilings.
 
 ### Querying Events
 
@@ -348,6 +364,23 @@ type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 type PlayerOpenOptions = {
   passphrase?: string;
   range?: PlayerRange;
+  resourceLimits?: Partial<ArchiveResourceLimits>;
+};
+
+type ArchiveResourceLimits = {
+  maxInputBytes: number;
+  maxEntryCount: number;
+  maxEntryUncompressedBytes: number;
+  maxTotalUncompressedBytes: number;
+  maxMetadataEntryBytes: number;
+  maxTotalMetadataBytes: number;
+  maxCompressionRatio: number;
+  maxEventCount: number;
+  maxIndexRecords: number;
+  maxIndexEventReferences: number;
+  maxChunkDecodedBytes: number;
+  maxTotalDecodedBytes: number;
+  decodeTimeoutMs: number;
 };
 
 type PlayerQuery = {

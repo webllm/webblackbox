@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+import { ArchiveOperationAdmission } from "./archive-operation-admission.js";
 import {
   compareSessions,
   compareSessionsInput,
@@ -37,6 +39,7 @@ export function createServer(): McpServer {
     name: SERVER_NAME,
     version: SERVER_VERSION
   });
+  const archiveOperations = new ArchiveOperationAdmission(1);
 
   server.tool("health", "Health check", {}, async () => {
     return {
@@ -74,13 +77,15 @@ export function createServer(): McpServer {
     "Open an archive and return session-level summary metrics and top issues.",
     sessionSummaryInput,
     async ({ path, passphrase, slowRequestMs, topN }) => {
-      return toTextPayload(
-        await summarizeSession({
-          path,
-          passphrase,
-          slowRequestMs,
-          topN
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await summarizeSession({
+            path,
+            passphrase,
+            slowRequestMs,
+            topN
+          })
+        )
       );
     }
   );
@@ -103,21 +108,23 @@ export function createServer(): McpServer {
       includeData,
       maxDataChars
     }) => {
-      return toTextPayload(
-        await queryEvents({
-          path,
-          passphrase,
-          text,
-          types,
-          levels,
-          requestId,
-          monoStart,
-          monoEnd,
-          offset,
-          limit,
-          includeData,
-          maxDataChars
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await queryEvents({
+            path,
+            passphrase,
+            text,
+            types,
+            levels,
+            requestId,
+            monoStart,
+            monoEnd,
+            offset,
+            limit,
+            includeData,
+            maxDataChars
+          })
+        )
       );
     }
   );
@@ -127,13 +134,15 @@ export function createServer(): McpServer {
     "Summarize failed and slow network requests from an archive.",
     networkIssuesInput,
     async ({ path, passphrase, minDurationMs, limit }) => {
-      return toTextPayload(
-        await summarizeNetworkIssues({
-          path,
-          passphrase,
-          minDurationMs,
-          limit
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await summarizeNetworkIssues({
+            path,
+            passphrase,
+            minDurationMs,
+            limit
+          })
+        )
       );
     }
   );
@@ -155,20 +164,22 @@ export function createServer(): McpServer {
       projectKey,
       priority
     }) => {
-      return toTextPayload(
-        await generateBugReportBundle({
-          path,
-          passphrase,
-          title,
-          maxItems,
-          monoStart,
-          monoEnd,
-          labels,
-          assignees,
-          issueType,
-          projectKey,
-          priority
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await generateBugReportBundle({
+            path,
+            passphrase,
+            title,
+            maxItems,
+            monoStart,
+            monoEnd,
+            labels,
+            assignees,
+            issueType,
+            projectKey,
+            priority
+          })
+        )
       );
     }
   );
@@ -178,13 +189,15 @@ export function createServer(): McpServer {
     "Export HAR JSON string from an archive, optionally within a mono range.",
     exportHarInput,
     async ({ path, passphrase, monoStart, monoEnd }) => {
-      return toTextPayload(
-        await exportHarFromArchive({
-          path,
-          passphrase,
-          monoStart,
-          monoEnd
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await exportHarFromArchive({
+            path,
+            passphrase,
+            monoStart,
+            monoEnd
+          })
+        )
       );
     }
   );
@@ -203,17 +216,19 @@ export function createServer(): McpServer {
       monoStart,
       monoEnd
     }) => {
-      return toTextPayload(
-        await generatePlaywrightFromArchive({
-          path,
-          passphrase,
-          name,
-          startUrl,
-          maxActions,
-          includeHarReplay,
-          monoStart,
-          monoEnd
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await generatePlaywrightFromArchive({
+            path,
+            passphrase,
+            name,
+            startUrl,
+            maxActions,
+            includeHarReplay,
+            monoStart,
+            monoEnd
+          })
+        )
       );
     }
   );
@@ -223,14 +238,16 @@ export function createServer(): McpServer {
     "Summarize action spans with trigger/duration plus request, error, and screenshot context.",
     summarizeActionsInput,
     async ({ path, passphrase, monoStart, monoEnd, limit }) => {
-      return toTextPayload(
-        await summarizeActions({
-          path,
-          passphrase,
-          monoStart,
-          monoEnd,
-          limit
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await summarizeActions({
+            path,
+            passphrase,
+            monoStart,
+            monoEnd,
+            limit
+          })
+        )
       );
     }
   );
@@ -240,15 +257,17 @@ export function createServer(): McpServer {
     "Find likely root-cause signals around errors (nearby failed requests, warn/error console, AI root cause hints).",
     rootCauseCandidatesInput,
     async ({ path, passphrase, monoStart, monoEnd, limit, windowMs }) => {
-      return toTextPayload(
-        await findRootCauseCandidates({
-          path,
-          passphrase,
-          monoStart,
-          monoEnd,
-          limit,
-          windowMs
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await findRootCauseCandidates({
+            path,
+            passphrase,
+            monoStart,
+            monoEnd,
+            limit,
+            windowMs
+          })
+        )
       );
     }
   );
@@ -269,19 +288,21 @@ export function createServer(): McpServer {
       topPerfDiffs,
       includeStorageHashes
     }) => {
-      return toTextPayload(
-        await compareSessions({
-          leftPath,
-          rightPath,
-          leftPassphrase,
-          rightPassphrase,
-          topTypeDeltas,
-          topRequestDiffs,
-          topErrorDiffs,
-          topActionDiffs,
-          topPerfDiffs,
-          includeStorageHashes
-        })
+      return archiveOperations.run(async () =>
+        toTextPayload(
+          await compareSessions({
+            leftPath,
+            rightPath,
+            leftPassphrase,
+            rightPassphrase,
+            topTypeDeltas,
+            topRequestDiffs,
+            topErrorDiffs,
+            topActionDiffs,
+            topPerfDiffs,
+            includeStorageHashes
+          })
+        )
       );
     }
   );

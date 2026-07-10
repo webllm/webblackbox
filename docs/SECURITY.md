@@ -29,7 +29,7 @@ Plaintext synthetic or local-debug export exemptions require a well-formed `capt
 
 ## Player Safety
 
-The player treats archives as untrusted input. It does not load captured external resources by default, limits replay resources to inert local object/data URLs, revokes screenshot object URLs after a short TTL, and serves player/share views with no-referrer and restrictive CSP controls. Remote share servers must use HTTPS; plaintext HTTP is accepted only for loopback development endpoints so share API credentials are not sent over an unprotected remote connection.
+The player treats archives as untrusted input. It does not load captured external resources by default, limits replay resources to inert local object/data URLs, revokes screenshot object URLs after a short TTL, and serves player/share views with no-referrer and restrictive CSP controls. Archive input bytes, ZIP entries, expanded bytes, compression ratios, decoded event bytes, event counts, and codec time are subject to non-relaxable safety ceilings; callers may only tighten them. Remote share servers must use HTTPS; plaintext HTTP is accepted only for loopback development endpoints so share API credentials are not sent over an unprotected remote connection.
 
 ## Share Server
 

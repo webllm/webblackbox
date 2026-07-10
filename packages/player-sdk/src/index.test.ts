@@ -70,6 +70,22 @@ describe("WebBlackboxPlayer", () => {
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
   });
 
+  it("memoizes lazy blob work without exposing mutable cached bytes", async () => {
+    const player = await WebBlackboxPlayer.open(await createFixtureArchive());
+    const first = await player.getBlob("blob1");
+    const second = await player.getBlob("blob1");
+
+    expect(first?.bytes).not.toBe(second?.bytes);
+    if (!first || !second) {
+      throw new Error("Missing fixture blob.");
+    }
+    first.bytes[0] = 99;
+    expect(Array.from(second.bytes)).toEqual([1, 2, 3]);
+    await expect(player.getBlob("blob1")).resolves.toMatchObject({
+      bytes: Uint8Array.from([1, 2, 3])
+    });
+  });
+
   it("builds an explainable privacy protection report", async () => {
     const bytes = await createPrivacyFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
@@ -116,6 +132,111 @@ describe("WebBlackboxPlayer", () => {
 
     const fromBlob = await WebBlackboxPlayer.open(new Blob([arrayBuffer]));
     expect(fromBlob.events.length).toBeGreaterThan(0);
+  });
+
+  it("enforces input-byte limits at the boundary before reading Blob contents", async () => {
+    const bytes = await createFixtureArchive();
+
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        resourceLimits: { maxInputBytes: bytes.byteLength }
+      })
+    ).resolves.toBeInstanceOf(WebBlackboxPlayer);
+
+    const blob = new Blob([toArrayBuffer(bytes)]);
+    const arrayBufferSpy = vi.spyOn(blob, "arrayBuffer");
+    await expect(
+      WebBlackboxPlayer.open(blob, {
+        resourceLimits: { maxInputBytes: bytes.byteLength - 1 }
+      })
+    ).rejects.toMatchObject({
+      name: "ArchiveResourceLimitError",
+      resource: "maxInputBytes"
+    });
+    expect(arrayBufferSpy).not.toHaveBeenCalled();
+  });
+
+  it("enforces event-count limits at the exact boundary", async () => {
+    const bytes = await createFixtureArchive();
+
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        resourceLimits: { maxEventCount: 5 }
+      })
+    ).resolves.toBeInstanceOf(WebBlackboxPlayer);
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        resourceLimits: { maxEventCount: 4 }
+      })
+    ).rejects.toMatchObject({
+      name: "ArchiveResourceLimitError",
+      resource: "maxEventCount",
+      actual: 5
+    });
+  });
+
+  it("stops before parsing later NDJSON lines after the event budget is exhausted", async () => {
+    const source = await createFixtureArchive();
+    const zip = await JSZip.loadAsync(source);
+    const eventFile = zip.file("events/chunk-000001.ndjson");
+    if (!eventFile) {
+      throw new Error("Missing fixture event chunk.");
+    }
+    const lines = (await eventFile.async("string")).split("\n");
+    zip.file("events/chunk-000001.ndjson", `${lines[0]}\n${lines[1]}\n{ malformed`);
+    await writeIntegrityHashes(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        resourceLimits: { maxEventCount: 1 }
+      })
+    ).rejects.toMatchObject({
+      name: "ArchiveResourceLimitError",
+      resource: "maxEventCount",
+      actual: 2
+    });
+  });
+
+  it("applies compression-ratio limits to nested event codecs", async () => {
+    const bytes = await createCompressedCodecArchive("gzip");
+
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        resourceLimits: { maxCompressionRatio: 1 }
+      })
+    ).rejects.toMatchObject({
+      name: "ArchiveResourceLimitError",
+      resource: "maxCompressionRatio"
+    });
+  });
+
+  it("applies the same output limit to the Node codec fallback", async () => {
+    const bytes = await createCompressedCodecArchive("gzip");
+    const originalDecompressionStream = globalThis.DecompressionStream;
+
+    Object.defineProperty(globalThis, "DecompressionStream", {
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+
+    try {
+      await expect(
+        WebBlackboxPlayer.open(bytes, {
+          resourceLimits: { maxCompressionRatio: 1 }
+        })
+      ).rejects.toMatchObject({
+        name: "ArchiveResourceLimitError",
+        resource: "maxCompressionRatio"
+      });
+    } finally {
+      Object.defineProperty(globalThis, "DecompressionStream", {
+        configurable: true,
+        writable: true,
+        value: originalDecompressionStream
+      });
+    }
   });
 
   it("opens plain archives without global Web Crypto when Node crypto is available", async () => {
@@ -184,7 +305,7 @@ describe("WebBlackboxPlayer", () => {
       const parseCountAfterFirstRead = parseSpy.mock.calls.length;
 
       expect(firstEvents.length).toBeGreaterThan(0);
-      expect(parseCountAfterFirstRead).toBe(firstEvents.length);
+      expect(parseCountAfterFirstRead).toBe(0);
 
       const secondEvents = player.events;
       const firstDerived = player.buildDerived();
@@ -256,6 +377,35 @@ describe("WebBlackboxPlayer", () => {
       expect(player.events.map((event) => event.id)).toEqual(["E-C-1", "E-C-2"]);
       expect(player.query({ requestId: `R-${codec}` }).map((event) => event.id)).toEqual(["E-C-2"]);
     }
+  });
+
+  it("opens a normally DEFLATE-compressed exporter-sized ZIP under default limits", async () => {
+    const source = await createFixtureArchive();
+    const zip = await JSZip.loadAsync(source);
+    const bytes = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 }
+    });
+
+    const player = await WebBlackboxPlayer.open(bytes);
+    expect(player.events).toHaveLength(5);
+  });
+
+  it("opens a legitimate highly compressible exporter blob under default limits", async () => {
+    const zip = await JSZip.loadAsync(await createFixtureArchive());
+    zip.file("blobs/sha256-blob1.webp", new Uint8Array(1024 * 1024));
+    await writeIntegrityHashes(zip);
+    const bytes = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 }
+    });
+
+    const player = await WebBlackboxPlayer.open(bytes);
+    await expect(player.getBlob("blob1")).resolves.toMatchObject({
+      bytes: expect.objectContaining({ byteLength: 1024 * 1024 })
+    });
   });
 
   it("opens encrypted archives when passphrase is provided", async () => {
@@ -534,6 +684,26 @@ describe("WebBlackboxPlayer", () => {
     const player = await WebBlackboxPlayer.open(bytes);
 
     await expect(player.getBlob("blob1")).rejects.toThrow(/integrity mismatch/i);
+  });
+
+  it("applies actual ZIP output limits to lazily loaded blobs", async () => {
+    const zip = await JSZip.loadAsync(await createFixtureArchive());
+    zip.file("blobs/sha256-blob1.webp", new Uint8Array(2 * 1024 * 1024));
+    await writeIntegrityHashes(zip);
+    const bytes = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 }
+    });
+    forgeZipEntryUncompressedSize(bytes, "blobs/sha256-blob1.webp", 1);
+
+    const player = await WebBlackboxPlayer.open(bytes, {
+      resourceLimits: { maxEntryUncompressedBytes: 1024 * 1024 }
+    });
+    await expect(player.getBlob("blob1")).rejects.toMatchObject({
+      name: "ArchiveResourceLimitError",
+      resource: "maxEntryUncompressedBytes"
+    });
   });
 
   it("rejects archives with undeclared event chunks", async () => {
@@ -2491,4 +2661,27 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function forgeZipEntryUncompressedSize(bytes: Uint8Array, targetName: string, size: number): void {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder();
+
+  for (let offset = 0; offset + 46 <= bytes.byteLength; offset += 1) {
+    const signature = view.getUint32(offset, true);
+    if (signature === 0x04034b50) {
+      const nameBytes = view.getUint16(offset + 26, true);
+      const name = decoder.decode(bytes.subarray(offset + 30, offset + 30 + nameBytes));
+      if (name === targetName) {
+        view.setUint32(offset + 22, size, true);
+      }
+    }
+    if (signature === 0x02014b50) {
+      const nameBytes = view.getUint16(offset + 28, true);
+      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameBytes));
+      if (name === targetName) {
+        view.setUint32(offset + 24, size, true);
+      }
+    }
+  }
 }

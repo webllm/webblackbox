@@ -91,6 +91,7 @@ node dist/cli.js --version
 ## Notes
 
 - Archive paths are resolved from the current working directory if relative.
+- Archive size is checked against a 64 MiB MCP ceiling on one open file descriptor before bytes are read; the Player SDK then enforces ZIP expansion and event budgets. The production MCP server admits one archive-heavy tool call at a time; excess concurrent calls fail fast instead of multiplying retained Player memory. `compare_sessions` is one admitted operation and can hold its two bounded archives.
 - Encrypted archives require `passphrase`.
 - `query_events` defaults to payload-hidden output (`includeData=false`) to avoid huge responses.
 - Range-scoped tools (`monoStart` / `monoEnd`) preload only intersecting chunks when opening archives.
