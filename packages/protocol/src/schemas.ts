@@ -623,18 +623,21 @@ export function validateEventData(
   return getEventPayloadSchema(type).safeParse(payload);
 }
 
+export const webBlackboxEventSchema = eventEnvelopeSchema.superRefine((event, context) => {
+  const payloadResult = validateEventData(event.type, event.data);
+
+  if (payloadResult.success) {
+    return;
+  }
+
+  for (const issue of payloadResult.error.issues) {
+    context.addIssue({
+      ...issue,
+      path: ["data", ...issue.path]
+    });
+  }
+});
+
 export function validateEvent(event: unknown) {
-  const envelopeResult = eventEnvelopeSchema.safeParse(event);
-
-  if (!envelopeResult.success) {
-    return envelopeResult;
-  }
-
-  const payloadResult = validateEventData(envelopeResult.data.type, envelopeResult.data.data);
-
-  if (!payloadResult.success) {
-    return payloadResult;
-  }
-
-  return envelopeResult;
+  return webBlackboxEventSchema.safeParse(event);
 }

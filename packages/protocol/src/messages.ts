@@ -2,9 +2,9 @@ import { z } from "zod";
 
 import {
   chunkCodecSchema,
-  eventEnvelopeSchema,
   freezeReasonSchema,
-  recorderConfigSchema
+  recorderConfigSchema,
+  webBlackboxEventSchema
 } from "./schemas.js";
 
 const arrayBufferSchema = z.custom<ArrayBuffer>((value) => value instanceof ArrayBuffer, {
@@ -53,7 +53,7 @@ export const eventBatchMessageSchema = z
     sid: z.string().min(1),
     tabId: z.number().int().nonnegative(),
     seq: z.number().int().nonnegative(),
-    events: z.array(eventEnvelopeSchema)
+    events: z.array(webBlackboxEventSchema)
   })
   .strict();
 

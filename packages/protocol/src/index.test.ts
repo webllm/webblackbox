@@ -63,6 +63,53 @@ describe("protocol", () => {
     expect(result.success).toBe(true);
   });
 
+  it("validates specialized event payloads inside batch messages", () => {
+    const validEvent = {
+      v: WEBBLACKBOX_PROTOCOL_VERSION,
+      sid: "S-batch",
+      tab: 3,
+      t: Date.now(),
+      mono: 42,
+      type: "network.request",
+      id: "E-valid",
+      data: {
+        reqId: "R-valid",
+        url: "https://example.com/api",
+        method: "GET"
+      }
+    };
+
+    expect(
+      validateMessage({
+        t: "EVT.BATCH",
+        sid: "S-batch",
+        tabId: 3,
+        seq: 1,
+        events: [validEvent]
+      }).success
+    ).toBe(true);
+
+    const invalid = validateMessage({
+      t: "EVT.BATCH",
+      sid: "S-batch",
+      tabId: 3,
+      seq: 2,
+      events: [
+        {
+          ...validEvent,
+          id: "E-invalid",
+          data: {}
+        }
+      ]
+    });
+
+    expect(invalid.success).toBe(false);
+
+    if (!invalid.success) {
+      expect(invalid.error.issues.some((issue) => issue.path[0] === "events")).toBe(true);
+    }
+  });
+
   it("ships product-safe redaction defaults", () => {
     expect(DEFAULT_RECORDER_CONFIG.redaction.redactHeaders).toEqual(
       expect.arrayContaining(["authorization", "x-api-key", "x-csrf-token"])
