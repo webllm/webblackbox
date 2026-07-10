@@ -723,6 +723,9 @@ describe("share-server", () => {
     const sourceRecord = JSON.parse(
       await readFile(resolve(server.dataDir, "records", `${upload.shareId}.json`), "utf8")
     ) as Record<string, unknown>;
+    const sourceArchive = await readFile(
+      resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`)
+    );
     const createdAt = Number(sourceRecord.createdAt);
     const cloneIds = ["a".repeat(32), "b".repeat(32)];
 
@@ -735,6 +738,7 @@ describe("share-server", () => {
           createdAt: createdAt - index - 1
         })
       );
+      await writeFile(resolve(server.dataDir, "archives", `${id}.webblackbox`), sourceArchive);
     }
 
     const firstResponse = await fetch(`${server.baseUrl}/api/share/list?limit=2&offset=0`, {
@@ -914,6 +918,85 @@ describe("share-server", () => {
       headers: { "x-webblackbox-api-key": apiKey }
     });
     expect(metadataResponse.status).toBe(200);
+  });
+
+  it.each(["truncated", "same-size replacement"] as const)(
+    "removes a %s persisted archive during restart reconciliation",
+    async (corruption) => {
+      const server = await startShareServer();
+      const upload = await uploadEncryptedFixture(server);
+      const archivePath = resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`);
+      const storedArchive = await readFile(archivePath);
+      const corruptedArchive =
+        corruption === "truncated"
+          ? storedArchive.subarray(0, storedArchive.byteLength - 1)
+          : Buffer.alloc(storedArchive.byteLength, 0xa5);
+      expect(sha256Hex(corruptedArchive)).not.toBe(sha256Hex(storedArchive));
+
+      await stopShareServer(server, false);
+      await writeFile(archivePath, corruptedArchive);
+      const restarted = await startShareServer({}, server.dataDir);
+
+      const listResponse = await fetch(`${restarted.baseUrl}/api/share/list`, {
+        headers: { "x-webblackbox-api-key": apiKey }
+      });
+      const list = (await listResponse.json()) as { items: unknown[]; total: number };
+      expect(listResponse.status).toBe(200);
+      expect(list).toMatchObject({ items: [], total: 0 });
+      await expect(readdir(resolve(restarted.dataDir, "archives"))).resolves.toEqual([]);
+      await expect(readdir(resolve(restarted.dataDir, "records"))).resolves.toEqual([]);
+
+      const metadataResponse = await fetch(
+        `${restarted.baseUrl}/api/share/${upload.shareId}/meta`,
+        { headers: { "x-webblackbox-api-key": apiKey } }
+      );
+      const downloadResponse = await fetch(
+        `${restarted.baseUrl}/api/share/${upload.shareId}/archive`,
+        { headers: { "x-webblackbox-api-key": apiKey } }
+      );
+      expect(metadataResponse.status).toBe(404);
+      expect(downloadResponse.status).toBe(404);
+    }
+  );
+
+  it("does not expose stale metadata or downloads after archives change at runtime", async () => {
+    const server = await startShareServer();
+    const truncatedUpload = await uploadEncryptedFixture(server);
+    const truncatedPath = resolve(
+      server.dataDir,
+      "archives",
+      `${truncatedUpload.shareId}.webblackbox`
+    );
+    const truncatedBytes = await readFile(truncatedPath);
+    await writeFile(truncatedPath, truncatedBytes.subarray(0, truncatedBytes.byteLength - 1));
+
+    const metadataResponse = await fetch(
+      `${server.baseUrl}/api/share/${truncatedUpload.shareId}/meta`,
+      { headers: { "x-webblackbox-api-key": apiKey } }
+    );
+    expect(metadataResponse.status).toBe(404);
+
+    const replacedUpload = await uploadEncryptedFixture(server);
+    const replacedPath = resolve(
+      server.dataDir,
+      "archives",
+      `${replacedUpload.shareId}.webblackbox`
+    );
+    const replacedBytes = await readFile(replacedPath);
+    await writeFile(replacedPath, Buffer.alloc(replacedBytes.byteLength, 0x5a));
+
+    const downloadResponse = await fetch(
+      `${server.baseUrl}/api/share/${replacedUpload.shareId}/archive`,
+      { headers: { "x-webblackbox-api-key": apiKey } }
+    );
+    expect(downloadResponse.status).toBe(404);
+    expect(downloadResponse.headers.get("content-type")).toContain("application/json");
+
+    const listResponse = await fetch(`${server.baseUrl}/api/share/list`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const list = (await listResponse.json()) as { items: unknown[]; total: number };
+    expect(list).toMatchObject({ items: [], total: 0 });
   });
 
   it("expires shares and blocks archive download after ttl", async () => {

@@ -1,6 +1,16 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { appendFile, mkdir, open, opendir, rename, rm, stat } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  open,
+  opendir,
+  rename,
+  rm,
+  stat,
+  type FileHandle
+} from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
@@ -216,6 +226,8 @@ const SHARE_RECORD_ADMISSION_LIMIT = Math.min(
   MAX_SHARE_RECORD_FILES
 );
 const MAX_SHARE_RECORD_DIRECTORY_ENTRIES = 20_000;
+const MAX_VERIFIED_ARCHIVE_CACHE_ENTRIES = 10_000;
+const ARCHIVE_CHECKSUM_BUFFER_BYTES = 64 * 1024;
 const DEFAULT_SHARE_LIST_LIMIT = 100;
 const MAX_SHARE_LIST_LIMIT = 200;
 const MAX_SHARE_AUDIT_LOG_BYTES = Math.min(
@@ -227,6 +239,7 @@ const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
 const shareReadSessions = new Map<string, ShareReadSession>();
+const verifiedArchiveCache = new Map<string, { checksumSha256: string; statFingerprint: string }>();
 let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
 let sharePublicOrigin = DEFAULT_BASE_URL;
@@ -776,7 +789,7 @@ async function handleList(
   }
 
   await pruneExpiredShareRecords(Date.now());
-  const records = (await loadAllRecords()).sort(
+  const records = (await filterRecordsWithValidArchives(await loadAllRecords())).sort(
     (left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id)
   );
   const endOffset = Math.min(records.length, pagination.offset + pagination.limit);
@@ -827,21 +840,18 @@ async function handleDownloadArchive(
     return;
   }
 
-  const archivePath = archivePathForId(id);
+  let verifiedArchive: VerifiedArchiveFile | null = null;
 
   try {
-    const archiveStat = await stat(archivePath);
-    if (!archiveStat.isFile()) {
-      throw new ArchiveFileNotFoundError();
-    }
+    verifiedArchive = await openVerifiedArchive(record);
 
     response.writeHead(200, {
       "content-type": "application/zip",
-      "content-length": String(archiveStat.size),
+      "content-length": String(record.sizeBytes),
       "content-disposition": `attachment; filename="${record.fileName}"`
     });
 
-    await streamArchiveDownload(request, response, archivePath);
+    await streamArchiveDownload(request, response, verifiedArchive.handle, record.sizeBytes);
     await writeShareAuditEvent(request, {
       action: "download",
       shareId: id,
@@ -849,6 +859,10 @@ async function handleDownloadArchive(
     });
   } catch (error) {
     const clientAborted = error instanceof ClientAbortedDownloadError;
+
+    if (error instanceof ArchiveIntegrityError) {
+      await removeStoredShare(id);
+    }
 
     if (!clientAborted && !response.headersSent && !response.writableEnded) {
       respondJson(response, 404, {
@@ -863,15 +877,22 @@ async function handleDownloadArchive(
       shareId: id,
       outcome: clientAborted ? "error" : "not-found"
     });
+  } finally {
+    await verifiedArchive?.handle.close().catch(() => undefined);
   }
 }
 
 async function streamArchiveDownload(
   request: IncomingMessage,
   response: ServerResponse,
-  archivePath: string
+  archiveHandle: FileHandle,
+  sizeBytes: number
 ): Promise<void> {
-  const source = createReadStream(archivePath);
+  const source = archiveHandle.createReadStream({
+    autoClose: false,
+    start: 0,
+    end: sizeBytes - 1
+  });
   const abortError = new ClientAbortedDownloadError();
   const abort = () => {
     if (!source.destroyed) {
@@ -906,7 +927,7 @@ class ClientAbortedDownloadError extends Error {
   }
 }
 
-class ArchiveFileNotFoundError extends Error {}
+class ArchiveIntegrityError extends Error {}
 
 async function handleSharePage(
   request: IncomingMessage,
@@ -1025,6 +1046,20 @@ async function readAvailableShareRecord(
       action,
       shareId: id,
       outcome: "revoked"
+    });
+    return null;
+  }
+
+  if (!(await hasValidStoredArchive(record))) {
+    await removeStoredShare(id);
+    respondShareUnavailable(response, action, "not-found");
+    await writeShareAuditEvent(request, {
+      action,
+      shareId: id,
+      outcome: "not-found",
+      details: {
+        reason: "archive-integrity"
+      }
     });
     return null;
   }
@@ -1762,14 +1797,14 @@ async function reconcileStorageLayout(): Promise<void> {
   const recordIds = await collectStoredIds(RECORDS_DIR, ".json", ".record");
 
   for (const id of recordIds) {
-    if (archiveIds.has(id) && (await readRecord(id))) {
-      continue;
+    if (archiveIds.has(id)) {
+      const record = await readRecord(id);
+      if (record && (await hasValidStoredArchive(record))) {
+        continue;
+      }
     }
 
-    await Promise.all([
-      rm(recordPathForId(id), { force: true }),
-      rm(archivePathForId(id), { force: true })
-    ]);
+    await removeStoredShare(id);
     archiveIds.delete(id);
   }
 
@@ -1778,6 +1813,166 @@ async function reconcileStorageLayout(): Promise<void> {
       await rm(archivePathForId(id), { force: true });
     }
   }
+}
+
+async function filterRecordsWithValidArchives(records: ShareRecord[]): Promise<ShareRecord[]> {
+  const verifiedRecords: ShareRecord[] = [];
+
+  for (const record of records) {
+    if (await hasValidStoredArchive(record)) {
+      verifiedRecords.push(record);
+      continue;
+    }
+
+    await removeStoredShare(record.id);
+  }
+
+  return verifiedRecords;
+}
+
+async function hasValidStoredArchive(record: ShareRecord): Promise<boolean> {
+  let verifiedArchive: VerifiedArchiveFile | null = null;
+
+  try {
+    verifiedArchive = await openVerifiedArchive(record);
+    return true;
+  } catch (error) {
+    if (!(error instanceof ArchiveIntegrityError)) {
+      throw error;
+    }
+    return false;
+  } finally {
+    await verifiedArchive?.handle.close().catch(() => undefined);
+  }
+}
+
+type VerifiedArchiveFile = {
+  handle: FileHandle;
+};
+
+async function openVerifiedArchive(record: ShareRecord): Promise<VerifiedArchiveFile> {
+  let handle: FileHandle | null = null;
+
+  try {
+    const archivePath = archivePathForId(record.id);
+    const pathStat = await lstat(archivePath, { bigint: true });
+    if (!pathStat.isFile() || pathStat.size !== BigInt(record.sizeBytes)) {
+      throw new ArchiveIntegrityError();
+    }
+
+    handle = await open(archivePath, "r");
+    const openedStat = await handle.stat({ bigint: true });
+    if (
+      !openedStat.isFile() ||
+      openedStat.size !== BigInt(record.sizeBytes) ||
+      !isSameArchiveFile(pathStat, openedStat)
+    ) {
+      throw new ArchiveIntegrityError();
+    }
+
+    const statFingerprint = archiveStatFingerprint(openedStat);
+    const cached = verifiedArchiveCache.get(record.id);
+    if (
+      cached?.checksumSha256 === record.checksumSha256 &&
+      cached.statFingerprint === statFingerprint
+    ) {
+      verifiedArchiveCache.delete(record.id);
+      verifiedArchiveCache.set(record.id, cached);
+      await assertArchivePathStillReferences(archivePath, openedStat);
+      return { handle };
+    }
+
+    const checksumSha256 = await checksumArchiveFileHandle(handle, record.sizeBytes);
+    const verifiedStat = await handle.stat({ bigint: true });
+    if (
+      archiveStatFingerprint(verifiedStat) !== statFingerprint ||
+      !sha256HexMatches(checksumSha256, record.checksumSha256)
+    ) {
+      throw new ArchiveIntegrityError();
+    }
+
+    await assertArchivePathStillReferences(archivePath, verifiedStat);
+    cacheVerifiedArchive(record.id, checksumSha256, statFingerprint);
+    return { handle };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (error instanceof ArchiveIntegrityError) {
+      throw error;
+    }
+    if (isFileNotFoundError(error)) {
+      throw new ArchiveIntegrityError();
+    }
+    throw error;
+  }
+}
+
+async function assertArchivePathStillReferences(
+  archivePath: string,
+  openedStat: BigIntStats
+): Promise<void> {
+  const currentPathStat = await lstat(archivePath, { bigint: true });
+  if (
+    !currentPathStat.isFile() ||
+    archiveStatFingerprint(currentPathStat) !== archiveStatFingerprint(openedStat)
+  ) {
+    throw new ArchiveIntegrityError();
+  }
+}
+
+function isSameArchiveFile(pathStat: BigIntStats, openedStat: BigIntStats): boolean {
+  return pathStat.dev === openedStat.dev && pathStat.ino === openedStat.ino;
+}
+
+function archiveStatFingerprint(archiveStat: BigIntStats): string {
+  return [
+    archiveStat.dev,
+    archiveStat.ino,
+    archiveStat.mode,
+    archiveStat.size,
+    archiveStat.mtimeNs,
+    archiveStat.ctimeNs
+  ].join(":");
+}
+
+async function checksumArchiveFileHandle(
+  handle: FileHandle,
+  expectedBytes: number
+): Promise<string> {
+  const checksum = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(Math.min(ARCHIVE_CHECKSUM_BUFFER_BYTES, expectedBytes));
+  let offset = 0;
+
+  while (offset < expectedBytes) {
+    const bytesToRead = Math.min(buffer.byteLength, expectedBytes - offset);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, offset);
+    if (bytesRead === 0) {
+      throw new ArchiveIntegrityError();
+    }
+    checksum.update(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+
+  return checksum.digest("hex");
+}
+
+function cacheVerifiedArchive(id: string, checksumSha256: string, statFingerprint: string): void {
+  verifiedArchiveCache.delete(id);
+  while (verifiedArchiveCache.size >= MAX_VERIFIED_ARCHIVE_CACHE_ENTRIES) {
+    const oldestId = verifiedArchiveCache.keys().next().value as string | undefined;
+    if (!oldestId) {
+      break;
+    }
+    verifiedArchiveCache.delete(oldestId);
+  }
+  verifiedArchiveCache.set(id, { checksumSha256, statFingerprint });
+}
+
+async function removeStoredShare(id: string): Promise<void> {
+  verifiedArchiveCache.delete(id);
+  await Promise.all([
+    rm(recordPathForId(id), { force: true }),
+    rm(archivePathForId(id), { force: true })
+  ]);
 }
 
 async function collectStoredIds(
@@ -2200,10 +2395,7 @@ async function pruneExpiredShareRecords(now: number): Promise<void> {
       continue;
     }
 
-    await Promise.all([
-      rm(recordPathForId(record.id), { force: true }),
-      rm(archivePathForId(record.id), { force: true })
-    ]);
+    await removeStoredShare(record.id);
   }
 }
 
