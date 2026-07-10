@@ -1941,8 +1941,9 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
 
   try {
     const headers: Record<string, string> = {};
-    if (trimmedApiKey.length > 0) {
-      headers["x-webblackbox-api-key"] = trimmedApiKey;
+    const requestApiKey = trimmedApiKey || resolved.queryApiKey || "";
+    if (requestApiKey.length > 0) {
+      headers["x-webblackbox-api-key"] = requestApiKey;
     }
 
     const response = await fetch(resolved.archiveUrl, {

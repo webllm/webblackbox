@@ -2,6 +2,7 @@ export type ShareArchiveRequest = {
   shareId: string;
   baseUrl: string;
   archiveUrl: string;
+  queryApiKey?: string;
 };
 
 export function resolveShareArchiveRequest(
@@ -36,11 +37,11 @@ export function resolveShareArchiveRequest(
   if (sharePageMatch?.[1]) {
     const shareId = sharePageMatch[1];
     const baseUrl = parsed.origin;
-    const keySuffix = buildAuthQuerySuffix(parsed);
     return {
       shareId,
       baseUrl,
-      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive${keySuffix}`
+      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive`,
+      ...readQueryApiKey(parsed)
     };
   }
 
@@ -50,7 +51,8 @@ export function resolveShareArchiveRequest(
     return {
       shareId: archiveMatch[1],
       baseUrl: parsed.origin,
-      archiveUrl: parsed.toString()
+      archiveUrl: `${parsed.origin}${parsed.pathname}`,
+      ...readQueryApiKey(parsed)
     };
   }
 
@@ -58,11 +60,11 @@ export function resolveShareArchiveRequest(
 
   if (metadataMatch?.[1]) {
     const shareId = metadataMatch[1];
-    const keySuffix = buildAuthQuerySuffix(parsed);
     return {
       shareId,
       baseUrl: parsed.origin,
-      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive${keySuffix}`
+      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive`,
+      ...readQueryApiKey(parsed)
     };
   }
 
@@ -102,11 +104,13 @@ export function resolveShareServerOrigin(value: string | null): string | null {
   }
 }
 
-function buildAuthQuerySuffix(url: URL): string {
+function readQueryApiKey(url: URL): Pick<ShareArchiveRequest, "queryApiKey"> {
   const key = url.searchParams.get("key");
   if (!key) {
-    return "";
+    return {};
   }
 
-  return `?key=${encodeURIComponent(key)}`;
+  return {
+    queryApiKey: key
+  };
 }
