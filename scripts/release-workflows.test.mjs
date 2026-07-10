@@ -10,7 +10,7 @@ test("serializes stable package publishing across release tags", async () => {
 
   assert.match(
     workflow,
-    /concurrency:\n[ ]{2}group: release-stable-publish\n[ ]{2}cancel-in-progress: false/
+    /^concurrency:\n[ ]{2}group: release-stable-publish\n[ ]{2}queue: max\n[ ]{2}cancel-in-progress: false$/m
   );
   assert.doesNotMatch(workflow, /group: release-\$\{\{/);
   assert.match(
@@ -28,6 +28,6 @@ test("serializes release assets and Pages deployments across tags", async () => 
 
   assert.match(
     workflow,
-    /concurrency:\n[ ]{2}group: release-assets-stable\n[ ]{2}cancel-in-progress: false/
+    /^concurrency:\n[ ]{2}group: release-assets-stable\n[ ]{2}queue: max\n[ ]{2}cancel-in-progress: false$/m
   );
 });

@@ -15,6 +15,7 @@ permissions: {}
 
 concurrency:
   group: release-assets-stable
+  queue: max
   cancel-in-progress: false
 
 jobs:

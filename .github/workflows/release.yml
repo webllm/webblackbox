@@ -18,6 +18,7 @@ permissions:
 
 concurrency:
   group: release-stable-publish
+  queue: max
   cancel-in-progress: false
 
 jobs:
