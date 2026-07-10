@@ -34,6 +34,27 @@ type ShareRecord = {
   summary: ShareSummary;
 };
 
+type ShareRecordIndexEntry = Readonly<{
+  id: string;
+  createdAt: number;
+  expiresAt: number;
+  retentionDeadline: number;
+}>;
+
+type ShareListCursor = Pick<ShareRecordIndexEntry, "id" | "createdAt">;
+
+type ShareListPagination =
+  | {
+      mode: "cursor";
+      cursor: ShareListCursor;
+      limit: number;
+    }
+  | {
+      mode: "offset";
+      offset: number;
+      limit: number;
+    };
+
 type ShareAuditAction = "upload" | "list" | "metadata" | "download" | "page" | "revoke";
 type ShareAuditOutcome = "ok" | "not-found" | "expired" | "revoked" | "blocked" | "error";
 type ShareAuthorizationSource = "unauthenticated-loopback-dev" | "token" | "query" | "read-session";
@@ -231,6 +252,7 @@ const MAX_VERIFIED_ARCHIVE_CACHE_ENTRIES = 10_000;
 const ARCHIVE_CHECKSUM_BUFFER_BYTES = 64 * 1024;
 const DEFAULT_SHARE_LIST_LIMIT = 100;
 const MAX_SHARE_LIST_LIMIT = 200;
+const MAX_SHARE_LIST_CURSOR_BYTES = 256;
 const MAX_SHARE_AUDIT_LOG_BYTES = Math.min(
   parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES, 16 * 1024 * 1024),
   64 * 1024 * 1024
@@ -264,6 +286,9 @@ const uploadRateWindows = new Map<string, { count: number; resetAt: number; last
 const shareReadSessions = new Map<string, ShareReadSession>();
 const verifiedArchiveCache = new Map<string, { checksumSha256: string; statFingerprint: string }>();
 const storageDirectoryIdentities = new Map<string, BigIntStats>();
+const shareRecordIndexById = new Map<string, ShareRecordIndexEntry>();
+const shareRecordListOrder: ShareRecordIndexEntry[] = [];
+const shareRecordExpiryOrder: ShareRecordIndexEntry[] = [];
 let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
 let reservedShareRecordSlots = 0;
@@ -964,30 +989,47 @@ async function handleList(
       }
     });
     respondJson(response, 400, {
-      error: `List pagination requires integer offset >= 0 and limit between 1 and ${MAX_SHARE_LIST_LIMIT}.`
+      error: `List pagination requires either a valid cursor or an integer offset >= 0, plus a limit between 1 and ${MAX_SHARE_LIST_LIMIT}.`
     });
     return;
   }
 
   await pruneExpiredShareRecords(Date.now());
-  const records = (await filterRecordsWithValidArchives(await loadAllRecords())).sort(
-    (left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id)
-  );
-  const endOffset = Math.min(records.length, pagination.offset + pagination.limit);
-  const items = records
-    .slice(pagination.offset, endOffset)
-    .map((record) => buildPublicShareMetadata(record));
+  const candidates = selectShareRecordIndexPage(pagination);
+  const records: ShareRecord[] = [];
+
+  for (const candidate of candidates) {
+    const record = await readRecord(candidate.id);
+    if (
+      !record ||
+      record.createdAt !== candidate.createdAt ||
+      record.expiresAt !== candidate.expiresAt ||
+      !(await hasValidStoredArchive(record))
+    ) {
+      await removeStoredShare(candidate.id);
+      continue;
+    }
+
+    records.push(record);
+  }
+
+  const lastCandidate = candidates.at(-1);
+  const hasMore = lastCandidate ? hasShareRecordIndexEntryAfter(lastCandidate) : false;
+  const nextCursor = hasMore && lastCandidate ? encodeShareListCursor(lastCandidate) : null;
+  const nextOffset =
+    pagination.mode === "offset" && hasMore ? pagination.offset + candidates.length : null;
 
   const auditPromise = writeShareAuditEvent(request, {
     action: "list",
     outcome: "ok"
   });
   respondJson(response, 200, {
-    items,
-    total: records.length,
-    offset: pagination.offset,
+    items: records.map((record) => buildPublicShareMetadata(record)),
+    total: shareRecordIndexById.size,
+    offset: pagination.mode === "offset" ? pagination.offset : null,
     limit: pagination.limit,
-    nextOffset: endOffset < records.length ? endOffset : null
+    nextOffset,
+    nextCursor
   });
   await auditPromise;
 }
@@ -2168,13 +2210,19 @@ function unsafeStoragePathError(
 
 async function reconcileStorageLayout(): Promise<void> {
   await assertManagedStorageLayout();
+  resetShareRecordIndex();
   const archiveIds = await collectStoredIds(ARCHIVES_DIR, ".webblackbox", ".upload");
   const recordIds = await collectStoredIds(RECORDS_DIR, ".json", ".record");
+  const indexEntries: ShareRecordIndexEntry[] = [];
+  if (recordIds.size > MAX_SHARE_RECORD_FILES) {
+    throw new Error(`Share record hard limit exceeded (${MAX_SHARE_RECORD_FILES}).`);
+  }
 
   for (const id of recordIds) {
     if (archiveIds.has(id)) {
       const record = await readRecord(id);
       if (record && (await hasValidStoredArchive(record))) {
+        indexEntries.push(createShareRecordIndexEntry(record));
         continue;
       }
     }
@@ -2193,23 +2241,8 @@ async function reconcileStorageLayout(): Promise<void> {
       await rm(archivePathForId(id), { force: true });
     }
   }
-
+  initializeShareRecordIndex(indexEntries);
   await assertManagedStorageLayout();
-}
-
-async function filterRecordsWithValidArchives(records: ShareRecord[]): Promise<ShareRecord[]> {
-  const verifiedRecords: ShareRecord[] = [];
-
-  for (const record of records) {
-    if (await hasValidStoredArchive(record)) {
-      verifiedRecords.push(record);
-      continue;
-    }
-
-    await removeStoredShare(record.id);
-  }
-
-  return verifiedRecords;
 }
 
 async function hasValidStoredArchive(record: ShareRecord): Promise<boolean> {
@@ -2384,6 +2417,7 @@ async function removeStoredShare(id: string): Promise<void> {
     rm(recordPathForId(id), { force: true }),
     rm(archivePathForId(id), { force: true })
   ]);
+  removeShareRecordIndexEntry(id);
 }
 
 async function collectStoredIds(
@@ -2470,44 +2504,16 @@ async function readRecord(id: string): Promise<ShareRecord | null> {
   }
 }
 
-async function loadAllRecords(): Promise<ShareRecord[]> {
-  const directory = await opendir(RECORDS_DIR);
-  const records: ShareRecord[] = [];
-  let directoryEntries = 0;
-  let recordFiles = 0;
-
-  for await (const entry of directory) {
-    directoryEntries += 1;
-    assertShareRecordDirectoryEntryBudget(directoryEntries);
-    if (!entry.isFile() || !entry.name.endsWith(".json")) {
-      continue;
-    }
-
-    recordFiles += 1;
-    if (recordFiles > MAX_SHARE_RECORD_FILES) {
-      throw new Error(`Share record hard limit exceeded (${MAX_SHARE_RECORD_FILES}).`);
-    }
-
-    const id = entry.name.slice(0, -".json".length);
-    const record = SHARE_ID_PATTERN.test(id) ? await readRecord(id) : null;
-    if (record) {
-      records.push(record);
-    }
-  }
-
-  return records;
-}
-
 async function tryReserveShareRecordSlot(): Promise<boolean> {
   const reservation = shareRecordAdmissionQueue.then(async () => {
-    const initialCount = await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT);
+    const initialCount = shareRecordIndexById.size;
     if (initialCount + reservedShareRecordSlots < SHARE_RECORD_ADMISSION_LIMIT) {
       reservedShareRecordSlots += 1;
       return true;
     }
 
     await pruneExpiredShareRecords(Date.now());
-    const retainedCount = await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT);
+    const retainedCount = shareRecordIndexById.size;
     if (retainedCount + reservedShareRecordSlots >= SHARE_RECORD_ADMISSION_LIMIT) {
       return false;
     }
@@ -2522,25 +2528,6 @@ async function tryReserveShareRecordSlot(): Promise<boolean> {
   return reservation;
 }
 
-async function countShareRecordFilesUpTo(stopAt: number): Promise<number> {
-  const directory = await opendir(RECORDS_DIR);
-  let directoryEntries = 0;
-  let recordFiles = 0;
-
-  for await (const entry of directory) {
-    directoryEntries += 1;
-    assertShareRecordDirectoryEntryBudget(directoryEntries);
-    if (entry.isFile() && entry.name.endsWith(".json")) {
-      recordFiles += 1;
-      if (recordFiles >= stopAt) {
-        return recordFiles;
-      }
-    }
-  }
-
-  return recordFiles;
-}
-
 function assertShareRecordDirectoryEntryBudget(entries: number): void {
   if (entries > MAX_SHARE_RECORD_DIRECTORY_ENTRIES) {
     throw new Error(
@@ -2549,7 +2536,148 @@ function assertShareRecordDirectoryEntryBudget(entries: number): void {
   }
 }
 
+function resetShareRecordIndex(): void {
+  shareRecordIndexById.clear();
+  shareRecordListOrder.length = 0;
+  shareRecordExpiryOrder.length = 0;
+}
+
+function initializeShareRecordIndex(entries: ShareRecordIndexEntry[]): void {
+  if (entries.length > MAX_SHARE_RECORD_FILES) {
+    throw new Error(`Share record hard limit exceeded (${MAX_SHARE_RECORD_FILES}).`);
+  }
+
+  resetShareRecordIndex();
+  for (const entry of entries) {
+    if (shareRecordIndexById.has(entry.id)) {
+      throw new Error(`Duplicate share record index entry: ${entry.id}`);
+    }
+    shareRecordIndexById.set(entry.id, entry);
+  }
+  shareRecordListOrder.push(...entries);
+  shareRecordListOrder.sort(compareShareRecordListEntries);
+  shareRecordExpiryOrder.push(...entries);
+  shareRecordExpiryOrder.sort(compareShareRecordExpiryEntries);
+}
+
+function assertShareRecordIndexCapacity(id: string): void {
+  if (!shareRecordIndexById.has(id) && shareRecordIndexById.size >= MAX_SHARE_RECORD_FILES) {
+    throw new Error(`Share record hard limit exceeded (${MAX_SHARE_RECORD_FILES}).`);
+  }
+}
+
+function upsertShareRecordIndex(record: ShareRecord): void {
+  const entry = createShareRecordIndexEntry(record);
+  removeShareRecordIndexEntry(record.id);
+  assertShareRecordIndexCapacity(record.id);
+  shareRecordIndexById.set(entry.id, entry);
+  insertSortedIndexEntry(shareRecordListOrder, entry, compareShareRecordListEntries);
+  insertSortedIndexEntry(shareRecordExpiryOrder, entry, compareShareRecordExpiryEntries);
+}
+
+function createShareRecordIndexEntry(record: ShareRecord): ShareRecordIndexEntry {
+  const retentionDeadline = addSafeIntegers(record.expiresAt, SHARE_RETAIN_EXPIRED_MS);
+  if (retentionDeadline === null) {
+    throw new Error("Share record retention deadline exceeds the safe integer range.");
+  }
+
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    retentionDeadline
+  };
+}
+
+function removeShareRecordIndexEntry(id: string): void {
+  const entry = shareRecordIndexById.get(id);
+  if (!entry) {
+    return;
+  }
+
+  shareRecordIndexById.delete(id);
+  removeSortedIndexEntry(shareRecordListOrder, entry, compareShareRecordListEntries);
+  removeSortedIndexEntry(shareRecordExpiryOrder, entry, compareShareRecordExpiryEntries);
+}
+
+function compareShareRecordListEntries(left: ShareListCursor, right: ShareListCursor): number {
+  return right.createdAt - left.createdAt || compareShareIds(left.id, right.id);
+}
+
+function compareShareRecordExpiryEntries(
+  left: ShareRecordIndexEntry,
+  right: ShareRecordIndexEntry
+): number {
+  return left.retentionDeadline - right.retentionDeadline || compareShareIds(left.id, right.id);
+}
+
+function compareShareIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function insertSortedIndexEntry<T>(
+  entries: T[],
+  entry: T,
+  compare: (left: T, right: T) => number
+): void {
+  entries.splice(findSortedIndex(entries, entry, compare, false), 0, entry);
+}
+
+function removeSortedIndexEntry<T>(
+  entries: T[],
+  entry: T,
+  compare: (left: T, right: T) => number
+): void {
+  const index = findSortedIndex(entries, entry, compare, false);
+  if (entries[index] === entry) {
+    entries.splice(index, 1);
+  }
+}
+
+function findSortedIndex<T, U>(
+  entries: T[],
+  target: U,
+  compare: (left: T, right: U) => number,
+  afterEqual: boolean
+): number {
+  let low = 0;
+  let high = entries.length;
+
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const comparison = compare(entries[middle] as T, target);
+    if (comparison < 0 || (afterEqual && comparison === 0)) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+
+  return low;
+}
+
+function selectShareRecordIndexPage(pagination: ShareListPagination): ShareRecordIndexEntry[] {
+  const start =
+    pagination.mode === "cursor"
+      ? findSortedIndex(
+          shareRecordListOrder,
+          pagination.cursor,
+          compareShareRecordListEntries,
+          true
+        )
+      : pagination.offset;
+  return shareRecordListOrder.slice(start, start + pagination.limit);
+}
+
+function hasShareRecordIndexEntryAfter(cursor: ShareListCursor): boolean {
+  return (
+    findSortedIndex(shareRecordListOrder, cursor, compareShareRecordListEntries, true) <
+    shareRecordListOrder.length
+  );
+}
+
 async function writeRecord(record: ShareRecord): Promise<void> {
+  assertShareRecordIndexCapacity(record.id);
   const recordDirectoryIdentity = getManagedStorageDirectoryIdentity(RECORDS_DIR);
   await assertStoragePathIdentity(RECORDS_DIR, recordDirectoryIdentity, "directory");
   const payload = Buffer.from(JSON.stringify(record, null, 2), "utf8");
@@ -2574,6 +2702,7 @@ async function writeRecord(record: ShareRecord): Promise<void> {
     await rename(temporaryPath, recordPathForId(record.id));
     committed = true;
     await syncDirectoryBestEffort(RECORDS_DIR);
+    upsertShareRecordIndex(record);
   } finally {
     await handle?.close();
     if (!committed) {
@@ -3230,20 +3359,84 @@ function resolveShareTtlMs(request: IncomingMessage): number {
   return Math.min(SHARE_MAX_TTL_MS, Math.max(1_000, requestedTtl));
 }
 
-function parseShareListPagination(requestUrl: URL): { offset: number; limit: number } | null {
-  const offset = parseBoundedQueryInteger(
-    requestUrl.searchParams.get("offset"),
-    0,
-    0,
-    MAX_SHARE_RECORD_FILES
-  );
+function parseShareListPagination(requestUrl: URL): ShareListPagination | null {
+  if (
+    requestUrl.searchParams.getAll("cursor").length > 1 ||
+    requestUrl.searchParams.getAll("offset").length > 1 ||
+    requestUrl.searchParams.getAll("limit").length > 1
+  ) {
+    return null;
+  }
+
   const limit = parseBoundedQueryInteger(
     requestUrl.searchParams.get("limit"),
     DEFAULT_SHARE_LIST_LIMIT,
     1,
     MAX_SHARE_LIST_LIMIT
   );
-  return offset === null || limit === null ? null : { offset, limit };
+  if (limit === null) {
+    return null;
+  }
+
+  const rawCursor = requestUrl.searchParams.get("cursor");
+  if (rawCursor !== null) {
+    if (requestUrl.searchParams.has("offset")) {
+      return null;
+    }
+    const cursor = decodeShareListCursor(rawCursor);
+    return cursor ? { mode: "cursor", cursor, limit } : null;
+  }
+
+  const offset = parseBoundedQueryInteger(
+    requestUrl.searchParams.get("offset"),
+    0,
+    0,
+    MAX_SHARE_RECORD_FILES
+  );
+  return offset === null ? null : { mode: "offset", offset, limit };
+}
+
+function encodeShareListCursor(cursor: ShareListCursor): string {
+  return Buffer.from(
+    JSON.stringify({ version: 1, createdAt: cursor.createdAt, id: cursor.id }),
+    "utf8"
+  ).toString("base64url");
+}
+
+function decodeShareListCursor(raw: string): ShareListCursor | null {
+  if (
+    raw.length === 0 ||
+    raw.length > MAX_SHARE_LIST_CURSOR_BYTES * 2 ||
+    !/^[A-Za-z0-9_-]+$/.test(raw)
+  ) {
+    return null;
+  }
+
+  try {
+    const bytes = Buffer.from(raw, "base64url");
+    if (
+      bytes.byteLength === 0 ||
+      bytes.byteLength > MAX_SHARE_LIST_CURSOR_BYTES ||
+      bytes.toString("base64url") !== raw
+    ) {
+      return null;
+    }
+
+    const cursor = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+    const createdAt = readSafeNonNegativeInteger(cursor.createdAt);
+    if (
+      cursor.version !== 1 ||
+      createdAt === null ||
+      typeof cursor.id !== "string" ||
+      !SHARE_ID_PATTERN.test(cursor.id)
+    ) {
+      return null;
+    }
+
+    return { createdAt, id: cursor.id };
+  } catch {
+    return null;
+  }
 }
 
 function parseBoundedQueryInteger(
@@ -3263,17 +3456,12 @@ function parseBoundedQueryInteger(
 }
 
 async function pruneExpiredShareRecords(now: number): Promise<void> {
-  const records = await loadAllRecords();
-  const retentionMs = Math.max(0, SHARE_RETAIN_EXPIRED_MS);
-
-  for (const record of records) {
-    const retentionDeadline = resolveShareExpiresAt(record) + retentionMs;
-
-    if (retentionDeadline > now) {
-      continue;
+  while ((shareRecordExpiryOrder[0]?.retentionDeadline ?? Number.POSITIVE_INFINITY) <= now) {
+    const expired = shareRecordExpiryOrder[0];
+    if (!expired) {
+      return;
     }
-
-    await removeStoredShare(record.id);
+    await removeStoredShare(expired.id);
   }
 }
 

@@ -123,7 +123,8 @@ Response:
 
 ### Metadata and archive
 
-- `GET /api/share/list?offset=0&limit=100` (strict offset pagination; maximum page size `200`, with `total` and `nextOffset` in the response)
+- `GET /api/share/list?limit=100` (maximum page size `200`; follow the opaque `nextCursor` response value with `?cursor=<nextCursor>&limit=100` for stable pagination)
+- `GET /api/share/list?offset=0&limit=100` remains available for compatibility and returns `nextOffset`, but offset pages can shift when shares are inserted or removed between requests
 - `GET /api/share/:id/meta`
 - `GET /api/share/:id/archive`
 - `GET /share/:id`
@@ -146,6 +147,8 @@ Each share writes:
 - `audit/share-access.jsonl` (action, outcome, share id, timestamp, and client hash only)
 
 On POSIX systems, storage directories are enforced as mode `0700`; committed archives, record JSON, and the active/rotated audit logs are enforced as mode `0600`. Startup migrates legacy `0755`/`0644` installations through no-follow file handles and refuses managed directory or committed-file symlinks and path replacements instead of changing an external target. Uploads are streamed to mode-`0600` temporary files under `archives/`, synced, removed on every rejection or disconnect, and atomically renamed only after validation succeeds. Record JSON is likewise written through a synced mode-`0600` temporary file and atomic rename. At startup the server removes interrupted temporary files, orphan archives, orphan records, and corrupt record/archive pairs before serving requests.
+
+Startup also builds a compact, hard-bounded index (at most `10,000` records). List requests select at most one page from that index and only then load and verify those records and archives, so a request never retains every record payload in memory. Expiry pruning walks the compact expiry index one due record at a time. The index is updated after durable uploads, revocations, removals, and startup reconciliation; page entries still receive full record and archive-integrity validation before they are returned.
 
 Audit logs cover successful, blocked, unavailable, and internal-error outcomes for recognized Share routes, including authorization, upload rate/capacity, client-claim, pagination, expiry, and revocation decisions. Writes are serialized through a capacity- and time-bounded queue and rotate into one bounded previous segment. Logs must not contain archive plaintext, passphrases, API keys, raw URLs, filenames supplied by the client, or request payloads.
 Audit queue overflow, expiry, append timeout, and append errors are reported through rate-limited operational warnings. A failed or timed-out sink opens a circuit: queued events are dropped, and after the retry cooldown one recovery probe is admitted only after the physical append has settled. These audit degradations do not turn an already committed upload, revoke, metadata response, page response, or download into a failed HTTP operation.

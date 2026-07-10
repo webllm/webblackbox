@@ -911,7 +911,10 @@ describe("share-server", () => {
       await writeFile(resolve(server.dataDir, "archives", `${id}.webblackbox`), sourceArchive);
     }
 
-    const firstResponse = await fetch(`${server.baseUrl}/api/share/list?limit=2&offset=0`, {
+    await stopShareServer(server, false);
+    const restarted = await startShareServer({}, server.dataDir);
+
+    const firstResponse = await fetch(`${restarted.baseUrl}/api/share/list?limit=2&offset=0`, {
       headers: { "x-webblackbox-api-key": apiKey }
     });
     const first = (await firstResponse.json()) as {
@@ -920,11 +923,13 @@ describe("share-server", () => {
       offset: number;
       limit: number;
       nextOffset: number | null;
+      nextCursor: string | null;
     };
     expect(first).toMatchObject({ total: 3, offset: 0, limit: 2, nextOffset: 2 });
     expect(first.items).toHaveLength(2);
+    expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
 
-    const secondResponse = await fetch(`${server.baseUrl}/api/share/list?limit=2&offset=2`, {
+    const secondResponse = await fetch(`${restarted.baseUrl}/api/share/list?limit=2&offset=2`, {
       headers: { "x-webblackbox-api-key": apiKey }
     });
     const second = (await secondResponse.json()) as {
@@ -934,10 +939,134 @@ describe("share-server", () => {
     expect(second.items).toHaveLength(1);
     expect(second.nextOffset).toBeNull();
 
-    const invalidResponse = await fetch(`${server.baseUrl}/api/share/list?limit=201`, {
+    const invalidResponse = await fetch(`${restarted.baseUrl}/api/share/list?limit=201`, {
       headers: { "x-webblackbox-api-key": apiKey }
     });
     expect(invalidResponse.status).toBe(400);
+
+    const conflictingResponse = await fetch(
+      `${restarted.baseUrl}/api/share/list?cursor=${first.nextCursor}&offset=0`,
+      { headers: { "x-webblackbox-api-key": apiKey } }
+    );
+    expect(conflictingResponse.status).toBe(400);
+  });
+
+  it("keeps cursor pagination stable across insertions and removals", async () => {
+    const server = await startShareServer();
+    const initialUploads = [
+      await uploadEncryptedFixture(server),
+      await uploadEncryptedFixture(server),
+      await uploadEncryptedFixture(server),
+      await uploadEncryptedFixture(server)
+    ];
+
+    const firstResponse = await fetch(`${server.baseUrl}/api/share/list?limit=2`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const first = (await firstResponse.json()) as {
+      items: Array<{ id: string }>;
+      nextCursor: string | null;
+    };
+    expect(firstResponse.status).toBe(200);
+    expect(first.items).toHaveLength(2);
+    expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    const inserted = await uploadEncryptedFixture(server);
+    const removedId = first.items[0]?.id;
+    if (!removedId) {
+      throw new Error("Expected a first-page share to remove.");
+    }
+    await rm(resolve(server.dataDir, "archives", `${removedId}.webblackbox`));
+    const removalResponse = await fetch(`${server.baseUrl}/api/share/${removedId}/archive`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(removalResponse.status).toBe(404);
+
+    const secondResponse = await fetch(
+      `${server.baseUrl}/api/share/list?limit=2&cursor=${first.nextCursor}`,
+      { headers: { "x-webblackbox-api-key": apiKey } }
+    );
+    const second = (await secondResponse.json()) as {
+      items: Array<{ id: string }>;
+      nextCursor: string | null;
+    };
+    const firstIds = first.items.map(({ id }) => id);
+    const secondIds = second.items.map(({ id }) => id);
+    const originalIdsAfterCursor = initialUploads
+      .map(({ shareId }) => shareId)
+      .filter((id) => !firstIds.includes(id));
+
+    expect(secondResponse.status).toBe(200);
+    expect(secondIds.sort()).toEqual(originalIdsAfterCursor.sort());
+    expect(secondIds.some((id) => firstIds.includes(id))).toBe(false);
+    expect(secondIds).not.toContain(inserted.shareId);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("loads and validates at most one page of large persisted records per list request", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const sourceRecord = JSON.parse(
+      await readFile(resolve(server.dataDir, "records", `${upload.shareId}.json`), "utf8")
+    ) as Record<string, unknown>;
+    const sourceArchive = await readFile(
+      resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`)
+    );
+    const createdAt = Number(sourceRecord.createdAt);
+    const cloneIds = Array.from(
+      { length: 12 },
+      (_, index) => `${String(index).padStart(2, "0")}${"c".repeat(30)}`
+    );
+
+    for (const [index, id] of cloneIds.entries()) {
+      await writeFile(
+        resolve(server.dataDir, "records", `${id}.json`),
+        JSON.stringify({
+          ...sourceRecord,
+          id,
+          createdAt: createdAt - index - 1,
+          padding: "x".repeat(220 * 1024)
+        })
+      );
+      await writeFile(resolve(server.dataDir, "archives", `${id}.webblackbox`), sourceArchive);
+    }
+
+    await stopShareServer(server, false);
+    const restarted = await startShareServer({}, server.dataDir);
+
+    for (const id of cloneIds.slice(1)) {
+      await writeFile(resolve(restarted.dataDir, "records", `${id}.json`), " ".repeat(220 * 1024));
+    }
+
+    const firstResponse = await fetch(`${restarted.baseUrl}/api/share/list?limit=2`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const first = (await firstResponse.json()) as {
+      items: Array<{ id: string }>;
+      total: number;
+      nextCursor: string | null;
+    };
+    expect(firstResponse.status).toBe(200);
+    expect(first).toMatchObject({ total: 13 });
+    expect(first.items.map(({ id }) => id)).toEqual([upload.shareId, cloneIds[0]]);
+    expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
+    await expect(readdir(resolve(restarted.dataDir, "records"))).resolves.toHaveLength(13);
+
+    const secondResponse = await fetch(
+      `${restarted.baseUrl}/api/share/list?limit=2&cursor=${first.nextCursor}`,
+      { headers: { "x-webblackbox-api-key": apiKey } }
+    );
+    const second = (await secondResponse.json()) as {
+      items: Array<{ id: string }>;
+      total: number;
+      nextCursor: string | null;
+    };
+    expect(secondResponse.status).toBe(200);
+    expect(second.items).toEqual([]);
+    expect(second.total).toBe(11);
+    expect(second.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
+    await expect(readdir(resolve(restarted.dataDir, "records"))).resolves.toHaveLength(11);
   });
 
   it("rejects uploads before buffering when retained record capacity is exhausted", async () => {
