@@ -54,6 +54,7 @@ import {
 } from "./lib/replay.js";
 import { decodeResponsePreview, type ResponsePreview } from "./lib/response-decoder.js";
 import { highlightJsonPreview, redactPreviewText } from "./lib/response-preview.js";
+import { LatestTaskGate } from "./lib/latest-task.js";
 import {
   buildActionScopeIndex,
   extractReqIdFromEvent,
@@ -410,6 +411,8 @@ const ACTION_MARKER_TYPES = new Set([
 const initialShareServerBaseUrl =
   readStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY) ?? DEFAULT_SHARE_SERVER_BASE_URL;
 const initialShareServerApiKeysByOrigin = readStoredShareServerApiKeys(initialShareServerBaseUrl);
+const primaryArchiveLoadGate = new LatestTaskGate();
+const compareArchiveLoadGate = new LatestTaskGate();
 
 const state: PlayerState = {
   player: null,
@@ -1536,6 +1539,7 @@ async function handlePrimaryArchiveChange(): Promise<void> {
   const file = refs.archiveInput.files?.[0];
 
   if (!file) {
+    primaryArchiveLoadGate.invalidate();
     return;
   }
 
@@ -1543,11 +1547,28 @@ async function handlePrimaryArchiveChange(): Promise<void> {
 }
 
 async function loadPrimaryArchiveFile(file: File): Promise<void> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  await loadPrimaryArchiveBytes(bytes, file.name);
+  const loadToken = primaryArchiveLoadGate.begin();
+
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await loadPrimaryArchiveBytes(bytes, file.name, loadToken);
+  } catch (error) {
+    if (primaryArchiveLoadGate.isCurrent(loadToken)) {
+      setFeedback(
+        i18n.t("feedbackArchiveLoadFailed", {
+          sourceName: file.name,
+          error: String(error)
+        })
+      );
+    }
+  }
 }
 
-async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): Promise<void> {
+async function loadPrimaryArchiveBytes(
+  bytes: Uint8Array,
+  sourceName: string,
+  loadToken: number
+): Promise<boolean> {
   pausePlayback();
   hideProgressHover();
   hideQuickTriagePanel();
@@ -1556,6 +1577,10 @@ async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): P
   try {
     const player = await openArchiveWithPassphraseFallback(bytes, sourceName);
     const model = buildArchiveModel(player);
+
+    if (!primaryArchiveLoadGate.isCurrent(loadToken)) {
+      return false;
+    }
 
     resetScreenshotResources();
     state.responsePreviewByHash.clear();
@@ -1572,23 +1597,33 @@ async function loadPrimaryArchiveBytes(bytes: Uint8Array, sourceName: string): P
     refreshCompareSummary();
 
     await renderAll({ forcePanels: true, forceScreenshot: true });
+
+    if (!primaryArchiveLoadGate.isCurrent(loadToken)) {
+      return false;
+    }
+
     showQuickTriagePanel(model, sourceName);
     const feedbackKey = hasPlaybackEvents(model.events)
       ? "feedbackArchiveLoaded"
       : "feedbackArchiveLoadedWithoutPlayback";
     setFeedback(i18n.t(feedbackKey, { sourceName }));
+    return true;
   } catch (error) {
-    hideQuickTriagePanel();
-    setFeedback(
-      i18n.t("feedbackArchiveLoadFailed", {
-        sourceName,
-        error: String(error)
-      })
-    );
+    if (primaryArchiveLoadGate.isCurrent(loadToken)) {
+      hideQuickTriagePanel();
+      setFeedback(
+        i18n.t("feedbackArchiveLoadFailed", {
+          sourceName,
+          error: String(error)
+        })
+      );
+    }
+    return false;
   }
 }
 
 async function handleCompareArchiveChange(): Promise<void> {
+  const loadToken = compareArchiveLoadGate.begin();
   const file = refs.compareInput.files?.[0];
 
   if (!file) {
@@ -1602,12 +1637,21 @@ async function handleCompareArchiveChange(): Promise<void> {
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const comparePlayer = await openArchiveWithPassphraseFallback(bytes, file.name);
+
+    if (!compareArchiveLoadGate.isCurrent(loadToken)) {
+      return;
+    }
+
     state.comparePlayer = comparePlayer;
     state.compareModel = buildArchiveModel(comparePlayer);
     refreshCompareSummary();
     renderSummary();
     setFeedback(i18n.t("feedbackCompareLoaded", { fileName: file.name }));
   } catch (error) {
+    if (!compareArchiveLoadGate.isCurrent(loadToken)) {
+      return;
+    }
+
     state.comparePlayer = null;
     state.compareModel = null;
     setFeedback(
@@ -1925,6 +1969,7 @@ async function loadArchiveFromSharePrompt(): Promise<void> {
 }
 
 async function loadArchiveFromShareReference(reference: string, apiKey: string): Promise<void> {
+  const loadToken = primaryArchiveLoadGate.begin();
   const trimmedReference = reference.trim();
   const trimmedApiKey = apiKey.trim();
 
@@ -1956,10 +2001,19 @@ async function loadArchiveFromShareReference(reference: string, apiKey: string):
     }
 
     const bytes = new Uint8Array(await response.arrayBuffer());
-    await loadPrimaryArchiveBytes(bytes, `shared-${resolved.shareId}.webblackbox`);
-    setFeedback(i18n.t("feedbackSharedArchiveLoaded", { shareId: resolved.shareId }));
+    const loaded = await loadPrimaryArchiveBytes(
+      bytes,
+      `shared-${resolved.shareId}.webblackbox`,
+      loadToken
+    );
+
+    if (loaded && primaryArchiveLoadGate.isCurrent(loadToken)) {
+      setFeedback(i18n.t("feedbackSharedArchiveLoaded", { shareId: resolved.shareId }));
+    }
   } catch (error) {
-    setFeedback(i18n.t("feedbackSharedArchiveLoadFailed", { error: String(error) }));
+    if (primaryArchiveLoadGate.isCurrent(loadToken)) {
+      setFeedback(i18n.t("feedbackSharedArchiveLoadFailed", { error: String(error) }));
+    }
   }
 }
 
