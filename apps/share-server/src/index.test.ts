@@ -1556,6 +1556,90 @@ describe("share-server", () => {
     ).rejects.toThrow(/contains an invalid IP address/);
   });
 
+  it("denies protected routes from direct loopback clients when no credential is configured", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_API_KEY: "",
+      WEBBLACKBOX_SHARE_API_KEYS: ""
+    });
+    const requests = [
+      ["GET", "/api/share/list"],
+      ["POST", "/api/share/upload"],
+      ["GET", "/api/share/example/meta"],
+      ["GET", "/api/share/example/archive"],
+      ["GET", "/share/example"],
+      ["POST", "/api/share/example/revoke"]
+    ] as const;
+
+    for (const [method, pathname] of requests) {
+      const response = await fetch(`${server.baseUrl}${pathname}`, { method });
+      expect(response.status, `${method} ${pathname}`).toBe(401);
+    }
+  });
+
+  it("allows explicit development-only unauthenticated access from a loopback peer", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_API_KEY: "",
+      WEBBLACKBOX_SHARE_API_KEYS: "",
+      WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK: "true"
+    });
+
+    const response = await fetch(`${server.baseUrl}/api/share/list`);
+
+    expect(response.status).toBe(200);
+    expect(server.logs.join("")).toContain(
+      "WARNING: unauthenticated loopback development access is enabled"
+    );
+  });
+
+  it("rejects the unauthenticated loopback development opt-out in proxy modes", async () => {
+    const baseOverrides = {
+      WEBBLACKBOX_SHARE_API_KEY: "",
+      WEBBLACKBOX_SHARE_API_KEYS: "",
+      WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK: "true"
+    };
+
+    await expect(
+      startShareServer({
+        ...baseOverrides,
+        WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true"
+      })
+    ).rejects.toThrow(/must not be enabled with proxy or forwarded-client configuration/);
+
+    await expect(
+      startShareServer({
+        ...baseOverrides,
+        WEBBLACKBOX_TRUSTED_PROXY_IPS: "203.0.113.10"
+      })
+    ).rejects.toThrow(/must not be enabled with proxy or forwarded-client configuration/);
+  });
+
+  it("rejects the unauthenticated loopback development opt-out for public endpoints", async () => {
+    const baseOverrides = {
+      WEBBLACKBOX_SHARE_API_KEY: "",
+      WEBBLACKBOX_SHARE_API_KEYS: "",
+      WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK: "true",
+      WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: "https://shares.example.test"
+    };
+
+    await expect(startShareServer(baseOverrides)).rejects.toThrow(
+      /requires both a loopback bind host and loopback public origin/
+    );
+
+    await expect(
+      startShareServer({
+        ...baseOverrides,
+        WEBBLACKBOX_SHARE_BIND_HOST: "0.0.0.0"
+      })
+    ).rejects.toThrow(/requires both a loopback bind host and loopback public origin/);
+
+    await expect(
+      startShareServer({
+        ...baseOverrides,
+        WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: "https://127.attacker.example"
+      })
+    ).rejects.toThrow(/requires both a loopback bind host and loopback public origin/);
+  });
+
   it("derives forwarded clients from the first untrusted hop next to trusted proxies", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true"
@@ -1627,9 +1711,13 @@ async function startShareServer(
       ...process.env,
       PORT: String(port),
       WEBBLACKBOX_SHARE_API_KEY: apiKey,
+      WEBBLACKBOX_SHARE_API_KEYS: "",
+      WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK: "false",
       WEBBLACKBOX_SHARE_BIND_HOST: "127.0.0.1",
       WEBBLACKBOX_SHARE_PUBLIC_ORIGIN: "",
       WEBBLACKBOX_SHARE_DATA_DIR: dataDir,
+      WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "false",
+      WEBBLACKBOX_TRUSTED_PROXY_IPS: "",
       ...envOverrides
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -1688,15 +1776,13 @@ async function waitForShareServer(server: RunningShareServer): Promise<void> {
     }
 
     try {
-      const response = await fetch(`${server.baseUrl}/api/share/list`, {
+      await fetch(`${server.baseUrl}/api/share/list`, {
         headers: {
           "x-webblackbox-api-key": apiKey
         }
       });
 
-      if (response.ok) {
-        return;
-      }
+      return;
     } catch {
       // retry until the process binds the port
     }

@@ -14,7 +14,7 @@ It provides:
 
 ```bash
 cd apps/share-server
-pnpm dev
+WEBBLACKBOX_SHARE_API_KEYS="local-dev:admin" pnpm dev
 ```
 
 By default the server listens on `http://127.0.0.1:8787`.
@@ -23,10 +23,11 @@ By default the server listens on `http://127.0.0.1:8787`.
 
 Set these environment variables for production-like deployments:
 
-- `WEBBLACKBOX_SHARE_API_KEY`: API key for `/api/share/*` and `/share/*` routes. If unset, protected routes are limited to loopback clients (`127.0.0.1` / `::1`). When set, clients can authenticate with either:
+- `WEBBLACKBOX_SHARE_API_KEY`: legacy single admin API key for `/api/share/*` and `/share/*` routes. Protected routes require a configured credential by default, including for direct loopback clients. Clients can authenticate with either:
   - `x-webblackbox-api-key: <key>`, or
   - `authorization: Bearer <key>`
 - `WEBBLACKBOX_SHARE_API_KEYS`: semicolon-separated scoped keys for rotation and least privilege. Format: `secret:scope,scope;next-secret:scope`. Supported scopes are `upload`, `read`, `list`, `revoke`, and `admin`. `admin` covers all scopes. Unknown or empty scopes and duplicate secrets fail startup instead of falling back to `admin`. A key without `:scope` retains the legacy explicit-admin behavior. Keep an old key and a new key configured during rotation, then remove the old key after clients are updated.
+- `WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK`: development-only opt-out, default `false`. When explicitly enabled, protected routes may be used without a credential only when the actual socket peer, bind host, and public origin are loopback. Startup fails if proxy/forwarded-client configuration is present or either endpoint is non-loopback. Never enable this behind a reverse proxy; use scoped credentials instead.
 - `WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY`: optional browser bootstrap for `GET /share/:id?key=<key>`. Keep this disabled in production unless the key is short-lived; when enabled, the server redirects to a clean URL and uses a short HttpOnly read-session cookie for page links.
 - `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
 - `WEBBLACKBOX_SHARE_PUBLIC_ORIGIN`: canonical external origin used for share URLs, same-origin CORS, and secure-cookie policy. It is required when binding to a non-loopback host, must be HTTPS unless it names a loopback host, and must not include credentials, a path, query, or fragment. A non-loopback public origin also requires an API credential, including when a local reverse proxy fronts a loopback bind. Request `Host` and `X-Forwarded-Proto` headers are never used as public-origin authority.
@@ -71,7 +72,7 @@ Headers:
 - `x-webblackbox-filename: <optional>`
 - `x-webblackbox-share-summary: <optional URL-encoded schema-v2 public claim computed client-side>`
 - `x-webblackbox-share-ttl-ms: <optional requested TTL, clamped by WEBBLACKBOX_SHARE_MAX_TTL_MS>`
-- `x-webblackbox-api-key: <optional if WEBBLACKBOX_SHARE_API_KEY is set>`
+- `x-webblackbox-api-key: <required scoped credential unless using an authorized read-session cookie or the explicit loopback development opt-out>`
 
 Body:
 

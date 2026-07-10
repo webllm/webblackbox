@@ -45,7 +45,7 @@ type ShareRecord = {
 
 type ShareAuditAction = "upload" | "list" | "metadata" | "download" | "page" | "revoke";
 type ShareAuditOutcome = "ok" | "not-found" | "expired" | "revoked" | "blocked" | "error";
-type ShareAuthorizationSource = "loopback" | "token" | "query" | "read-session";
+type ShareAuthorizationSource = "unauthenticated-loopback-dev" | "token" | "query" | "read-session";
 type ShareAuthorizationResult = {
   authorized: boolean;
   source?: ShareAuthorizationSource;
@@ -184,6 +184,9 @@ const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_F
 const TRUSTED_PROXY_ADDRESSES = parseTrustedProxyAddresses(
   process.env.WEBBLACKBOX_TRUSTED_PROXY_IPS
 );
+const ALLOW_UNAUTHENTICATED_LOOPBACK = parseBooleanFlag(
+  process.env.WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK
+);
 const ALLOW_QUERY_API_KEY = parseBooleanFlag(process.env.WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
@@ -261,6 +264,7 @@ async function startShareServer(): Promise<void> {
   const port = parsePort(process.env.PORT);
   const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
   sharePublicOrigin = resolvePublicOrigin(process.env.WEBBLACKBOX_SHARE_PUBLIC_ORIGIN, host, port);
+  validateAuthorizationConfiguration(host, sharePublicOrigin);
   if (SHARE_API_CREDENTIALS.length === 0 && !isLoopbackHost(new URL(sharePublicOrigin).hostname)) {
     throw new Error(
       "A scoped WEBBLACKBOX_SHARE_API_KEY or WEBBLACKBOX_SHARE_API_KEYS credential is required for a non-loopback public origin."
@@ -302,6 +306,11 @@ async function startShareServer(): Promise<void> {
     console.info(`[share-server] listening on http://${host}:${port}`);
     console.info(`[share-server] public origin: ${sharePublicOrigin}`);
     console.info(`[share-server] data root: ${DATA_ROOT}`);
+    if (ALLOW_UNAUTHENTICATED_LOOPBACK) {
+      console.warn(
+        "[share-server] WARNING: unauthenticated loopback development access is enabled."
+      );
+    }
   });
 }
 
@@ -3007,12 +3016,34 @@ function isLoopbackHost(host: string): boolean {
     .trim()
     .toLowerCase()
     .replace(/^\[|\]$/g, "");
-  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    (isIP(normalized) === 4 && normalized.startsWith("127."))
+  );
 }
 
 function formatHostForUrl(host: string): string {
   const normalized = host.trim().replace(/^\[|\]$/g, "");
   return normalized.includes(":") ? `[${normalized}]` : normalized;
+}
+
+function validateAuthorizationConfiguration(bindHost: string, publicOrigin: string): void {
+  if (!ALLOW_UNAUTHENTICATED_LOOPBACK) {
+    return;
+  }
+
+  if (!isLoopbackHost(bindHost) || !isLoopbackHost(new URL(publicOrigin).hostname)) {
+    throw new Error(
+      "WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK is development-only and requires both a loopback bind host and loopback public origin."
+    );
+  }
+
+  if (TRUST_X_FORWARDED_FOR || TRUSTED_PROXY_ADDRESSES.size > 0) {
+    throw new Error(
+      "WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK must not be enabled with proxy or forwarded-client configuration."
+    );
+  }
 }
 
 function normalizeAllowedOrigin(rawValue: string | undefined): string {
@@ -3411,15 +3442,11 @@ function authorizeRequest(
   pathname: string,
   requiredScope: ShareApiScope
 ): ShareAuthorizationResult {
-  if (SHARE_API_CREDENTIALS.length === 0) {
-    return isLoopbackRequest(request)
-      ? {
-          authorized: true,
-          source: "loopback"
-        }
-      : {
-          authorized: false
-        };
+  if (ALLOW_UNAUTHENTICATED_LOOPBACK && isLoopbackRequest(request)) {
+    return {
+      authorized: true,
+      source: "unauthenticated-loopback-dev"
+    };
   }
 
   const headerToken = readAuthTokenFromRequest(request);

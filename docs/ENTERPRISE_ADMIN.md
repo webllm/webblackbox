@@ -42,6 +42,11 @@ WEBBLACKBOX_SHARE_MAX_TTL_MS=2592000000
 WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS=2592000000
 ```
 
+Protected Share routes require scoped credentials even when the server is bound directly to
+loopback. Do not enable `WEBBLACKBOX_SHARE_ALLOW_UNAUTHENTICATED_LOOPBACK` in a self-hosted or
+reverse-proxied deployment; it is a development-only opt-out and is incompatible with proxy or
+forwarded-client configuration.
+
 Rotate share API keys by deploying old and new scoped keys together, moving clients to the new key, confirming audit activity, then removing the old key.
 
 ## Audit Logs
