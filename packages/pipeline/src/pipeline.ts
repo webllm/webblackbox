@@ -146,6 +146,9 @@ export class FlightRecorderPipeline {
     const lastSequence = latestMeta?.seq ?? 0;
 
     this.chunker.restoreSequence(lastSequence);
+    if (latestMeta) {
+      this.chunker.restoreTimelineBoundary(latestMeta.tEnd, latestMeta.monoEnd);
+    }
     const resumeState = latestMeta
       ? await this.restoreResumeStateFromLatestChunk(latestMeta.chunkId, latestMeta.seq)
       : emptyPipelineResumeState();

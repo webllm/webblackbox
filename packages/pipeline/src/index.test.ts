@@ -302,6 +302,36 @@ describe("pipeline", () => {
     expect(new Set(archive.events.map((event) => event.id)).size).toBe(archive.events.length);
   });
 
+  it("restores the persisted timeline watermark before ingesting delayed events", async () => {
+    const storage = new MemoryPipelineStorage();
+    const session = {
+      ...SESSION,
+      sid: "S-delayed-event-restart"
+    };
+    const first = createTestPipeline({ session, storage, maxChunkBytes: 1 });
+    await first.start();
+    await first.ingest({
+      ...createEvent("E-00000001", "user.marker", 100),
+      sid: session.sid
+    });
+    await first.close();
+
+    const restored = createTestPipeline({ session, storage, maxChunkBytes: 1 });
+    await restored.start();
+    await restored.ingest({
+      ...createEvent("E-00000002", "user.marker", 10),
+      sid: session.sid
+    });
+    const exported = await restored.exportBundle(FULL_EXPORT_OPTIONS);
+    const archive = await readWebBlackboxArchive(exported.bytes);
+    await restored.close();
+
+    expect(archive.events.map(({ id, t, mono }) => ({ id, t, mono }))).toEqual([
+      { id: "E-00000001", t: 100, mono: 100 },
+      { id: "E-00000002", t: 100, mono: 100 }
+    ]);
+  });
+
   it("reports pending offscreen events and screen chunk hashes in the live resume state", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = createTestPipeline({

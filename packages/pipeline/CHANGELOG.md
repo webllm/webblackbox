@@ -9,6 +9,8 @@
 
 ### Patch Changes
 
+- Canonicalized delayed multi-source events into monotonic chunk timelines and restored the
+  persisted timeline watermark after restart so exported archives remain replayable.
 - Closed the legacy `allowPlaintextLocalExport` bypass: real-user and required-policy exports now
   require a passphrase, while plaintext remains available only to trusted synthetic/local-debug
   exemptions.

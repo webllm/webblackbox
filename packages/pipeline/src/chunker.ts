@@ -26,6 +26,10 @@ export class EventChunker {
 
   private sequence = 0;
 
+  private finalizedTimeEnd = Number.NEGATIVE_INFINITY;
+
+  private finalizedMonoEnd = Number.NEGATIVE_INFINITY;
+
   private operationTail: Promise<void> = Promise.resolve();
 
   private acceptingEvents = true;
@@ -106,6 +110,16 @@ export class EventChunker {
     this.sequence = Math.floor(sequence);
   }
 
+  public restoreTimelineBoundary(tEnd: number, monoEnd: number): void {
+    if (Number.isFinite(tEnd)) {
+      this.finalizedTimeEnd = Math.max(this.finalizedTimeEnd, tEnd);
+    }
+
+    if (Number.isFinite(monoEnd)) {
+      this.finalizedMonoEnd = Math.max(this.finalizedMonoEnd, monoEnd);
+    }
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.operationTail.then(operation);
     // A failed operation rejects its own caller but must not poison the queue.
@@ -125,7 +139,11 @@ export class EventChunker {
   }
 
   private async finalize(): Promise<FinalizedChunk> {
-    const events = [...this.pending];
+    const events = canonicalizeEventTimeline(
+      this.pending,
+      this.finalizedTimeEnd,
+      this.finalizedMonoEnd
+    );
     const encoded = await encodeChunkEvents(events, this.codec);
     const bytes = encoded.bytes;
     const first = events[0];
@@ -154,9 +172,45 @@ export class EventChunker {
     this.pending.length = 0;
     this.pendingBytes = 0;
     this.sequence = sequence;
+    this.finalizedTimeEnd = last?.t ?? this.finalizedTimeEnd;
+    this.finalizedMonoEnd = last?.mono ?? this.finalizedMonoEnd;
 
     return chunk;
   }
+}
+
+function canonicalizeEventTimeline(
+  events: readonly WebBlackboxEvent[],
+  previousTimeEnd: number,
+  previousMonoEnd: number
+): WebBlackboxEvent[] {
+  let time = previousTimeEnd;
+  let mono = previousMonoEnd;
+
+  return events
+    .map((event, ordinal) => ({ event, ordinal }))
+    .sort(
+      (left, right) =>
+        left.event.mono - right.event.mono ||
+        left.event.t - right.event.t ||
+        left.ordinal - right.ordinal
+    )
+    .map(({ event }) => {
+      const nextTime = Math.max(time, event.t);
+      const nextMono = Math.max(mono, event.mono);
+      time = nextTime;
+      mono = nextMono;
+
+      if (nextTime === event.t && nextMono === event.mono) {
+        return event;
+      }
+
+      return {
+        ...event,
+        t: nextTime,
+        mono: nextMono
+      };
+    });
 }
 
 function estimateEventNdjsonBytes(event: WebBlackboxEvent): number {
