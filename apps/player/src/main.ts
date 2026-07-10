@@ -15,6 +15,7 @@ import { createRoot } from "react-dom/client";
 
 import { hasFilePayload, pickArchiveFile } from "./lib/archive-files.js";
 import { hasPlaybackEvents } from "./lib/archive-health.js";
+import { readArchiveBlobBounded, readArchiveResponseBounded } from "./lib/archive-input.js";
 import { toArrayBuffer } from "./lib/binary.js";
 import { formatCompareSummary } from "./lib/compare-summary.js";
 import { escapeHtml, getElement } from "./lib/dom.js";
@@ -1557,7 +1558,7 @@ async function loadPrimaryArchiveFile(file: File): Promise<void> {
   const loadToken = primaryArchiveLoadGate.begin();
 
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    const bytes = await readArchiveBlobBounded(file);
     await loadPrimaryArchiveBytes(bytes, file.name, loadToken);
   } catch (error) {
     if (primaryArchiveLoadGate.isCurrent(loadToken)) {
@@ -1642,7 +1643,7 @@ async function handleCompareArchiveChange(): Promise<void> {
   }
 
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    const bytes = await readArchiveBlobBounded(file);
     const comparePlayer = await openArchiveWithPassphraseFallback(bytes, file.name);
 
     if (!compareArchiveLoadGate.isCurrent(loadToken)) {
@@ -2023,7 +2024,7 @@ async function loadArchiveFromShareReference(
       throw new Error(message || `HTTP ${response.status}`);
     }
 
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = await readArchiveResponseBounded(response);
     const loaded = await loadPrimaryArchiveBytes(
       bytes,
       `shared-${resolved.shareId}.webblackbox`,
