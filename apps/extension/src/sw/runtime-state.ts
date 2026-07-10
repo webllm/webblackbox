@@ -58,13 +58,22 @@ export type PersistedActiveRuntime = PersistedRuntimeBase & {
   state: "active";
 };
 
+export type PersistedStoppingRuntime = PersistedRuntimeBase & {
+  state: "stopping";
+  stopRequestedAt: number;
+  cleanupDeadline: number;
+};
+
 export type PersistedStoppedRuntime = PersistedRuntimeBase & {
   state: "stopped";
   stoppedAt: number;
   cleanupDeadline: number;
 };
 
-export type PersistedRuntime = PersistedActiveRuntime | PersistedStoppedRuntime;
+export type PersistedRuntime =
+  | PersistedActiveRuntime
+  | PersistedStoppingRuntime
+  | PersistedStoppedRuntime;
 
 export type RuntimeStateSnapshot = {
   schemaVersion: typeof RUNTIME_STATE_SCHEMA_VERSION;
@@ -75,6 +84,11 @@ export type RuntimeStateSnapshot = {
 export type ActiveRuntimeRestorationDecision =
   | { allowed: true; captureUrl: string; sanitizedUrl: string }
   | { allowed: false; reason: string };
+
+export type RuntimeRestorationPlan =
+  | { kind: "resume-active"; runtime: PersistedActiveRuntime }
+  | { kind: "purge-stopping"; runtime: PersistedStoppingRuntime }
+  | { kind: "retain-stopped"; runtime: PersistedStoppedRuntime };
 
 export type PersistedRuntimeIdentity = {
   sid: string;
@@ -129,6 +143,27 @@ export type RuntimeCleanupSchedulerOptions = {
   onDue: (sid: string) => void | Promise<void>;
 };
 
+export type DurableRuntimeStopWorkflowOptions = {
+  persistStopping: () => void | Promise<void>;
+  teardownSteps: ReadonlyArray<() => void | Promise<void>>;
+  persistStopped: () => void | Promise<void>;
+};
+
+export type DurableStopTombstoneOptions = {
+  persist: () => void | Promise<void>;
+  activate: () => void;
+};
+
+export type StoppingRuntimeRecoveryOptions = {
+  getScreenRecordingStatus: () =>
+    | RuntimeOffscreenScreenRecordingStatus
+    | Promise<RuntimeOffscreenScreenRecordingStatus>;
+  stopScreenRecording: (
+    status: Extract<RuntimeOffscreenScreenRecordingStatus, { active: true }>
+  ) => void | Promise<void>;
+  purge: () => void | Promise<void>;
+};
+
 export class RuntimeStartCoordinator {
   private readonly inFlight = new Map<number, Promise<void>>();
 
@@ -148,6 +183,55 @@ export class RuntimeStartCoordinator {
       });
     this.inFlight.set(tabId, task);
     return task;
+  }
+}
+
+/** Runs no teardown until the stop intent is durably checkpointed. */
+export async function runDurableRuntimeStopWorkflow(
+  options: DurableRuntimeStopWorkflowOptions
+): Promise<void> {
+  await options.persistStopping();
+
+  for (const step of options.teardownSteps) {
+    await step();
+  }
+
+  await options.persistStopped();
+}
+
+/** Activates the in-memory stop marker only after its durable write succeeds. */
+export async function persistDurableStopTombstone(
+  options: DurableStopTombstoneOptions
+): Promise<void> {
+  await options.persist();
+  options.activate();
+}
+
+/** Stopping tombstones are never eligible for active capture restoration. */
+export function planRuntimeRestoration(runtime: PersistedRuntime): RuntimeRestorationPlan {
+  if (runtime.state === "active") {
+    return { kind: "resume-active", runtime };
+  }
+
+  if (runtime.state === "stopping") {
+    return { kind: "purge-stopping", runtime };
+  }
+
+  return { kind: "retain-stopped", runtime };
+}
+
+/** Stops any recorder that survived the worker before purging its stopped session. */
+export async function recoverStoppingRuntimeFailClosed(
+  options: StoppingRuntimeRecoveryOptions
+): Promise<void> {
+  try {
+    const status = await options.getScreenRecordingStatus();
+
+    if (status.active) {
+      await options.stopScreenRecording(status);
+    }
+  } finally {
+    await options.purge();
   }
 }
 
@@ -207,6 +291,37 @@ export function createRuntimeStateSnapshot(
     savedAt,
     sessions: sessions.map(clonePersistedRuntime)
   };
+}
+
+export function createStoppingRuntimeTombstone(
+  runtime: PersistedActiveRuntime,
+  stopRequestedAt: number,
+  cleanupDeadline: number
+): PersistedStoppingRuntime {
+  return {
+    ...runtime,
+    state: "stopping",
+    stopRequestedAt,
+    cleanupDeadline
+  };
+}
+
+/** Retained stopping tombstones override same-session rows so later writes cannot revive capture. */
+export function mergeRuntimeStateWithStoppingTombstones(
+  sessions: readonly PersistedRuntime[],
+  tombstones: readonly PersistedStoppingRuntime[]
+): PersistedRuntime[] {
+  const merged = new Map<string, PersistedRuntime>();
+
+  for (const session of sessions) {
+    merged.set(session.sid, session);
+  }
+
+  for (const tombstone of tombstones) {
+    merged.set(tombstone.sid, tombstone);
+  }
+
+  return [...merged.values()];
 }
 
 /** Extracts only non-sensitive identifiers used to fail-closed purge a corrupt checkpoint. */
@@ -705,6 +820,43 @@ function parsePersistedRuntime(input: unknown): PersistedRuntime | null {
       ...base,
       state: "stopped",
       stoppedAt: record.stoppedAt,
+      cleanupDeadline: record.cleanupDeadline
+    };
+  }
+
+  if (raw?.state === "stopping") {
+    const record = asStrictRecord(input, [
+      "state",
+      "sid",
+      "tabId",
+      "mode",
+      "url",
+      "title",
+      "tags",
+      "note",
+      "config",
+      "startedAt",
+      "counters",
+      "screenRecording",
+      "stopRequestedAt",
+      "cleanupDeadline"
+    ]);
+    const base = record ? parsePersistedRuntimeBase(record) : null;
+
+    if (
+      !base ||
+      !isFiniteNonNegativeNumber(record?.stopRequestedAt) ||
+      !isFiniteNonNegativeNumber(record.cleanupDeadline) ||
+      record.stopRequestedAt < base.startedAt ||
+      record.cleanupDeadline < record.stopRequestedAt
+    ) {
+      return null;
+    }
+
+    return {
+      ...base,
+      state: "stopping",
+      stopRequestedAt: record.stopRequestedAt,
       cleanupDeadline: record.cleanupDeadline
     };
   }

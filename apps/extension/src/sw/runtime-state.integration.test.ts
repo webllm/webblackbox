@@ -9,9 +9,11 @@ import {
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
   parseRuntimeStateSnapshot,
+  planRuntimeRestoration,
   type PersistedActiveRuntime,
   type PersistedRuntimeCounters,
-  type PersistedStoppedRuntime
+  type PersistedStoppedRuntime,
+  type PersistedStoppingRuntime
 } from "./runtime-state.js";
 
 const STARTED_AT = Date.parse("2026-06-01T00:00:00.000Z");
@@ -73,6 +75,17 @@ function stopped(): PersistedStoppedRuntime {
   };
 }
 
+function stopping(): PersistedStoppingRuntime {
+  const stopRequestedAt = STARTED_AT + 30_000;
+  return {
+    ...active(),
+    state: "stopping",
+    sid: "S-1780272030000-stopping",
+    stopRequestedAt,
+    cleanupDeadline: stopRequestedAt + 86_400_000
+  };
+}
+
 describe("service-worker restart recovery integration", () => {
   it("restores a valid active checkpoint and re-arms stopped TTL cleanup after restart", async () => {
     const rawStorageValue = structuredClone(
@@ -130,6 +143,22 @@ describe("service-worker restart recovery integration", () => {
         STARTED_AT + 30_001
       )
     ).toEqual({ allowed: false, reason: "consent-expired" });
+  });
+
+  it("routes a crash-persisted stopping tombstone to purge, never active restoration", () => {
+    const snapshot = parseRuntimeStateSnapshot(
+      createRuntimeStateSnapshot([stopping()], STARTED_AT + 31_000)
+    );
+    const row = snapshot?.sessions[0];
+
+    expect(row?.state).toBe("stopping");
+    expect(row && planRuntimeRestoration(row)).toMatchObject({
+      kind: "purge-stopping",
+      runtime: {
+        sid: "S-1780272030000-stopping",
+        stopRequestedAt: STARTED_AT + 30_000
+      }
+    });
   });
 
   it("rejects a corrupt checkpoint while retaining only safe purge identities", () => {

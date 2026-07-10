@@ -9,14 +9,20 @@ import {
   capCleanupDeadline,
   createRuntimeCleanupAlarmName,
   createRuntimeStateSnapshot,
+  createStoppingRuntimeTombstone,
   compactScreenRecordingChunkHashes,
   deriveDurableScreenRecordingChunkCount,
   evaluateActiveRuntimeRestoration,
+  mergeRuntimeStateWithStoppingTombstones,
   mergeRuntimeCountersWithSequenceWatermark,
   normalizeOffscreenScreenRecordingStatus,
   parseRuntimeStateSnapshot,
+  persistDurableStopTombstone,
+  planRuntimeRestoration,
   reconcileScreenRecordingResumeState,
+  recoverStoppingRuntimeFailClosed,
   restoreScreenRecordingChunkHashes,
+  runDurableRuntimeStopWorkflow,
   type PersistedActiveRuntime,
   type PersistedRuntime
 } from "./runtime-state.js";
@@ -42,7 +48,7 @@ function createConfig(tabId = 7, expiresAt?: string): RecorderConfig {
 }
 
 function createRuntime(
-  state: "active" | "stopped" = "active",
+  state: PersistedRuntime["state"] = "active",
   overrides: Partial<PersistedRuntime> = {}
 ): PersistedRuntime {
   const base = {
@@ -71,26 +77,237 @@ function createRuntime(
     ...overrides
   };
 
-  return state === "stopped"
+  if (state === "active") {
+    return { ...base, state: "active" };
+  }
+
+  const stopTime = Date.parse("2026-01-01T01:00:00.000Z");
+  const cleanupDeadline = Date.parse("2026-01-02T01:00:00.000Z");
+
+  return state === "stopping"
     ? {
         ...base,
-        state: "stopped",
-        stoppedAt: Date.parse("2026-01-01T01:00:00.000Z"),
-        cleanupDeadline: Date.parse("2026-01-02T01:00:00.000Z")
+        state: "stopping",
+        stopRequestedAt: stopTime,
+        cleanupDeadline
       }
-    : { ...base, state: "active" };
+    : {
+        ...base,
+        state: "stopped",
+        stoppedAt: stopTime,
+        cleanupDeadline
+      };
 }
 
 describe("runtime state checkpoint", () => {
-  it("round-trips active and stopped sessions without events or keys", () => {
+  it("round-trips active, stopping, and stopped sessions without events or keys", () => {
     const snapshot = createRuntimeStateSnapshot(
-      [createRuntime("active"), createRuntime("stopped", { sid: "S-1767225600001-stopped" })],
+      [
+        createRuntime("active"),
+        createRuntime("stopping", { sid: "S-1767225600001-stopping" }),
+        createRuntime("stopped", { sid: "S-1767225600002-stopped" })
+      ],
       123
     );
     const parsed = parseRuntimeStateSnapshot(snapshot);
 
     expect(parsed).toEqual(snapshot);
     expect(JSON.stringify(parsed)).not.toMatch(/"events"|"encryptionKey"|"passphrase":/);
+  });
+
+  it("never plans active restoration for a durable stopping tombstone", () => {
+    expect(planRuntimeRestoration(createRuntime("active")).kind).toBe("resume-active");
+    expect(planRuntimeRestoration(createRuntime("stopping")).kind).toBe("purge-stopping");
+    expect(planRuntimeRestoration(createRuntime("stopped")).kind).toBe("retain-stopped");
+  });
+
+  it("retains a failed recovery tombstone across later active checkpoint writes", () => {
+    const active = createRuntime("active");
+    const tombstone = createRuntime("stopping", {
+      sid: active.sid
+    }) as Extract<PersistedRuntime, { state: "stopping" }>;
+    const merged = mergeRuntimeStateWithStoppingTombstones([active], [tombstone]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      sid: active.sid,
+      state: "stopping",
+      stopRequestedAt: tombstone.stopRequestedAt
+    });
+    expect(planRuntimeRestoration(merged[0]!)).toMatchObject({ kind: "purge-stopping" });
+  });
+
+  it("does not activate a failed first tombstone write and persists again on retry", async () => {
+    let stopping = false;
+    let attempts = 0;
+    const activate = vi.fn(() => {
+      stopping = true;
+    });
+    const persist = vi.fn(async () => {
+      attempts += 1;
+
+      if (attempts === 1) {
+        throw new Error("storage unavailable");
+      }
+    });
+
+    await expect(persistDurableStopTombstone({ activate, persist })).rejects.toThrow(
+      /storage unavailable/
+    );
+    expect(stopping).toBe(false);
+    expect(activate).not.toHaveBeenCalled();
+
+    await persistDurableStopTombstone({ activate, persist });
+    expect(stopping).toBe(true);
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(activate).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes a serialized stopping row before activating the in-memory marker", async () => {
+    const active = createRuntime("active") as PersistedActiveRuntime;
+    const stopRequestedAt = active.startedAt + 1_000;
+    let activated = false;
+    const storageSet = vi.fn(async (snapshot: ReturnType<typeof createRuntimeStateSnapshot>) => {
+      expect(activated).toBe(false);
+      expect(snapshot.sessions[0]).toMatchObject({
+        sid: active.sid,
+        state: "stopping",
+        stopRequestedAt
+      });
+    });
+
+    await persistDurableStopTombstone({
+      persist: () =>
+        storageSet(
+          createRuntimeStateSnapshot([
+            createStoppingRuntimeTombstone(active, stopRequestedAt, stopRequestedAt + 10_000)
+          ])
+        ),
+      activate: () => {
+        activated = true;
+      }
+    });
+
+    expect(storageSet).toHaveBeenCalledTimes(1);
+    expect(activated).toBe(true);
+  });
+
+  it("does not begin teardown when the stopping tombstone write fails", async () => {
+    const teardown = vi.fn();
+    const persistStopped = vi.fn();
+
+    await expect(
+      runDurableRuntimeStopWorkflow({
+        persistStopping: () => Promise.reject(new Error("checkpoint failed")),
+        teardownSteps: [teardown],
+        persistStopped
+      })
+    ).rejects.toThrow(/checkpoint failed/);
+
+    expect(teardown).not.toHaveBeenCalled();
+    expect(persistStopped).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, 2])(
+    "keeps the durable stopping state when teardown crash point %i aborts",
+    async (crashPoint) => {
+      let durableState: PersistedRuntime["state"] = "active";
+      const teardownSteps = [0, 1, 2].map((index) => async () => {
+        if (index === crashPoint) {
+          throw new Error(`crash-${index}`);
+        }
+      });
+
+      await expect(
+        runDurableRuntimeStopWorkflow({
+          persistStopping: () => {
+            durableState = "stopping";
+          },
+          teardownSteps,
+          persistStopped: () => {
+            durableState = "stopped";
+          }
+        })
+      ).rejects.toThrow(`crash-${crashPoint}`);
+
+      expect(durableState).toBe("stopping");
+    }
+  );
+
+  it("persists stopped after teardown and can retry a failed final checkpoint", async () => {
+    const order: string[] = [];
+    let durableState: PersistedRuntime["state"] = "active";
+    let finalAttempts = 0;
+    const persistStopped = async () => {
+      finalAttempts += 1;
+
+      if (finalAttempts === 1) {
+        throw new Error("final checkpoint failed");
+      }
+
+      durableState = "stopped";
+      order.push("stopped");
+    };
+
+    await expect(
+      runDurableRuntimeStopWorkflow({
+        persistStopping: () => {
+          durableState = "stopping";
+          order.push("stopping");
+        },
+        teardownSteps: [
+          () => {
+            order.push("teardown");
+          }
+        ],
+        persistStopped
+      })
+    ).rejects.toThrow(/final checkpoint failed/);
+    expect(durableState).toBe("stopping");
+
+    await persistStopped();
+    expect(durableState).toBe("stopped");
+    expect(order).toEqual(["stopping", "teardown", "stopped"]);
+  });
+
+  it("stops an offscreen recorder that survived the stopping checkpoint before purge", async () => {
+    const order: string[] = [];
+
+    await recoverStoppingRuntimeFailClosed({
+      getScreenRecordingStatus: async () => {
+        order.push("status");
+        return {
+          active: true,
+          recordingId: "VR-stopping",
+          mime: "video/webm"
+        };
+      },
+      stopScreenRecording: async (status) => {
+        order.push(`stop:${status.recordingId}`);
+      },
+      purge: async () => {
+        order.push("purge");
+      }
+    });
+
+    expect(order).toEqual(["status", "stop:VR-stopping", "purge"]);
+  });
+
+  it("still purges when stopping an orphaned offscreen recorder fails", async () => {
+    const purge = vi.fn();
+
+    await expect(
+      recoverStoppingRuntimeFailClosed({
+        getScreenRecordingStatus: () => ({
+          active: true,
+          recordingId: "VR-stopping",
+          mime: "video/webm"
+        }),
+        stopScreenRecording: () => Promise.reject(new Error("recorder stop failed")),
+        purge
+      })
+    ).rejects.toThrow(/recorder stop failed/);
+    expect(purge).toHaveBeenCalledTimes(1);
   });
 
   it("rejects the entire checkpoint on unknown fields, invalid policy, or duplicate active tabs", () => {
@@ -328,6 +545,51 @@ describe("runtime state checkpoint", () => {
 });
 
 describe("MV3 cleanup scheduling", () => {
+  it("retains a failed stopping recovery and removes it after a bounded retry succeeds", async () => {
+    let now = 1_000;
+    let purgeShouldFail = true;
+    const tombstone = createRuntime("stopping") as Extract<PersistedRuntime, { state: "stopping" }>;
+    const retained = new Map([[tombstone.sid, tombstone]]);
+    const scheduler = new RuntimeCleanupScheduler({
+      alarms: {
+        create: vi.fn(),
+        clear: vi.fn().mockResolvedValue(true)
+      },
+      now: () => now,
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      retryDelayMs: 100,
+      onDue: async (sid) => {
+        const pending = retained.get(sid);
+
+        if (!pending) {
+          return;
+        }
+
+        await recoverStoppingRuntimeFailClosed({
+          getScreenRecordingStatus: () => ({ active: false }),
+          stopScreenRecording: vi.fn(),
+          purge: async () => {
+            if (purgeShouldFail) {
+              throw new Error("purge failed");
+            }
+          }
+        });
+        retained.delete(sid);
+      }
+    });
+    const alarmName = createRuntimeCleanupAlarmName(tombstone.sid);
+
+    await scheduler.schedule(tombstone.sid, 1_100);
+    now = 1_101;
+    await expect(scheduler.handleAlarm(alarmName)).rejects.toThrow(/purge failed/);
+    expect(retained.has(tombstone.sid)).toBe(true);
+
+    purgeShouldFail = false;
+    now = 1_202;
+    await scheduler.handleAlarm(alarmName);
+    expect(retained.has(tombstone.sid)).toBe(false);
+  });
+
   it("arms chrome.alarms plus a timer and purges once after restart alarm delivery", async () => {
     let now = 1_000;
     let timerCallback: (() => void) | undefined;
