@@ -53,7 +53,8 @@
     "inspect": "pnpm run build && npx @modelcontextprotocol/inspector node dist/cli.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

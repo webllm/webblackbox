@@ -11,5 +11,20 @@ export default defineConfig({
         new URL("../../packages/protocol/src/index.ts", import.meta.url)
       )
     }
+  },
+  test: {
+    environment: "node",
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov"],
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/*.test.ts", "src/**/*.d.ts"],
+      thresholds: {
+        lines: 65,
+        statements: 65,
+        functions: 55,
+        branches: 45
+      }
+    }
   }
 });
