@@ -170,6 +170,25 @@ describe("recorder", () => {
     expect(result.event?.tab).toBe(0);
   });
 
+  it("restores event and action sequences after a service-worker restart", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    recorder.restoreSequenceState({ event: 41, action: 9 });
+
+    const result = recorder.ingest({
+      source: "content",
+      rawType: "click",
+      sid: "S-recovered",
+      tabId: 7,
+      t: Date.now(),
+      mono: 10,
+      payload: { selector: "button" }
+    });
+
+    expect(result.event?.id).toBe("E-00000042");
+    expect(result.event?.ref?.act).toBe("A-000010");
+    expect(recorder.getSequenceState()).toEqual({ event: 42, action: 10 });
+  });
+
   it("assigns action span id to dependent events", () => {
     const recorder = new WebBlackboxRecorder(TEST_CONFIG);
     const now = Date.now();

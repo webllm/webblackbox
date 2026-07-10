@@ -75,6 +75,11 @@ export type RecorderHooks = {
   onFreeze?: (reason: FreezeReason, event: WebBlackboxEvent) => void;
 };
 
+export type RecorderSequenceState = {
+  event: number;
+  action: number;
+};
+
 export class WebBlackboxRecorder {
   private readonly idFactory = new EventIdFactory();
 
@@ -181,6 +186,18 @@ export class WebBlackboxRecorder {
 
   public getBufferedEventCount(): number {
     return this.ringBuffer.size();
+  }
+
+  public getSequenceState(): RecorderSequenceState {
+    return {
+      event: this.idFactory.value(),
+      action: this.actionSpanTracker.sequenceValue()
+    };
+  }
+
+  public restoreSequenceState(state: RecorderSequenceState): void {
+    this.idFactory.restore(state.event);
+    this.actionSpanTracker.restoreSequence(state.action);
   }
 
   private applyRawPlugins(raw: RawRecorderEvent): RawRecorderEvent | null {

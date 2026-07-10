@@ -49,6 +49,7 @@ describe("extension build manifest", () => {
     expect(manifest.key).toBeTypeOf("string");
     expect(manifest.permissions).not.toContain("activeTab");
     expect(manifest.permissions).not.toContain("cookies");
+    expect(manifest.permissions).toContain("alarms");
     expect(manifest.permissions).toContain("tabCapture");
     expect(manifest).not.toHaveProperty("content_scripts");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
@@ -65,6 +66,7 @@ describe("extension build manifest", () => {
 
     expect(manifest).not.toHaveProperty("key");
     expect(manifest.permissions).toContain("activeTab");
+    expect(manifest.permissions).toContain("alarms");
     expect(manifest.permissions).toContain("tabCapture");
     expect(manifest.permissions).not.toContain("debugger");
     expect(manifest.permissions).not.toContain("tabs");
@@ -85,6 +87,23 @@ describe("extension build manifest", () => {
 
     expect(manifest).not.toHaveProperty("key");
     expect(validateExtensionManifest(manifest, { version: "1.2.3", release: true })).toEqual([]);
+  });
+
+  it("rejects store-safe packages without restart-safe cleanup alarms", () => {
+    const manifest = createExtensionManifest({
+      version: "1.2.3",
+      release: true,
+      profile: "store-safe"
+    });
+    manifest.permissions = manifest.permissions.filter((permission) => permission !== "alarms");
+
+    expect(
+      validateExtensionManifest(manifest, {
+        version: "1.2.3",
+        release: true,
+        profile: "store-safe"
+      })
+    ).toContain("Store-safe manifest must include 'alarms' permission.");
   });
 
   it("rejects always-on content scripts in the development profile", () => {

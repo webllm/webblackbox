@@ -36,4 +36,12 @@ export class EventIdFactory {
   public value(): number {
     return this.sequence;
   }
+
+  public restore(value: number): void {
+    if (!Number.isSafeInteger(value) || value < this.sequence) {
+      throw new Error("Event id sequence must be a safe integer that does not move backwards.");
+    }
+
+    this.sequence = value;
+  }
 }

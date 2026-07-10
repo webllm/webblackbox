@@ -11,6 +11,8 @@
 
 ### Patch Changes
 
+- Restored active and stopped runtime sessions safely across MV3 service-worker restarts, with
+  strict policy-bound checkpoints and alarm-backed retention cleanup.
 - Required an export passphrase in the popup and sessions UI and removed the automatic plaintext
   local-export override from the service-worker/offscreen pipeline bridge.
 - Updated dependencies

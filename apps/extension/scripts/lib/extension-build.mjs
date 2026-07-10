@@ -61,6 +61,7 @@ export const EXTENSION_MANIFEST_PROFILES = ["dev", "store-safe"];
 // and persistent host access comes from `<all_urls>`, so neither `cookies`
 // nor `activeTab` belongs in the dev/enterprise permission set.
 const DEV_PERMISSIONS = [
+  "alarms",
   "debugger",
   "downloads",
   "offscreen",
@@ -72,6 +73,7 @@ const DEV_PERMISSIONS = [
 ];
 const STORE_SAFE_PERMISSIONS = [
   "activeTab",
+  "alarms",
   "downloads",
   "offscreen",
   "scripting",
@@ -423,16 +425,18 @@ function validateUniqueStringArray(value, fieldName, issues) {
 function validateStoreSafeManifest(manifest, issues) {
   const permissions = new Set(manifest?.permissions ?? []);
 
+  for (const permission of STORE_SAFE_PERMISSIONS) {
+    if (!permissions.has(permission)) {
+      issues.push(`Store-safe manifest must include '${permission}' permission.`);
+    }
+  }
+
   if (permissions.has("debugger")) {
     issues.push("Store-safe manifest must not request the debugger permission.");
   }
 
   if (permissions.has("tabs") || permissions.has("webRequest")) {
     issues.push("Store-safe manifest must not request persistent tabs or webRequest access.");
-  }
-
-  if (!permissions.has("activeTab")) {
-    issues.push("Store-safe manifest must request activeTab for user-gesture scoped capture.");
   }
 
   if (Array.isArray(manifest?.host_permissions) && manifest.host_permissions.length > 0) {

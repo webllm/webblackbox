@@ -28,6 +28,14 @@ export type PortLike = {
 };
 
 export type ChromeApi = {
+  alarms?: {
+    create(name: string, alarmInfo: { when: number }): void | Promise<void>;
+    clear(name: string): boolean | Promise<boolean>;
+    getAll?(): Promise<Array<{ name: string; scheduledTime?: number }>>;
+    onAlarm: {
+      addListener(callback: (alarm: { name: string; scheduledTime?: number }) => void): void;
+    };
+  };
   action?: {
     setBadgeText(details: { text: string }): Promise<void>;
     setBadgeBackgroundColor(details: { color: string }): Promise<void>;

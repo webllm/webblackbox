@@ -30,6 +30,9 @@ describe("protocol", () => {
     expect(sessionId.startsWith("S-1700000000000-")).toBe(true);
     expect(ids.next()).toBe("E-00000001");
     expect(ids.next()).toBe("E-00000002");
+    ids.restore(41);
+    expect(ids.next()).toBe("E-00000042");
+    expect(() => ids.restore(1)).toThrow(/does not move backwards/);
   });
 
   it("validates an event envelope", () => {

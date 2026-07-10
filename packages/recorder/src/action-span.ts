@@ -114,4 +114,17 @@ export class ActionSpanTracker {
       ? (value as Record<string, unknown>)
       : null;
   }
+
+  public sequenceValue(): number {
+    return this.sequence;
+  }
+
+  public restoreSequence(value: number): void {
+    if (!Number.isSafeInteger(value) || value < this.sequence) {
+      throw new Error("Action sequence must be a safe integer that does not move backwards.");
+    }
+
+    this.sequence = value;
+    this.currentAction = null;
+  }
 }

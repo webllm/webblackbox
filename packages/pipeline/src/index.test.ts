@@ -259,6 +259,30 @@ describe("pipeline", () => {
     expect(new Set(persisted.map((event) => event.id)).size).toBe(events.length);
   });
 
+  it("continues chunk sequencing when an offscreen pipeline is rebuilt after restart", async () => {
+    const storage = new MemoryPipelineStorage();
+    const first = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 1
+    });
+    await first.start();
+    await first.ingest(createEvent("E-before-restart", "user.marker", 1));
+    await first.close();
+
+    const restored = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 1
+    });
+    await restored.start();
+    await restored.ingest(createEvent("E-after-restart", "user.marker", 2));
+    await restored.close();
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    expect(chunks.map((chunk) => chunk.meta.seq)).toEqual([1, 2]);
+  });
+
   it("can retry an ingest after chunk persistence fails without a sequence gap or duplicate", async () => {
     const storage = new FailOnceChunkStorage();
     const pipeline = createTestPipeline({

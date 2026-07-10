@@ -95,6 +95,7 @@ The Chrome Web Store package uses the `store-safe` profile:
 | Permission   | Purpose                                                |
 | ------------ | ------------------------------------------------------ |
 | `activeTab`  | Temporary page access after the user starts recording  |
+| `alarms`     | Restart-safe local session retention cleanup           |
 | `scripting`  | Programmatic capture injection after that user gesture |
 | `storage`    | Extension settings and session data                    |
 | `offscreen`  | Pipeline processing in the background                  |
@@ -106,6 +107,7 @@ The separately packaged development/enterprise profile adds the following broade
 | Permission   | Purpose                                          |
 | ------------ | ------------------------------------------------ |
 | `debugger`   | CDP access for network, runtime, and page events |
+| `alarms`     | Restart-safe local session retention cleanup     |
 | `tabs`       | Tab information and URL access                   |
 | `scripting`  | Content script injection                         |
 | `storage`    | Extension settings and session data              |

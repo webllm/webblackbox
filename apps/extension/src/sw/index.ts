@@ -101,6 +101,20 @@ import {
   parseStorageSnapshotMeta,
   type LocalStorageSnapshotMode
 } from "./storage-snapshot.js";
+import {
+  RuntimeCleanupScheduler,
+  RuntimeStartCoordinator,
+  capCleanupDeadline,
+  createRuntimeStateSnapshot,
+  evaluateActiveRuntimeRestoration,
+  extractPersistedRuntimeIdentities,
+  parseRuntimeStateSnapshot,
+  type PersistedActiveRuntime,
+  type PersistedRuntime,
+  type PersistedRuntimeCounters,
+  type PersistedScreenRecording,
+  type PersistedStoppedRuntime
+} from "./runtime-state.js";
 
 type SessionRuntime = {
   sid: string;
@@ -150,7 +164,7 @@ type SessionRuntime = {
   queue: Promise<void>;
   removeCdpListeners: Array<() => void>;
   heapSnapshotCapture: HeapSnapshotCaptureState | null;
-  cleanupTimer: ReturnType<typeof setTimeout> | null;
+  cleanupDeadline?: number;
   consentExpiryTimer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -348,6 +362,7 @@ const chromeApi = getChromeApi();
 
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
+const sessionStartCoordinator = new RuntimeStartCoordinator();
 const sessionAnnotations = new Map<string, SessionAnnotation>();
 const connectedPorts = new Set<PortLike>();
 let offscreenPort: PortLike | null = null;
@@ -374,6 +389,8 @@ const offscreenSessionRecovery = new Map<string, Promise<void>>();
 let offscreenRequestSeq = 0;
 let freezeBadgeTimer: ReturnType<typeof setTimeout> | null = null;
 let liteWebRequestCaptureCleanup: (() => void) | null = null;
+let runtimeStatePersistTail: Promise<void> = Promise.resolve();
+let runtimeStatePersistTimer: ReturnType<typeof setTimeout> | null = null;
 
 const OFFSCREEN_PATH = "offscreen.html";
 const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
@@ -447,7 +464,7 @@ const ACTIVE_SESSION_STORAGE_KEY = "webblackbox.runtime.sessions";
 const SESSION_ANNOTATIONS_STORAGE_KEY = "webblackbox.runtime.sessionAnnotations";
 const EXPORT_AUDIT_STORAGE_KEY = "webblackbox.audit.exports";
 const EXPORT_AUDIT_MAX_EVENTS = 200;
-const STOPPED_SESSION_TTL_MS = 10 * 60_000;
+const RUNTIME_STATE_PERSIST_DEBOUNCE_MS = 500;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
 const STOP_DRAIN_CONTENT_RAW_TYPES = new Set([
   "snapshot",
@@ -470,7 +487,26 @@ const SCREEN_RECORDING_OFFSCREEN_SOURCE = "tab";
 
 console.info("[WebBlackbox] service worker booted");
 
-void restoreRuntimeState();
+const runtimeCleanupScheduler = new RuntimeCleanupScheduler({
+  alarms: chromeApi?.alarms,
+  onDue: async (sid) => {
+    const runtime = sessionsBySid.get(sid);
+
+    if (runtime?.stoppedAt) {
+      await disposeStoppedSession(runtime);
+    }
+  }
+});
+const runtimeStateRestorePromise = restoreRuntimeState().catch(async (error) => {
+  console.warn("[WebBlackbox] runtime state restoration failed closed", error);
+  await failClosedRuntimeRestoration();
+});
+
+chromeApi?.alarms?.onAlarm.addListener((alarm) => {
+  void runtimeCleanupScheduler.handleAlarm(alarm.name).catch((error) => {
+    console.warn("[WebBlackbox] stopped-session cleanup alarm failed", error);
+  });
+});
 
 chromeApi?.runtime?.onInstalled.addListener(() => {
   void setIdleBadge();
@@ -538,12 +574,14 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
   const tabId = port.sender?.tab?.id;
 
   if (typeof tabId !== "number") {
+    sendInactiveContentPortState(port);
     return;
   }
 
   const runtime = sessionsByTab.get(tabId);
 
   if (!runtime || runtime.stoppedAt) {
+    sendInactiveContentPortState(port);
     return;
   }
 
@@ -570,12 +608,14 @@ function syncContentPortRecordingState(port: PortLike): void {
   const tabId = port.sender?.tab?.id;
 
   if (typeof tabId !== "number") {
+    sendInactiveContentPortState(port);
     return;
   }
 
   const runtime = sessionsByTab.get(tabId);
 
   if (!runtime || runtime.stoppedAt) {
+    sendInactiveContentPortState(port);
     return;
   }
 
@@ -586,6 +626,20 @@ function syncContentPortRecordingState(port: PortLike): void {
   }
 
   sendContentPortRecordingState(port, runtime, true);
+}
+
+function sendInactiveContentPortState(port: PortLike): void {
+  try {
+    port.postMessage({
+      kind: "sw.recording-status",
+      active: false
+    });
+  } catch (error) {
+    logPortSendFailure("sw.recording-status", error, {
+      tabId: port.sender?.tab?.id,
+      frameId: port.sender?.frameId
+    });
+  }
 }
 
 function sendContentPortRecordingState(
@@ -683,6 +737,10 @@ async function handleInboundMessage(
   port?: PortLike,
   sender: MessageSenderLike | undefined = port?.sender
 ): Promise<unknown> {
+  if (message.kind.startsWith("ui.")) {
+    await runtimeStateRestorePromise;
+  }
+
   if (message.kind === "ui.start") {
     const tabId = await resolveUiActionTabId(message.tabId);
 
@@ -909,6 +967,15 @@ async function startSession(
   mode: CaptureMode,
   options: { visualCapture?: FullModeVisualCapture } = {}
 ): Promise<void> {
+  await runtimeStateRestorePromise;
+  await sessionStartCoordinator.run(tabId, () => startSessionUnlocked(tabId, mode, options));
+}
+
+async function startSessionUnlocked(
+  tabId: number,
+  mode: CaptureMode,
+  options: { visualCapture?: FullModeVisualCapture }
+): Promise<void> {
   const existing = sessionsByTab.get(tabId);
 
   if (existing) {
@@ -959,93 +1026,22 @@ async function startSession(
     tags: [...annotation.tags]
   };
 
-  const recorderPlugins = createDefaultRecorderPlugins();
   const pipeline = createOffscreenPipelineClient(sid);
   await pipeline.start(metadata, recorderConfig.redaction, recorderConfig.capturePolicy);
-
-  const runtime: SessionRuntime = {
+  const runtime = createSessionRuntime({
     sid,
     tabId,
     mode,
     url: metadata.url,
     captureUrl: tabMetadata.captureUrl,
     title: metadata.title,
-    tags: [...annotation.tags],
+    tags: annotation.tags,
     note: annotation.note,
     config: recorderConfig,
     startedAt,
-    stoppedAt: undefined,
-    recorder: new WebBlackboxRecorder(
-      {
-        ...recorderConfig,
-        mode
-      },
-      {},
-      undefined,
-      recorderPlugins
-    ),
     pipeline,
-    cdpRouter: null,
-    enabledCdpSessions: new Set<string>(),
-    cdpScope: createCdpCaptureScopeState(
-      recorderConfig.capturePolicy,
-      tabId,
-      tabMetadata.captureUrl
-    ),
-    authorizedContentFrames: new Set<number>([0]),
-    requestMeta: new Map(),
-    screenshotInterval: null,
-    screenRecording: null,
-    lastPointer: null,
-    lastViewport: null,
-    lastActionScreenshotMono: Number.NEGATIVE_INFINITY,
-    lastIncidentCaptureAt: Number.NEGATIVE_INFINITY,
-    lastNavigationSnapshotAt: Number.NEGATIVE_INFINITY,
-    queueDepth: 0,
-    droppedBestEffortTasks: 0,
-    pipelineEventBuffer: [],
-    pipelineFlushTimer: null,
-    pipelineFlushQueued: false,
-    stopping: false,
-    responseBodyCaptures: 0,
-    responseBodyCaptureTimestamps: [],
-    capturedEventCount: 0,
-    capturedErrorCount: 0,
-    capturedSizeBytes: 0,
-    budgetAlertCount: 0,
-    performanceBudget,
-    networkBudgetSample: {
-      total: 0,
-      failed: 0
-    },
-    lastFreezeNotices: new Map<string, number>(),
-    lastBudgetBreachAt: new Map<string, number>(),
-    queue: Promise.resolve(),
-    removeCdpListeners: [],
-    heapSnapshotCapture: null,
-    cleanupTimer: null,
-    consentExpiryTimer: null
-  };
-
-  runtime.recorder = new WebBlackboxRecorder(
-    {
-      ...recorderConfig,
-      mode
-    },
-    {
-      onEvent: (event) => {
-        updateSessionMetadataFromEvent(runtime, event);
-        trackSessionCounters(runtime, event);
-        evaluatePerformanceBudget(runtime, event);
-        enqueuePipelineEvent(runtime, event);
-      },
-      onFreeze: (reason) => {
-        handleFreezeNotice(runtime, reason);
-      }
-    },
-    undefined,
-    recorderPlugins
-  );
+    performanceBudget
+  });
 
   sessionsByTab.set(tabId, runtime);
   sessionsBySid.set(sid, runtime);
@@ -1098,6 +1094,142 @@ async function startSession(
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
+}
+
+function createSessionRuntime(input: {
+  sid: string;
+  tabId: number;
+  mode: CaptureMode;
+  url: string;
+  captureUrl: string;
+  title?: string;
+  tags: readonly string[];
+  note?: string;
+  config: typeof DEFAULT_RECORDER_CONFIG;
+  startedAt: number;
+  stoppedAt?: number;
+  cleanupDeadline?: number;
+  pipeline: SessionPipelineClient;
+  performanceBudget: PerformanceBudgetConfig;
+  counters?: PersistedRuntimeCounters;
+  screenRecording?: PersistedScreenRecording;
+}): SessionRuntime {
+  const counters = input.counters ?? {
+    recorderEventSequence: 0,
+    recorderActionSequence: 0,
+    eventCount: 0,
+    errorCount: 0,
+    sizeBytes: 0,
+    budgetAlertCount: 0,
+    droppedBestEffortTasks: 0,
+    responseBodyCaptures: 0,
+    networkTotal: 0,
+    networkFailed: 0
+  };
+  const recorderPlugins = createDefaultRecorderPlugins();
+  const runtimeRef: { current?: SessionRuntime } = {};
+  const recorder = new WebBlackboxRecorder(
+    {
+      ...input.config,
+      mode: input.mode
+    },
+    {
+      onEvent: (event) => {
+        const runtime = runtimeRef.current;
+
+        if (!runtime) {
+          return;
+        }
+
+        updateSessionMetadataFromEvent(runtime, event);
+        trackSessionCounters(runtime, event);
+        evaluatePerformanceBudget(runtime, event);
+        enqueuePipelineEvent(runtime, event);
+      },
+      onFreeze: (reason) => {
+        if (runtimeRef.current) {
+          handleFreezeNotice(runtimeRef.current, reason);
+        }
+      }
+    },
+    undefined,
+    recorderPlugins
+  );
+  recorder.restoreSequenceState({
+    event: counters.recorderEventSequence,
+    action: counters.recorderActionSequence
+  });
+
+  const runtime: SessionRuntime = {
+    sid: input.sid,
+    tabId: input.tabId,
+    mode: input.mode,
+    url: input.url,
+    captureUrl: input.captureUrl,
+    title: input.title,
+    tags: [...input.tags],
+    note: input.note,
+    config: input.config,
+    startedAt: input.startedAt,
+    stoppedAt: input.stoppedAt,
+    recorder,
+    pipeline: input.pipeline,
+    cdpRouter: null,
+    enabledCdpSessions: new Set<string>(),
+    cdpScope: createCdpCaptureScopeState(input.config.capturePolicy, input.tabId, input.captureUrl),
+    authorizedContentFrames: new Set<number>(input.stoppedAt ? [] : [0]),
+    requestMeta: new Map(),
+    screenshotInterval: null,
+    screenRecording: input.screenRecording
+      ? {
+          recordingId: input.screenRecording.recordingId,
+          source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
+          startedAt: input.screenRecording.startedAt,
+          startedMono: input.screenRecording.startedMono,
+          mime: input.screenRecording.mime,
+          width: input.screenRecording.width,
+          height: input.screenRecording.height,
+          frameRate: input.screenRecording.frameRate,
+          chunks: new Array<string>(input.screenRecording.chunkCount),
+          chunkCount: input.screenRecording.chunkCount,
+          sizeBytes: input.screenRecording.sizeBytes,
+          pendingWrites: new Set(),
+          stopPromise: null
+        }
+      : null,
+    lastPointer: null,
+    lastViewport: null,
+    lastActionScreenshotMono: Number.NEGATIVE_INFINITY,
+    lastIncidentCaptureAt: Number.NEGATIVE_INFINITY,
+    lastNavigationSnapshotAt: Number.NEGATIVE_INFINITY,
+    queueDepth: 0,
+    droppedBestEffortTasks: counters.droppedBestEffortTasks,
+    pipelineEventBuffer: [],
+    pipelineFlushTimer: null,
+    pipelineFlushQueued: false,
+    stopping: false,
+    responseBodyCaptures: counters.responseBodyCaptures,
+    responseBodyCaptureTimestamps: [],
+    capturedEventCount: counters.eventCount,
+    capturedErrorCount: counters.errorCount,
+    capturedSizeBytes: counters.sizeBytes,
+    budgetAlertCount: counters.budgetAlertCount,
+    performanceBudget: input.performanceBudget,
+    networkBudgetSample: {
+      total: counters.networkTotal,
+      failed: counters.networkFailed
+    },
+    lastFreezeNotices: new Map<string, number>(),
+    lastBudgetBreachAt: new Map<string, number>(),
+    queue: Promise.resolve(),
+    removeCdpListeners: [],
+    heapSnapshotCapture: null,
+    cleanupDeadline: input.cleanupDeadline,
+    consentExpiryTimer: null
+  };
+  runtimeRef.current = runtime;
+
+  return runtime;
 }
 
 async function reloadRecordingTab(tabId: number): Promise<void> {
@@ -1155,7 +1287,9 @@ async function stopSession(tabId: number): Promise<void> {
   sessionsByTab.delete(runtime.tabId);
   uninstallLiteWebRequestCaptureIfUnused();
   runtime.stoppedAt = Date.now();
-  scheduleStoppedRuntimeCleanup(runtime);
+  runtime.cleanupDeadline =
+    runtime.stoppedAt + resolveRuntimeLocalTtlMs(runtime.config.capturePolicy);
+  await scheduleStoppedRuntimeCleanup(runtime);
 
   if (sessionsByTab.size === 0) {
     await setIdleBadge();
@@ -1788,11 +1922,13 @@ function trackSessionCounters(runtime: SessionRuntime, event: WebBlackboxEvent):
   if (event.type === "error.exception" || event.type === "error.unhandledrejection") {
     runtime.capturedErrorCount += 1;
     pushSessionList();
+    scheduleRuntimeStatePersist();
     return;
   }
 
   if (runtime.capturedEventCount % 50 === 0) {
     pushSessionList();
+    scheduleRuntimeStatePersist();
   }
 }
 
@@ -1844,6 +1980,7 @@ function evaluatePerformanceBudget(runtime: SessionRuntime, event: WebBlackboxEv
 
   if (updated) {
     pushSessionList();
+    scheduleRuntimeStatePersist();
   }
 }
 
@@ -4639,14 +4776,12 @@ async function cleanupCdpInstrumentation(
   runtime.heapSnapshotCapture = null;
 }
 
-function scheduleStoppedRuntimeCleanup(runtime: SessionRuntime): void {
-  if (runtime.cleanupTimer !== null) {
-    clearTimeout(runtime.cleanupTimer);
+async function scheduleStoppedRuntimeCleanup(runtime: SessionRuntime): Promise<void> {
+  if (!runtime.stoppedAt || !runtime.cleanupDeadline) {
+    throw new Error("Stopped session is missing its absolute cleanup deadline.");
   }
 
-  runtime.cleanupTimer = setTimeout(() => {
-    void disposeStoppedSession(runtime);
-  }, STOPPED_SESSION_TTL_MS);
+  await runtimeCleanupScheduler.schedule(runtime.sid, runtime.cleanupDeadline);
 }
 
 async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
@@ -4654,10 +4789,7 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
     return;
   }
 
-  if (runtime.cleanupTimer !== null) {
-    clearTimeout(runtime.cleanupTimer);
-    runtime.cleanupTimer = null;
-  }
+  await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
 
   await flushBufferedPipelineEvents(runtime);
   await runtime.queue;
@@ -4668,6 +4800,9 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
     })
     .catch(() => undefined);
   sessionsBySid.delete(runtime.sid);
+  if (sessionAnnotations.delete(runtime.sid)) {
+    await persistSessionAnnotations().catch(() => undefined);
+  }
 
   if (sessionsByTab.size === 0) {
     await setIdleBadge();
@@ -4679,6 +4814,19 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
   pushSessionList();
   await persistRuntimeState();
   notifyOffscreenPipelineStatus();
+}
+
+function resolveRuntimeLocalTtlMs(policy: CapturePolicy | null | undefined): number {
+  const ttl = policy?.retention.localTtlMs;
+
+  if (typeof ttl === "number" && Number.isSafeInteger(ttl) && ttl > 0) {
+    return ttl;
+  }
+
+  return (
+    DEFAULT_RECORDER_CONFIG.capturePolicy?.retention.localTtlMs ??
+    DEFAULT_CAPTURE_POLICY.retention.localTtlMs
+  );
 }
 
 async function closeOffscreenIfUnused(): Promise<void> {
@@ -4734,6 +4882,7 @@ function toSessionMetadata(runtime: SessionRuntime): SessionMetadata {
     sid: runtime.sid,
     tabId: runtime.tabId,
     startedAt: runtime.startedAt,
+    endedAt: runtime.stoppedAt,
     mode: runtime.mode,
     url: sanitizeUrlForPrivacy(runtime.url),
     title: runtime.title,
@@ -4827,6 +4976,7 @@ async function updateSessionMetadataFromEventAsync(
 
   if (changed) {
     pushSessionList();
+    scheduleRuntimeStatePersist();
   }
 }
 
@@ -4873,6 +5023,7 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     runtime.cdpScope.captureUrl = rawUrl;
     resetAuthorizedContentFrames(runtime);
     pushSessionList();
+    scheduleRuntimeStatePersist();
   }
 }
 
@@ -5101,6 +5252,7 @@ async function updateSessionAnnotation(
   });
 
   await persistSessionAnnotations().catch(() => undefined);
+  await persistRuntimeState().catch(() => undefined);
   pushSessionList();
 }
 
@@ -5215,16 +5367,90 @@ async function persistRuntimeState(): Promise<void> {
     return;
   }
 
-  const sessions = [...sessionsByTab.values()].map((runtime) => ({
+  const snapshot = createRuntimeStateSnapshot([...sessionsBySid.values()].map(toPersistedRuntime));
+  const operation = runtimeStatePersistTail
+    .catch(() => undefined)
+    .then(async () => {
+      await chromeApi.storage!.local.set({
+        [ACTIVE_SESSION_STORAGE_KEY]: snapshot
+      });
+    });
+  runtimeStatePersistTail = operation;
+  await operation;
+}
+
+function scheduleRuntimeStatePersist(): void {
+  if (runtimeStatePersistTimer !== null) {
+    return;
+  }
+
+  runtimeStatePersistTimer = setTimeout(() => {
+    runtimeStatePersistTimer = null;
+    void persistRuntimeState().catch((error) => {
+      console.warn("[WebBlackbox] failed to persist runtime checkpoint", error);
+    });
+  }, RUNTIME_STATE_PERSIST_DEBOUNCE_MS);
+}
+
+function toPersistedRuntime(runtime: SessionRuntime): PersistedRuntime {
+  const recorderSequence = runtime.recorder.getSequenceState();
+  const counters: PersistedRuntimeCounters = {
+    recorderEventSequence: recorderSequence.event,
+    recorderActionSequence: recorderSequence.action,
+    eventCount: runtime.capturedEventCount,
+    errorCount: runtime.capturedErrorCount,
+    sizeBytes: runtime.capturedSizeBytes,
+    budgetAlertCount: runtime.budgetAlertCount,
+    droppedBestEffortTasks: runtime.droppedBestEffortTasks,
+    responseBodyCaptures: runtime.responseBodyCaptures,
+    networkTotal: runtime.networkBudgetSample.total,
+    networkFailed: runtime.networkBudgetSample.failed
+  };
+  const screenRecording: PersistedScreenRecording | undefined = runtime.screenRecording
+    ? {
+        recordingId: runtime.screenRecording.recordingId,
+        startedAt: runtime.screenRecording.startedAt,
+        startedMono: runtime.screenRecording.startedMono,
+        mime: runtime.screenRecording.mime,
+        ...(runtime.screenRecording.width ? { width: runtime.screenRecording.width } : {}),
+        ...(runtime.screenRecording.height ? { height: runtime.screenRecording.height } : {}),
+        ...(runtime.screenRecording.frameRate
+          ? { frameRate: runtime.screenRecording.frameRate }
+          : {}),
+        chunkCount: runtime.screenRecording.chunkCount,
+        sizeBytes: runtime.screenRecording.sizeBytes
+      }
+    : undefined;
+  const base = {
     sid: runtime.sid,
     tabId: runtime.tabId,
     mode: runtime.mode,
-    startedAt: runtime.startedAt
-  }));
+    url: sanitizeUrlForPrivacy(runtime.url),
+    ...(runtime.title ? { title: runtime.title.slice(0, 1_024) } : {}),
+    tags: normalizeSessionTags(runtime.tags),
+    ...(runtime.note ? { note: normalizeSessionNote(runtime.note) } : {}),
+    config: runtime.config,
+    startedAt: runtime.startedAt,
+    counters,
+    ...(screenRecording ? { screenRecording } : {})
+  };
 
-  await chromeApi.storage.local.set({
-    [ACTIVE_SESSION_STORAGE_KEY]: sessions
-  });
+  if (runtime.stoppedAt) {
+    const cleanupDeadline =
+      runtime.cleanupDeadline ??
+      runtime.stoppedAt + resolveRuntimeLocalTtlMs(runtime.config.capturePolicy);
+    return {
+      ...base,
+      state: "stopped",
+      stoppedAt: runtime.stoppedAt,
+      cleanupDeadline
+    };
+  }
+
+  return {
+    ...base,
+    state: "active"
+  };
 }
 
 async function appendExportAuditEvent(event: ExportAuditEvent): Promise<void> {
@@ -5260,27 +5486,314 @@ async function restoreRuntimeState(): Promise<void> {
 
   const values = await chromeApi.storage.local.get(ACTIVE_SESSION_STORAGE_KEY);
   const persisted = values?.[ACTIVE_SESSION_STORAGE_KEY];
+  const snapshot = parseRuntimeStateSnapshot(persisted);
 
-  if (Array.isArray(persisted) && persisted.length > 0) {
+  if (persisted !== undefined && !snapshot) {
+    const identities = extractPersistedRuntimeIdentities(persisted);
+    sessionAnnotations.clear();
+    await persistSessionAnnotations().catch(() => undefined);
     await chromeApi.storage.local
       .set({
-        [ACTIVE_SESSION_STORAGE_KEY]: []
+        [ACTIVE_SESSION_STORAGE_KEY]: createRuntimeStateSnapshot([])
       })
       .catch(() => undefined);
+    await clearStaleRuntimeCleanupAlarms(new Set());
 
-    for (const item of persisted) {
-      const row = asRecord(item);
-      const tabId = typeof row?.tabId === "number" ? row.tabId : undefined;
+    for (const identity of identities) {
+      await notifyTabStatus(identity.tabId, false);
+      await purgePersistedRuntimeData({
+        ...identity,
+        mode: "lite",
+        url: "https://invalid.invalid/",
+        title: undefined,
+        tags: [],
+        config: withSessionCapturePolicy(resolveModeBaseConfig("lite"), {
+          tabId: identity.tabId,
+          origin: "https://invalid.invalid",
+          startedAt: identity.startedAt
+        })
+      });
+    }
+  } else if (snapshot) {
+    const enterprisePolicy = await loadEnterprisePolicy();
+    const performanceBudget = await loadPerformanceBudgetConfig();
+    const stoppedRuntimes: SessionRuntime[] = [];
 
-      if (typeof tabId === "number") {
-        await notifyTabStatus(tabId, false);
+    for (const persistedRuntime of snapshot.sessions) {
+      const config = applyEnterprisePolicyToRecorderConfig(
+        persistedRuntime.config,
+        enterprisePolicy
+      );
+
+      try {
+        if (persistedRuntime.state === "stopped") {
+          const runtime = await restoreStoppedRuntime(persistedRuntime, config, performanceBudget);
+          stoppedRuntimes.push(runtime);
+          continue;
+        }
+
+        const restored = await restoreActiveRuntime(persistedRuntime, config, performanceBudget);
+
+        if (!restored) {
+          await notifyTabStatus(persistedRuntime.tabId, false);
+          await purgePersistedRuntimeData({ ...persistedRuntime, config });
+        }
+      } catch (error) {
+        console.warn("[WebBlackbox] failed closed while restoring session", {
+          sid: persistedRuntime.sid,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await notifyTabStatus(persistedRuntime.tabId, false);
+        await purgePersistedRuntimeData({ ...persistedRuntime, config });
       }
+    }
+
+    await clearStaleRuntimeCleanupAlarms(new Set(stoppedRuntimes.map((runtime) => runtime.sid)));
+
+    for (const runtime of stoppedRuntimes) {
+      if (sessionsBySid.get(runtime.sid) === runtime) {
+        await scheduleStoppedRuntimeCleanup(runtime);
+      }
+    }
+
+    await persistRuntimeState();
+  }
+
+  if (sessionsByTab.size > 0) {
+    await setRecordingBadge();
+  } else {
+    await setIdleBadge();
+  }
+  pushSessionList();
+  notifyOffscreenPipelineStatus();
+}
+
+async function failClosedRuntimeRestoration(): Promise<void> {
+  const runtimes = [...sessionsBySid.values()];
+  sessionsByTab.clear();
+  sessionsBySid.clear();
+  sessionAnnotations.clear();
+  uninstallLiteWebRequestCaptureIfUnused();
+
+  for (const runtime of runtimes) {
+    await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
+
+    if (!runtime.stoppedAt) {
+      await notifyAuthorizedContentFrames(runtime, false).catch(() => undefined);
+      await teardownCaptureInstrumentation(runtime).catch(() => undefined);
+    }
+
+    await runtime.pipeline.close({ purge: true }).catch(() => undefined);
+  }
+
+  await chromeApi?.storage?.local
+    ?.set({
+      [ACTIVE_SESSION_STORAGE_KEY]: createRuntimeStateSnapshot([])
+    })
+    .catch(() => undefined);
+  await persistSessionAnnotations().catch(() => undefined);
+
+  for (const port of connectedPorts) {
+    if (port.name === PORT_NAMES.content) {
+      sendInactiveContentPortState(port);
     }
   }
 
   await setIdleBadge();
   pushSessionList();
   notifyOffscreenPipelineStatus();
+}
+
+async function restoreActiveRuntime(
+  persisted: PersistedActiveRuntime,
+  config: typeof DEFAULT_RECORDER_CONFIG,
+  performanceBudget: PerformanceBudgetConfig
+): Promise<SessionRuntime | null> {
+  let tab: {
+    id?: number;
+    active?: boolean;
+    url?: string;
+    title?: string;
+    lastAccessed?: number;
+  } | null = null;
+
+  try {
+    tab = chromeApi?.tabs?.get ? await chromeApi.tabs.get(persisted.tabId) : null;
+  } catch {
+    tab = null;
+  }
+
+  const candidate: PersistedActiveRuntime = {
+    ...persisted,
+    config
+  };
+  const decision = evaluateActiveRuntimeRestoration(candidate, tab, Date.now());
+
+  if (!decision.allowed) {
+    console.warn("[WebBlackbox] active session checkpoint rejected", {
+      sid: persisted.sid,
+      reason: decision.reason
+    });
+    return null;
+  }
+
+  await ensureOffscreenDocument();
+  const pipeline = createOffscreenPipelineClient(persisted.sid);
+  await pipeline.start(
+    {
+      sid: persisted.sid,
+      tabId: persisted.tabId,
+      startedAt: persisted.startedAt,
+      mode: persisted.mode,
+      url: decision.sanitizedUrl,
+      title: persisted.title,
+      tags: [...persisted.tags]
+    },
+    config.redaction,
+    config.capturePolicy
+  );
+  const runtime = createSessionRuntime({
+    sid: persisted.sid,
+    tabId: persisted.tabId,
+    mode: persisted.mode,
+    url: decision.sanitizedUrl,
+    captureUrl: decision.captureUrl,
+    title:
+      typeof tab?.title === "string" && tab.title.trim().length > 0
+        ? tab.title.trim().slice(0, 1_024)
+        : persisted.title,
+    tags: persisted.tags,
+    note: persisted.note,
+    config,
+    startedAt: persisted.startedAt,
+    pipeline,
+    performanceBudget,
+    counters: persisted.counters,
+    screenRecording: persisted.screenRecording
+  });
+  sessionsByTab.set(runtime.tabId, runtime);
+  sessionsBySid.set(runtime.sid, runtime);
+  scheduleConsentExpiry(runtime);
+
+  if (runtime.mode === "lite") {
+    installLiteWebRequestCapture();
+  }
+
+  if (shouldInjectHooksForMode(runtime.mode)) {
+    await ensureContentScriptInjected(runtime);
+    await ensureInjectedHooks(runtime.tabId, 0);
+  }
+
+  if (runtime.mode === "full" && runtime.config.capturePolicy?.categories.cdp !== "off") {
+    await attachCdp(runtime);
+  }
+
+  await notifyAuthorizedContentFrames(runtime, true);
+  return runtime;
+}
+
+async function restoreStoppedRuntime(
+  persisted: PersistedStoppedRuntime,
+  config: typeof DEFAULT_RECORDER_CONFIG,
+  performanceBudget: PerformanceBudgetConfig
+): Promise<SessionRuntime> {
+  const cleanupDeadline = capCleanupDeadline(
+    persisted.stoppedAt,
+    persisted.cleanupDeadline,
+    resolveRuntimeLocalTtlMs(config.capturePolicy)
+  );
+  await ensureOffscreenDocument();
+  const pipeline = createOffscreenPipelineClient(persisted.sid);
+  await pipeline.start(
+    {
+      sid: persisted.sid,
+      tabId: persisted.tabId,
+      startedAt: persisted.startedAt,
+      endedAt: persisted.stoppedAt,
+      mode: persisted.mode,
+      url: persisted.url,
+      title: persisted.title,
+      tags: [...persisted.tags]
+    },
+    config.redaction,
+    config.capturePolicy
+  );
+  const runtime = createSessionRuntime({
+    sid: persisted.sid,
+    tabId: persisted.tabId,
+    mode: persisted.mode,
+    url: persisted.url,
+    captureUrl: persisted.url,
+    title: persisted.title,
+    tags: persisted.tags,
+    note: persisted.note,
+    config,
+    startedAt: persisted.startedAt,
+    stoppedAt: persisted.stoppedAt,
+    cleanupDeadline,
+    pipeline,
+    performanceBudget,
+    counters: persisted.counters
+  });
+  sessionsBySid.set(runtime.sid, runtime);
+  return runtime;
+}
+
+async function purgePersistedRuntimeData(runtime: {
+  sid: string;
+  tabId: number;
+  startedAt: number;
+  mode: CaptureMode;
+  url: string;
+  title?: string;
+  tags: readonly string[];
+  config: typeof DEFAULT_RECORDER_CONFIG;
+}): Promise<void> {
+  if (sessionAnnotations.delete(runtime.sid)) {
+    await persistSessionAnnotations().catch(() => undefined);
+  }
+
+  try {
+    await ensureOffscreenDocument();
+    const pipeline = createOffscreenPipelineClient(runtime.sid);
+    await pipeline.start(
+      {
+        sid: runtime.sid,
+        tabId: runtime.tabId,
+        startedAt: runtime.startedAt,
+        mode: runtime.mode,
+        url: sanitizeUrlForPrivacy(runtime.url),
+        title: runtime.title,
+        tags: [...runtime.tags]
+      },
+      runtime.config.redaction,
+      runtime.config.capturePolicy
+    );
+    await pipeline.close({ purge: true });
+  } catch (error) {
+    console.warn("[WebBlackbox] persisted session purge failed", {
+      sid: runtime.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function clearStaleRuntimeCleanupAlarms(validSids: ReadonlySet<string>): Promise<void> {
+  const alarms = await chromeApi?.alarms?.getAll?.().catch(() => []);
+
+  for (const alarm of alarms ?? []) {
+    const prefix = "webblackbox.runtime.cleanup:";
+
+    if (!alarm.name.startsWith(prefix)) {
+      continue;
+    }
+
+    const sid = alarm.name.slice(prefix.length);
+
+    if (!validSids.has(sid)) {
+      await chromeApi?.alarms?.clear(alarm.name);
+    }
+  }
 }
 
 function notifyOffscreenPipelineStatus(): void {
