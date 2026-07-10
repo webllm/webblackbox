@@ -14,6 +14,11 @@ import {
   resolveExecutable,
   terminateProcess
 } from "../../../scripts/e2e-runtime.mjs";
+import {
+  deleteSessionFromSessionsPort,
+  startSessionFromPopupRuntime,
+  stopSessionFromPopupPort
+} from "./lib/extension-e2e-controller.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -57,6 +62,7 @@ const state = {
   server: null,
   browserClient: null,
   popupClient: null,
+  sessionsClient: null,
   pageClient: null,
   swClient: null,
   offscreenClient: null,
@@ -152,7 +158,7 @@ async function main() {
   await pageClient.send("Runtime.enable");
   await pageClient.send("Page.enable").catch(() => undefined);
   await popupClient.send("Runtime.enable");
-  await waitForPopupRuntimeReady(popupClient, 20_000);
+  await waitForExtensionRuntimeReady(popupClient, 20_000);
 
   const swClient = await connectToDiscoveredTarget(swTarget, browserClient);
   state.swClient = swClient;
@@ -167,7 +173,10 @@ async function main() {
     });
   });
 
-  const start = await startSessionFromPopup(popupClient, "full", stressUrl);
+  const start = await startSessionFromPopupRuntime(popupClient, {
+    mode: "full",
+    expectedUrl: stressUrl
+  });
   assert(start?.ok === true, "Failed to start full mode session.", start);
 
   const indicatorText = await waitForIndicatorText(pageClient, "REC full", 25_000);
@@ -184,6 +193,9 @@ async function main() {
 
   const active = sessionsAfterStart[0];
   assert(typeof active?.sid === "string" && active.sid.length > 0, "Missing active session sid.", {
+    sessionsAfterStart
+  });
+  assert(typeof active?.tabId === "number", "Missing active session tab id.", {
     sessionsAfterStart
   });
 
@@ -309,7 +321,10 @@ async function main() {
     });
   }
 
-  const stop = await stopActiveSessionFromPopup(popupClient, active.sid);
+  const stop = await stopSessionFromPopupPort(popupClient, {
+    sid: active.sid,
+    tabId: active.tabId
+  });
   assert(stop?.ok === true, "Failed to stop full mode session.", stop);
 
   const indicatorGone = await waitForIndicatorGone(pageClient, 15_000);
@@ -329,7 +344,18 @@ async function main() {
     state.offscreenClient = null;
   }
 
-  const deleted = await deleteSessionFromPopup(popupClient, active.sid);
+  const sessionsTarget = await openTarget(
+    baseUrl,
+    `chrome-extension://${extensionId}/sessions.html`
+  );
+  state.openedTargetIds.push(sessionsTarget.id);
+  const sessionsClient = new CdpClient(sessionsTarget.webSocketDebuggerUrl);
+  await sessionsClient.connect();
+  await sessionsClient.send("Runtime.enable");
+  await waitForExtensionRuntimeReady(sessionsClient, 20_000);
+  state.sessionsClient = sessionsClient;
+
+  const deleted = await deleteSessionFromSessionsPort(sessionsClient, { sid: active.sid });
   assert(deleted?.ok === true, "Failed to delete stopped session.", deleted);
 
   await waitForTargetGone(
@@ -705,10 +731,10 @@ async function connectToDiscoveredTarget(target, browserClient) {
   return browserClient.attachToTarget(target.targetId);
 }
 
-async function waitForPopupRuntimeReady(popupClient, timeoutMs) {
+async function waitForExtensionRuntimeReady(extensionClient, timeoutMs) {
   return waitFor(
     async () => {
-      const snapshot = await popupClient.evaluate(`
+      const snapshot = await extensionClient.evaluate(`
         (() => ({
           runtimeId:
             typeof chrome === 'object' &&
@@ -733,99 +759,6 @@ async function waitForPopupRuntimeReady(popupClient, timeoutMs) {
     250,
     "Popup runtime is not ready"
   );
-}
-
-async function startSessionFromPopup(popupClient, mode, expectedUrl) {
-  const expression = `
-    (async () => {
-      const tabs = await chrome.tabs.query({});
-      const target =
-        tabs.find((tab) =>
-          typeof tab.id === 'number' &&
-          typeof tab.url === 'string' &&
-          tab.url.startsWith(${JSON.stringify(expectedUrl)})
-        ) ??
-        tabs.find((tab) =>
-          typeof tab.id === 'number' &&
-          typeof tab.url === 'string' &&
-          !tab.url.startsWith('chrome-extension://') &&
-          tab.url !== 'about:blank'
-        );
-
-      if (!target || typeof target.id !== 'number') {
-        return {
-          ok: false,
-          reason: 'target-tab-not-found',
-          tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active }))
-        };
-      }
-
-      await chrome.runtime.sendMessage({
-        kind: 'ui.start',
-        tabId: target.id,
-        mode: ${JSON.stringify(mode)}
-      });
-
-      return {
-        ok: true,
-        tabId: target.id,
-        mode: ${JSON.stringify(mode)}
-      };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
-}
-
-async function stopActiveSessionFromPopup(popupClient, expectedSid) {
-  const expression = `
-    (async () => {
-      const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
-      const snapshot = store['webblackbox.runtime.sessions'];
-      const sessions = (
-        Array.isArray(snapshot)
-          ? snapshot
-          : Array.isArray(snapshot?.sessions)
-            ? snapshot.sessions
-            : []
-      ).filter((row) => row?.state !== 'stopped');
-      const expectedSid = ${JSON.stringify(expectedSid)};
-      const active =
-        (expectedSid
-          ? sessions.find((row) => row?.sid === expectedSid && typeof row?.tabId === 'number')
-          : undefined) ??
-        sessions.find((row) => typeof row?.tabId === 'number');
-
-      if (!active || typeof active.tabId !== 'number') {
-        if (expectedSid) {
-          return {
-            ok: true,
-            sid: expectedSid,
-            alreadyStopped: true,
-            rows: sessions
-          };
-        }
-
-        return { ok: false, reason: 'no-active-session', rows: sessions };
-      }
-
-      await chrome.runtime.sendMessage({ kind: 'ui.stop', tabId: active.tabId });
-      return { ok: true, tabId: active.tabId };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
-}
-
-async function deleteSessionFromPopup(popupClient, sid) {
-  const expression = `
-    (async () => {
-      await chrome.runtime.sendMessage({ kind: 'ui.delete', sid: ${JSON.stringify(sid)} });
-      return { ok: true, sid: ${JSON.stringify(sid)} };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
 }
 
 async function readRuntimeSessions(popupClient) {
@@ -1226,6 +1159,9 @@ async function cleanup() {
 
   await closeClient(state.popupClient);
   state.popupClient = null;
+
+  await closeClient(state.sessionsClient);
+  state.sessionsClient = null;
 
   await closeClient(state.browserClient);
   state.browserClient = null;

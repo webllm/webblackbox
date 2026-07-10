@@ -16,6 +16,11 @@ import {
   resolveExecutable,
   terminateProcess
 } from "../../../scripts/e2e-runtime.mjs";
+import {
+  exportSessionFromPopupRuntime,
+  startSessionFromPopupRuntime,
+  stopSessionFromPopupPort
+} from "./lib/extension-e2e-controller.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -221,113 +226,62 @@ async function main() {
   }
 
   const demoClient = new CdpClient(demoTarget.webSocketDebuggerUrl);
-  const demoContexts = createRuntimeContextTracker(demoClient);
   await demoClient.connect();
   await demoClient.send("Runtime.enable");
   await demoClient.send("DOM.enable");
   state.demoClient = demoClient;
 
-  const usePopupControl = recordScreenInFullMode || usePopupUiActions;
+  // Extension UI authorization is page- and transport-bound. Keep every
+  // fullchain control action in an actual popup page, including headless runs.
   let usePopupUiActionsEffective = recordScreenInFullMode ? false : usePopupUiActions;
-  let control = null;
+  if (!popupTarget) {
+    popupTarget = recordScreenInFullMode
+      ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
+      : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+    state.openedTargetIds.push(popupTarget.id);
+  } else if (warmupPopupTargetId) {
+    await closeTarget(baseUrl, warmupPopupTargetId);
+    state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
+    popupTarget = recordScreenInFullMode
+      ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
+      : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
+    state.openedTargetIds.push(popupTarget.id);
+  }
 
-  if (usePopupControl) {
-    if (!popupTarget) {
-      popupTarget = recordScreenInFullMode
-        ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
-        : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
-      state.openedTargetIds.push(popupTarget.id);
-    } else if (warmupPopupTargetId) {
-      await closeTarget(baseUrl, warmupPopupTargetId);
-      state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
-      popupTarget = recordScreenInFullMode
-        ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
-        : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
-      state.openedTargetIds.push(popupTarget.id);
-    }
+  const popupClient = new CdpClient(popupTarget.webSocketDebuggerUrl);
+  await popupClient.connect();
+  await popupClient.send("Runtime.enable");
+  await popupClient.send("DOM.enable");
+  state.popupClient = popupClient;
 
-    const popupClient = new CdpClient(popupTarget.webSocketDebuggerUrl);
-    await popupClient.connect();
-    await popupClient.send("Runtime.enable");
-    await popupClient.send("DOM.enable");
-    state.popupClient = popupClient;
+  if (usePopupUiActionsEffective) {
+    const popupUiReady = await waitForPopupUiReady(popupClient, 20_000).catch(() => null);
 
-    if (usePopupUiActionsEffective) {
-      const popupUiReady = await waitForPopupUiReady(popupClient, 20_000).catch(() => null);
-
-      if (!popupUiReady) {
-        const popupRuntimeReady = await waitForPopupRuntimeReady(popupClient, 12_000).catch(
-          () => null
-        );
-
-        if (popupRuntimeReady) {
-          usePopupUiActionsEffective = false;
-          console.warn("Popup UI not ready; falling back to runtime message actions.");
-        } else {
-          throw new Error("Popup UI/runtime is not ready");
-        }
-      }
-    } else {
+    if (!popupUiReady) {
       const popupRuntimeReady = await waitForPopupRuntimeReady(popupClient, 12_000).catch(
         () => null
       );
 
-      if (!popupRuntimeReady) {
-        throw new Error("Popup runtime is not ready");
+      if (popupRuntimeReady) {
+        usePopupUiActionsEffective = false;
+        console.warn("Popup UI not ready; falling back to runtime message actions.");
+      } else {
+        throw new Error("Popup UI/runtime is not ready");
       }
     }
-
-    control = {
-      kind: "popup",
-      client: popupClient,
-      useUiActions: usePopupUiActionsEffective
-    };
   } else {
-    let runtimeContext = await waitForExtensionRuntimeContext(
-      demoClient,
-      demoContexts,
-      extensionId,
-      15_000
-    ).catch(() => null);
+    const popupRuntimeReady = await waitForPopupRuntimeReady(popupClient, 12_000).catch(() => null);
 
-    if (!runtimeContext) {
-      await demoClient.send("Page.reload", { ignoreCache: true }).catch(() => undefined);
-      runtimeContext = await waitForExtensionRuntimeContext(
-        demoClient,
-        demoContexts,
-        extensionId,
-        20_000
-      );
-    }
-
-    control = {
-      kind: "content-runtime",
-      client: demoClient,
-      contextId: runtimeContext.contextId,
-      contextTracker: demoContexts,
-      extensionId
-    };
-
-    if (!state.swClient) {
-      swTarget = await waitForExtensionServiceWorker(baseUrl, 10_000, extensionId).catch(
-        () => null
-      );
-
-      if (swTarget?.webSocketDebuggerUrl) {
-        const swClient = new CdpClient(swTarget.webSocketDebuggerUrl);
-        await swClient.connect();
-        await swClient.send("Runtime.enable");
-        state.swClient = swClient;
-
-        swClient.on("Runtime.exceptionThrown", (params) => {
-          swExceptions.push({
-            text: params?.exceptionDetails?.text ?? "unknown",
-            line: params?.exceptionDetails?.lineNumber ?? null
-          });
-        });
-      }
+    if (!popupRuntimeReady) {
+      throw new Error("Popup runtime is not ready");
     }
   }
+
+  const control = {
+    kind: "popup",
+    client: popupClient,
+    useUiActions: usePopupUiActionsEffective
+  };
 
   const demoExceptions = [];
   demoClient.on("Runtime.exceptionThrown", (params) => {
@@ -391,6 +345,9 @@ async function main() {
 
   const sid = activeSessions[0]?.sid;
   assert(typeof sid === "string" && sid.length > 0, "Missing session id", { activeSessions });
+  assert(typeof activeSessions[0]?.tabId === "number", "Missing active session tab id", {
+    activeSessions
+  });
   if (typeof demoTab?.id === "number") {
     assert(activeSessions[0]?.tabId === demoTab.id, "Session started on unexpected tab", {
       expectedTabId: demoTab.id,
@@ -434,7 +391,7 @@ async function main() {
 
   await sleep(captureMode === "lite" || recordScreenInFullMode ? 2_400 : 1_600);
 
-  const stop = await stopActiveSessionFromControl(control, sid);
+  const stop = await stopActiveSessionFromControl(control, activeSessions[0]);
   assert(stop?.ok === true, `Failed to stop ${captureMode} mode`, stop);
 
   const indicatorGone = await waitForIndicatorGone(demoClient, 15_000);
@@ -1747,152 +1704,8 @@ async function closeTarget(urlBase, targetId) {
   }
 }
 
-function createRuntimeContextTracker(client) {
-  const contexts = new Map();
-
-  client.on("Runtime.executionContextCreated", (params) => {
-    const context = params?.context;
-
-    if (context && typeof context.id === "number") {
-      contexts.set(context.id, context);
-    }
-  });
-
-  client.on("Runtime.executionContextDestroyed", (params) => {
-    const id = params?.executionContextId;
-
-    if (typeof id === "number") {
-      contexts.delete(id);
-    }
-  });
-
-  client.on("Runtime.executionContextsCleared", () => {
-    contexts.clear();
-  });
-
-  return {
-    list() {
-      return [...contexts.values()];
-    }
-  };
-}
-
-async function waitForExtensionRuntimeContext(pageClient, tracker, extensionId, timeoutMs) {
-  let lastSnapshot = null;
-
-  try {
-    return await waitFor(
-      async () => {
-        const contexts = tracker.list().filter((context) => {
-          const origin = typeof context.origin === "string" ? context.origin : "";
-          const name = typeof context.name === "string" ? context.name : "";
-          const auxData =
-            context.auxData && typeof context.auxData === "object" ? context.auxData : {};
-          const type = typeof auxData.type === "string" ? auxData.type : "";
-
-          return (
-            type === "isolated" ||
-            origin.startsWith(`chrome-extension://${extensionId}`) ||
-            name.includes(extensionId) ||
-            name.includes("WebBlackbox")
-          );
-        });
-
-        for (const context of contexts) {
-          const snapshot = await pageClient
-            .evaluate(
-              `
-                (() => {
-                  const chromeApi =
-                    typeof chrome === "object" && chrome !== null ? chrome : null;
-                  const runtime = chromeApi?.runtime ?? null;
-                  return {
-                    contextId: ${JSON.stringify(context.id)},
-                    contextName: ${JSON.stringify(context.name ?? "")},
-                    contextOrigin: ${JSON.stringify(context.origin ?? "")},
-                    url: location.href,
-                    runtimeId:
-                      runtime && typeof runtime.id === "string" ? runtime.id : null,
-                    hasRuntimeMessaging:
-                      runtime !== null && typeof runtime.sendMessage === "function",
-                    hasStorageLocal:
-                      typeof chromeApi?.storage?.local?.get === "function"
-                  };
-                })()
-              `,
-              { contextId: context.id }
-            )
-            .catch((error) => ({
-              contextId: context.id,
-              error: error instanceof Error ? error.message : String(error)
-            }));
-
-          lastSnapshot = snapshot;
-
-          if (
-            snapshot?.hasRuntimeMessaging &&
-            (snapshot.runtimeId === extensionId || typeof snapshot.runtimeId === "string")
-          ) {
-            return {
-              contextId: context.id,
-              snapshot
-            };
-          }
-        }
-
-        return null;
-      },
-      timeoutMs,
-      200,
-      "Extension runtime context not ready"
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const contextSummary = tracker
-      .list()
-      .map((context) => ({
-        id: context.id,
-        name: context.name,
-        origin: context.origin,
-        auxData: context.auxData
-      }))
-      .slice(0, 12);
-    throw new Error(
-      `${message}; lastSnapshot=${JSON.stringify(lastSnapshot)}; contexts=${JSON.stringify(
-        contextSummary
-      )}`
-    );
-  }
-}
-
 async function evaluateControl(control, expression) {
-  try {
-    return await control.client.evaluate(
-      expression,
-      typeof control.contextId === "number" ? { contextId: control.contextId } : undefined
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const canRefreshContext =
-      control.kind === "content-runtime" &&
-      control.contextTracker &&
-      control.extensionId &&
-      /Cannot find context|Execution context|Cannot find object with id/u.test(message);
-
-    if (!canRefreshContext) {
-      throw error;
-    }
-
-    const runtimeContext = await waitForExtensionRuntimeContext(
-      control.client,
-      control.contextTracker,
-      control.extensionId,
-      10_000
-    );
-    control.contextId = runtimeContext.contextId;
-
-    return control.client.evaluate(expression, { contextId: control.contextId });
-  }
+  return control.client.evaluate(expression);
 }
 
 async function configureE2eRecorderOptions(control, mode) {
@@ -2024,40 +1837,10 @@ async function startSessionFromControl(control, mode, expectedUrl, options = {})
       ? (options.visualCapture ?? (options.recordScreen === true ? "both" : "screenshots"))
       : null;
 
-  if (control.kind === "popup") {
-    return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions, {
-      ...options,
-      visualCapture
-    });
-  }
-
-  return evaluateControl(
-    control,
-    `
-      (async () => {
-        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
-        if (typeof chromeApi?.runtime?.sendMessage !== 'function') {
-          return { ok: false, reason: 'runtime-api-unavailable' };
-        }
-
-        const response = await chromeApi.runtime.sendMessage({
-          kind: 'ui.start',
-          mode: ${JSON.stringify(mode)},
-          visualCapture: ${JSON.stringify(visualCapture)}
-        });
-
-        if (response && typeof response === 'object' && response.ok === false) {
-          return {
-            ok: false,
-            reason: 'runtime-start-rejected',
-            response
-          };
-        }
-
-        return { ok: true, mode: ${JSON.stringify(mode)}, via: 'content-runtime' };
-      })()
-    `
-  );
+  return startSessionFromPopup(control.client, mode, expectedUrl, control.useUiActions, {
+    ...options,
+    visualCapture
+  });
 }
 
 async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiActions, options = {}) {
@@ -2146,144 +1929,23 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl, useUiAction
     return popupClient.evaluate(expression);
   }
 
-  const expression = `
-    (async () => {
-      if (typeof chrome?.tabs?.query === 'function') {
-        const tabs = await chrome.tabs.query({});
-        const exact = tabs.find((tab) =>
-          typeof tab.id === 'number' &&
-          typeof tab.url === 'string' &&
-          tab.url.startsWith(${JSON.stringify(expectedUrl)})
-        );
-
-        const fallback = tabs.find((tab) =>
-          typeof tab.id === 'number' &&
-          typeof tab.url === 'string' &&
-          !tab.url.startsWith('chrome-extension://') &&
-          tab.url !== 'about:blank'
-        );
-
-        const target = exact ?? fallback;
-
-        if (!target || typeof target.id !== 'number') {
-          return {
-            ok: false,
-            reason: 'target-tab-not-found',
-            tabs: tabs.map((tab) => ({ id: tab.id, url: tab.url, active: tab.active }))
-          };
-        }
-
-        const response = await chrome.runtime.sendMessage({
-          kind: 'ui.start',
-          tabId: target.id,
-          mode: ${JSON.stringify(mode)},
-          visualCapture: ${JSON.stringify(visualCapture)}
-        });
-        if (response && typeof response === 'object' && response.ok === false) {
-          return {
-            ok: false,
-            reason: 'runtime-start-rejected',
-            tabId: target.id,
-            response
-          };
-        }
-        return {
-          ok: true,
-          tabId: target.id,
-          mode: ${JSON.stringify(mode)},
-          visualCapture: ${JSON.stringify(visualCapture)},
-          via: 'runtime-tabs'
-        };
-      }
-
-      const response = await chrome.runtime.sendMessage({
-        kind: 'ui.start',
-        mode: ${JSON.stringify(mode)},
-        visualCapture: ${JSON.stringify(visualCapture)}
-      });
-      if (response && typeof response === 'object' && response.ok === false) {
-        return {
-          ok: false,
-          reason: 'runtime-start-rejected',
-          response
-        };
-      }
-      return {
-        ok: true,
-        mode: ${JSON.stringify(mode)},
-        visualCapture: ${JSON.stringify(visualCapture)},
-        via: 'runtime-active-tab-fallback'
-      };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
+  return startSessionFromPopupRuntime(popupClient, {
+    mode,
+    expectedUrl,
+    visualCapture
+  });
 }
 
-async function stopActiveSessionFromControl(control, expectedSid) {
-  if (control.kind === "popup") {
-    return stopActiveSessionFromPopup(control.client, control.useUiActions, expectedSid);
-  }
-
-  return evaluateControl(
-    control,
-    `
-      (async () => {
-        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
-
-        if (typeof chromeApi?.runtime?.sendMessage !== 'function') {
-          return { ok: false, reason: 'runtime-api-unavailable' };
-        }
-
-        const store =
-          typeof chromeApi?.storage?.local?.get === 'function'
-            ? await chromeApi.storage.local.get('webblackbox.runtime.sessions')
-            : {};
-        const snapshot = store['webblackbox.runtime.sessions'];
-        const sessions = (
-          Array.isArray(snapshot)
-            ? snapshot
-            : Array.isArray(snapshot?.sessions)
-              ? snapshot.sessions
-              : []
-        ).filter((row) => row?.state !== 'stopped');
-        const expectedSid = ${JSON.stringify(expectedSid)};
-        const active =
-          (expectedSid
-            ? sessions.find((row) => row?.sid === expectedSid && typeof row?.tabId === 'number')
-            : undefined) ??
-          sessions.find((row) => typeof row?.tabId === 'number');
-
-        if (!active || typeof active.tabId !== 'number') {
-          if (expectedSid) {
-            return {
-              ok: true,
-              sid: expectedSid,
-              alreadyStopped: true,
-              via: 'content-runtime',
-              rows: sessions
-            };
-          }
-
-          return { ok: false, reason: 'no-active-session', rows: sessions };
-        }
-
-        const response = await chromeApi.runtime.sendMessage({
-          kind: 'ui.stop',
-          tabId: active.tabId
-        });
-
-        if (response && typeof response === 'object' && response.ok === false) {
-          return { ok: false, reason: 'runtime-stop-rejected', response };
-        }
-
-        return { ok: true, tabId: active.tabId, via: 'content-runtime' };
-      })()
-    `
+async function stopActiveSessionFromControl(control, activeSession) {
+  return stopActiveSessionFromPopup(
+    control.client,
+    control.useUiActions,
+    activeSession?.sid,
+    activeSession?.tabId
   );
 }
 
-async function stopActiveSessionFromPopup(popupClient, useUiActions, expectedSid) {
+async function stopActiveSessionFromPopup(popupClient, useUiActions, expectedSid, tabId) {
   if (useUiActions) {
     const expression = `
       (() => {
@@ -2314,77 +1976,11 @@ async function stopActiveSessionFromPopup(popupClient, useUiActions, expectedSid
     return popupClient.evaluate(expression);
   }
 
-  const expression = `
-    (async () => {
-      const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
-      const snapshot = store['webblackbox.runtime.sessions'];
-      const sessions = (
-        Array.isArray(snapshot)
-          ? snapshot
-          : Array.isArray(snapshot?.sessions)
-            ? snapshot.sessions
-            : []
-      ).filter((row) => row?.state !== 'stopped');
-      const expectedSid = ${JSON.stringify(expectedSid)};
-      const active =
-        (expectedSid
-          ? sessions.find((row) => row?.sid === expectedSid && typeof row?.tabId === 'number')
-          : undefined) ??
-        sessions.find((row) => typeof row?.tabId === 'number');
-
-      if (!active || typeof active.tabId !== 'number') {
-        if (expectedSid) {
-          return {
-            ok: true,
-            sid: expectedSid,
-            alreadyStopped: true,
-            via: 'popup-runtime',
-            rows: sessions
-          };
-        }
-
-        return { ok: false, reason: 'no-active-session', rows: sessions };
-      }
-
-      await chrome.runtime.sendMessage({ kind: 'ui.stop', tabId: active.tabId });
-      return { ok: true, tabId: active.tabId };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
+  return stopSessionFromPopupPort(popupClient, { sid: expectedSid, tabId });
 }
 
 async function exportSessionFromControl(control, sid) {
-  if (control.kind === "popup") {
-    return exportSessionFromPopup(control.client, sid, control.useUiActions);
-  }
-
-  return evaluateControl(
-    control,
-    `
-      (async () => {
-        const chromeApi = typeof chrome === 'object' && chrome !== null ? chrome : null;
-
-        if (typeof chromeApi?.runtime?.sendMessage !== 'function') {
-          return { ok: false, reason: 'runtime-api-unavailable' };
-        }
-
-        const response = await chromeApi.runtime.sendMessage({
-          kind: 'ui.export',
-          sid: ${JSON.stringify(sid)},
-          passphrase: ${JSON.stringify(exportPassphrase)},
-          saveAs: false,
-          policy: ${JSON.stringify(e2eExportPolicy)}
-        });
-
-        if (response && typeof response === 'object' && response.ok === false) {
-          return { ok: false, reason: 'runtime-export-rejected', response };
-        }
-
-        return { ok: true, sid: ${JSON.stringify(sid)}, via: 'content-runtime' };
-      })()
-    `
-  );
+  return exportSessionFromPopup(control.client, sid, control.useUiActions);
 }
 
 async function exportSessionFromPopup(popupClient, sid, useUiActions) {
@@ -2445,20 +2041,12 @@ async function exportSessionFromPopup(popupClient, sid, useUiActions) {
     return popupClient.evaluate(expression);
   }
 
-  const expression = `
-    (async () => {
-      await chrome.runtime.sendMessage({
-        kind: 'ui.export',
-        sid: ${JSON.stringify(sid)},
-        passphrase: ${JSON.stringify(exportPassphrase)},
-        saveAs: false,
-        policy: ${JSON.stringify(e2eExportPolicy)}
-      });
-      return { ok: true, sid: ${JSON.stringify(sid)} };
-    })()
-  `;
-
-  return popupClient.evaluate(expression);
+  return exportSessionFromPopupRuntime(popupClient, {
+    sid,
+    passphrase: exportPassphrase,
+    saveAs: false,
+    policy: e2eExportPolicy
+  });
 }
 
 async function readRuntimeSessions(control) {
