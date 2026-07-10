@@ -439,7 +439,7 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
         }
       });
       respondJson(response, 507, {
-        error: `Share record capacity is exhausted (${SHARE_RECORD_ADMISSION_LIMIT}). Revoke or expire retained shares before uploading.`
+        error: `Share record capacity is exhausted (${SHARE_RECORD_ADMISSION_LIMIT}). Wait for expired records to pass retention and be pruned, remove retained data administratively, or raise the admission limit.`
       });
       return;
     }

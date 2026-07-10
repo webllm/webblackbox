@@ -789,7 +789,7 @@ describe("share-server", () => {
     expect(response.status).toBe(507);
     await expect(response.json()).resolves.toEqual({
       error:
-        "Share record capacity is exhausted (2). Revoke or expire retained shares before uploading."
+        "Share record capacity is exhausted (2). Wait for expired records to pass retention and be pruned, remove retained data administratively, or raise the admission limit."
     });
     await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toHaveLength(2);
   });
@@ -873,7 +873,7 @@ describe("share-server", () => {
     expect(rejectedUploadResponse.status).toBe(507);
     await expect(rejectedUploadResponse.json()).resolves.toEqual({
       error:
-        "Share record capacity is exhausted (1). Revoke or expire retained shares before uploading."
+        "Share record capacity is exhausted (1). Wait for expired records to pass retention and be pruned, remove retained data administratively, or raise the admission limit."
     });
     await expect(readdir(resolve(restarted.dataDir, "archives"))).resolves.toHaveLength(3);
   });
