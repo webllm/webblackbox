@@ -25,6 +25,7 @@ const profileDir =
 const chromeLogPath = process.env.WB_E2E_LOG ?? createE2eTempPath("webblackbox-ext-e2e", ".log");
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 const checkExport = (process.env.WB_E2E_CHECK_EXPORT ?? "1") !== "0";
+const exportPassphrase = process.env.WB_E2E_EXPORT_PASSPHRASE ?? "webblackbox-e2e-passphrase";
 const cdpCommandTimeoutMs = readPositiveInteger(process.env.WB_E2E_CDP_COMMAND_TIMEOUT_MS, 15_000);
 
 const chromeCandidates = [
@@ -443,7 +444,9 @@ async function exportSessionFromPopup(popupClient, sid) {
     (async () => {
       const response = await chrome.runtime.sendMessage({
         kind: 'ui.export',
-        sid: ${JSON.stringify(sid)}
+        sid: ${JSON.stringify(sid)},
+        passphrase: ${JSON.stringify(exportPassphrase)},
+        saveAs: false
       });
       return {
         ok: response?.ok === true,
