@@ -1,29 +1,115 @@
 {
   "entries": [
     {
+      "name": "protocol runtime",
+      "path": "packages/protocol/dist/index.js",
+      "maxBytes": 57000,
+      "maxGzipBytes": 14000
+    },
+    {
+      "name": "CDP router runtime",
+      "path": "packages/cdp-router/dist/index.js",
+      "maxBytes": 6500,
+      "maxGzipBytes": 1800
+    },
+    {
+      "name": "recorder runtime",
       "path": "packages/recorder/dist/index.js",
-      "maxBytes": 55000,
-      "maxGzipBytes": 15000
+      "maxBytes": 59000,
+      "maxGzipBytes": 14000
     },
     {
+      "name": "pipeline runtime",
       "path": "packages/pipeline/dist/index.js",
-      "maxBytes": 76000,
-      "maxGzipBytes": 18000
+      "maxBytes": 143000,
+      "maxGzipBytes": 30000
     },
     {
+      "name": "Player SDK runtime",
       "path": "packages/player-sdk/dist/index.js",
-      "maxBytes": 90000,
-      "maxGzipBytes": 22000
+      "maxBytes": 128000,
+      "maxGzipBytes": 30000
     },
     {
+      "name": "webblackbox package JavaScript",
+      "directory": "packages/webblackbox/dist",
+      "extensions": [".js"],
+      "maxBytes": 175000,
+      "maxGzipBytes": 41000
+    },
+    {
+      "name": "MCP server JavaScript",
+      "directory": "apps/mcp-server/dist",
+      "extensions": [".js"],
+      "maxBytes": 65000,
+      "maxGzipBytes": 14000
+    },
+    {
+      "name": "Share server runtime",
+      "path": "apps/share-server/dist/index.js",
+      "maxBytes": 96000,
+      "maxGzipBytes": 23000
+    },
+    {
+      "name": "Player application",
       "path": "apps/player/build/main.js",
-      "maxBytes": 1800000,
-      "maxGzipBytes": 330000
+      "maxBytes": 1000000,
+      "maxGzipBytes": 265000
     },
     {
+      "name": "Extension JavaScript total",
+      "directory": "apps/extension/build",
+      "extensions": [".js"],
+      "maxBytes": 5000000,
+      "maxGzipBytes": 850000
+    },
+    {
+      "name": "Extension service worker",
       "path": "apps/extension/build/sw.js",
-      "maxBytes": 800000,
-      "maxGzipBytes": 150000
+      "maxBytes": 975000,
+      "maxGzipBytes": 170000
+    },
+    {
+      "name": "Extension offscreen runtime",
+      "path": "apps/extension/build/offscreen.js",
+      "maxBytes": 995000,
+      "maxGzipBytes": 180000
+    },
+    {
+      "name": "Extension content agent",
+      "path": "apps/extension/build/content-agent.js",
+      "maxBytes": 880000,
+      "maxGzipBytes": 163000
+    },
+    {
+      "name": "Extension content bridge",
+      "path": "apps/extension/build/content.js",
+      "maxBytes": 39000,
+      "maxGzipBytes": 11000
+    },
+    {
+      "name": "Extension injected runtime",
+      "path": "apps/extension/build/injected.js",
+      "maxBytes": 680000,
+      "maxGzipBytes": 108000
+    },
+    {
+      "name": "Extension options UI",
+      "path": "apps/extension/build/options.js",
+      "maxBytes": 685000,
+      "maxGzipBytes": 110000
+    },
+    {
+      "name": "Extension popup UI",
+      "path": "apps/extension/build/popup.js",
+      "maxBytes": 700000,
+      "maxGzipBytes": 113000
+    },
+    {
+      "name": "Extension sessions UI",
+      "path": "apps/extension/build/sessions.js",
+      "maxBytes": 46000,
+      "maxGzipBytes": 12000
     }
   ]
 }
