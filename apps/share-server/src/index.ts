@@ -731,9 +731,21 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
   }
 
   let reservedRecordSlot = false;
+  let inspectionSlotHeld = true;
+  const releaseAdmissionLease = () => {
+    if (reservedRecordSlot) {
+      reservedRecordSlot = false;
+      reservedShareRecordSlots -= 1;
+    }
+    if (inspectionSlotHeld) {
+      inspectionSlotHeld = false;
+      activeUploadInspections -= 1;
+    }
+  };
   try {
     reservedRecordSlot = await tryReserveShareRecordSlot();
     if (!reservedRecordSlot) {
+      releaseAdmissionLease();
       closeRequestAfterResponse(request, response);
       await writeShareAuditEvent(request, {
         action: "upload",
@@ -749,18 +761,16 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
       return;
     }
 
-    await handleUploadWithinInspectionSlot(request, response);
+    await handleUploadWithinInspectionSlot(request, response, releaseAdmissionLease);
   } finally {
-    if (reservedRecordSlot) {
-      reservedShareRecordSlots -= 1;
-    }
-    activeUploadInspections -= 1;
+    releaseAdmissionLease();
   }
 }
 
 async function handleUploadWithinInspectionSlot(
   request: IncomingMessage,
-  response: ServerResponse
+  response: ServerResponse,
+  releaseAdmissionLease: () => void
 ): Promise<void> {
   const id = randomUUID().replaceAll("-", "");
   const archiveDirectoryIdentity = getManagedStorageDirectoryIdentity(ARCHIVES_DIR);
@@ -776,7 +786,7 @@ async function handleUploadWithinInspectionSlot(
   };
 
   try {
-    await processUploadWithinInspectionSlot(request, response, upload);
+    await processUploadWithinInspectionSlot(request, response, upload, releaseAdmissionLease);
   } finally {
     if (!upload.committed) {
       await removeUncommittedUploadFiles(upload);
@@ -844,7 +854,8 @@ async function removePrivateArchiveFileIfUnchanged(
 async function processUploadWithinInspectionSlot(
   request: IncomingMessage,
   response: ServerResponse,
-  upload: PendingShareUpload
+  upload: PendingShareUpload,
+  releaseAdmissionLease: () => void
 ): Promise<void> {
   const { id } = upload;
   let bytes: Uint8Array;
@@ -1101,6 +1112,7 @@ async function processUploadWithinInspectionSlot(
   await commitUploadedArchive(upload);
   await writeRecord(record);
   upload.committed = true;
+  releaseAdmissionLease();
   const auditPromise = writeShareAuditEvent(request, {
     action: "upload",
     shareId: id,

@@ -170,6 +170,53 @@ describe("share-server", () => {
     pendingUpload.destroy();
   });
 
+  it("releases upload admission before a delayed success audit settles", async () => {
+    const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-admission-audit-"));
+    const auditPath = resolve(dataDir, "audit", "share-access.jsonl");
+    const auditDelayHookPath = resolve(dataDir, "delay-audit-append.mjs");
+    await writeFile(
+      auditDelayHookPath,
+      `import fileSystemPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+
+const originalOpen = fileSystemPromises.open;
+fileSystemPromises.open = async (...arguments_) => {
+  const handle = await originalOpen(...arguments_);
+  if (String(arguments_[0]) === process.env.WEBBLACKBOX_TEST_DELAY_AUDIT_PATH) {
+    const originalAppendFile = handle.appendFile.bind(handle);
+    handle.appendFile = async (...appendArguments) => {
+      await new Promise((resolvePromise) =>
+        setTimeout(resolvePromise, Number(process.env.WEBBLACKBOX_TEST_AUDIT_DELAY_MS))
+      );
+      return originalAppendFile(...appendArguments);
+    };
+  }
+  return handle;
+};
+syncBuiltinESMExports();
+`
+    );
+    const inheritedNodeOptions = process.env.NODE_OPTIONS?.trim();
+    const server = await startShareServer(
+      {
+        NODE_OPTIONS: [inheritedNodeOptions, `--import=${pathToFileURL(auditDelayHookPath).href}`]
+          .filter((value): value is string => Boolean(value))
+          .join(" "),
+        WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS: "1",
+        WEBBLACKBOX_SHARE_AUDIT_QUEUE_TIMEOUT_MS: "5000",
+        WEBBLACKBOX_SHARE_AUDIT_WRITE_TIMEOUT_MS: "5000",
+        WEBBLACKBOX_TEST_DELAY_AUDIT_PATH: auditPath,
+        WEBBLACKBOX_TEST_AUDIT_DELAY_MS: "1000"
+      },
+      dataDir
+    );
+
+    const first = await uploadEncryptedFixture(server);
+    const second = await uploadEncryptedFixture(server);
+
+    expect(first.shareId).not.toBe(second.shareId);
+  }, 10_000);
+
   it("releases the upload slot and removes temporary files after an idle timeout", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_UPLOAD_IDLE_TIMEOUT_MS: "50",
