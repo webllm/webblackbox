@@ -13,7 +13,8 @@ import JSZip from "jszip";
 import {
   createE2eTempPath,
   extensionChromeLoadArgs,
-  resolveExecutable
+  resolveExecutable,
+  terminateProcess
 } from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -835,7 +836,7 @@ async function launchChromeWithRetry(binary, options) {
       };
     } catch (error) {
       lastError = error;
-      await terminateChromeProcess(proc);
+      await terminateProcess(proc);
       logStream.end();
 
       if (attempt < options.attempts) {
@@ -849,30 +850,6 @@ async function launchChromeWithRetry(binary, options) {
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-async function terminateChromeProcess(proc) {
-  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
-    return;
-  }
-
-  proc.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => {
-      proc.once("exit", resolve);
-    }),
-    sleep(5_000)
-  ]);
-
-  if (proc.exitCode === null && proc.signalCode === null) {
-    proc.kill("SIGKILL");
-    await Promise.race([
-      new Promise((resolve) => {
-        proc.once("exit", resolve);
-      }),
-      sleep(2_000)
-    ]);
-  }
 }
 
 async function resolveLaunchPort(preferredPort) {
@@ -4426,7 +4403,7 @@ async function cleanup() {
     }
   }
 
-  await terminateChromeProcess(state.chromeProcess);
+  await terminateProcess(state.chromeProcess);
 
   state.chromeProcess = null;
   state.baseUrl = null;

@@ -11,7 +11,11 @@ import { fileURLToPath } from "node:url";
 
 import JSZip from "jszip";
 
-import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
+import {
+  createE2eTempPath,
+  resolveExecutable,
+  terminateProcess
+} from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const playerRoot = resolve(root, "..");
@@ -725,7 +729,7 @@ async function launchChromeWithRetry(binary, options) {
       };
     } catch (error) {
       lastError = error;
-      await terminateChromeProcess(proc);
+      await terminateProcess(proc);
       logStream.end();
 
       if (attempt < options.attempts) {
@@ -1241,30 +1245,6 @@ function sleep(ms) {
   });
 }
 
-async function terminateChromeProcess(proc) {
-  if (!proc || proc.killed || proc.exitCode !== null) {
-    return;
-  }
-
-  proc.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolvePromise) => {
-      proc.once("exit", resolvePromise);
-    }),
-    sleep(5_000)
-  ]);
-
-  if (proc.exitCode === null && !proc.killed) {
-    proc.kill("SIGKILL");
-    await Promise.race([
-      new Promise((resolvePromise) => {
-        proc.once("exit", resolvePromise);
-      }),
-      sleep(2_000)
-    ]);
-  }
-}
-
 async function cleanup() {
   if (state.client) {
     state.client.close();
@@ -1276,7 +1256,7 @@ async function cleanup() {
     state.targetId = null;
   }
 
-  await terminateChromeProcess(state.chromeProcess);
+  await terminateProcess(state.chromeProcess);
   state.chromeProcess = null;
   state.baseUrl = null;
 

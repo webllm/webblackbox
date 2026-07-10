@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import {
   createE2eTempPath,
   executableSearchPaths,
   extensionChromeLoadArgs,
-  resolveExecutable
+  resolveExecutable,
+  terminateProcess
 } from "./e2e-runtime.mjs";
 
 test("keeps unpacked extension loading available in branded and unbranded test browsers", () => {
@@ -112,4 +114,27 @@ test("resolves explicit paths and PATH commands with injected access checks", as
   });
   assert.equal(fromPath, "D:\\Chrome\\chrome.EXE");
   assert.deepEqual(pathChecks, ["C:\\Missing\\chrome.EXE", "D:\\Chrome\\chrome.EXE"]);
+});
+
+test("force kills a child that ignores SIGTERM even after killed becomes true", async () => {
+  const processHandle = new EventEmitter();
+  const signals = [];
+  processHandle.exitCode = null;
+  processHandle.signalCode = null;
+  processHandle.killed = false;
+  processHandle.kill = (signal) => {
+    signals.push(signal);
+    processHandle.killed = true;
+
+    if (signal === "SIGKILL") {
+      processHandle.signalCode = signal;
+      queueMicrotask(() => processHandle.emit("exit", null, signal));
+    }
+
+    return true;
+  };
+
+  await terminateProcess(processHandle, { graceMs: 1, forceKillWaitMs: 10 });
+
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
 });

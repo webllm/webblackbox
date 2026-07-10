@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 
 import JSZip from "jszip";
 
+import { terminateProcess } from "../../../scripts/e2e-runtime.mjs";
+
 const root = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(root, "..");
 const apiKey = "share-e2e-key";
@@ -299,9 +301,7 @@ function toBase64(bytes) {
 }
 
 async function cleanup() {
-  if (child && !child.killed) {
-    child.kill("SIGTERM");
-  }
+  await terminateProcess(child);
   if (dataDir) {
     await rm(dataDir, { recursive: true, force: true });
   }

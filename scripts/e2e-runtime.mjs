@@ -120,6 +120,50 @@ export async function resolveExecutable(
   return null;
 }
 
+export async function terminateProcess(
+  processHandle,
+  { graceMs = 5_000, forceKillWaitMs = 2_000 } = {}
+) {
+  if (!processHandle || hasProcessExited(processHandle)) {
+    return;
+  }
+
+  processHandle.kill("SIGTERM");
+
+  if (await waitForProcessExit(processHandle, graceMs)) {
+    return;
+  }
+
+  processHandle.kill("SIGKILL");
+  await waitForProcessExit(processHandle, forceKillWaitMs);
+}
+
+function hasProcessExited(processHandle) {
+  return processHandle.exitCode !== null || processHandle.signalCode !== null;
+}
+
+function waitForProcessExit(processHandle, timeoutMs) {
+  if (hasProcessExited(processHandle)) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolvePromise) => {
+    const onExit = () => {
+      clearTimeout(timeout);
+      resolvePromise(true);
+    };
+    const timeout = setTimeout(
+      () => {
+        processHandle.removeListener("exit", onExit);
+        resolvePromise(hasProcessExited(processHandle));
+      },
+      Math.max(0, timeoutMs)
+    );
+
+    processHandle.once("exit", onExit);
+  });
+}
+
 function windowsCommandNames(command, pathExtValue, pathApi) {
   const extensions = String(pathExtValue)
     .split(";")

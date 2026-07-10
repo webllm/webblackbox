@@ -11,7 +11,8 @@ import { fileURLToPath } from "node:url";
 import {
   createE2eTempPath,
   extensionChromeLoadArgs,
-  resolveExecutable
+  resolveExecutable,
+  terminateProcess
 } from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -1233,14 +1234,7 @@ async function cleanup() {
     await closeTarget(baseUrl, targetId);
   }
 
-  if (state.chromeProcess && !state.chromeProcess.killed) {
-    state.chromeProcess.kill("SIGTERM");
-    await sleep(700);
-
-    if (!state.chromeProcess.killed) {
-      state.chromeProcess.kill("SIGKILL");
-    }
-  }
+  await terminateProcess(state.chromeProcess, { graceMs: 700 });
 
   state.chromeProcess = null;
 

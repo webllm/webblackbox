@@ -12,7 +12,8 @@ import { fileURLToPath } from "node:url";
 import {
   createE2eTempPath,
   extensionChromeLoadArgs,
-  resolveExecutable
+  resolveExecutable,
+  terminateProcess
 } from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -534,7 +535,7 @@ async function launchChromeWithRetry(binary, options) {
       };
     } catch (error) {
       lastError = error;
-      await terminateChromeProcess(proc);
+      await terminateProcess(proc);
       logStream.end();
 
       if (attempt < options.attempts) {
@@ -548,30 +549,6 @@ async function launchChromeWithRetry(binary, options) {
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-async function terminateChromeProcess(proc) {
-  if (!proc || proc.killed || proc.exitCode !== null) {
-    return;
-  }
-
-  proc.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => {
-      proc.once("exit", resolve);
-    }),
-    sleep(5_000)
-  ]);
-
-  if (proc.exitCode === null && !proc.killed) {
-    proc.kill("SIGKILL");
-    await Promise.race([
-      new Promise((resolve) => {
-        proc.once("exit", resolve);
-      }),
-      sleep(2_000)
-    ]);
-  }
 }
 
 async function resolveLaunchPort(preferredPort) {
@@ -3106,14 +3083,7 @@ async function cleanup() {
     }
   }
 
-  if (state.chromeProcess && !state.chromeProcess.killed) {
-    state.chromeProcess.kill("SIGTERM");
-    await sleep(700);
-
-    if (!state.chromeProcess.killed) {
-      state.chromeProcess.kill("SIGKILL");
-    }
-  }
+  await terminateProcess(state.chromeProcess, { graceMs: 700 });
 
   state.chromeProcess = null;
   state.baseUrl = null;
