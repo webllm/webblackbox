@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { constants, createWriteStream } from "node:fs";
 import { access, mkdir, rm } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(root, "..");
@@ -14,8 +16,8 @@ const targetUrl = process.env.WB_E2E_TARGET_URL ?? "https://example.com/";
 const remotePort = Number(process.env.WB_E2E_REMOTE_PORT ?? "9222");
 const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const profileDir =
-  process.env.WB_E2E_PROFILE_DIR ?? `/tmp/webblackbox-ext-e2e-profile-${Date.now()}`;
-const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-e2e-${Date.now()}.log`;
+  process.env.WB_E2E_PROFILE_DIR ?? createE2eTempPath("webblackbox-ext-e2e-profile");
+const chromeLogPath = process.env.WB_E2E_LOG ?? createE2eTempPath("webblackbox-ext-e2e", ".log");
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 const checkExport = (process.env.WB_E2E_CHECK_EXPORT ?? "1") !== "0";
 
@@ -226,7 +228,7 @@ async function ensureExtensionBuildReady(dir) {
 
 async function resolveChromeBinary(candidates) {
   for (const candidate of candidates) {
-    const resolved = await resolveChromeCandidate(candidate);
+    const resolved = await resolveExecutable(candidate);
 
     if (resolved) {
       return resolved;
@@ -236,47 +238,6 @@ async function resolveChromeBinary(candidates) {
   throw new Error(
     "Chrome binary not found. Set WB_E2E_CHROME_BIN or install Chrome for Testing/Google Chrome."
   );
-}
-
-async function resolveChromeCandidate(candidate) {
-  if (typeof candidate !== "string" || candidate.trim().length === 0) {
-    return null;
-  }
-
-  const trimmed = candidate.trim();
-
-  if (isAbsolute(trimmed) || trimmed.startsWith(".")) {
-    try {
-      await access(trimmed, constants.X_OK);
-      return trimmed;
-    } catch {
-      return null;
-    }
-  }
-
-  const which = spawnSync("which", [trimmed], {
-    encoding: "utf8"
-  });
-
-  if (which.status !== 0) {
-    return null;
-  }
-
-  const resolved = which.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-
-  if (!resolved) {
-    return null;
-  }
-
-  try {
-    await access(resolved, constants.X_OK);
-    return resolved;
-  } catch {
-    return null;
-  }
 }
 
 function startChrome(binary, options) {

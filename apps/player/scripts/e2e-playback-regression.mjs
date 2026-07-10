@@ -1,26 +1,28 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { constants, createWriteStream } from "node:fs";
 import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
-import { dirname, extname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import JSZip from "jszip";
+
+import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const playerRoot = resolve(root, "..");
 const playerDir = process.env.WB_E2E_PLAYER_DIR ?? resolve(playerRoot, "build");
 const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const profileDir =
-  process.env.WB_E2E_PROFILE_DIR ?? `/tmp/webblackbox-player-playback-profile-${Date.now()}`;
+  process.env.WB_E2E_PROFILE_DIR ?? createE2eTempPath("webblackbox-player-playback-profile");
 const artifactsDir =
-  process.env.WB_E2E_ARTIFACTS_DIR ?? `/tmp/webblackbox-player-playback-artifacts-${Date.now()}`;
+  process.env.WB_E2E_ARTIFACTS_DIR ?? createE2eTempPath("webblackbox-player-playback-artifacts");
 const chromeLogPath =
-  process.env.WB_E2E_LOG ?? `/tmp/webblackbox-player-playback-${Date.now()}.log`;
+  process.env.WB_E2E_LOG ?? createE2eTempPath("webblackbox-player-playback", ".log");
 const chromeReadyTimeoutMs = Number(process.env.WB_E2E_CHROME_READY_TIMEOUT_MS ?? "25000");
 const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ?? "2");
 const requestedRemotePort = process.env.WB_E2E_REMOTE_PORT
@@ -675,51 +677,6 @@ async function resolveChromeBinary(candidates) {
   throw new Error(
     "Unable to find Chrome. Set WB_E2E_CHROME_BIN to a Chrome or Chromium executable."
   );
-}
-
-async function resolveExecutable(candidate) {
-  if (!candidate) {
-    return null;
-  }
-
-  const trimmed = candidate.trim();
-
-  if (!trimmed) {
-    return null;
-  }
-
-  if (isAbsolute(trimmed) || trimmed.startsWith(".")) {
-    try {
-      await access(trimmed, constants.X_OK);
-      return trimmed;
-    } catch {
-      return null;
-    }
-  }
-
-  const which = spawnSync("which", [trimmed], {
-    encoding: "utf8"
-  });
-
-  if (which.status !== 0) {
-    return null;
-  }
-
-  const resolved = which.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-
-  if (!resolved) {
-    return null;
-  }
-
-  try {
-    await access(resolved, constants.X_OK);
-    return resolved;
-  } catch {
-    return null;
-  }
 }
 
 async function launchChromeWithRetry(binary, options) {

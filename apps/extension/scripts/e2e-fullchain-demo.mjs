@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { constants, createWriteStream } from "node:fs";
 import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
-import { dirname, extname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
+
+import { createE2eTempPath, resolveExecutable } from "../../../scripts/e2e-runtime.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -21,10 +23,11 @@ const playerDir = process.env.WB_E2E_PLAYER_DIR ?? resolve(workspaceRoot, "apps/
 const remotePort = Number(process.env.WB_E2E_REMOTE_PORT ?? "9233");
 const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const profileDir =
-  process.env.WB_E2E_PROFILE_DIR ?? `/tmp/webblackbox-ext-fullchain-profile-${Date.now()}`;
+  process.env.WB_E2E_PROFILE_DIR ?? createE2eTempPath("webblackbox-ext-fullchain-profile");
 const downloadDir =
-  process.env.WB_E2E_DOWNLOAD_DIR ?? `/tmp/webblackbox-ext-fullchain-downloads-${Date.now()}`;
-const chromeLogPath = process.env.WB_E2E_LOG ?? `/tmp/webblackbox-ext-fullchain-${Date.now()}.log`;
+  process.env.WB_E2E_DOWNLOAD_DIR ?? createE2eTempPath("webblackbox-ext-fullchain-downloads");
+const chromeLogPath =
+  process.env.WB_E2E_LOG ?? createE2eTempPath("webblackbox-ext-fullchain", ".log");
 const chromeReadyTimeoutMs = Number(process.env.WB_E2E_CHROME_READY_TIMEOUT_MS ?? "25000");
 const chromeLaunchAttempts = Number(process.env.WB_E2E_CHROME_LAUNCH_ATTEMPTS ?? "2");
 const downloadTimeoutMs = Number(process.env.WB_E2E_DOWNLOAD_TIMEOUT_MS ?? "45000");
@@ -701,7 +704,7 @@ async function ensureBuildInputs() {
 }
 
 async function prepareScreenRecordingE2eExtensionDir(sourceDir) {
-  const tempDir = `/tmp/webblackbox-ext-fullchain-extension-${Date.now()}`;
+  const tempDir = createE2eTempPath("webblackbox-ext-fullchain-extension");
   await rm(tempDir, { recursive: true, force: true });
   await cp(sourceDir, tempDir, { recursive: true });
 
@@ -723,7 +726,7 @@ async function prepareScreenRecordingE2eExtensionDir(sourceDir) {
 
 async function resolveChromeBinary(candidates) {
   for (const candidate of candidates) {
-    const resolved = await resolveChromeCandidate(candidate);
+    const resolved = await resolveExecutable(candidate);
 
     if (resolved) {
       return resolved;
@@ -750,47 +753,6 @@ function assertCommandLineExtensionLoadingSupported(binary, browserVersion) {
         "Set WB_E2E_CHROME_BIN to Chrome for Testing or Chromium."
       ].join(" ")
     );
-  }
-}
-
-async function resolveChromeCandidate(candidate) {
-  if (typeof candidate !== "string" || candidate.trim().length === 0) {
-    return null;
-  }
-
-  const trimmed = candidate.trim();
-
-  if (isAbsolute(trimmed) || trimmed.startsWith(".")) {
-    try {
-      await access(trimmed, constants.X_OK);
-      return trimmed;
-    } catch {
-      return null;
-    }
-  }
-
-  const which = spawnSync("which", [trimmed], {
-    encoding: "utf8"
-  });
-
-  if (which.status !== 0) {
-    return null;
-  }
-
-  const resolved = which.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-
-  if (!resolved) {
-    return null;
-  }
-
-  try {
-    await access(resolved, constants.X_OK);
-    return resolved;
-  } catch {
-    return null;
   }
 }
 

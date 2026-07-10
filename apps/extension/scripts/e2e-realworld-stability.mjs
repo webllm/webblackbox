@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createE2eTempPath } from "../../../scripts/e2e-runtime.mjs";
+
 const root = dirname(fileURLToPath(import.meta.url));
 const fullchainScript = resolve(root, "e2e-fullchain-demo.mjs");
 
@@ -84,13 +86,14 @@ function runScenario(scenario, index) {
       ...scenario.env,
       WB_E2E_REMOTE_PORT: String(basePort + index),
       WB_E2E_LOG:
-        process.env.WB_E2E_LOG ?? `/tmp/webblackbox-realworld-${scenario.name}-${Date.now()}.log`,
+        process.env.WB_E2E_LOG ??
+        createE2eTempPath(`webblackbox-realworld-${scenario.name}`, ".log"),
       WB_E2E_PROFILE_DIR:
         process.env.WB_E2E_PROFILE_DIR ??
-        `/tmp/webblackbox-realworld-profile-${scenario.name}-${Date.now()}`,
+        createE2eTempPath(`webblackbox-realworld-profile-${scenario.name}`),
       WB_E2E_DOWNLOAD_DIR:
         process.env.WB_E2E_DOWNLOAD_DIR ??
-        `/tmp/webblackbox-realworld-downloads-${scenario.name}-${Date.now()}`
+        createE2eTempPath(`webblackbox-realworld-downloads-${scenario.name}`)
     };
 
     console.log(`\n[realworld:${index + 1}/${selected.length}] ${scenario.name}`);
