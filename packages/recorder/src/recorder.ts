@@ -17,6 +17,59 @@ import { redactPayload } from "./redaction.js";
 import { EventRingBuffer } from "./ring-buffer.js";
 import type { EventNormalizer, RawRecorderEvent, RecorderIngestResult } from "./types.js";
 
+const NON_TEXT_KEYBOARD_KEYS = new Set([
+  "Alt",
+  "AltGraph",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "Backspace",
+  "CapsLock",
+  "ContextMenu",
+  "Control",
+  "Delete",
+  "End",
+  "Enter",
+  "Escape",
+  "Fn",
+  "FnLock",
+  "Home",
+  "Hyper",
+  "Insert",
+  "Meta",
+  "NumLock",
+  "NumpadEnter",
+  "PageDown",
+  "PageUp",
+  "Pause",
+  "PrintScreen",
+  "ScrollLock",
+  "Shift",
+  "Super",
+  "Symbol",
+  "SymbolLock",
+  "Tab"
+]);
+
+const TEXT_PRODUCING_KEYBOARD_CODES = new Set([
+  "Backquote",
+  "Backslash",
+  "BracketLeft",
+  "BracketRight",
+  "Comma",
+  "Equal",
+  "IntlBackslash",
+  "IntlRo",
+  "IntlYen",
+  "Minus",
+  "Period",
+  "Quote",
+  "Semicolon",
+  "Slash",
+  "Space"
+]);
+
 export type RecorderHooks = {
   onEvent?: (event: WebBlackboxEvent) => void;
   onFreeze?: (reason: FreezeReason, event: WebBlackboxEvent) => void;
@@ -63,12 +116,12 @@ export class WebBlackboxRecorder {
     const redactedPayload = redactPayload(normalized.payload, this.config.redaction);
     const privacy = classifyPrivacy(
       normalized.eventType,
-      redactedPayload,
+      normalized.payload,
       this.config.capturePolicy
     );
     const violation = evaluateCapturePolicy(
       normalized.eventType,
-      redactedPayload,
+      normalized.payload,
       privacy,
       this.config.capturePolicy
     );
@@ -206,8 +259,8 @@ function classifyPrivacy(
   policy: CapturePolicy | undefined
 ): PrivacyClassification {
   const effectivePolicy = policy ?? DEFAULT_CAPTURE_POLICY;
-  const category = classifyCategory(eventType);
-  const sensitivity = classifySensitivity(eventType);
+  const category = classifyCategory(eventType, payload);
+  const sensitivity = classifySensitivity(eventType, payload);
 
   return {
     category,
@@ -287,6 +340,28 @@ function findPolicyViolationReason(
     return "dom-disabled";
   }
 
+  const editableKeydownContext = readEditableKeydownContext(eventType, payload);
+
+  if (editableKeydownContext) {
+    if (policy.categories.inputs === "none") {
+      return "inputs-disabled";
+    }
+
+    if (
+      editableKeydownContext === "protected" &&
+      (hasAnyKeyboardIdentity(payload) || hasRawInputValue(payload))
+    ) {
+      return "password-key-data-disabled";
+    }
+
+    if (
+      policy.categories.inputs !== "allow" &&
+      (hasSensitiveKeyboardIdentity(payload) || hasRawInputValue(payload))
+    ) {
+      return "raw-input-value-disabled";
+    }
+  }
+
   if (eventType === "user.input") {
     if (policy.categories.inputs === "none") {
       return "inputs-disabled";
@@ -334,8 +409,11 @@ function findPolicyViolationReason(
   return null;
 }
 
-function classifyCategory(eventType: WebBlackboxEventType): PrivacyClassification["category"] {
-  if (eventType === "user.input") {
+function classifyCategory(
+  eventType: WebBlackboxEventType,
+  payload: unknown
+): PrivacyClassification["category"] {
+  if (eventType === "user.input" || readEditableKeydownContext(eventType, payload)) {
     return "inputs";
   }
 
@@ -375,7 +453,8 @@ function classifyCategory(eventType: WebBlackboxEventType): PrivacyClassificatio
 }
 
 function classifySensitivity(
-  eventType: WebBlackboxEventType
+  eventType: WebBlackboxEventType,
+  payload: unknown
 ): PrivacyClassification["sensitivity"] {
   if (eventType === "privacy.violation") {
     return "medium";
@@ -383,6 +462,7 @@ function classifySensitivity(
 
   if (
     eventType === "user.input" ||
+    readEditableKeydownContext(eventType, payload) !== null ||
     eventType === "dom.snapshot" ||
     eventType === "network.body" ||
     eventType === "screen.screenshot" ||
@@ -492,6 +572,94 @@ function hasRawInputValue(payload: unknown): boolean {
   return typeof row.value === "string" || typeof row.text === "string";
 }
 
+type EditableKeydownContext = "input" | "protected" | "textarea" | "contenteditable";
+
+function readEditableKeydownContext(
+  eventType: WebBlackboxEventType,
+  payload: unknown
+): EditableKeydownContext | null {
+  if (eventType !== "user.keydown") {
+    return null;
+  }
+
+  const row = asRecord(payload);
+  const declaredContext = row?.inputContext;
+
+  if (declaredContext === "password") {
+    return "protected";
+  }
+
+  if (
+    declaredContext === "input" ||
+    declaredContext === "protected" ||
+    declaredContext === "textarea" ||
+    declaredContext === "contenteditable"
+  ) {
+    return declaredContext;
+  }
+
+  const target = asRecord(row?.target);
+  const targetTag = typeof target?.tag === "string" ? target.tag.toUpperCase() : "";
+  const targetType =
+    typeof target?.inputType === "string"
+      ? target.inputType
+      : typeof target?.type === "string"
+        ? target.type
+        : "";
+
+  if (targetTag === "INPUT") {
+    return targetType.toLowerCase() === "password" ? "protected" : "input";
+  }
+
+  if (targetTag === "TEXTAREA") {
+    return "textarea";
+  }
+
+  if (target?.contentEditable === true || target?.isContentEditable === true) {
+    return "contenteditable";
+  }
+
+  return null;
+}
+
+function hasAnyKeyboardIdentity(payload: unknown): boolean {
+  const row = asRecord(payload);
+  return typeof row?.key === "string" || typeof row?.code === "string";
+}
+
+function hasSensitiveKeyboardIdentity(payload: unknown): boolean {
+  const row = asRecord(payload);
+
+  if (!row) {
+    return false;
+  }
+
+  const key = typeof row.key === "string" ? row.key : undefined;
+  const code = typeof row.code === "string" ? row.code : undefined;
+
+  return (
+    (key !== undefined && !isNonTextKeyboardKey(key, code ?? "")) ||
+    (code !== undefined && isTextProducingKeyboardCode(code))
+  );
+}
+
+function isNonTextKeyboardKey(key: string, code: string): boolean {
+  if (NON_TEXT_KEYBOARD_KEYS.has(key)) {
+    return !isTextProducingKeyboardCode(code);
+  }
+
+  return /^F(?:[1-9]|1\d|2[0-4])$/.test(key) && /^F(?:[1-9]|1\d|2[0-4])$/.test(code);
+}
+
+function isTextProducingKeyboardCode(code: string): boolean {
+  return (
+    /^Key[A-Z]$/.test(code) ||
+    /^Digit\d$/.test(code) ||
+    /^Numpad(?:\d|Add|Comma|Decimal|Divide|Equal|Multiply|Subtract)$/.test(code) ||
+    TEXT_PRODUCING_KEYBOARD_CODES.has(code)
+  );
+}
+
 function hasConsoleTextPayload(payload: unknown): boolean {
   const row = asRecord(payload);
 
@@ -539,6 +707,7 @@ function hasRedactionSignal(payload: unknown): boolean {
   return (
     row.redacted === true ||
     row.valueRedacted === true ||
+    row.keyRedacted === true ||
     row.selectorRedacted === true ||
     (target !== null &&
       typeof target === "object" &&

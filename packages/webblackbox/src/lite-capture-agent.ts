@@ -102,6 +102,41 @@ const FULL_MODE_SKIPPED_RAW_TYPES = new Set([
   "cookieSnapshot"
 ]);
 
+const NON_TEXT_KEYBOARD_KEYS = new Set([
+  "Alt",
+  "AltGraph",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "Backspace",
+  "CapsLock",
+  "ContextMenu",
+  "Control",
+  "Delete",
+  "End",
+  "Enter",
+  "Escape",
+  "Fn",
+  "FnLock",
+  "Home",
+  "Hyper",
+  "Insert",
+  "Meta",
+  "NumLock",
+  "NumpadEnter",
+  "PageDown",
+  "PageUp",
+  "Pause",
+  "PrintScreen",
+  "ScrollLock",
+  "Shift",
+  "Super",
+  "Symbol",
+  "SymbolLock",
+  "Tab"
+]);
+
 const DEFAULT_SAMPLING: LiteCaptureSampling = {
   mousemoveHz: 20,
   scrollHz: 15,
@@ -134,6 +169,7 @@ type MutationBatchSummary = {
 
 type TargetPayloadDetail = "action" | "input" | "fast" | "navigation";
 type CapturePressureStage = "none" | "soft" | "hard" | "critical";
+type EditableKeydownContext = "input" | "protected" | "textarea" | "contenteditable";
 
 /**
  * Browser-side event capture agent used by `WebBlackboxLiteSdk`.
@@ -453,16 +489,11 @@ export class LiteCaptureAgent {
           this.emitMarker("Keyboard marker");
         }
 
-        this.queueEvent("keydown", {
-          key: event.key,
-          code: event.code,
-          repeat: event.repeat,
-          altKey: event.altKey,
-          ctrlKey: event.ctrlKey,
-          shiftKey: event.shiftKey,
-          metaKey: event.metaKey,
-          target: this.resolveTargetPayload(event.target, "fast")
-        });
+        const payload = this.createKeydownPayload(event);
+
+        if (payload) {
+          this.queueEvent("keydown", payload);
+        }
       },
       INPUT_OPTIONS_TRUE
     );
@@ -1856,6 +1887,53 @@ export class LiteCaptureAgent {
     };
   }
 
+  private createKeydownPayload(event: KeyboardEvent): Record<string, unknown> | null {
+    const inputContext = resolveEditableKeydownContext(event.target);
+
+    if (inputContext && this.capturePolicy.categories.inputs === "none") {
+      return null;
+    }
+
+    const payload: Record<string, unknown> = {
+      repeat: event.repeat,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      isComposing: event.isComposing,
+      target: this.resolveTargetPayload(event.target, "fast")
+    };
+
+    if (!inputContext) {
+      payload.key = event.key;
+      payload.code = event.code;
+      return payload;
+    }
+
+    payload.inputContext = inputContext;
+
+    const canRetainKeyIdentity =
+      inputContext !== "protected" &&
+      (this.capturePolicy.categories.inputs === "allow" ||
+        isNonTextKeyboardKey(event.key, event.code));
+
+    if (canRetainKeyIdentity) {
+      payload.key = event.key;
+      payload.code = event.code;
+      return payload;
+    }
+
+    payload.keyRedacted = true;
+    payload.keyKind =
+      inputContext === "protected"
+        ? "protected"
+        : event.isComposing || event.key === "Dead" || event.key === "Process"
+          ? "composition"
+          : "printable";
+
+    return payload;
+  }
+
   private resolveTargetPayload(
     target: EventTarget | null,
     detail: TargetPayloadDetail
@@ -2251,11 +2329,50 @@ function buildDomSnapshotSummaryHtml(options: {
 }
 
 function isEditableInteractionTarget(target: EventTarget | null): boolean {
-  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-    return true;
+  return resolveEditableKeydownContext(target) !== null;
+}
+
+function resolveEditableKeydownContext(target: EventTarget | null): EditableKeydownContext | null {
+  if (target instanceof HTMLInputElement) {
+    return target.type.toLowerCase() === "password" ? "protected" : "input";
   }
 
-  return isRichTextEditableTarget(target);
+  if (target instanceof HTMLTextAreaElement) {
+    return "textarea";
+  }
+
+  return isRichTextEditableTarget(target) ? "contenteditable" : null;
+}
+
+function isNonTextKeyboardKey(key: string, code: string): boolean {
+  if (NON_TEXT_KEYBOARD_KEYS.has(key)) {
+    return !isTextProducingKeyboardCode(code);
+  }
+
+  return /^F(?:[1-9]|1\d|2[0-4])$/.test(key) && /^F(?:[1-9]|1\d|2[0-4])$/.test(code);
+}
+
+function isTextProducingKeyboardCode(code: string): boolean {
+  return (
+    /^Key[A-Z]$/.test(code) ||
+    /^Digit\d$/.test(code) ||
+    /^Numpad(?:\d|Add|Comma|Decimal|Divide|Equal|Multiply|Subtract)$/.test(code) ||
+    code === "Space" ||
+    code === "Quote" ||
+    code === "Backquote" ||
+    code === "Comma" ||
+    code === "Period" ||
+    code === "Slash" ||
+    code === "Semicolon" ||
+    code === "Equal" ||
+    code === "Minus" ||
+    code === "BracketLeft" ||
+    code === "BracketRight" ||
+    code === "Backslash" ||
+    code === "IntlBackslash" ||
+    code === "IntlRo" ||
+    code === "IntlYen"
+  );
 }
 
 function resolveNavigationTarget(target: EventTarget | null): HTMLAnchorElement | null {

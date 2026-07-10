@@ -34,6 +34,16 @@ const MASKED_SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
   }
 };
 
+function capturePolicyWithInputs(inputs: CapturePolicy["categories"]["inputs"]): CapturePolicy {
+  return {
+    ...DEFAULT_CAPTURE_POLICY,
+    categories: {
+      ...DEFAULT_CAPTURE_POLICY.categories,
+      inputs
+    }
+  };
+}
+
 function createAgent(
   state: Partial<LiteCaptureState> = {},
   options: Partial<LiteCaptureAgentOptions> = {}
@@ -185,11 +195,20 @@ function countEmittedEvents(emitBatch: ReturnType<typeof vi.fn>): number {
   }, 0);
 }
 
-function emittedRawTypes(emitBatch: ReturnType<typeof vi.fn>): string[] {
+type EmittedRawEvent = {
+  rawType?: string;
+  payload?: Record<string, unknown>;
+};
+
+function emittedEvents(emitBatch: ReturnType<typeof vi.fn>): EmittedRawEvent[] {
   return emitBatch.mock.calls.flatMap((call) => {
-    const [events] = call as [Array<{ rawType?: string }>];
-    return events.map((event) => event.rawType ?? "");
+    const [events] = call as [EmittedRawEvent[]];
+    return events;
   });
+}
+
+function emittedRawTypes(emitBatch: ReturnType<typeof vi.fn>): string[] {
+  return emittedEvents(emitBatch).map((event) => event.rawType ?? "");
 }
 
 describe("LiteCaptureAgent", () => {
@@ -1146,6 +1165,196 @@ describe("LiteCaptureAgent", () => {
       expect(target).not.toHaveProperty("selector");
       expect(target).not.toHaveProperty("text");
     }
+
+    agent.dispose();
+  });
+
+  it("retains editable printable key identity only when input capture is allowed", () => {
+    const { agent, emitBatch } = createAgent({
+      capturePolicy: capturePolicyWithInputs("allow")
+    });
+    const field = inputTarget();
+
+    field.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "A",
+        code: "KeyA",
+        bubbles: true
+      })
+    );
+    agent.flush();
+
+    const keydown = emittedEvents(emitBatch).find((event) => event.rawType === "keydown");
+
+    expect(keydown?.payload).toMatchObject({
+      inputContext: "input",
+      key: "A",
+      code: "KeyA"
+    });
+    expect(keydown?.payload).not.toHaveProperty("keyRedacted");
+
+    agent.dispose();
+  });
+
+  it.each(["length-only", "masked"] as const)(
+    "redacts editable printable key identity under the %s input policy",
+    (inputs) => {
+      const { agent, emitBatch } = createAgent({
+        capturePolicy: capturePolicyWithInputs(inputs)
+      });
+      const field = inputTarget();
+
+      field.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "A",
+          code: "KeyA",
+          bubbles: true
+        })
+      );
+      agent.flush();
+
+      const keydown = emittedEvents(emitBatch).find((event) => event.rawType === "keydown");
+
+      expect(keydown?.payload).toMatchObject({
+        inputContext: "input",
+        keyRedacted: true,
+        keyKind: "printable"
+      });
+      expect(keydown?.payload).not.toHaveProperty("key");
+      expect(keydown?.payload).not.toHaveProperty("code");
+
+      agent.dispose();
+    }
+  );
+
+  it("omits editable keydown events when input capture is disabled", () => {
+    const { agent, emitBatch } = createAgent({
+      capturePolicy: capturePolicyWithInputs("none")
+    });
+
+    inputTarget().dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "A",
+        code: "KeyA",
+        bubbles: true
+      })
+    );
+    agent.flush();
+
+    expect(emittedRawTypes(emitBatch)).not.toContain("keydown");
+
+    agent.dispose();
+  });
+
+  it("never retains password key identity even when input capture is allowed", () => {
+    const { agent, emitBatch } = createAgent({
+      capturePolicy: capturePolicyWithInputs("allow")
+    });
+    const field = inputTarget();
+    field.type = "password";
+
+    field.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "A",
+        code: "KeyA",
+        bubbles: true
+      })
+    );
+    agent.flush();
+
+    const keydown = emittedEvents(emitBatch).find((event) => event.rawType === "keydown");
+
+    expect(keydown?.payload).toMatchObject({
+      inputContext: "protected",
+      keyRedacted: true,
+      keyKind: "protected"
+    });
+    expect(keydown?.payload).not.toHaveProperty("key");
+    expect(keydown?.payload).not.toHaveProperty("code");
+
+    agent.dispose();
+  });
+
+  it("sanitizes textarea printable keys under length-only input capture", () => {
+    document.body.insertAdjacentHTML("beforeend", '<textarea id="notes-keydown"></textarea>');
+    const textarea = document.querySelector<HTMLTextAreaElement>("#notes-keydown");
+
+    if (!textarea) {
+      throw new Error("missing textarea target");
+    }
+
+    const { agent, emitBatch } = createAgent({
+      capturePolicy: capturePolicyWithInputs("length-only")
+    });
+
+    textarea.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Z",
+        code: "KeyZ",
+        bubbles: true
+      })
+    );
+    agent.flush();
+
+    const keydown = emittedEvents(emitBatch).find((event) => event.rawType === "keydown");
+
+    expect(keydown?.payload).toMatchObject({
+      inputContext: "textarea",
+      keyRedacted: true,
+      keyKind: "printable"
+    });
+    expect(keydown?.payload).not.toHaveProperty("key");
+    expect(keydown?.payload).not.toHaveProperty("code");
+
+    agent.dispose();
+  });
+
+  it("sanitizes contenteditable text keys while retaining non-text navigation keys", () => {
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="editor-keydown" contenteditable="true">editable</div>'
+    );
+    const editor = document.querySelector<HTMLElement>("#editor-keydown");
+
+    if (!editor) {
+      throw new Error("missing contenteditable target");
+    }
+
+    const { agent, emitBatch } = createAgent({
+      capturePolicy: capturePolicyWithInputs("length-only")
+    });
+
+    editor.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "A",
+        code: "KeyA",
+        bubbles: true
+      })
+    );
+    editor.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true
+      })
+    );
+    agent.flush();
+
+    const keydowns = emittedEvents(emitBatch).filter((event) => event.rawType === "keydown");
+
+    expect(keydowns).toHaveLength(2);
+    expect(keydowns[0]?.payload).toMatchObject({
+      inputContext: "contenteditable",
+      keyRedacted: true,
+      keyKind: "printable"
+    });
+    expect(keydowns[0]?.payload).not.toHaveProperty("key");
+    expect(keydowns[0]?.payload).not.toHaveProperty("code");
+    expect(keydowns[1]?.payload).toMatchObject({
+      inputContext: "contenteditable",
+      key: "Enter",
+      code: "Enter"
+    });
 
     agent.dispose();
   });

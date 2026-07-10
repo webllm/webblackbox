@@ -792,6 +792,218 @@ describe("recorder", () => {
     });
   });
 
+  it("classifies editable keydowns as high-sensitivity input data", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        payload: {
+          inputContext: "input",
+          key: "A",
+          code: "KeyA",
+          target: {
+            tag: "INPUT"
+          }
+        }
+      })
+    );
+
+    expect(result.event?.type).toBe("user.keydown");
+    expect(result.event?.privacy).toEqual({
+      category: "inputs",
+      sensitivity: "high",
+      redacted: false
+    });
+  });
+
+  it("blocks raw editable text keys when the input policy is length-only", () => {
+    const recorder = new WebBlackboxRecorder({
+      ...TEST_CONFIG,
+      capturePolicy: createPolicy({
+        categories: {
+          ...TEST_CAPTURE_POLICY.categories,
+          inputs: "length-only"
+        }
+      })
+    });
+    const result = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        payload: {
+          key: "A",
+          code: "KeyA",
+          target: {
+            tag: "INPUT"
+          }
+        }
+      })
+    );
+
+    expect(result.event?.type).toBe("privacy.violation");
+    expect(result.event?.data).toMatchObject({
+      blockedType: "user.keydown",
+      category: "inputs",
+      sensitivity: "high",
+      reason: "raw-input-value-disabled"
+    });
+  });
+
+  it("accepts sanitized editable keys and retains non-text shortcuts under length-only", () => {
+    const recorder = new WebBlackboxRecorder({
+      ...TEST_CONFIG,
+      capturePolicy: createPolicy({
+        categories: {
+          ...TEST_CAPTURE_POLICY.categories,
+          inputs: "length-only"
+        }
+      })
+    });
+    const sanitized = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        payload: {
+          inputContext: "textarea",
+          keyRedacted: true,
+          keyKind: "printable",
+          target: {
+            tag: "TEXTAREA"
+          }
+        }
+      })
+    );
+    const navigation = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        mono: 2,
+        payload: {
+          inputContext: "contenteditable",
+          key: "Enter",
+          code: "Enter",
+          target: {
+            tag: "DIV",
+            contentEditable: true
+          }
+        }
+      })
+    );
+
+    expect(sanitized.event?.type).toBe("user.keydown");
+    expect(sanitized.event?.privacy).toEqual({
+      category: "inputs",
+      sensitivity: "high",
+      redacted: true
+    });
+    expect(navigation.event?.type).toBe("user.keydown");
+    expect(navigation.event?.data).toMatchObject({
+      key: "Enter",
+      code: "Enter"
+    });
+    expect(navigation.event?.privacy).toEqual({
+      category: "inputs",
+      sensitivity: "high",
+      redacted: true
+    });
+  });
+
+  it("blocks editable keydowns when input capture is disabled", () => {
+    const recorder = new WebBlackboxRecorder({
+      ...TEST_CONFIG,
+      capturePolicy: createPolicy({
+        categories: {
+          ...TEST_CAPTURE_POLICY.categories,
+          inputs: "none"
+        }
+      })
+    });
+    const result = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        payload: {
+          inputContext: "contenteditable",
+          key: "Enter",
+          code: "Enter"
+        }
+      })
+    );
+
+    expect(result.event?.type).toBe("privacy.violation");
+    expect(result.event?.data).toMatchObject({
+      blockedType: "user.keydown",
+      category: "inputs",
+      sensitivity: "high",
+      reason: "inputs-disabled"
+    });
+  });
+
+  it("blocks every password key identity even when input capture is allowed", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        payload: {
+          inputContext: "password",
+          key: "Enter",
+          code: "Enter",
+          target: {
+            tag: "INPUT",
+            inputType: "password"
+          }
+        }
+      })
+    );
+    const sanitized = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        mono: 2,
+        payload: {
+          inputContext: "protected",
+          keyRedacted: true,
+          keyKind: "protected",
+          target: {
+            tag: "INPUT"
+          }
+        }
+      })
+    );
+
+    expect(result.event?.type).toBe("privacy.violation");
+    expect(result.event?.data).toMatchObject({
+      blockedType: "user.keydown",
+      category: "inputs",
+      sensitivity: "high",
+      reason: "password-key-data-disabled"
+    });
+    expect(sanitized.event?.type).toBe("user.keydown");
+    expect(sanitized.event?.privacy).toEqual({
+      category: "inputs",
+      sensitivity: "high",
+      redacted: true
+    });
+  });
+
+  it("keeps non-editable keydowns in the actions privacy category", () => {
+    const recorder = new WebBlackboxRecorder(TEST_CONFIG);
+    const result = recorder.ingest(
+      createRawEvent({
+        rawType: "keydown",
+        payload: {
+          key: "A",
+          code: "KeyA",
+          target: {
+            tag: "DIV"
+          }
+        }
+      })
+    );
+
+    expect(result.event?.type).toBe("user.keydown");
+    expect(result.event?.privacy).toEqual({
+      category: "actions",
+      sensitivity: "low",
+      redacted: false
+    });
+  });
+
   it("maps capture policy category gates to redacted violations", () => {
     const cases: Array<{
       raw: RawRecorderEvent;
