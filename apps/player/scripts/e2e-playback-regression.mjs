@@ -254,7 +254,7 @@ async function createMixedMonoArchive() {
     event(
       "E-030",
       base + 500,
-      base + 900_000,
+      900_000,
       "network.request",
       {
         reqId: "R-mixed",
@@ -274,7 +274,7 @@ async function createMixedMonoArchive() {
     event(
       "E-040",
       base + 820,
-      base + 900_320,
+      900_320,
       "network.response",
       {
         reqId: "R-mixed",
@@ -294,7 +294,7 @@ async function createMixedMonoArchive() {
     event(
       "E-050",
       base + 860,
-      base + 900_360,
+      900_360,
       "network.body",
       {
         reqId: "R-mixed",
@@ -306,14 +306,14 @@ async function createMixedMonoArchive() {
         req: "R-mixed"
       }
     ),
-    event("E-060", base + 900, 900, "user.mousemove", {
+    event("E-060", base + 900, 900_400, "user.mousemove", {
       x: 320,
       y: 210
     }),
     event(
       "E-070",
       base + 1_000,
-      base + 901_000,
+      901_000,
       "screen.screenshot",
       {
         shotId: screenshotHash,
@@ -331,31 +331,31 @@ async function createMixedMonoArchive() {
           x: 330,
           y: 218,
           t: base + 1_000,
-          mono: base + 901_000
+          mono: 901_000
         }
       },
       {
         shot: screenshotHash
       }
     ),
-    event("E-080", base + 1_250, 1_250, "console.entry", {
+    event("E-080", base + 1_250, 901_250, "console.entry", {
       level: "info",
       source: "console-api",
       text: "mixed mono fixture loaded"
     }),
-    event("E-090", base + 1_500, base + 901_500, "error.exception", {
+    event("E-090", base + 1_500, 901_500, "error.exception", {
       message: "Synthetic fixture error",
       name: "Error",
       stack: "Error: Synthetic fixture error"
     }),
-    event("E-100", base + 1_650, 1_650, "user.mousemove", {
+    event("E-100", base + 1_650, 901_650, "user.mousemove", {
       x: 420,
       y: 260
     }),
     event(
       "E-110",
       base + 1_850,
-      1_850,
+      901_850,
       "user.click",
       {
         x: 455,
@@ -373,7 +373,7 @@ async function createMixedMonoArchive() {
     event(
       "E-120",
       base + 2_200,
-      base + 902_200,
+      902_200,
       "screen.screenshot",
       {
         shotId: screenshotHash,
@@ -391,7 +391,7 @@ async function createMixedMonoArchive() {
           x: 455,
           y: 286,
           t: base + 2_200,
-          mono: base + 902_200
+          mono: 902_200
         }
       },
       {
@@ -399,23 +399,28 @@ async function createMixedMonoArchive() {
         shot: screenshotHash
       }
     ),
-    event("E-130", base + 2_400, 2_400, "meta.session.end", {
+    event("E-130", base + 2_400, 902_400, "meta.session.end", {
       reason: "complete"
     })
   ];
   const ndjson = `${events.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
   const chunkBytes = textEncoder.encode(ndjson);
   const chunkHash = sha256Hex(chunkBytes);
-  const rawMonos = events.map((entry) => entry.mono);
-  const wallTimes = events.map((entry) => entry.t);
+  const firstEvent = events[0];
+  const lastEvent = events.at(-1);
+
+  if (!firstEvent || !lastEvent) {
+    throw new Error("Playback regression archive requires at least one event.");
+  }
+
   const timeIndex = [
     {
       chunkId: "C-000001",
       seq: 1,
-      tStart: Math.min(...wallTimes),
-      tEnd: Math.max(...wallTimes),
-      monoStart: Math.min(...rawMonos),
-      monoEnd: Math.max(...rawMonos),
+      tStart: firstEvent.t,
+      tEnd: lastEvent.t,
+      monoStart: firstEvent.mono,
+      monoEnd: lastEvent.mono,
       eventCount: events.length,
       byteLength: chunkBytes.byteLength,
       codec: "none",
