@@ -1,4 +1,5 @@
 import { DEFAULT_RECORDER_CONFIG, type RecorderConfig } from "@webblackbox/protocol";
+import { WebBlackboxRecorder } from "@webblackbox/recorder";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -7,8 +8,11 @@ import {
   capCleanupDeadline,
   createRuntimeCleanupAlarmName,
   createRuntimeStateSnapshot,
+  compactScreenRecordingChunkHashes,
   evaluateActiveRuntimeRestoration,
+  mergeRuntimeCountersWithSequenceWatermark,
   parseRuntimeStateSnapshot,
+  restoreScreenRecordingChunkHashes,
   type PersistedActiveRuntime,
   type PersistedRuntime
 } from "./runtime-state.js";
@@ -143,6 +147,66 @@ describe("runtime state checkpoint", () => {
     expect(capCleanupDeadline(1_000, 11_000, 2_000)).toBe(3_000);
     expect(capCleanupDeadline(1_000, 2_000, 5_000)).toBe(2_000);
   });
+
+  it("advances stale recorder counters to the pipeline high-water", () => {
+    const runtime = createRuntime() as PersistedActiveRuntime;
+    const merged = mergeRuntimeCountersWithSequenceWatermark(runtime.counters, {
+      event: 47,
+      action: 9
+    });
+
+    expect(merged.recorderEventSequence).toBe(47);
+    expect(merged.recorderActionSequence).toBe(9);
+    expect(merged.eventCount).toBe(runtime.counters.eventCount);
+
+    const recorder = new WebBlackboxRecorder(createConfig());
+    recorder.restoreSequenceState({
+      event: merged.recorderEventSequence,
+      action: merged.recorderActionSequence
+    });
+    const next = recorder.ingest({
+      source: "content",
+      rawType: "click",
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      t: runtime.startedAt + 1,
+      mono: runtime.startedAt + 1,
+      payload: { selector: "button" }
+    });
+    expect(next.event?.id).toBe("E-00000048");
+    expect(next.event?.ref?.act).toBe("A-000010");
+  });
+
+  it("rebuilds restart-spanning video hashes without writing them to chrome.storage", () => {
+    const hashBeforeRestart = "a".repeat(64);
+    const hashAfterRestart = "b".repeat(64);
+    const hashes = restoreScreenRecordingChunkHashes(1, [
+      { index: 0, hash: hashBeforeRestart },
+      { index: 1, hash: hashAfterRestart }
+    ]);
+
+    const endEvent = {
+      type: "screen.recording.end",
+      data: {
+        chunks: compactScreenRecordingChunkHashes(hashes)
+      }
+    };
+    expect(endEvent.data.chunks).toEqual([hashBeforeRestart, hashAfterRestart]);
+
+    const runtime = createRuntime() as PersistedActiveRuntime;
+    runtime.screenRecording = {
+      recordingId: "VR-restart",
+      startedAt: runtime.startedAt,
+      startedMono: runtime.startedAt,
+      mime: "video/webm",
+      chunkCount: 1,
+      sizeBytes: 10
+    };
+    const serialized = JSON.stringify(createRuntimeStateSnapshot([runtime]));
+    expect(serialized).not.toContain(hashBeforeRestart);
+    expect(serialized).not.toContain(hashAfterRestart);
+    expect(serialized).not.toContain('"chunks"');
+  });
 });
 
 describe("MV3 cleanup scheduling", () => {
@@ -187,6 +251,40 @@ describe("MV3 cleanup scheduling", () => {
     await scheduler.schedule("S-1767225600001-expired", 4_999);
     expect(onDue).toHaveBeenCalledOnce();
     expect(sessions.has("S-1767225600001-expired")).toBe(false);
+  });
+
+  it("re-arms cleanup after a transient due-time flush failure", async () => {
+    let now = 5_000;
+    const sessions = new Set(["S-1767225600001-retry"]);
+    const alarmCreate = vi.fn();
+    const onDue = vi
+      .fn<(sid: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("transient flush failure"))
+      .mockImplementationOnce(async (sid) => {
+        sessions.delete(sid);
+      });
+    const scheduler = new RuntimeCleanupScheduler({
+      alarms: { create: alarmCreate, clear: vi.fn().mockResolvedValue(true) },
+      now: () => now,
+      retryDelayMs: 100,
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      onDue
+    });
+
+    await expect(scheduler.schedule("S-1767225600001-retry", 4_999)).rejects.toThrow(
+      "transient flush failure"
+    );
+    expect(sessions.has("S-1767225600001-retry")).toBe(true);
+    expect(scheduler.getDeadline("S-1767225600001-retry")).toBe(5_100);
+    expect(alarmCreate).toHaveBeenLastCalledWith(
+      createRuntimeCleanupAlarmName("S-1767225600001-retry"),
+      { when: 5_100 }
+    );
+
+    now = 5_101;
+    await scheduler.handleAlarm(createRuntimeCleanupAlarmName("S-1767225600001-retry"));
+    expect(sessions.has("S-1767225600001-retry")).toBe(false);
+    expect(onDue).toHaveBeenCalledTimes(2);
   });
 });
 

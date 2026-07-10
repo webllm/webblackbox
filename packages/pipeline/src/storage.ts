@@ -12,6 +12,27 @@ export type StoredChunk = {
   sid: string;
   meta: ChunkTimeIndexEntry;
   bytes: Uint8Array;
+  resumeState?: PipelineResumeState;
+};
+
+export type RecorderSequenceWatermark = {
+  event: number;
+  action: number;
+};
+
+export type ScreenRecordingChunkReference = {
+  index: number;
+  hash: string;
+};
+
+export type ScreenRecordingResumeState = {
+  recordingId: string;
+  chunks: ScreenRecordingChunkReference[];
+};
+
+export type PipelineResumeState = {
+  sequenceWatermark: RecorderSequenceWatermark;
+  screenRecordings: ScreenRecordingResumeState[];
 };
 
 export type StoredBlob = {

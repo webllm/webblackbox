@@ -20,6 +20,7 @@ type OffscreenPipelineRequest = {
     | "ingest"
     | "ingestBatch"
     | "flush"
+    | "getResumeState"
     | "putBlob"
     | "exportDownload"
     | "close"
@@ -218,6 +219,10 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 
   if (!pipeline) {
     throw new Error(`Pipeline session not found: ${message.sid}`);
+  }
+
+  if (message.op === "getResumeState") {
+    return pipeline.getResumeState();
   }
 
   if (message.op === "startScreenRecording") {

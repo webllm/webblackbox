@@ -3,6 +3,7 @@ import {
   createChromeDebuggerTransport,
   type CdpRouter
 } from "@webblackbox/cdp-router";
+import type { PipelineResumeState, ScreenRecordingChunkReference } from "@webblackbox/pipeline";
 import {
   createSessionId,
   DEFAULT_CAPTURE_POLICY,
@@ -109,10 +110,13 @@ import {
   RuntimeCleanupScheduler,
   RuntimeStartCoordinator,
   capCleanupDeadline,
+  compactScreenRecordingChunkHashes,
   createRuntimeStateSnapshot,
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
+  mergeRuntimeCountersWithSequenceWatermark,
   parseRuntimeStateSnapshot,
+  restoreScreenRecordingChunkHashes,
   type PersistedActiveRuntime,
   type PersistedRuntime,
   type PersistedRuntimeCounters,
@@ -246,6 +250,7 @@ type SessionPipelineClient = {
   ingest: (event: WebBlackboxEvent) => Promise<void>;
   ingestBatch: (events: WebBlackboxEvent[]) => Promise<void>;
   flush: () => Promise<void>;
+  getResumeState: () => Promise<PipelineResumeState>;
   putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
   exportAndDownload: (options?: {
     passphrase?: string;
@@ -265,6 +270,7 @@ type OffscreenPipelineRequest = {
     | "ingest"
     | "ingestBatch"
     | "flush"
+    | "getResumeState"
     | "putBlob"
     | "exportDownload"
     | "close"
@@ -489,6 +495,7 @@ const STOP_DRAIN_ACK_TIMEOUT_MS = 3_000;
 const CDP_ARTIFACT_TIMEOUT_MS = 5_000;
 const CDP_HEAP_SNAPSHOT_TIMEOUT_MS = 8_000;
 const SCREEN_RECORDING_OFFSCREEN_SOURCE = "tab";
+const PIPELINE_RESUME_MAX_SCREEN_CHUNKS = 500_000;
 
 console.info("[WebBlackbox] service worker booted");
 
@@ -1126,6 +1133,7 @@ function createSessionRuntime(input: {
   performanceBudget: PerformanceBudgetConfig;
   counters?: PersistedRuntimeCounters;
   screenRecording?: PersistedScreenRecording;
+  screenRecordingChunks?: readonly ScreenRecordingChunkReference[];
 }): SessionRuntime {
   const counters = input.counters ?? {
     recorderEventSequence: 0,
@@ -1172,6 +1180,12 @@ function createSessionRuntime(input: {
     event: counters.recorderEventSequence,
     action: counters.recorderActionSequence
   });
+  const restoredScreenRecordingChunks = input.screenRecording
+    ? restoreScreenRecordingChunkHashes(
+        input.screenRecording.chunkCount,
+        input.screenRecordingChunks ?? []
+      )
+    : null;
 
   const runtime: SessionRuntime = {
     sid: input.sid,
@@ -1203,8 +1217,8 @@ function createSessionRuntime(input: {
           width: input.screenRecording.width,
           height: input.screenRecording.height,
           frameRate: input.screenRecording.frameRate,
-          chunks: new Array<string>(input.screenRecording.chunkCount),
-          chunkCount: input.screenRecording.chunkCount,
+          chunks: restoredScreenRecordingChunks ?? [],
+          chunkCount: restoredScreenRecordingChunks?.length ?? input.screenRecording.chunkCount,
           sizeBytes: input.screenRecording.sizeBytes,
           pendingWrites: new Set(),
           stopPromise: null
@@ -1302,7 +1316,12 @@ async function stopSession(tabId: number): Promise<void> {
   runtime.stoppedAt = Date.now();
   runtime.cleanupDeadline =
     runtime.stoppedAt + resolveRuntimeLocalTtlMs(runtime.config.capturePolicy);
-  await scheduleStoppedRuntimeCleanup(runtime);
+  await scheduleStoppedRuntimeCleanup(runtime).catch((error) => {
+    console.warn("[WebBlackbox] alarm setup failed; timer and restart recovery remain armed", {
+      sid: runtime.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 
   if (sessionsByTab.size === 0) {
     await setIdleBadge();
@@ -2176,6 +2195,13 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         op: "flush",
         sid
       });
+    },
+    getResumeState: async () => {
+      const result = await requestOffscreenPipeline<unknown>({
+        op: "getResumeState",
+        sid
+      });
+      return normalizePipelineResumeState(result);
     },
     putBlob: async (mime, bytes) => {
       return requestOffscreenPipeline<string>({
@@ -3270,9 +3296,7 @@ async function finalizeScreenRecording(
   }
 
   await waitForScreenRecordingChunkWrites(recording);
-  const chunks = recording.chunks.filter(
-    (chunk): chunk is string => typeof chunk === "string" && chunk.length > 0
-  );
+  const chunks = compactScreenRecordingChunkHashes(recording.chunks);
 
   ingestRawEvent({
     source: "system",
@@ -4259,6 +4283,93 @@ function shouldInjectHooksForMode(mode: CaptureMode): boolean {
   return shouldInjectPageHooksForMode(mode);
 }
 
+function normalizePipelineResumeState(raw: unknown): PipelineResumeState {
+  const row = asRecord(raw);
+  const sequence = asRecord(row?.sequenceWatermark);
+  const event = sequence?.event;
+  const action = sequence?.action;
+
+  if (
+    !row ||
+    Object.keys(row).length !== 2 ||
+    !sequence ||
+    Object.keys(sequence).length !== 2 ||
+    !Number.isSafeInteger(event) ||
+    (event as number) < 0 ||
+    !Number.isSafeInteger(action) ||
+    (action as number) < 0 ||
+    !Array.isArray(row.screenRecordings) ||
+    row.screenRecordings.length > 32
+  ) {
+    throw new Error("Invalid offscreen pipeline resume state.");
+  }
+
+  const screenRecordings: PipelineResumeState["screenRecordings"] = [];
+  const recordingIds = new Set<string>();
+  let totalChunks = 0;
+
+  for (const candidate of row.screenRecordings) {
+    const recording = asRecord(candidate);
+
+    if (
+      !recording ||
+      Object.keys(recording).length !== 2 ||
+      typeof recording.recordingId !== "string" ||
+      recording.recordingId.length === 0 ||
+      recording.recordingId.length > 256 ||
+      recordingIds.has(recording.recordingId) ||
+      !Array.isArray(recording.chunks)
+    ) {
+      throw new Error("Invalid offscreen screen-recording resume state.");
+    }
+
+    recordingIds.add(recording.recordingId);
+    totalChunks += recording.chunks.length;
+
+    if (totalChunks > PIPELINE_RESUME_MAX_SCREEN_CHUNKS) {
+      throw new Error("Offscreen screen-recording resume state is too large.");
+    }
+
+    const chunks: ScreenRecordingChunkReference[] = [];
+    const indexes = new Set<number>();
+
+    for (const chunkCandidate of recording.chunks) {
+      const chunk = asRecord(chunkCandidate);
+      const index = chunk?.index;
+      const hash = chunk?.hash;
+
+      if (
+        !chunk ||
+        Object.keys(chunk).length !== 2 ||
+        !Number.isSafeInteger(index) ||
+        (index as number) < 0 ||
+        (index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
+        indexes.has(index as number) ||
+        typeof hash !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(hash)
+      ) {
+        throw new Error("Invalid offscreen screen-recording chunk reference.");
+      }
+
+      indexes.add(index as number);
+      chunks.push({ index: index as number, hash });
+    }
+
+    screenRecordings.push({
+      recordingId: recording.recordingId,
+      chunks: chunks.sort((left, right) => left.index - right.index)
+    });
+  }
+
+  return {
+    sequenceWatermark: {
+      event: event as number,
+      action: action as number
+    },
+    screenRecordings
+  };
+}
+
 function normalizePipelineExportDownloadResult(raw: unknown): PipelineExportDownloadResult {
   const row = asRecord(raw);
 
@@ -4802,17 +4913,18 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
     return;
   }
 
-  await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
-
-  await flushBufferedPipelineEvents(runtime);
-  await runtime.queue;
+  await flushBufferedPipelineEvents(runtime).catch((error) => {
+    console.warn("[WebBlackbox] stopped-session buffer flush failed during purge", error);
+  });
+  await runtime.queue.catch((error) => {
+    console.warn("[WebBlackbox] stopped-session queue drain failed during purge", error);
+  });
   await runtime.pipeline.flush().catch(() => undefined);
-  await runtime.pipeline
-    .close({
-      purge: true
-    })
-    .catch(() => undefined);
+  await runtime.pipeline.close({
+    purge: true
+  });
   sessionsBySid.delete(runtime.sid);
+  await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
   if (sessionAnnotations.delete(runtime.sid)) {
     await persistSessionAnnotations().catch(() => undefined);
   }
@@ -4823,9 +4935,11 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
     await setRecordingBadge();
   }
 
-  await closeOffscreenIfUnused();
+  await closeOffscreenIfUnused().catch(() => undefined);
   pushSessionList();
-  await persistRuntimeState();
+  await persistRuntimeState().catch((error) => {
+    console.warn("[WebBlackbox] failed to persist stopped-session purge", error);
+  });
   notifyOffscreenPipelineStatus();
 }
 
@@ -5565,7 +5679,12 @@ async function restoreRuntimeState(): Promise<void> {
 
     for (const runtime of stoppedRuntimes) {
       if (sessionsBySid.get(runtime.sid) === runtime) {
-        await scheduleStoppedRuntimeCleanup(runtime);
+        await scheduleStoppedRuntimeCleanup(runtime).catch((error) => {
+          console.warn("[WebBlackbox] stopped-session cleanup scheduled for retry", {
+            sid: runtime.sid,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
       }
     }
 
@@ -5665,6 +5784,28 @@ async function restoreActiveRuntime(
     config.redaction,
     config.capturePolicy
   );
+  const resumeState = await pipeline.getResumeState();
+  const restoredCounters = mergeRuntimeCountersWithSequenceWatermark(
+    persisted.counters,
+    resumeState.sequenceWatermark
+  );
+  const screenRecordingChunks = persisted.screenRecording
+    ? resumeState.screenRecordings.find(
+        (recording) => recording.recordingId === persisted.screenRecording?.recordingId
+      )?.chunks
+    : undefined;
+
+  if (
+    persisted.screenRecording &&
+    persisted.screenRecording.chunkCount > 0 &&
+    !hasCompleteScreenRecordingResumePrefix(
+      persisted.screenRecording.chunkCount,
+      screenRecordingChunks ?? []
+    )
+  ) {
+    throw new Error("Screen-recording resume state is incomplete.");
+  }
+
   const runtime = createSessionRuntime({
     sid: persisted.sid,
     tabId: persisted.tabId,
@@ -5681,8 +5822,9 @@ async function restoreActiveRuntime(
     startedAt: persisted.startedAt,
     pipeline,
     performanceBudget,
-    counters: persisted.counters,
-    screenRecording: persisted.screenRecording
+    counters: restoredCounters,
+    screenRecording: persisted.screenRecording,
+    screenRecordingChunks
   });
   sessionsByTab.set(runtime.tabId, runtime);
   sessionsBySid.set(runtime.sid, runtime);
@@ -5703,6 +5845,21 @@ async function restoreActiveRuntime(
 
   await notifyAuthorizedContentFrames(runtime, true);
   return runtime;
+}
+
+function hasCompleteScreenRecordingResumePrefix(
+  expectedChunkCount: number,
+  chunks: readonly ScreenRecordingChunkReference[]
+): boolean {
+  const indexes = new Set(chunks.map((chunk) => chunk.index));
+
+  for (let index = 0; index < expectedChunkCount; index += 1) {
+    if (!indexes.has(index)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 async function restoreStoppedRuntime(

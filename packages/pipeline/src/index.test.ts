@@ -267,7 +267,10 @@ describe("pipeline", () => {
       maxChunkBytes: 1
     });
     await first.start();
-    await first.ingest(createEvent("E-before-restart", "user.marker", 1));
+    await first.ingest({
+      ...createEvent("E-00000051", "user.marker", 1),
+      ref: { act: "A-000007" }
+    });
     await first.close();
 
     const restored = createTestPipeline({
@@ -276,11 +279,88 @@ describe("pipeline", () => {
       maxChunkBytes: 1
     });
     await restored.start();
-    await restored.ingest(createEvent("E-after-restart", "user.marker", 2));
+    expect(await restored.getSequenceWatermark()).toEqual({ event: 51, action: 7 });
+    await restored.ingest(createEvent("E-00000052", "user.marker", 2));
+    const exported = await restored.exportBundle(FULL_EXPORT_OPTIONS);
+    const archive = await readWebBlackboxArchive(exported.bytes);
     await restored.close();
 
     const chunks = await storage.listChunks(SESSION.sid);
     expect(chunks.map((chunk) => chunk.meta.seq)).toEqual([1, 2]);
+    expect(chunks[1]?.resumeState?.sequenceWatermark).toEqual({ event: 52, action: 7 });
+    expect(archive.events.map((event) => event.id)).toEqual(["E-00000051", "E-00000052"]);
+    expect(new Set(archive.events.map((event) => event.id)).size).toBe(archive.events.length);
+  });
+
+  it("reports pending offscreen events and screen chunk hashes in the live resume state", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 1_000_000
+    });
+    const hash = "c".repeat(64);
+
+    await pipeline.start();
+    await pipeline.ingest({
+      ...createEvent("E-00000091", "screen.recording.chunk", 1, {
+        recordingId: "VR-pending",
+        chunkId: hash,
+        index: 0,
+        mime: "video/webm",
+        size: 10
+      }),
+      ref: { act: "A-000012" }
+    });
+
+    expect(await storage.listChunks(SESSION.sid)).toHaveLength(0);
+    expect(await pipeline.getResumeState()).toEqual({
+      sequenceWatermark: { event: 91, action: 12 },
+      screenRecordings: [
+        {
+          recordingId: "VR-pending",
+          chunks: [{ index: 0, hash }]
+        }
+      ]
+    });
+  });
+
+  it("restores cumulative screen hashes from the latest durable chunk only", async () => {
+    const storage = new MemoryPipelineStorage();
+    const before = "d".repeat(64);
+    const after = "e".repeat(64);
+    const first = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await first.start();
+    await first.ingest(
+      createEvent("E-00000101", "screen.recording.chunk", 1, {
+        recordingId: "VR-restart",
+        chunkId: before,
+        index: 0
+      })
+    );
+    await first.ingest(
+      createEvent("E-00000102", "screen.recording.chunk", 2, {
+        recordingId: "VR-restart",
+        chunkId: after,
+        index: 1
+      })
+    );
+    await first.close();
+
+    const restored = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await restored.start();
+    expect(await restored.getResumeState()).toEqual({
+      sequenceWatermark: { event: 102, action: 0 },
+      screenRecordings: [
+        {
+          recordingId: "VR-restart",
+          chunks: [
+            { index: 0, hash: before },
+            { index: 1, hash: after }
+          ]
+        }
+      ]
+    });
   });
 
   it("can retry an ingest after chunk persistence fails without a sequence gap or duplicate", async () => {

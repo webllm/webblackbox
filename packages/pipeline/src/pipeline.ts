@@ -20,7 +20,10 @@ import { EventIndexer } from "./indexer.js";
 import { assertPrivacyScannerPassed, buildPrivacyManifest } from "./privacy.js";
 import {
   PIPELINE_STORAGE_SECURITY,
+  type PipelineResumeState,
   type PipelineStorage,
+  type RecorderSequenceWatermark,
+  type ScreenRecordingResumeState,
   type StoredBlob,
   type StoredChunk
 } from "./storage.js";
@@ -96,6 +99,10 @@ const LOW_RISK_OVERRIDE_BLOCKED_CATEGORIES = new Set([
 ]);
 const LOCAL_DEBUG_EVIDENCE_PATTERN = /^local-attestation:[A-Za-z0-9][A-Za-z0-9._:-]{7,}$/;
 const SYNTHETIC_EVIDENCE_PATTERN = /^(?:synthetic-fixture|ci-run):[A-Za-z0-9][A-Za-z0-9._:-]{7,}$/;
+const EVENT_SEQUENCE_PATTERN = /^E-(\d+)$/;
+const ACTION_SEQUENCE_PATTERN = /^A-(\d+)$/;
+const BLOB_HASH_PATTERN = /^[a-f0-9]{64}$/;
+const PIPELINE_RESUME_MAX_SCREEN_CHUNKS = 500_000;
 
 export class FlightRecorderPipeline {
   private readonly chunker: EventChunker;
@@ -104,6 +111,8 @@ export class FlightRecorderPipeline {
   private chunkOperationTail: Promise<void> = Promise.resolve();
   private acceptingEvents = true;
   private closePromise: Promise<void> | null = null;
+  private sequenceWatermark: RecorderSequenceWatermark = { event: 0, action: 0 };
+  private readonly screenRecordingChunks = new Map<string, Map<number, string>>();
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = resolveChunkCodec(options.chunkCodec);
@@ -122,10 +131,15 @@ export class FlightRecorderPipeline {
 
   public async start(): Promise<void> {
     await this.ensureStorageReady();
-    const lastSequence =
-      (await this.options.storage.getLatestChunkMeta(this.options.session.sid))?.seq ?? 0;
+    const latestMeta = await this.options.storage.getLatestChunkMeta(this.options.session.sid);
+    const lastSequence = latestMeta?.seq ?? 0;
 
     this.chunker.restoreSequence(lastSequence);
+    const resumeState = latestMeta
+      ? await this.restoreResumeStateFromLatestChunk(latestMeta.chunkId)
+      : emptyPipelineResumeState();
+    this.sequenceWatermark = resumeState.sequenceWatermark;
+    this.restoreScreenRecordingResumeState(resumeState.screenRecordings);
     await this.options.storage.putSession(this.options.session);
   }
 
@@ -137,6 +151,7 @@ export class FlightRecorderPipeline {
 
     await this.enqueueChunkOperation(async () => {
       await this.chunker.append(event);
+      this.applyEventToResumeState(event);
     });
   }
 
@@ -156,8 +171,18 @@ export class FlightRecorderPipeline {
     await this.enqueueChunkOperation(async () => {
       for (const event of events) {
         await this.chunker.append(event);
+        this.applyEventToResumeState(event);
       }
     });
+  }
+
+  public async getSequenceWatermark(): Promise<RecorderSequenceWatermark> {
+    return (await this.getResumeState()).sequenceWatermark;
+  }
+
+  public async getResumeState(): Promise<PipelineResumeState> {
+    await this.enqueueChunkOperation(async () => undefined);
+    return this.snapshotResumeState();
   }
 
   public async flush(): Promise<void> {
@@ -689,10 +714,70 @@ export class FlightRecorderPipeline {
         codec,
         sha256: hash
       },
-      bytes
+      bytes,
+      resumeState: derivePipelineResumeState(this.snapshotResumeState(), events)
     };
 
     await this.options.storage.putChunk(chunk);
+  }
+
+  private async restoreResumeStateFromLatestChunk(chunkId: string): Promise<PipelineResumeState> {
+    const latest = await this.options.storage.getChunk(this.options.session.sid, chunkId);
+
+    if (!latest) {
+      throw new Error("Latest pipeline chunk metadata points to missing chunk payload.");
+    }
+
+    if (isPipelineResumeState(latest.resumeState)) {
+      return clonePipelineResumeState(latest.resumeState);
+    }
+
+    const events = await decodeChunkEvents(latest.bytes, latest.meta.codec);
+
+    // Legacy chunks did not persist an exact action high-water. Advancing the
+    // action sequence to the durable event high-water is deterministic and
+    // prevents reuse without scanning an unbounded archive history.
+    const legacy = derivePipelineResumeState(emptyPipelineResumeState(), events);
+    legacy.sequenceWatermark.action = Math.max(
+      legacy.sequenceWatermark.action,
+      legacy.sequenceWatermark.event
+    );
+    return legacy;
+  }
+
+  private applyEventToResumeState(event: WebBlackboxEvent): void {
+    this.sequenceWatermark = mergeSequenceWatermarks(
+      this.sequenceWatermark,
+      deriveRecorderSequenceWatermark([event])
+    );
+    applyScreenRecordingChunkEvent(this.screenRecordingChunks, event);
+  }
+
+  private snapshotResumeState(): PipelineResumeState {
+    return {
+      sequenceWatermark: { ...this.sequenceWatermark },
+      screenRecordings: [...this.screenRecordingChunks.entries()]
+        .map(([recordingId, chunks]) => ({
+          recordingId,
+          chunks: [...chunks.entries()]
+            .map(([index, hash]) => ({ index, hash }))
+            .sort((left, right) => left.index - right.index)
+        }))
+        .sort((left, right) => left.recordingId.localeCompare(right.recordingId))
+    };
+  }
+
+  private restoreScreenRecordingResumeState(
+    screenRecordings: readonly ScreenRecordingResumeState[]
+  ): void {
+    this.screenRecordingChunks.clear();
+
+    for (const recording of screenRecordings) {
+      this.screenRecordingChunks.set(
+        recording.recordingId,
+        new Map(recording.chunks.map((chunk) => [chunk.index, chunk.hash]))
+      );
+    }
   }
 
   private enqueueChunkOperation(operation: () => Promise<void>): Promise<void> {
@@ -995,6 +1080,207 @@ function assertPrivacyClassifiedEvent(event: WebBlackboxEvent): void {
   if (!event.privacy) {
     throw new Error(`Event ${event.id} is missing privacy classification.`);
   }
+}
+
+function deriveRecorderSequenceWatermark(
+  events: readonly WebBlackboxEvent[]
+): RecorderSequenceWatermark {
+  const watermark: RecorderSequenceWatermark = { event: 0, action: 0 };
+
+  for (const event of events) {
+    watermark.event = Math.max(
+      watermark.event,
+      parseCanonicalSequence(event.id, EVENT_SEQUENCE_PATTERN)
+    );
+    watermark.action = Math.max(
+      watermark.action,
+      parseCanonicalSequence(event.ref?.act, ACTION_SEQUENCE_PATTERN)
+    );
+  }
+
+  return watermark;
+}
+
+function mergeSequenceWatermarks(
+  left: RecorderSequenceWatermark,
+  right: RecorderSequenceWatermark
+): RecorderSequenceWatermark {
+  return {
+    event: Math.max(left.event, right.event),
+    action: Math.max(left.action, right.action)
+  };
+}
+
+function derivePipelineResumeState(
+  base: PipelineResumeState,
+  events: readonly WebBlackboxEvent[]
+): PipelineResumeState {
+  const screenRecordingChunks = new Map<string, Map<number, string>>();
+
+  for (const recording of base.screenRecordings) {
+    screenRecordingChunks.set(
+      recording.recordingId,
+      new Map(recording.chunks.map((chunk) => [chunk.index, chunk.hash]))
+    );
+  }
+
+  let sequenceWatermark = { ...base.sequenceWatermark };
+
+  for (const event of events) {
+    sequenceWatermark = mergeSequenceWatermarks(
+      sequenceWatermark,
+      deriveRecorderSequenceWatermark([event])
+    );
+    applyScreenRecordingChunkEvent(screenRecordingChunks, event);
+  }
+
+  return {
+    sequenceWatermark,
+    screenRecordings: [...screenRecordingChunks.entries()]
+      .map(([recordingId, chunks]) => ({
+        recordingId,
+        chunks: [...chunks.entries()]
+          .map(([index, hash]) => ({ index, hash }))
+          .sort((left, right) => left.index - right.index)
+      }))
+      .sort((left, right) => left.recordingId.localeCompare(right.recordingId))
+  };
+}
+
+function applyScreenRecordingChunkEvent(
+  output: Map<string, Map<number, string>>,
+  event: WebBlackboxEvent
+): void {
+  if (event.type !== "screen.recording.chunk") {
+    return;
+  }
+
+  const data = asUnknownRecord(event.data);
+  const recordingId = data?.recordingId;
+  const hash = data?.chunkId;
+  const index = data?.index;
+
+  if (
+    typeof recordingId !== "string" ||
+    recordingId.length === 0 ||
+    recordingId.length > 256 ||
+    typeof hash !== "string" ||
+    !BLOB_HASH_PATTERN.test(hash) ||
+    !Number.isSafeInteger(index) ||
+    (index as number) < 0 ||
+    (index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS
+  ) {
+    return;
+  }
+
+  const chunks = output.get(recordingId) ?? new Map<number, string>();
+  chunks.set(index as number, hash);
+  output.set(recordingId, chunks);
+}
+
+function isPipelineResumeState(value: unknown): value is PipelineResumeState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  const sequence = asUnknownRecord(record.sequenceWatermark);
+
+  if (
+    Object.keys(record).length !== 2 ||
+    !sequence ||
+    Object.keys(sequence).length !== 2 ||
+    !Number.isSafeInteger(sequence.event) ||
+    (sequence.event as number) < 0 ||
+    !Number.isSafeInteger(sequence.action) ||
+    (sequence.action as number) < 0 ||
+    !Array.isArray(record.screenRecordings) ||
+    record.screenRecordings.length > 32
+  ) {
+    return false;
+  }
+
+  const recordingIds = new Set<string>();
+  let totalChunks = 0;
+
+  for (const candidate of record.screenRecordings) {
+    const recording = asUnknownRecord(candidate);
+
+    if (
+      !recording ||
+      Object.keys(recording).length !== 2 ||
+      typeof recording.recordingId !== "string" ||
+      recording.recordingId.length === 0 ||
+      recording.recordingId.length > 256 ||
+      recordingIds.has(recording.recordingId) ||
+      !Array.isArray(recording.chunks)
+    ) {
+      return false;
+    }
+
+    recordingIds.add(recording.recordingId);
+    totalChunks += recording.chunks.length;
+
+    if (totalChunks > PIPELINE_RESUME_MAX_SCREEN_CHUNKS) {
+      return false;
+    }
+
+    const indexes = new Set<number>();
+
+    for (const chunkCandidate of recording.chunks) {
+      const chunk = asUnknownRecord(chunkCandidate);
+
+      if (
+        !chunk ||
+        Object.keys(chunk).length !== 2 ||
+        !Number.isSafeInteger(chunk.index) ||
+        (chunk.index as number) < 0 ||
+        (chunk.index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
+        indexes.has(chunk.index as number) ||
+        typeof chunk.hash !== "string" ||
+        !BLOB_HASH_PATTERN.test(chunk.hash)
+      ) {
+        return false;
+      }
+
+      indexes.add(chunk.index as number);
+    }
+  }
+
+  return true;
+}
+
+function emptyPipelineResumeState(): PipelineResumeState {
+  return {
+    sequenceWatermark: { event: 0, action: 0 },
+    screenRecordings: []
+  };
+}
+
+function clonePipelineResumeState(state: PipelineResumeState): PipelineResumeState {
+  return {
+    sequenceWatermark: { ...state.sequenceWatermark },
+    screenRecordings: state.screenRecordings.map((recording) => ({
+      recordingId: recording.recordingId,
+      chunks: recording.chunks.map((chunk) => ({ ...chunk }))
+    }))
+  };
+}
+
+function asUnknownRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseCanonicalSequence(value: unknown, pattern: RegExp): number {
+  if (typeof value !== "string") {
+    return 0;
+  }
+
+  const match = pattern.exec(value);
+  const sequence = match?.[1] ? Number(match[1]) : Number.NaN;
+  return Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
 }
 
 function normalizeBoundedPositiveInt(value: unknown): number | null {

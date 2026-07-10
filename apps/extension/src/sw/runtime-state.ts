@@ -11,6 +11,7 @@ export const RUNTIME_CLEANUP_ALARM_PREFIX = "webblackbox.runtime.cleanup:";
 
 const MAX_PERSISTED_SESSIONS = 512;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
+const MAX_SCREEN_RECORDING_CHUNKS = 500_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export type PersistedRuntimeCounters = {
@@ -85,11 +86,22 @@ export type RuntimeCleanupAlarmApi = {
   clear(name: string): boolean | Promise<boolean>;
 };
 
+export type RuntimeSequenceWatermark = {
+  event: number;
+  action: number;
+};
+
+export type RuntimeScreenRecordingChunkReference = {
+  index: number;
+  hash: string;
+};
+
 export type RuntimeCleanupSchedulerOptions = {
   alarms?: RuntimeCleanupAlarmApi;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+  retryDelayMs?: number;
   onDue: (sid: string) => void | Promise<void>;
 };
 
@@ -245,6 +257,52 @@ export function capCleanupDeadline(
   return Math.min(persistedDeadline, stoppedAt + localTtlMs);
 }
 
+export function mergeRuntimeCountersWithSequenceWatermark(
+  counters: PersistedRuntimeCounters,
+  watermark: RuntimeSequenceWatermark
+): PersistedRuntimeCounters {
+  return {
+    ...counters,
+    recorderEventSequence: Math.max(counters.recorderEventSequence, watermark.event),
+    recorderActionSequence: Math.max(counters.recorderActionSequence, watermark.action)
+  };
+}
+
+export function restoreScreenRecordingChunkHashes(
+  persistedChunkCount: number,
+  references: readonly RuntimeScreenRecordingChunkReference[]
+): string[] {
+  if (
+    !Number.isSafeInteger(persistedChunkCount) ||
+    persistedChunkCount < 0 ||
+    persistedChunkCount > MAX_SCREEN_RECORDING_CHUNKS ||
+    references.some(
+      (reference) =>
+        !Number.isSafeInteger(reference.index) ||
+        reference.index < 0 ||
+        reference.index >= MAX_SCREEN_RECORDING_CHUNKS
+    )
+  ) {
+    throw new Error("Invalid screen-recording resume chunk range.");
+  }
+
+  const maxIndex = references.reduce(
+    (maximum, reference) => Math.max(maximum, reference.index),
+    -1
+  );
+  const chunks = new Array<string>(Math.max(persistedChunkCount, maxIndex + 1));
+
+  for (const reference of references) {
+    chunks[reference.index] = reference.hash;
+  }
+
+  return chunks;
+}
+
+export function compactScreenRecordingChunkHashes(chunks: readonly string[]): string[] {
+  return chunks.filter((chunk) => typeof chunk === "string" && chunk.length > 0);
+}
+
 export function createRuntimeCleanupAlarmName(sid: string): string {
   return `${RUNTIME_CLEANUP_ALARM_PREFIX}${sid}`;
 }
@@ -271,6 +329,7 @@ export class RuntimeCleanupScheduler {
   ) => ReturnType<typeof setTimeout>;
   private readonly clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
   private readonly onDue: (sid: string) => void | Promise<void>;
+  private readonly retryDelayMs: number;
   private readonly deadlines = new Map<string, number>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly dueTasks = new Map<string, Promise<void>>();
@@ -281,6 +340,7 @@ export class RuntimeCleanupScheduler {
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
     this.onDue = options.onDue;
+    this.retryDelayMs = Math.max(1, Math.round(options.retryDelayMs ?? 60_000));
   }
 
   public async schedule(sid: string, deadline: number): Promise<void> {
@@ -299,8 +359,14 @@ export class RuntimeCleanupScheduler {
     }
 
     const alarmName = createRuntimeCleanupAlarmName(sid);
-    await this.alarms?.clear(alarmName);
-    await this.alarms?.create(alarmName, { when: deadline });
+    let alarmError: unknown;
+
+    try {
+      await this.alarms?.clear(alarmName);
+      await this.alarms?.create(alarmName, { when: deadline });
+    } catch (error) {
+      alarmError = error;
+    }
 
     const timer = this.setTimer(
       () => {
@@ -310,6 +376,10 @@ export class RuntimeCleanupScheduler {
       Math.min(delay, MAX_TIMER_DELAY_MS)
     );
     this.timers.set(sid, timer);
+
+    if (alarmError) {
+      throw alarmError;
+    }
   }
 
   public async cancel(sid: string): Promise<void> {
@@ -356,11 +426,26 @@ export class RuntimeCleanupScheduler {
       return;
     }
 
-    this.deadlines.delete(sid);
     this.cancelTimer(sid);
-    const task = Promise.resolve(this.onDue(sid)).finally(() => {
-      this.dueTasks.delete(sid);
-    });
+    const task = Promise.resolve()
+      .then(() => this.onDue(sid))
+      .then(async () => {
+        this.deadlines.delete(sid);
+        this.cancelTimer(sid);
+        await this.alarms?.clear(createRuntimeCleanupAlarmName(sid));
+      })
+      .catch(async (error: unknown) => {
+        if (this.deadlines.has(sid)) {
+          const retryDeadline = this.now() + this.retryDelayMs;
+          this.deadlines.set(sid, retryDeadline);
+          await this.schedule(sid, retryDeadline).catch(() => undefined);
+        }
+
+        throw error;
+      })
+      .finally(() => {
+        this.dueTasks.delete(sid);
+      });
     this.dueTasks.set(sid, task);
     await task;
   }
@@ -546,6 +631,7 @@ function parseScreenRecording(input: unknown): PersistedScreenRecording | null {
     !isOptionalPositiveNumber(record.height) ||
     !isOptionalPositiveNumber(record.frameRate) ||
     !isNonNegativeSafeInteger(record.chunkCount) ||
+    (record.chunkCount as number) > MAX_SCREEN_RECORDING_CHUNKS ||
     !isNonNegativeSafeInteger(record.sizeBytes)
   ) {
     return null;
