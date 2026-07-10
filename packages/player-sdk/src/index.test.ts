@@ -1,10 +1,26 @@
 import * as zlib from "node:zlib";
 import JSZip from "jszip";
+import { DiagnosticCategory, ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChunkTimeIndexEntry, ExportManifest, WebBlackboxEvent } from "@webblackbox/protocol";
 
 import { WebBlackboxPlayer } from "./index.js";
+
+function expectValidTypeScript(source: string): void {
+  const result = transpileModule(source, {
+    compilerOptions: {
+      module: ModuleKind.ESNext,
+      target: ScriptTarget.ES2022
+    },
+    reportDiagnostics: true
+  });
+  const errors = result.diagnostics?.filter(
+    (diagnostic) => diagnostic.category === DiagnosticCategory.Error
+  );
+
+  expect(errors).toEqual([]);
+}
 
 describe("WebBlackboxPlayer", () => {
   it("opens archive and supports query/search/getBlob", async () => {
@@ -585,6 +601,17 @@ describe("WebBlackboxPlayer", () => {
     const mockScript = await player.generatePlaywrightMockScript({ maxMocks: 5 });
     expect(mockScript).toContain("context.route(");
     expect(mockScript).toContain("route.fulfill");
+
+    const untrustedName = "replay');\nthrow new Error('injected')\u2029//";
+    const namedScript = player.generatePlaywrightScript({ name: untrustedName });
+    const namedMockScript = await player.generatePlaywrightMockScript({
+      name: untrustedName,
+      maxMocks: 5
+    });
+    expect(namedScript).toContain(`test("replay');\\nthrow new Error('injected')\\u2029//"`);
+    expect(namedMockScript).toContain(`test("replay');\\nthrow new Error('injected')\\u2029//"`);
+    expectValidTypeScript(namedScript);
+    expectValidTypeScript(namedMockScript);
 
     const domSnapshots = player.getDomSnapshots();
     expect(domSnapshots).toHaveLength(2);

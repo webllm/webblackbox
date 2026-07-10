@@ -1,4 +1,5 @@
 import type { WebBlackboxEvent } from "@webblackbox/protocol";
+import { DiagnosticCategory, ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 
 import { generatePlaywrightScriptFromEvents } from "./playwright-script.js";
@@ -19,6 +20,21 @@ function event(
     id,
     data
   };
+}
+
+function expectValidTypeScript(source: string): void {
+  const result = transpileModule(source, {
+    compilerOptions: {
+      module: ModuleKind.ESNext,
+      target: ScriptTarget.ES2022
+    },
+    reportDiagnostics: true
+  });
+  const errors = result.diagnostics?.filter(
+    (diagnostic) => diagnostic.category === DiagnosticCategory.Error
+  );
+
+  expect(errors).toEqual([]);
 }
 
 describe("generatePlaywrightScriptFromEvents", () => {
@@ -70,5 +86,29 @@ describe("generatePlaywrightScriptFromEvents", () => {
 
     expect(script).toContain("button.first");
     expect(script).not.toContain("button.second");
+  });
+
+  it("escapes untrusted names and keeps masked selectors inside one comment line", () => {
+    const script = generatePlaywrightScriptFromEvents(
+      [
+        event("E-malicious", 100, "user.input", {
+          target: {
+            selector: 'input[name=password]\nawait page.goto("https://attacker.invalid")'
+          },
+          value: "[MASKED]"
+        })
+      ],
+      {
+        name: "replay');\nthrow new Error('injected')\u2028//",
+        includeHarReplay: false
+      }
+    );
+
+    expect(script).toContain(`test("replay');\\nthrow new Error('injected')\\u2028//"`);
+    expect(script).toContain(
+      '// input on input[name=password] await page.goto("https://attacker.invalid") was masked in capture'
+    );
+    expect(script).not.toContain('\nawait page.goto("https://attacker.invalid")');
+    expectValidTypeScript(script);
   });
 });

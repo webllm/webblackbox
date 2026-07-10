@@ -27,7 +27,7 @@ export function generatePlaywrightScriptFromEvents(
   const lines = [
     "import { test } from '@playwright/test';",
     "",
-    `test('${name}', async ({ browser }) => {`,
+    `test(${toJavaScriptStringLiteral(name)}, async ({ browser }) => {`,
     "  const context = await browser.newContext();",
     includeHarReplay
       ? "  await context.routeFromHAR('./session.har', { notFound: 'fallback' });"
@@ -73,7 +73,7 @@ function toPlaywrightLines(event: WebBlackboxEvent): string[] {
     }
 
     if (!value || value === "[MASKED]") {
-      return [`  // input on ${selector} was masked in capture`];
+      return [`  // input on ${toSingleLineCommentText(selector)} was masked in capture`];
     }
 
     return [`  await page.fill(${JSON.stringify(selector)}, ${JSON.stringify(value)});`];
@@ -103,6 +103,25 @@ function toPlaywrightLines(event: WebBlackboxEvent): string[] {
   }
 
   return [];
+}
+
+function toJavaScriptStringLiteral(value: string): string {
+  return JSON.stringify(value).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
+}
+
+function toSingleLineCommentText(value: string): string {
+  const withoutControls = [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint !== undefined &&
+        (codePoint < 32 || codePoint === 127 || codePoint === 0x2028 || codePoint === 0x2029)
+        ? " "
+        : character;
+    })
+    .join("");
+  const sanitized = withoutControls.replace(/\s+/g, " ").trim().slice(0, 240);
+
+  return sanitized || "[redacted selector]";
 }
 
 function readSelector(event: WebBlackboxEvent): string | null {
