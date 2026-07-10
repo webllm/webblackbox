@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { constants, createWriteStream } from "node:fs";
 import { access, mkdir, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,7 +13,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(root, "..");
 
 const extensionDir = process.env.WB_E2E_EXTENSION_DIR ?? resolve(appRoot, "build");
-const targetUrl = process.env.WB_E2E_TARGET_URL ?? "https://example.com/";
+const configuredTargetUrl = process.env.WB_E2E_TARGET_URL;
 const remotePort = Number(process.env.WB_E2E_REMOTE_PORT ?? "9222");
 const headless = (process.env.WB_E2E_HEADLESS ?? "1") !== "0";
 const profileDir =
@@ -20,6 +21,7 @@ const profileDir =
 const chromeLogPath = process.env.WB_E2E_LOG ?? createE2eTempPath("webblackbox-ext-e2e", ".log");
 const baseUrl = `http://127.0.0.1:${remotePort}`;
 const checkExport = (process.env.WB_E2E_CHECK_EXPORT ?? "1") !== "0";
+const cdpCommandTimeoutMs = readPositiveInteger(process.env.WB_E2E_CDP_COMMAND_TIMEOUT_MS, 15_000);
 
 const chromeCandidates = [
   process.env.WB_E2E_CHROME_BIN,
@@ -42,6 +44,7 @@ const state = {
   swClient: null,
   popupClient: null,
   pageClient: null,
+  targetServer: null,
   openedTargetIds: []
 };
 
@@ -54,6 +57,7 @@ main().catch(async (error) => {
 async function main() {
   await ensureExtensionBuildReady(extensionDir);
   const chromeBinary = await resolveChromeBinary(chromeCandidates);
+  const targetUrl = configuredTargetUrl ?? (await startTargetServer());
 
   await rm(profileDir, { recursive: true, force: true });
   await mkdir(profileDir, { recursive: true });
@@ -98,11 +102,12 @@ async function main() {
   await pageClient.connect();
   await popupClient.connect();
   await pageClient.send("Runtime.enable");
+  await pageClient.send("Page.enable");
   await popupClient.send("Runtime.enable");
   state.pageClient = pageClient;
   state.popupClient = popupClient;
 
-  await sleep(1_200);
+  await waitForPageUrl(pageClient, targetUrl, 20_000);
 
   const lite = await runModeCheck({
     popupClient,
@@ -200,7 +205,8 @@ async function runModeCheck({
 
   if (exportAfterStop) {
     const statusBefore = await readExportStatusLine(popupClient);
-    await exportSessionFromPopup(popupClient, active.sid);
+    const exportRequest = await exportSessionFromPopup(popupClient, active.sid);
+    assert(exportRequest?.ok === true, `${mode} export request failed`, exportRequest);
     exportStatus = await waitForExportStatus(popupClient, statusBefore, 30_000);
     assert(exportStatus.ok, `${mode} export failed`, exportStatus);
   }
@@ -352,19 +358,12 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl) {
     (async () => {
       const tabs = await chrome.tabs.query({});
       const exact = tabs.find((tab) =>
-        typeof tab.id === 'number' && typeof tab.url === 'string' && tab.url.startsWith(${JSON.stringify(
-          expectedUrl
-        )})
-      );
-
-      const fallback = tabs.find((tab) =>
         typeof tab.id === 'number' &&
         typeof tab.url === 'string' &&
-        !tab.url.startsWith('chrome-extension://') &&
-        tab.url !== 'about:blank'
+        tab.url.startsWith(${JSON.stringify(expectedUrl)})
       );
 
-      const target = exact ?? fallback;
+      const target = exact;
 
       if (!target || typeof target.id !== 'number') {
         return {
@@ -374,10 +373,22 @@ async function startSessionFromPopup(popupClient, mode, expectedUrl) {
         };
       }
 
-      await chrome.runtime.sendMessage({ kind: 'ui.start', tabId: target.id, mode: ${JSON.stringify(
-        mode
-      )} });
-      return { ok: true, tabId: target.id, mode: ${JSON.stringify(mode)} };
+      const response = await chrome.runtime.sendMessage({
+        kind: 'ui.start',
+        tabId: target.id,
+        mode: ${JSON.stringify(mode)}
+      });
+      return {
+        ok: response?.ok === true,
+        tabId: target.id,
+        mode: ${JSON.stringify(mode)},
+        response,
+        target: {
+          url: target.url,
+          pendingUrl: target.pendingUrl,
+          status: target.status
+        }
+      };
     })()
   `;
 
@@ -395,8 +406,15 @@ async function stopActiveSessionFromPopup(popupClient) {
         return { ok: false, reason: 'no-active-session', rows };
       }
 
-      await chrome.runtime.sendMessage({ kind: 'ui.stop', tabId: active.tabId });
-      return { ok: true, tabId: active.tabId };
+      const response = await chrome.runtime.sendMessage({
+        kind: 'ui.stop',
+        tabId: active.tabId
+      });
+      return {
+        ok: response?.ok === true,
+        tabId: active.tabId,
+        response
+      };
     })()
   `;
 
@@ -406,8 +424,15 @@ async function stopActiveSessionFromPopup(popupClient) {
 async function exportSessionFromPopup(popupClient, sid) {
   const expression = `
     (async () => {
-      await chrome.runtime.sendMessage({ kind: 'ui.export', sid: ${JSON.stringify(sid)} });
-      return { ok: true, sid: ${JSON.stringify(sid)} };
+      const response = await chrome.runtime.sendMessage({
+        kind: 'ui.export',
+        sid: ${JSON.stringify(sid)}
+      });
+      return {
+        ok: response?.ok === true,
+        sid: ${JSON.stringify(sid)},
+        response
+      };
     })()
   `;
 
@@ -474,6 +499,18 @@ async function waitForIndicatorText(pageClient, fragment, timeoutMs) {
   );
 }
 
+async function waitForPageUrl(pageClient, expectedUrl, timeoutMs) {
+  return waitFor(
+    async () => {
+      const url = await pageClient.evaluate("location.href");
+      return typeof url === "string" && url.startsWith(expectedUrl) ? url : null;
+    },
+    timeoutMs,
+    250,
+    `Target page did not navigate to ${expectedUrl}`
+  );
+}
+
 async function waitForIndicatorGone(pageClient, timeoutMs) {
   return waitFor(
     async () => {
@@ -526,6 +563,41 @@ async function fetchJson(url, timeoutMs, init) {
   return response.json();
 }
 
+async function startTargetServer() {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": "text/html; charset=utf-8"
+    });
+    response.end(
+      '<!doctype html><html><head><title>WebBlackbox E2E</title></head><body><button type="button">Test action</button></body></html>'
+    );
+  });
+
+  await new Promise((resolvePromise, rejectPromise) => {
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", rejectPromise);
+      resolvePromise();
+    });
+  });
+
+  const address = server.address();
+
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("Failed to resolve the local E2E target address");
+  }
+
+  state.targetServer = server;
+  return `http://127.0.0.1:${address.port}/`;
+}
+
+function readPositiveInteger(value, fallback) {
+  const numeric = Number(value ?? fallback);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : fallback;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -569,6 +641,13 @@ async function cleanup() {
     });
     state.logStream = null;
   }
+
+  if (state.targetServer) {
+    await new Promise((resolvePromise) => {
+      state.targetServer.close(resolvePromise);
+    });
+    state.targetServer = null;
+  }
 }
 
 class CdpClient {
@@ -595,6 +674,7 @@ class CdpClient {
 
       socket.addEventListener("close", () => {
         for (const pending of this.pending.values()) {
+          clearTimeout(pending.timeout);
           pending.reject(new Error("CDP socket closed"));
         }
         this.pending.clear();
@@ -611,6 +691,7 @@ class CdpClient {
           }
 
           this.pending.delete(payload.id);
+          clearTimeout(pending.timeout);
 
           if (payload.error) {
             pending.reject(new Error(payload.error.message ?? JSON.stringify(payload.error)));
@@ -646,7 +727,11 @@ class CdpClient {
     const message = JSON.stringify({ id, method, params });
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP command timed out: ${method}`));
+      }, cdpCommandTimeoutMs);
+      this.pending.set(id, { resolve, reject, timeout });
       this.socket.send(message);
     });
   }
