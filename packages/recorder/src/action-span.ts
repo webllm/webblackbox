@@ -46,7 +46,9 @@ export class ActionSpanTracker {
 
     const activeAction = this.currentAction;
     const shouldAttachCurrentAction = Boolean(
-      activeAction && event.mono <= activeAction.expiresAtMono
+      activeAction &&
+      event.mono >= activeAction.startedAtMono &&
+      event.mono <= activeAction.expiresAtMono
     );
     let actionId = shouldAttachCurrentAction ? activeAction?.id : undefined;
 

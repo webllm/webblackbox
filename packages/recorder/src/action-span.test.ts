@@ -121,6 +121,27 @@ describe("ActionSpanTracker", () => {
     expect(lateEvent.ref?.act).toBeUndefined();
   });
 
+  it("does not attach delayed pre-action events to a future action", () => {
+    const tracker = new ActionSpanTracker(100);
+    const firstAction = tracker.assign(createEvent("user.click", 10));
+    tracker.assign(
+      createEvent("network.request", 20, {
+        reqId: "R-delayed"
+      })
+    );
+    const futureAction = tracker.assign(createEvent("user.click", 200));
+    const delayedConsole = tracker.assign(createEvent("console.entry", 150));
+    const delayedResponse = tracker.assign(
+      createEvent("network.response", 150, {
+        reqId: "R-delayed"
+      })
+    );
+
+    expect(delayedConsole.ref?.act).toBeUndefined();
+    expect(delayedResponse.ref?.act).toBe(firstAction.ref?.act);
+    expect(delayedResponse.ref?.act).not.toBe(futureAction.ref?.act);
+  });
+
   it("returns original event for non-action events without mapping", () => {
     const tracker = new ActionSpanTracker(50);
     const event = createEvent("console.entry", 500, {
