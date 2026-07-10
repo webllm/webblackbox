@@ -2,7 +2,18 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { request as createHttpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -1124,6 +1135,100 @@ describe("share-server", () => {
     expect(metadataResponse.status).toBe(200);
   });
 
+  it("migrates legacy storage directories and committed files to private modes on restart", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    await stopShareServer(server, false);
+
+    const archivePath = resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const activeAuditPath = resolve(server.dataDir, "audit", "share-access.jsonl");
+    const rotatedAuditPath = resolve(server.dataDir, "audit", "share-access.1.jsonl");
+    const directoryPaths = [
+      server.dataDir,
+      resolve(server.dataDir, "archives"),
+      resolve(server.dataDir, "records"),
+      resolve(server.dataDir, "audit")
+    ];
+    const committedFilePaths = [archivePath, recordPath, activeAuditPath, rotatedAuditPath];
+
+    await writeFile(rotatedAuditPath, '{"legacy":true}\n');
+    await Promise.all(directoryPaths.map((directoryPath) => chmod(directoryPath, 0o755)));
+    await Promise.all(committedFilePaths.map((filePath) => chmod(filePath, 0o644)));
+
+    const restarted = await startShareServer({}, server.dataDir);
+
+    for (const directoryPath of directoryPaths) {
+      expect((await stat(directoryPath)).mode & 0o777).toBe(0o700);
+    }
+    for (const filePath of committedFilePaths) {
+      expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+    }
+
+    const metadataResponse = await fetch(`${restarted.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(metadataResponse.status).toBe(200);
+  });
+
+  it("refuses a managed storage directory symlink without changing its external target", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-symlink-root-"));
+    const outsideDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-outside-"));
+    const outsideSentinel = resolve(outsideDir, "sentinel.txt");
+
+    try {
+      await writeFile(outsideSentinel, "outside", { mode: 0o644 });
+      await chmod(outsideDir, 0o755);
+      await chmod(outsideSentinel, 0o644);
+      await symlink(outsideDir, resolve(dataDir, "records"), "dir");
+
+      await expect(startShareServer({}, dataDir)).rejects.toThrow(
+        /Unsafe share storage path .*records/
+      );
+      expect((await stat(outsideDir)).mode & 0o777).toBe(0o755);
+      expect((await stat(outsideSentinel)).mode & 0o777).toBe(0o644);
+      await expect(readFile(outsideSentinel, "utf8")).resolves.toBe("outside");
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a committed file symlink without changing its external target", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const archivePath = resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`);
+    const outsideDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-outside-file-"));
+    const outsideFile = resolve(outsideDir, "outside.webblackbox");
+
+    try {
+      await stopShareServer(server, false);
+      await writeFile(outsideFile, "outside", { mode: 0o644 });
+      await chmod(outsideFile, 0o644);
+      await rm(archivePath);
+      await symlink(outsideFile, archivePath, "file");
+
+      await expect(startShareServer({}, server.dataDir)).rejects.toThrow(
+        /Unsafe share storage path .*webblackbox/
+      );
+      expect((await stat(outsideFile)).mode & 0o777).toBe(0o644);
+      await expect(readFile(outsideFile, "utf8")).resolves.toBe("outside");
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it.each(["truncated", "same-size replacement"] as const)(
     "removes a %s persisted archive during restart reconciliation",
     async (corruption) => {
@@ -1436,7 +1541,7 @@ describe("share-server", () => {
     expect(server.logs.join("")).toContain("[share-server] shutdown drain complete");
   });
 
-  it("bounds shutdown when the audit sink cannot drain", async () => {
+  it("exits within the shutdown bound when the audit sink is unsafe", async () => {
     if (process.platform === "win32") {
       return;
     }
@@ -1466,8 +1571,9 @@ describe("share-server", () => {
       const startedAt = Date.now();
       const exit = await terminateShareServer(server);
 
-      expect(exit.signal === "SIGKILL" || exit.code === 128 + 9).toBe(true);
+      expect(exit).toEqual({ code: 0, signal: null });
       expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(server.logs.join("")).toContain("[share-server] audit append failed");
     } finally {
       await auditReader.close();
     }
@@ -1757,19 +1863,23 @@ describe("share-server", () => {
     });
     expect(response.status).toBe(200);
 
-    const auditLog = await readFile(resolve(server.dataDir, "audit", "share-access.jsonl"), "utf8");
-    const events = auditLog
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { action: string; clientHash: string });
     const expectedHash = createHash("sha256")
       .update("webblackbox-share-audit:ip:203.0.113.10")
       .digest("hex");
     const spoofedHash = createHash("sha256")
       .update("webblackbox-share-audit:ip:198.51.100.99")
       .digest("hex");
-    expect(events.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
-    expect(events.at(-1)?.clientHash).not.toBe(spoofedHash);
+    await waitForAuditClientHash(server, "list", expectedHash);
+    const refreshedAuditLog = await readFile(
+      resolve(server.dataDir, "audit", "share-access.jsonl"),
+      "utf8"
+    );
+    const refreshedEvents = refreshedAuditLog
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { action: string; clientHash: string });
+    expect(refreshedEvents.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
+    expect(refreshedEvents.at(-1)?.clientHash).not.toBe(spoofedHash);
   });
 
   it.each([
@@ -1791,15 +1901,19 @@ describe("share-server", () => {
       });
       expect(response.status).toBe(200);
 
-      const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
-      const events = auditLog
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as { action: string; clientHash: string });
       const expectedHash = createHash("sha256")
         .update(`webblackbox-share-audit:ip:${clientAddress}`)
         .digest("hex");
-      expect(events.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
+      await waitForAuditClientHash(server, "list", expectedHash);
+      const refreshedAuditLog = await readFile(
+        resolve(server.dataDir, "audit/share-access.jsonl"),
+        "utf8"
+      );
+      const refreshedEvents = refreshedAuditLog
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { action: string; clientHash: string });
+      expect(refreshedEvents.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
     }
   );
 
@@ -1918,6 +2032,34 @@ async function waitForAuditEvent(
   }
 
   throw new Error(`Timed out waiting for ${action} audit event for ${shareId}.`);
+}
+
+async function waitForAuditClientHash(
+  server: RunningShareServer,
+  action: string,
+  clientHash: string
+): Promise<void> {
+  const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    try {
+      const lines = (await readFile(auditPath, "utf8")).trim().split("\n");
+      const found = lines.some((line) => {
+        const event = JSON.parse(line) as { action?: string; clientHash?: string };
+        return event.action === action && event.clientHash === clientHash;
+      });
+      if (found) {
+        return;
+      }
+    } catch {
+      // Audit creation may still be in flight after the HTTP response completes.
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+
+  throw new Error(`Timed out waiting for ${action} audit event with client hash ${clientHash}.`);
 }
 
 async function createFullNamedPipe(path: string): Promise<Awaited<ReturnType<typeof open>>> {

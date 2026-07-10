@@ -1,16 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import type { BigIntStats } from "node:fs";
-import {
-  appendFile,
-  lstat,
-  mkdir,
-  open,
-  opendir,
-  rename,
-  rm,
-  stat,
-  type FileHandle
-} from "node:fs/promises";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
+import { lstat, mkdir, open, opendir, rename, rm, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP, SocketAddress } from "node:net";
 import { join, resolve } from "node:path";
@@ -273,6 +263,7 @@ const AUDIT_DEGRADATION_WARNING_INTERVAL_MS = 5_000;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
 const shareReadSessions = new Map<string, ShareReadSession>();
 const verifiedArchiveCache = new Map<string, { checksumSha256: string; statFingerprint: string }>();
+const storageDirectoryIdentities = new Map<string, BigIntStats>();
 let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
 let reservedShareRecordSlots = 0;
@@ -304,6 +295,7 @@ async function startShareServer(): Promise<void> {
     );
   }
   await ensureStorageLayout();
+  await migrateLegacyStoragePermissions();
   await reconcileStorageLayout();
   await pruneExpiredShareRecords(Date.now());
 
@@ -1119,6 +1111,7 @@ class ClientAbortedDownloadError extends Error {
 }
 
 class ArchiveIntegrityError extends Error {}
+class UnsafeStoragePathError extends Error {}
 
 async function handleSharePage(
   request: IncomingMessage,
@@ -1219,38 +1212,37 @@ async function readAvailableShareRecord(
   const record = await readRecord(id);
 
   if (!record) {
-    respondShareUnavailable(response, action, "not-found");
     await writeShareAuditEvent(request, {
       action,
       shareId: id,
       outcome: "not-found"
     });
+    respondShareUnavailable(response, action, "not-found");
     return null;
   }
 
   if (isShareExpired(record, Date.now())) {
-    respondShareUnavailable(response, action, "expired");
     await writeShareAuditEvent(request, {
       action,
       shareId: id,
       outcome: "expired"
     });
+    respondShareUnavailable(response, action, "expired");
     return null;
   }
 
   if (!allowRevoked && record.revokedAt) {
-    respondShareUnavailable(response, action, "revoked");
     await writeShareAuditEvent(request, {
       action,
       shareId: id,
       outcome: "revoked"
     });
+    respondShareUnavailable(response, action, "revoked");
     return null;
   }
 
   if (!(await hasValidStoredArchive(record))) {
     await removeStoredShare(id);
-    respondShareUnavailable(response, action, "not-found");
     await writeShareAuditEvent(request, {
       action,
       shareId: id,
@@ -1259,6 +1251,7 @@ async function readAvailableShareRecord(
         reason: "archive-integrity"
       }
     });
+    respondShareUnavailable(response, action, "not-found");
     return null;
   }
 
@@ -1972,25 +1965,209 @@ function roundTo(value: number, digits: number): number {
 }
 
 async function ensureStorageLayout(): Promise<void> {
+  storageDirectoryIdentities.clear();
   await mkdir(DATA_ROOT, {
     recursive: true,
     mode: 0o700
   });
-  await mkdir(ARCHIVES_DIR, {
-    recursive: true,
-    mode: 0o700
-  });
-  await mkdir(RECORDS_DIR, {
-    recursive: true,
-    mode: 0o700
-  });
-  await mkdir(AUDIT_DIR, {
-    recursive: true,
-    mode: 0o700
+  const dataRootIdentity = await hardenStorageDirectory(DATA_ROOT);
+  storageDirectoryIdentities.set(DATA_ROOT, dataRootIdentity);
+
+  for (const directoryPath of [ARCHIVES_DIR, RECORDS_DIR, AUDIT_DIR]) {
+    await assertStoragePathIdentity(DATA_ROOT, dataRootIdentity, "directory");
+    try {
+      await mkdir(directoryPath, { mode: 0o700 });
+    } catch (error) {
+      if (!hasFileSystemErrorCode(error, "EEXIST")) {
+        throw error;
+      }
+    }
+    await assertStoragePathIdentity(DATA_ROOT, dataRootIdentity, "directory");
+    const directoryIdentity = await hardenStorageDirectory(directoryPath);
+    storageDirectoryIdentities.set(directoryPath, directoryIdentity);
+  }
+
+  await assertManagedStorageLayout();
+}
+
+async function migrateLegacyStoragePermissions(): Promise<void> {
+  await assertManagedStorageLayout();
+  await hardenCommittedStorageFiles(ARCHIVES_DIR, (name) => name.endsWith(".webblackbox"));
+  await hardenCommittedStorageFiles(RECORDS_DIR, (name) => name.endsWith(".json"));
+  const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+  for (const auditPath of [SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH]) {
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    await hardenStorageFileIfPresent(auditPath);
+  }
+  await assertManagedStorageLayout();
+}
+
+async function hardenCommittedStorageFiles(
+  directoryPath: string,
+  isCommittedName: (name: string) => boolean
+): Promise<void> {
+  const directoryIdentity = getManagedStorageDirectoryIdentity(directoryPath);
+  await assertStoragePathIdentity(directoryPath, directoryIdentity, "directory");
+  const directory = await opendir(directoryPath);
+  let directoryEntries = 0;
+
+  for await (const entry of directory) {
+    directoryEntries += 1;
+    assertShareRecordDirectoryEntryBudget(directoryEntries);
+    if (!entry.name.startsWith(".") && isCommittedName(entry.name)) {
+      await assertStoragePathIdentity(directoryPath, directoryIdentity, "directory");
+      await hardenStorageFileIfPresent(join(directoryPath, entry.name));
+    }
+  }
+
+  await assertStoragePathIdentity(directoryPath, directoryIdentity, "directory");
+}
+
+async function assertManagedStorageLayout(): Promise<void> {
+  for (const directoryPath of [DATA_ROOT, ARCHIVES_DIR, RECORDS_DIR, AUDIT_DIR]) {
+    await assertStoragePathIdentity(
+      directoryPath,
+      getManagedStorageDirectoryIdentity(directoryPath),
+      "directory"
+    );
+  }
+}
+
+function getManagedStorageDirectoryIdentity(directoryPath: string): BigIntStats {
+  const identity = storageDirectoryIdentities.get(directoryPath);
+  if (!identity) {
+    throw unsafeStoragePathError(directoryPath, "has not been securely initialized");
+  }
+  return identity;
+}
+
+async function hardenStorageDirectory(directoryPath: string): Promise<BigIntStats> {
+  let handle: FileHandle | null = null;
+
+  try {
+    handle = await open(
+      directoryPath,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW
+    );
+    const openedStat = await handle.stat({ bigint: true });
+    if (!openedStat.isDirectory()) {
+      throw unsafeStoragePathError(directoryPath, "expected a regular directory");
+    }
+
+    if (process.platform !== "win32") {
+      await handle.chmod(0o700);
+    }
+    const hardenedStat = await handle.stat({ bigint: true });
+    if (
+      !hardenedStat.isDirectory() ||
+      (process.platform !== "win32" && (hardenedStat.mode & 0o777n) !== 0o700n)
+    ) {
+      throw unsafeStoragePathError(directoryPath, "could not enforce mode 0700");
+    }
+
+    await assertStoragePathIdentity(directoryPath, hardenedStat, "directory");
+    return hardenedStat;
+  } catch (error) {
+    if (error instanceof UnsafeStoragePathError) {
+      throw error;
+    }
+    throw unsafeStoragePathError(directoryPath, "refusing to follow or replace this path", error);
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function hardenStorageFileIfPresent(filePath: string): Promise<void> {
+  let pathStat: BigIntStats;
+  try {
+    pathStat = await lstat(filePath, { bigint: true });
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  if (!pathStat.isFile()) {
+    throw unsafeStoragePathError(filePath, "expected a regular file");
+  }
+
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const openedStat = await handle.stat({ bigint: true });
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1n ||
+      !isSameFileSystemObject(pathStat, openedStat)
+    ) {
+      throw unsafeStoragePathError(filePath, "changed while permissions were being migrated");
+    }
+
+    if (process.platform !== "win32") {
+      await handle.chmod(0o600);
+    }
+    const hardenedStat = await handle.stat({ bigint: true });
+    if (
+      !hardenedStat.isFile() ||
+      hardenedStat.nlink !== 1n ||
+      (process.platform !== "win32" && (hardenedStat.mode & 0o777n) !== 0o600n)
+    ) {
+      throw unsafeStoragePathError(filePath, "could not enforce mode 0600");
+    }
+
+    await assertStoragePathIdentity(filePath, hardenedStat, "file");
+  } catch (error) {
+    if (error instanceof UnsafeStoragePathError) {
+      throw error;
+    }
+    throw unsafeStoragePathError(filePath, "refusing to follow or replace this path", error);
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function assertStoragePathIdentity(
+  storagePath: string,
+  expectedStat: BigIntStats,
+  expectedKind: "directory" | "file"
+): Promise<void> {
+  let currentStat: BigIntStats;
+  try {
+    currentStat = await lstat(storagePath, { bigint: true });
+  } catch (error) {
+    throw unsafeStoragePathError(storagePath, "disappeared during a storage operation", error);
+  }
+
+  const hasExpectedKind =
+    expectedKind === "directory" ? currentStat.isDirectory() : currentStat.isFile();
+  const hasSafeLinkCount =
+    expectedKind === "directory" || (currentStat.nlink === 1n && expectedStat.nlink === 1n);
+  const expectedMode = expectedKind === "directory" ? 0o700n : 0o600n;
+  const hasExpectedMode =
+    process.platform === "win32" || (currentStat.mode & 0o777n) === expectedMode;
+  if (
+    !hasExpectedKind ||
+    !hasSafeLinkCount ||
+    !hasExpectedMode ||
+    !isSameFileSystemObject(currentStat, expectedStat)
+  ) {
+    throw unsafeStoragePathError(storagePath, "changed during a storage operation");
+  }
+}
+
+function unsafeStoragePathError(
+  storagePath: string,
+  reason: string,
+  cause?: unknown
+): UnsafeStoragePathError {
+  return new UnsafeStoragePathError(`Unsafe share storage path "${storagePath}": ${reason}.`, {
+    cause
   });
 }
 
 async function reconcileStorageLayout(): Promise<void> {
+  await assertManagedStorageLayout();
   const archiveIds = await collectStoredIds(ARCHIVES_DIR, ".webblackbox", ".upload");
   const recordIds = await collectStoredIds(RECORDS_DIR, ".json", ".record");
 
@@ -2008,9 +2185,16 @@ async function reconcileStorageLayout(): Promise<void> {
 
   for (const id of archiveIds) {
     if (!recordIds.has(id)) {
+      await assertStoragePathIdentity(
+        ARCHIVES_DIR,
+        getManagedStorageDirectoryIdentity(ARCHIVES_DIR),
+        "directory"
+      );
       await rm(archivePathForId(id), { force: true });
     }
   }
+
+  await assertManagedStorageLayout();
 }
 
 async function filterRecordsWithValidArchives(records: ShareRecord[]): Promise<ShareRecord[]> {
@@ -2052,20 +2236,35 @@ async function openVerifiedArchive(record: ShareRecord): Promise<VerifiedArchive
   let handle: FileHandle | null = null;
 
   try {
+    const archiveDirectoryIdentity = getManagedStorageDirectoryIdentity(ARCHIVES_DIR);
+    await assertStoragePathIdentity(ARCHIVES_DIR, archiveDirectoryIdentity, "directory");
     const archivePath = archivePathForId(record.id);
     const pathStat = await lstat(archivePath, { bigint: true });
     if (!pathStat.isFile() || pathStat.size !== BigInt(record.sizeBytes)) {
       throw new ArchiveIntegrityError();
     }
 
-    handle = await open(archivePath, "r");
-    const openedStat = await handle.stat({ bigint: true });
+    handle = await open(archivePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    let openedStat = await handle.stat({ bigint: true });
     if (
       !openedStat.isFile() ||
+      openedStat.nlink !== 1n ||
       openedStat.size !== BigInt(record.sizeBytes) ||
-      !isSameArchiveFile(pathStat, openedStat)
+      !isSameFileSystemObject(pathStat, openedStat)
     ) {
       throw new ArchiveIntegrityError();
+    }
+    if (process.platform !== "win32" && (openedStat.mode & 0o777n) !== 0o600n) {
+      await handle.chmod(0o600);
+      openedStat = await handle.stat({ bigint: true });
+      if (
+        !openedStat.isFile() ||
+        openedStat.nlink !== 1n ||
+        openedStat.size !== BigInt(record.sizeBytes) ||
+        (openedStat.mode & 0o777n) !== 0o600n
+      ) {
+        throw new ArchiveIntegrityError();
+      }
     }
 
     const statFingerprint = archiveStatFingerprint(openedStat);
@@ -2077,6 +2276,7 @@ async function openVerifiedArchive(record: ShareRecord): Promise<VerifiedArchive
       verifiedArchiveCache.delete(record.id);
       verifiedArchiveCache.set(record.id, cached);
       await assertArchivePathStillReferences(archivePath, openedStat);
+      await assertStoragePathIdentity(ARCHIVES_DIR, archiveDirectoryIdentity, "directory");
       return { handle };
     }
 
@@ -2090,6 +2290,7 @@ async function openVerifiedArchive(record: ShareRecord): Promise<VerifiedArchive
     }
 
     await assertArchivePathStillReferences(archivePath, verifiedStat);
+    await assertStoragePathIdentity(ARCHIVES_DIR, archiveDirectoryIdentity, "directory");
     cacheVerifiedArchive(record.id, checksumSha256, statFingerprint);
     return { handle };
   } catch (error) {
@@ -2097,7 +2298,7 @@ async function openVerifiedArchive(record: ShareRecord): Promise<VerifiedArchive
     if (error instanceof ArchiveIntegrityError) {
       throw error;
     }
-    if (isFileNotFoundError(error)) {
+    if (isFileNotFoundError(error) || hasFileSystemErrorCode(error, "ELOOP")) {
       throw new ArchiveIntegrityError();
     }
     throw error;
@@ -2117,8 +2318,8 @@ async function assertArchivePathStillReferences(
   }
 }
 
-function isSameArchiveFile(pathStat: BigIntStats, openedStat: BigIntStats): boolean {
-  return pathStat.dev === openedStat.dev && pathStat.ino === openedStat.ino;
+function isSameFileSystemObject(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function archiveStatFingerprint(archiveStat: BigIntStats): string {
@@ -2168,6 +2369,18 @@ function cacheVerifiedArchive(id: string, checksumSha256: string, statFingerprin
 async function removeStoredShare(id: string): Promise<void> {
   verifiedArchiveCache.delete(id);
   await Promise.all([
+    assertStoragePathIdentity(
+      RECORDS_DIR,
+      getManagedStorageDirectoryIdentity(RECORDS_DIR),
+      "directory"
+    ),
+    assertStoragePathIdentity(
+      ARCHIVES_DIR,
+      getManagedStorageDirectoryIdentity(ARCHIVES_DIR),
+      "directory"
+    )
+  ]);
+  await Promise.all([
     rm(recordPathForId(id), { force: true }),
     rm(archivePathForId(id), { force: true })
   ]);
@@ -2178,6 +2391,8 @@ async function collectStoredIds(
   committedSuffix: string,
   temporarySuffix: string
 ): Promise<Set<string>> {
+  const directoryIdentity = getManagedStorageDirectoryIdentity(directoryPath);
+  await assertStoragePathIdentity(directoryPath, directoryIdentity, "directory");
   const directory = await opendir(directoryPath);
   const ids = new Set<string>();
   let directoryEntries = 0;
@@ -2190,6 +2405,7 @@ async function collectStoredIds(
     }
 
     if (entry.name.startsWith(".") && entry.name.endsWith(temporarySuffix)) {
+      await assertStoragePathIdentity(directoryPath, directoryIdentity, "directory");
       await rm(join(directoryPath, entry.name), { force: true });
       continue;
     }
@@ -2204,6 +2420,7 @@ async function collectStoredIds(
     }
   }
 
+  await assertStoragePathIdentity(directoryPath, directoryIdentity, "directory");
   return ids;
 }
 
@@ -2214,18 +2431,36 @@ async function readRecord(id: string): Promise<ShareRecord | null> {
 
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
-    handle = await open(recordPathForId(id), "r");
-    const recordStat = await handle.stat();
+    const recordDirectoryIdentity = getManagedStorageDirectoryIdentity(RECORDS_DIR);
+    await assertStoragePathIdentity(RECORDS_DIR, recordDirectoryIdentity, "directory");
+    const recordPath = recordPathForId(id);
+    handle = await open(recordPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    let recordStat = await handle.stat({ bigint: true });
     if (
       !recordStat.isFile() ||
-      !Number.isSafeInteger(recordStat.size) ||
-      recordStat.size <= 0 ||
-      recordStat.size > MAX_SHARE_RECORD_BYTES
+      recordStat.nlink !== 1n ||
+      recordStat.size <= 0n ||
+      recordStat.size > BigInt(MAX_SHARE_RECORD_BYTES)
     ) {
       return null;
     }
+    if (process.platform !== "win32" && (recordStat.mode & 0o777n) !== 0o600n) {
+      await handle.chmod(0o600);
+      recordStat = await handle.stat({ bigint: true });
+      if (
+        !recordStat.isFile() ||
+        recordStat.nlink !== 1n ||
+        recordStat.size <= 0n ||
+        recordStat.size > BigInt(MAX_SHARE_RECORD_BYTES) ||
+        (recordStat.mode & 0o777n) !== 0o600n
+      ) {
+        return null;
+      }
+    }
 
-    const raw = await readFileHandleExactly(handle, recordStat.size);
+    const raw = await readFileHandleExactly(handle, Number(recordStat.size));
+    await assertStoragePathIdentity(recordPath, recordStat, "file");
+    await assertStoragePathIdentity(RECORDS_DIR, recordDirectoryIdentity, "directory");
     const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)) as unknown;
     return normalizePersistedShareRecord(parsed, id);
   } catch {
@@ -2315,6 +2550,8 @@ function assertShareRecordDirectoryEntryBudget(entries: number): void {
 }
 
 async function writeRecord(record: ShareRecord): Promise<void> {
+  const recordDirectoryIdentity = getManagedStorageDirectoryIdentity(RECORDS_DIR);
+  await assertStoragePathIdentity(RECORDS_DIR, recordDirectoryIdentity, "directory");
   const payload = Buffer.from(JSON.stringify(record, null, 2), "utf8");
   if (payload.byteLength > MAX_SHARE_RECORD_BYTES) {
     throw new Error(`Share record exceeds ${MAX_SHARE_RECORD_BYTES} bytes.`);
@@ -2333,6 +2570,7 @@ async function writeRecord(record: ShareRecord): Promise<void> {
     await handle.sync();
     await handle.close();
     handle = null;
+    await assertStoragePathIdentity(RECORDS_DIR, recordDirectoryIdentity, "directory");
     await rename(temporaryPath, recordPathForId(record.id));
     committed = true;
     await syncDirectoryBestEffort(RECORDS_DIR);
@@ -3077,34 +3315,87 @@ async function appendShareAuditLine(line: string, signal: AbortSignal): Promise<
   }
 
   throwIfAuditWriteAborted(signal);
-  let currentBytes = 0;
+  let currentLog = await openAuditLogForAppend();
   try {
-    const current = await stat(SHARE_AUDIT_LOG_PATH);
-    currentBytes = current.isFile() ? current.size : 0;
+    if (
+      currentLog.stat.size > 0n &&
+      currentLog.stat.size + BigInt(lineBytes) > BigInt(MAX_SHARE_AUDIT_LOG_BYTES)
+    ) {
+      await currentLog.handle?.close();
+      currentLog = { handle: null, stat: currentLog.stat };
+      throwIfAuditWriteAborted(signal);
+      await assertStoragePathIdentity(
+        AUDIT_DIR,
+        getManagedStorageDirectoryIdentity(AUDIT_DIR),
+        "directory"
+      );
+      await rm(SHARE_AUDIT_ROTATED_LOG_PATH, { force: true });
+      throwIfAuditWriteAborted(signal);
+      try {
+        await rename(SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH);
+      } catch (error) {
+        if (!isFileNotFoundError(error)) {
+          throw error;
+        }
+      }
+      await hardenStorageFileIfPresent(SHARE_AUDIT_ROTATED_LOG_PATH);
+      throwIfAuditWriteAborted(signal);
+      currentLog = await openAuditLogForAppend();
+    }
+
+    if (!currentLog.handle) {
+      throw new Error("Share audit log handle is unavailable.");
+    }
+    throwIfAuditWriteAborted(signal);
+    await currentLog.handle.appendFile(line, { encoding: "utf8" });
+    await assertStoragePathIdentity(SHARE_AUDIT_LOG_PATH, currentLog.stat, "file");
+  } finally {
+    await currentLog.handle?.close().catch(() => undefined);
+  }
+}
+
+async function openAuditLogForAppend(): Promise<{
+  handle: FileHandle | null;
+  stat: BigIntStats;
+}> {
+  let handle: FileHandle | null = null;
+  try {
+    const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    handle = await open(
+      SHARE_AUDIT_LOG_PATH,
+      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW,
+      0o600
+    );
+    const openedStat = await handle.stat({ bigint: true });
+    if (!openedStat.isFile() || openedStat.nlink !== 1n) {
+      throw unsafeStoragePathError(SHARE_AUDIT_LOG_PATH, "expected a regular audit log");
+    }
+
+    if (process.platform !== "win32") {
+      await handle.chmod(0o600);
+    }
+    const hardenedStat = await handle.stat({ bigint: true });
+    if (
+      hardenedStat.nlink !== 1n ||
+      (process.platform !== "win32" && (hardenedStat.mode & 0o777n) !== 0o600n)
+    ) {
+      throw unsafeStoragePathError(SHARE_AUDIT_LOG_PATH, "could not enforce mode 0600");
+    }
+    await assertStoragePathIdentity(SHARE_AUDIT_LOG_PATH, hardenedStat, "file");
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    return { handle, stat: hardenedStat };
   } catch (error) {
-    if (!isFileNotFoundError(error)) {
+    await handle?.close().catch(() => undefined);
+    if (error instanceof UnsafeStoragePathError) {
       throw error;
     }
+    throw unsafeStoragePathError(
+      SHARE_AUDIT_LOG_PATH,
+      "refusing to follow or replace this path",
+      error
+    );
   }
-
-  throwIfAuditWriteAborted(signal);
-  if (currentBytes > 0 && currentBytes + lineBytes > MAX_SHARE_AUDIT_LOG_BYTES) {
-    await rm(SHARE_AUDIT_ROTATED_LOG_PATH, { force: true });
-    throwIfAuditWriteAborted(signal);
-    try {
-      await rename(SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH);
-    } catch (error) {
-      if (!isFileNotFoundError(error)) {
-        throw error;
-      }
-    }
-  }
-
-  throwIfAuditWriteAborted(signal);
-  await appendFile(SHARE_AUDIT_LOG_PATH, line, {
-    encoding: "utf8",
-    mode: 0o600
-  });
 }
 
 function reportAuditWriteDegradation(
@@ -3152,10 +3443,12 @@ function throwIfAuditWriteAborted(signal: AbortSignal): void {
 }
 
 function isFileNotFoundError(error: unknown): boolean {
+  return hasFileSystemErrorCode(error, "ENOENT");
+}
+
+function hasFileSystemErrorCode(error: unknown, code: string): boolean {
   return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as Error & { code?: unknown }).code === "ENOENT"
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
   );
 }
 
