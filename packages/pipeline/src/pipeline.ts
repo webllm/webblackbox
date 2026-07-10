@@ -44,6 +44,11 @@ export type ExportBundleOptions = {
   maxArchiveBytes?: number | null;
   recentWindowMs?: number | null;
   strictPrivacyScanner?: boolean;
+  /**
+   * @deprecated Plaintext export eligibility is determined exclusively by the active capture
+   * policy and trusted capture-context evidence. This flag is retained for source compatibility
+   * and cannot bypass encryption requirements.
+   */
   allowPlaintextLocalExport?: boolean;
 };
 
@@ -308,40 +313,32 @@ export class FlightRecorderPipeline {
   }
 
   private assertExportEncryptionPolicy(options: ExportBundleOptions): void {
+    const hasPassphrase = typeof options.passphrase === "string" && options.passphrase.length > 0;
+
+    if (hasPassphrase) {
+      return;
+    }
+
     const policy = this.options.capturePolicy;
 
     if (!policy) {
-      return;
-    }
-
-    const hasPassphrase = typeof options.passphrase === "string" && options.passphrase.length > 0;
-
-    if (!hasPassphrase && options.allowPlaintextLocalExport === true) {
-      return;
-    }
-
-    if (policy.encryption.archive === "required" && !hasPassphrase) {
-      throw new Error("Export encryption is required by the active capture policy.");
-    }
-
-    if (
-      !hasPassphrase &&
-      (policy.encryption.archive === "synthetic-local-debug-exempt" ||
-        policy.encryption.archive === "explicit-low-risk-override")
-    ) {
-      assertTrustedPlaintextExemptionEvidence(
-        policy,
-        this.options.trustedPlaintextExemptionEvidenceRefs
+      throw new Error(
+        "Export encryption is required unless the active capture policy grants a trusted synthetic or local-debug plaintext exemption."
       );
     }
 
-    if (
-      policy.captureContext === "real-user" &&
-      policy.encryption.archive !== "synthetic-local-debug-exempt" &&
-      !hasPassphrase
-    ) {
+    if (policy.captureContext === "real-user") {
       throw new Error("Real-user archives must be encrypted before export or share.");
     }
+
+    if (policy.encryption.archive === "required") {
+      throw new Error("Export encryption is required by the active capture policy.");
+    }
+
+    assertTrustedPlaintextExemptionEvidence(
+      policy,
+      this.options.trustedPlaintextExemptionEvidenceRefs
+    );
   }
 
   private async listSessionBlobs(): Promise<StoredBlob[]> {

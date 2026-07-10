@@ -338,7 +338,7 @@ function bindActions(container: HTMLElement): void {
       postUiMessage({
         kind: "ui.export",
         sid,
-        ...(hasDialogPassphrase(passphrase) ? { passphrase } : {}),
+        passphrase,
         saveAs: false
       });
     });
@@ -438,6 +438,7 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
     input.type = "password";
     input.className = "wb-input wb-prompt-field";
     input.autocomplete = "off";
+    input.required = true;
 
     const actions = document.createElement("div");
     actions.className = "wb-confirm-actions";
@@ -474,7 +475,14 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
     const submitPassphrase = (): void => {
       const passphrase = input.value;
 
-      finish(passphrase.trim().length > 0 ? passphrase : "");
+      if (passphrase.trim().length === 0) {
+        input.setCustomValidity(t("popupPassphraseRequired"));
+        input.reportValidity();
+        input.focus();
+        return;
+      }
+
+      finish(passphrase);
     };
 
     const onKeydown = (event: KeyboardEvent): void => {
@@ -509,10 +517,6 @@ function openPassphraseDialog(sid: string): Promise<string | null> {
     document.body.append(overlay);
     input.focus();
   });
-}
-
-function hasDialogPassphrase(passphrase: string): boolean {
-  return passphrase.length > 0;
 }
 
 function openConfirmDialog(message: string): Promise<boolean> {

@@ -11,6 +11,8 @@
 
 ### Patch Changes
 
+- Required an export passphrase in the popup and sessions UI and removed the automatic plaintext
+  local-export override from the service-worker/offscreen pipeline bridge.
 - Updated dependencies
   - @webblackbox/cdp-router@0.6.0
   - @webblackbox/pipeline@0.6.0

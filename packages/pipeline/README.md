@@ -24,7 +24,7 @@ The event processing pipeline for WebBlackbox. Handles chunking, indexing, blob 
 - **EventChunker** — Groups events into size-bounded chunks with codec support
 - **EventIndexer** — Builds time-based, request-based, and inverted text search indexes on demand from stored chunks
 - **Codec** — NDJSON chunk codec support for `none`, `gzip`, `br`, and `zst`
-- **Archive Export** — Creates `.webblackbox` ZIP archives with optional AES-GCM encryption
+- **Archive Export** — Creates policy-gated `.webblackbox` ZIP archives with AES-GCM encryption
 - **PipelineStorage** — Abstract storage interface with in-memory implementation
 - **IndexedDB Quota Recovery** — Indexed storage evicts oldest sessions on quota pressure (best-effort)
 
@@ -68,7 +68,7 @@ const indexes = await pipeline.finalizeIndexes();
 
 // Export as archive
 const result = await pipeline.exportBundle({
-  passphrase: "optional-encryption-key",
+  passphrase: "archive-encryption-key",
   includeScreenshots: true,
   maxArchiveBytes: 100 * 1024 * 1024,
   recentWindowMs: 20 * 60 * 1000
@@ -78,6 +78,13 @@ console.log(`Exported: ${result.fileName} (${result.bytes.length} bytes)`);
 ```
 
 `includeScreenshots`, `maxArchiveBytes`, and `recentWindowMs` are optional export filters. If omitted, export includes the full retained session.
+
+An export passphrase is required for real-user sessions, policies with `archive: "required"`,
+and callers that do not supply a capture policy. Plaintext export is limited to synthetic or
+local-debug policies that explicitly grant an exemption and whose `captureContextEvidenceRef`
+is present in `trustedPlaintextExemptionEvidenceRefs`. The deprecated
+`allowPlaintextLocalExport` option is retained for source compatibility but cannot bypass these
+checks.
 
 ### Optional At-Rest Storage Encryption
 

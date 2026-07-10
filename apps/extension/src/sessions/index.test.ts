@@ -114,7 +114,7 @@ describe("sessions page rendering", () => {
     expect(document.getElementById("pwned")).toBeNull();
   });
 
-  it("exports without encryption when the passphrase prompt is left empty", async () => {
+  it("requires an export passphrase before posting the request", async () => {
     const port = new FakePort();
     installChromeStub(port);
 
@@ -134,20 +134,11 @@ describe("sessions page rendering", () => {
     });
     await flushSessions();
 
+    port.postMessage.mockClear();
     document.querySelector<HTMLButtonElement>("button[data-export]")?.click();
     await flushSessions();
 
     document.querySelector<HTMLButtonElement>("[data-passphrase-submit]")?.click();
-    await flushSessions();
-
-    expect(port.postMessage).toHaveBeenCalledWith({
-      kind: "ui.export",
-      sid: "sid-export",
-      saveAs: false
-    });
-
-    port.postMessage.mockClear();
-    document.querySelector<HTMLButtonElement>("button[data-export]")?.click();
     await flushSessions();
 
     const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
@@ -155,6 +146,9 @@ describe("sessions page rendering", () => {
     if (!passphraseInput) {
       throw new Error("missing passphrase input");
     }
+
+    expect(port.postMessage).not.toHaveBeenCalled();
+    expect(passphraseInput.validationMessage).toBe("A passphrase is required for this export.");
 
     passphraseInput.value = " session-secret ";
     passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));

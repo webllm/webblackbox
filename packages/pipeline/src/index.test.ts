@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 
 import {
+  type CapturePolicy,
   DEFAULT_CAPTURE_POLICY,
   type SessionMetadata,
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
 
 import { readWebBlackboxArchive } from "./exporter.js";
-import { FlightRecorderPipeline } from "./pipeline.js";
+import { FlightRecorderPipeline, type FlightRecorderPipelineOptions } from "./pipeline.js";
 import {
   derivePipelineStorageKey,
   EncryptedPipelineStorage,
@@ -31,6 +32,24 @@ const FULL_EXPORT_OPTIONS = {
 } as const;
 const TRUSTED_SYNTHETIC_EVIDENCE_REF = "synthetic-fixture:pipeline-export-0001";
 const TRUSTED_LOCAL_DEBUG_EVIDENCE_REF = "local-attestation:low-risk-override-0001";
+const TRUSTED_PLAINTEXT_TEST_POLICY = {
+  ...DEFAULT_CAPTURE_POLICY,
+  captureContext: "synthetic",
+  captureContextEvidenceRef: TRUSTED_SYNTHETIC_EVIDENCE_REF,
+  encryption: {
+    localAtRest: "required",
+    archive: "synthetic-local-debug-exempt",
+    archiveKeyEnvelope: "none"
+  }
+} satisfies CapturePolicy;
+
+function createTestPipeline(options: FlightRecorderPipelineOptions): FlightRecorderPipeline {
+  return new FlightRecorderPipeline({
+    capturePolicy: TRUSTED_PLAINTEXT_TEST_POLICY,
+    trustedPlaintextExemptionEvidenceRefs: [TRUSTED_SYNTHETIC_EVIDENCE_REF],
+    ...options
+  });
+}
 
 function createEvent(
   id: string,
@@ -95,7 +114,7 @@ function createNoisyPayload(size: number, seed: number): string {
 describe("pipeline", () => {
   it("rejects events without privacy classification", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 100
@@ -110,7 +129,7 @@ describe("pipeline", () => {
 
   it("chunks events and builds request index", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 100
@@ -131,7 +150,7 @@ describe("pipeline", () => {
 
   it("indexes request ids from nested request payloads", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-nested-request-id"
@@ -164,7 +183,7 @@ describe("pipeline", () => {
   it("encodes and decodes chunk codecs when runtime support is available", async () => {
     for (const codec of ["gzip", "br", "zst"] as const) {
       const storage = new MemoryPipelineStorage();
-      const pipeline = new FlightRecorderPipeline({
+      const pipeline = createTestPipeline({
         session: {
           ...SESSION,
           sid: `S-codec-${codec}`
@@ -200,7 +219,7 @@ describe("pipeline", () => {
 
   it("sanitizes session URLs in export manifests", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-manifest-url-privacy",
@@ -235,7 +254,7 @@ describe("pipeline", () => {
 
   it("applies the default export policy when no options are passed", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-default-export-policy"
@@ -271,7 +290,7 @@ describe("pipeline", () => {
 
   it("allows local export and records scanner findings when raw secrets remain", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-scanner-warning"
@@ -304,7 +323,7 @@ describe("pipeline", () => {
 
   it("blocks scanner findings when strict privacy scanning is requested", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-scanner-strict"
@@ -325,9 +344,9 @@ describe("pipeline", () => {
     );
   });
 
-  it("requires encryption for real-user capture policies", async () => {
+  it("requires encryption for real-user capture policies even when the legacy plaintext flag is set", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-real-user-encryption"
@@ -340,37 +359,53 @@ describe("pipeline", () => {
     await pipeline.start();
     await pipeline.ingest(createEvent("E-real-user", "user.click", Date.now()));
 
-    await expect(pipeline.exportBundle()).rejects.toThrow(/encryption is required/i);
+    await expect(pipeline.exportBundle({ allowPlaintextLocalExport: true })).rejects.toThrow(
+      /real-user archives must be encrypted/i
+    );
   });
 
-  it("allows explicit plaintext local exports for real-user capture policies", async () => {
+  it("requires encryption when no capture policy can prove a trusted plaintext exemption", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = new FlightRecorderPipeline({
       session: {
         ...SESSION,
-        sid: "S-real-user-plaintext-local"
+        sid: "S-missing-export-policy"
       },
       storage,
-      maxChunkBytes: 512,
-      capturePolicy: DEFAULT_CAPTURE_POLICY
+      maxChunkBytes: 512
     });
 
     await pipeline.start();
-    await pipeline.ingest(createEvent("E-real-user-plaintext", "user.click", Date.now()));
+    await pipeline.ingest(createEvent("E-missing-export-policy", "user.click", Date.now()));
 
-    const exported = await pipeline.exportBundle({
-      allowPlaintextLocalExport: true
-    });
-    const parsed = await readWebBlackboxArchive(exported.bytes);
+    await expect(pipeline.exportBundle({ allowPlaintextLocalExport: true })).rejects.toThrow(
+      /trusted synthetic or local-debug plaintext exemption/i
+    );
+  });
 
-    expect(parsed.manifest.encryption).toBeUndefined();
-    expect(parsed.privacyManifest?.encryption.archive).toBe("plaintext");
-    expect(parsed.privacyManifest?.transfer).toMatchObject({
-      destination: "local-download",
-      archiveKeyEnvelope: "none",
-      encrypted: false,
-      shareEligible: false
+  it("requires encryption when a synthetic capture policy marks archives as required", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-synthetic-encryption-required"
+      },
+      storage,
+      maxChunkBytes: 512,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_SYNTHETIC_EVIDENCE_REF],
+      capturePolicy: {
+        ...DEFAULT_CAPTURE_POLICY,
+        captureContext: "synthetic",
+        captureContextEvidenceRef: TRUSTED_SYNTHETIC_EVIDENCE_REF
+      }
     });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-synthetic-required", "user.click", Date.now()));
+
+    await expect(pipeline.exportBundle({ allowPlaintextLocalExport: true })).rejects.toThrow(
+      /encryption is required by the active capture policy/i
+    );
   });
 
   it("rejects plaintext capture-context exemptions without trusted evidence", async () => {
@@ -380,7 +415,7 @@ describe("pipeline", () => {
       "local-attestation:forged-local-debug-0001"
     ]) {
       const storage = new MemoryPipelineStorage();
-      const pipeline = new FlightRecorderPipeline({
+      const pipeline = createTestPipeline({
         session: {
           ...SESSION,
           sid: `S-plaintext-evidence-${evidenceRef ?? "missing"}`
@@ -408,7 +443,7 @@ describe("pipeline", () => {
 
   it("allows plaintext synthetic exemptions with trusted evidence", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-trusted-synthetic-exemption"
@@ -438,9 +473,41 @@ describe("pipeline", () => {
     expect(parsed.privacyManifest?.transfer?.archiveKeyEnvelope).toBe("none");
   });
 
+  it("allows plaintext local-debug exemptions with trusted evidence", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({
+      session: {
+        ...SESSION,
+        sid: "S-trusted-local-debug-exemption"
+      },
+      storage,
+      maxChunkBytes: 512,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
+      capturePolicy: {
+        ...DEFAULT_CAPTURE_POLICY,
+        captureContext: "local-debug",
+        captureContextEvidenceRef: TRUSTED_LOCAL_DEBUG_EVIDENCE_REF,
+        encryption: {
+          localAtRest: "required",
+          archive: "synthetic-local-debug-exempt",
+          archiveKeyEnvelope: "none"
+        }
+      }
+    });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-trusted-local-debug", "user.click", Date.now()));
+
+    const exported = await pipeline.exportBundle();
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.manifest.encryption).toBeUndefined();
+    expect(parsed.privacyManifest?.transfer?.archiveKeyEnvelope).toBe("none");
+  });
+
   it("rejects explicit low-risk overrides when high-risk artifacts are present", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: {
         ...SESSION,
         sid: "S-low-risk-override-high-risk"
@@ -475,7 +542,7 @@ describe("pipeline", () => {
 
   it("ingests batches without losing index coverage", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 120
@@ -499,7 +566,7 @@ describe("pipeline", () => {
 
   it("skips oversized hash/base64-like terms in inverted index", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 256
@@ -529,7 +596,7 @@ describe("pipeline", () => {
 
   it("deduplicates blobs by sha256", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 512
@@ -551,7 +618,7 @@ describe("pipeline", () => {
       ...SESSION,
       sid: "S-recovery"
     };
-    const initialPipeline = new FlightRecorderPipeline({
+    const initialPipeline = createTestPipeline({
       session,
       storage,
       maxChunkBytes: 128
@@ -574,7 +641,7 @@ describe("pipeline", () => {
     );
     await initialPipeline.flush();
 
-    const recoveredPipeline = new FlightRecorderPipeline({
+    const recoveredPipeline = createTestPipeline({
       session,
       storage,
       maxChunkBytes: 128
@@ -600,7 +667,7 @@ describe("pipeline", () => {
       ...SESSION,
       sid: "S-recovery-seq"
     };
-    const initialPipeline = new FlightRecorderPipeline({
+    const initialPipeline = createTestPipeline({
       session,
       storage,
       maxChunkBytes: 128
@@ -615,7 +682,7 @@ describe("pipeline", () => {
     );
     await initialPipeline.flush();
 
-    const recoveredPipeline = new FlightRecorderPipeline({
+    const recoveredPipeline = createTestPipeline({
       session,
       storage,
       maxChunkBytes: 128
@@ -638,7 +705,7 @@ describe("pipeline", () => {
 
   it("exports only blobs referenced by retained events", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -666,7 +733,7 @@ describe("pipeline", () => {
 
   it("exports and reads .webblackbox archive", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -693,7 +760,7 @@ describe("pipeline", () => {
 
   it("reads plain archives without global Web Crypto when Node crypto is available", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -725,7 +792,7 @@ describe("pipeline", () => {
 
   it("rejects archives with integrity mismatches on read", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -757,7 +824,7 @@ describe("pipeline", () => {
 
   it("rejects archives with undeclared event chunks on read", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -791,7 +858,7 @@ describe("pipeline", () => {
 
   it("writes provided redaction profile into export manifest", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128,
@@ -879,7 +946,7 @@ describe("pipeline", () => {
     const storage = new EncryptedPipelineStorage(baseStorage, {
       key: key.key
     });
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -915,7 +982,7 @@ describe("pipeline", () => {
 
   it("supports export filtering by screenshot and recent time window", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -951,7 +1018,7 @@ describe("pipeline", () => {
 
   it("supports independent export filtering for screen recordings", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 128
@@ -1023,7 +1090,7 @@ describe("pipeline", () => {
       startedAt: sessionEnd - 60 * 60 * 1000,
       endedAt: sessionEnd
     };
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session,
       storage,
       maxChunkBytes: 128
@@ -1052,7 +1119,7 @@ describe("pipeline", () => {
       sid: "S-export-live-anchor",
       startedAt: now - 60 * 60 * 1000
     };
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session,
       storage,
       maxChunkBytes: 128
@@ -1072,7 +1139,7 @@ describe("pipeline", () => {
 
   it("limits exported archive size to recent suffix of chunks", async () => {
     const storage = new MemoryPipelineStorage();
-    const pipeline = new FlightRecorderPipeline({
+    const pipeline = createTestPipeline({
       session: SESSION,
       storage,
       maxChunkBytes: 512
@@ -1112,12 +1179,12 @@ describe("pipeline", () => {
       ...SESSION,
       sid: "S-purge-b"
     };
-    const pipelineA = new FlightRecorderPipeline({
+    const pipelineA = createTestPipeline({
       session: sessionA,
       storage,
       maxChunkBytes: 128
     });
-    const pipelineB = new FlightRecorderPipeline({
+    const pipelineB = createTestPipeline({
       session: sessionB,
       storage,
       maxChunkBytes: 128

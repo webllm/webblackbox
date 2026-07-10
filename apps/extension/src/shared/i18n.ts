@@ -56,9 +56,9 @@ const EXTENSION_MESSAGES = {
     popupMarkerHint: "Marker: Ctrl/Cmd + Shift + M",
     popupExportPassphraseTitle: "Export Passphrase",
     popupExportPassphraseBody:
-      "Add an AES-GCM passphrase to encrypt this export. Leave blank to export without encryption.",
+      "Enter an AES-GCM passphrase. Real-user exports cannot be created without encryption.",
     popupPassphraseLabel: "Passphrase",
-    popupPassphraseRequired: "Enter a passphrase to encrypt this export.",
+    popupPassphraseRequired: "A passphrase is required for this export.",
     popupCancel: "Cancel",
     popupExporting: "Exporting...",
     popupExported: "Exported: {name}",
@@ -150,7 +150,7 @@ const EXTENSION_MESSAGES = {
     sessionsDeletePrompt: "Delete session {sid}? This removes local archive data.",
     sessionsExportDialogTitle: "Export Session",
     sessionsExportDialogBody:
-      "Add an AES-GCM passphrase to encrypt this export. Leave blank to export without encryption.",
+      "Enter an AES-GCM passphrase. Real-user exports cannot be created without encryption.",
     sessionsConfirmDeleteTitle: "Confirm Delete",
     sessionsTitle: "Sessions"
   },
@@ -203,9 +203,9 @@ const EXTENSION_MESSAGES = {
     popupOptions: "设置",
     popupMarkerHint: "标记快捷键：Ctrl/Cmd + Shift + M",
     popupExportPassphraseTitle: "导出口令",
-    popupExportPassphraseBody: "填写 AES-GCM 口令可加密导出；留空则不加密导出。",
+    popupExportPassphraseBody: "请输入 AES-GCM 口令。真实用户会话必须加密后才能导出。",
     popupPassphraseLabel: "口令",
-    popupPassphraseRequired: "填写口令将加密导出。",
+    popupPassphraseRequired: "此次导出必须填写口令。",
     popupCancel: "取消",
     popupExporting: "正在导出...",
     popupExported: "已导出：{name}",
@@ -291,7 +291,7 @@ const EXTENSION_MESSAGES = {
     sessionsFallbackTab: "标签页 {tabId}",
     sessionsDeletePrompt: "删除会话 {sid}？这会移除本地归档数据。",
     sessionsExportDialogTitle: "导出会话",
-    sessionsExportDialogBody: "填写 AES-GCM 口令可加密导出；留空则不加密导出。",
+    sessionsExportDialogBody: "请输入 AES-GCM 口令。真实用户会话必须加密后才能导出。",
     sessionsConfirmDeleteTitle: "确认删除",
     sessionsTitle: "会话"
   }

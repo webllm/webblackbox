@@ -218,7 +218,6 @@ type SessionPipelineClient = {
     includeScreenRecordings?: boolean;
     maxArchiveBytes?: number;
     recentWindowMs?: number;
-    allowPlaintextLocalExport?: boolean;
   }) => Promise<PipelineExportDownloadResult>;
   close: (options?: { purge?: boolean }) => Promise<void>;
 };
@@ -249,7 +248,6 @@ type OffscreenPipelineRequest = {
   includeScreenRecordings?: boolean;
   maxArchiveBytes?: number;
   recentWindowMs?: number;
-  allowPlaintextLocalExport?: boolean;
   purge?: boolean;
   recordingId?: string;
   streamId?: string;
@@ -1133,8 +1131,7 @@ async function exportSession(
         includeScreenshots: effectivePolicy.includeScreenshots,
         includeScreenRecordings: effectivePolicy.includeScreenRecordings,
         maxArchiveBytes: effectivePolicy.maxArchiveBytes,
-        recentWindowMs: effectivePolicy.recentWindowMs,
-        allowPlaintextLocalExport: !encrypted
+        recentWindowMs: effectivePolicy.recentWindowMs
       });
     });
 
@@ -1943,8 +1940,7 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         includeScreenshots: options.includeScreenshots,
         includeScreenRecordings: options.includeScreenRecordings,
         maxArchiveBytes: options.maxArchiveBytes,
-        recentWindowMs: options.recentWindowMs,
-        allowPlaintextLocalExport: options.allowPlaintextLocalExport
+        recentWindowMs: options.recentWindowMs
       });
 
       return normalizePipelineExportDownloadResult(exported);

@@ -659,7 +659,7 @@ describe("popup export policy form", () => {
     expect(getExportButton().disabled).toBe(false);
   });
 
-  it("exports without encryption when the passphrase prompt is left empty", async () => {
+  it("requires an export passphrase before posting the request", async () => {
     const port = new FakePort();
     installChromeStub(port);
 
@@ -679,15 +679,31 @@ describe("popup export policy form", () => {
     });
     await flushPopup();
 
+    port.postMessage.mockClear();
     getExportButton().click();
     await flushPopup();
 
     getPassphraseSubmitButton().click();
     await flushPopup();
 
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!passphraseInput) {
+      throw new Error("missing passphrase input");
+    }
+
+    expect(port.postMessage).not.toHaveBeenCalled();
+    expect(passphraseInput.validationMessage).toBe("A passphrase is required for this export.");
+
+    passphraseInput.value = " export-secret ";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
+    getPassphraseSubmitButton().click();
+    await flushPopup();
+
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.export",
       sid: "sid-empty-passphrase",
+      passphrase: " export-secret ",
       saveAs: false,
       policy: {
         includeScreenshots: false,
@@ -1021,12 +1037,21 @@ describe("popup export policy form", () => {
 
     getExportButton().click();
     await flushPopup();
+    const passphraseInput = document.querySelector<HTMLInputElement>("#wb-passphrase-input");
+
+    if (!passphraseInput) {
+      throw new Error("missing passphrase input");
+    }
+
+    passphraseInput.value = "export-secret";
+    passphraseInput.dispatchEvent(new Event("input", { bubbles: true }));
     getPassphraseSubmitButton().click();
     await flushPopup();
 
     expect(port.postMessage).toHaveBeenCalledWith({
       kind: "ui.export",
       sid: "sid-none-export",
+      passphrase: "export-secret",
       saveAs: false,
       policy: {
         includeScreenshots: false,

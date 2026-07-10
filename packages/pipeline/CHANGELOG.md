@@ -9,6 +9,9 @@
 
 ### Patch Changes
 
+- Closed the legacy `allowPlaintextLocalExport` bypass: real-user and required-policy exports now
+  require a passphrase, while plaintext remains available only to trusted synthetic/local-debug
+  exemptions.
 - Updated dependencies
   - @webblackbox/protocol@0.6.0
 
