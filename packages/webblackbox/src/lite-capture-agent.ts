@@ -211,7 +211,7 @@ export class LiteCaptureAgent {
   private screenshotCaptureBlocked = false;
   private screenshotInFlightPromise: Promise<void> | null = null;
   private screenshotPendingReason: string | null = null;
-  private hasCapturedScreenshot = false;
+  private stopCapturePrepared = false;
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
   private lastUserActivityMono = monotonicTime();
   private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
@@ -271,7 +271,7 @@ export class LiteCaptureAgent {
     if (state.active && !wasRecording) {
       this.hasDomSnapshot = false;
       this.hasLocalStorageSnapshot = false;
-      this.hasCapturedScreenshot = false;
+      this.stopCapturePrepared = false;
     }
 
     if (!state.active && wasRecording && this.shouldCaptureDomSnapshots() && !this.hasDomSnapshot) {
@@ -281,7 +281,7 @@ export class LiteCaptureAgent {
     if (
       !state.active &&
       wasRecording &&
-      this.shouldCaptureStorageSnapshots() &&
+      this.shouldCaptureLocalStorageSnapshot() &&
       !this.hasLocalStorageSnapshot
     ) {
       this.emitLocalStorageSnapshot("stop");
@@ -354,11 +354,24 @@ export class LiteCaptureAgent {
     this.drainBufferedEvents();
   }
 
-  /** Completes any in-flight screenshot and captures one final frame if none was recorded yet. */
+  /** Emits exactly one final stop artifact per enabled top-frame capture category. */
   public async prepareStopCapture(): Promise<void> {
     if (this.disposed || !this.recordingActive || !this.isDocumentWithinScope()) {
       this.deactivateForScope();
       return;
+    }
+
+    if (this.stopCapturePrepared) {
+      return;
+    }
+    this.stopCapturePrepared = true;
+
+    if (this.shouldCaptureDomSnapshots()) {
+      this.emitDomSnapshot("stop");
+    }
+
+    if (this.shouldCaptureLocalStorageSnapshot()) {
+      this.emitLocalStorageSnapshot("stop");
     }
 
     try {
@@ -367,7 +380,7 @@ export class LiteCaptureAgent {
       void 0;
     }
 
-    if (this.shouldCaptureScreenshots() && !this.hasCapturedScreenshot) {
+    if (this.shouldCaptureScreenshots()) {
       if (this.screenshotCaptureBlocked) {
         return;
       }
@@ -400,7 +413,6 @@ export class LiteCaptureAgent {
     this.mutationSummary = createEmptyMutationSummary();
     this.selectorCache = new WeakMap<Element, string>();
     this.selectorCacheSize = 0;
-    this.hasCapturedScreenshot = false;
   }
 
   private installInjectedMessageBridge(): void {
@@ -916,6 +928,15 @@ export class LiteCaptureAgent {
     );
   }
 
+  private shouldCaptureLocalStorageSnapshot(): boolean {
+    return (
+      this.mode !== "full" &&
+      this.isTopLevelFrame &&
+      this.isDocumentWithinScope() &&
+      this.capturePolicy.categories.storage !== "off"
+    );
+  }
+
   private startMutationAndSnapshots(): void {
     if (this.shouldCaptureMutationSignals() && !this.mutationObserver) {
       this.ensureMutationObserverActive();
@@ -1164,7 +1185,7 @@ export class LiteCaptureAgent {
     this.queueEvent("cookieSnapshot", {
       reason,
       count,
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
   }
@@ -1178,7 +1199,7 @@ export class LiteCaptureAgent {
       reason,
       count,
       truncated: false,
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
   }
@@ -1194,7 +1215,7 @@ export class LiteCaptureAgent {
       this.queueEvent("indexedDbSnapshot", {
         reason,
         count: rows.length,
-        mode: "counts-only",
+        mode: "schema-only",
         redacted: true,
         truncated: false
       });
@@ -1381,8 +1402,6 @@ export class LiteCaptureAgent {
       ) {
         return;
       }
-
-      this.hasCapturedScreenshot = true;
 
       this.queueEvent("screenshot", {
         reason,

@@ -8,6 +8,9 @@
 
 ### Patch Changes
 
+- Emitted one final Lite DOM, local-storage, and screenshot stop artifact even when an earlier
+  background capture had already run, and normalized count-only storage metadata to the archive
+  schema so hosts can drain a complete terminal state safely.
 - Updated dependencies
   - @webblackbox/pipeline@0.6.0
   - @webblackbox/protocol@0.6.0

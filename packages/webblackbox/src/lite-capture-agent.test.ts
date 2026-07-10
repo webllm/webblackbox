@@ -377,6 +377,41 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("emits each stop artifact once after earlier DOM and storage captures", async () => {
+    const { agent, emitBatch } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
+    const internal = agent as unknown as {
+      hasDomSnapshot: boolean;
+      hasLocalStorageSnapshot: boolean;
+      captureScreenshot: (reason: string) => Promise<void>;
+    };
+    internal.hasDomSnapshot = true;
+    internal.hasLocalStorageSnapshot = true;
+    const captureScreenshotSpy = vi.spyOn(internal, "captureScreenshot").mockResolvedValue();
+
+    await agent.prepareStopCapture();
+    await agent.prepareStopCapture();
+    agent.setRecordingStatus({
+      active: false,
+      sid: "S-lite-agent-test",
+      tabId: 7,
+      mode: "lite"
+    });
+
+    const stopEvents = emittedEvents(emitBatch).filter((event) => event.payload?.reason === "stop");
+
+    expect(stopEvents.filter((event) => event.rawType === "snapshot")).toHaveLength(1);
+    expect(stopEvents.filter((event) => event.rawType === "localStorageSnapshot")).toHaveLength(1);
+    expect(captureScreenshotSpy).toHaveBeenCalledTimes(1);
+    expect(captureScreenshotSpy).toHaveBeenCalledWith("stop");
+
+    agent.dispose();
+  });
+
   it("installs capture listeners only while recording is active", () => {
     const { agent, emitBatch } = createInactiveAgent();
 
@@ -790,7 +825,7 @@ describe("LiteCaptureAgent", () => {
 
     expect(storageEvent?.payload).toMatchObject({
       count: 1,
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
     expect(storageEvent?.payload).not.toHaveProperty("entries");
@@ -813,7 +848,7 @@ describe("LiteCaptureAgent", () => {
     const cookieEvent = events.find((event) => event.rawType === "cookieSnapshot");
 
     expect(cookieEvent?.payload).toMatchObject({
-      mode: "counts-only",
+      mode: "schema-only",
       redacted: true
     });
     expect(cookieEvent?.payload).not.toHaveProperty("names");

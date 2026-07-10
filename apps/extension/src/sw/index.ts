@@ -108,6 +108,16 @@ import {
   type LocalStorageSnapshotMode
 } from "./storage-snapshot.js";
 import {
+  acknowledgeStopDrain,
+  claimStopDrainEvent,
+  closeStopDrain,
+  createStopDrainCapability,
+  isStopDrainClaimValid,
+  runStopDrainBlobOperation,
+  type StopDrainCapability,
+  type StopDrainClaim
+} from "./stop-drain.js";
+import {
   RuntimeCleanupScheduler,
   RuntimeStartCoordinator,
   blockVolatileCapture,
@@ -403,7 +413,9 @@ const pendingStopDrainAcks = new Map<
   {
     sid: string;
     tabId: number;
+    capability: StopDrainCapability;
     ackReceived: boolean;
+    settling: boolean;
     resolve: () => void;
     timeout: ReturnType<typeof setTimeout>;
   }
@@ -499,13 +511,6 @@ const EXPORT_AUDIT_MAX_EVENTS = 200;
 const RUNTIME_STATE_PERSIST_DEBOUNCE_MS = 500;
 const RETAINED_STOPPING_RETRY_DELAY_MS = 30_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
-const STOP_DRAIN_CONTENT_RAW_TYPES = new Set([
-  "snapshot",
-  "localStorageSnapshot",
-  "indexedDbSnapshot",
-  "cookieSnapshot",
-  "screenshot"
-]);
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
 const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
 const PERF_WARN_MS = 40;
@@ -513,7 +518,7 @@ const OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
 const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
 const OFFSCREEN_PORT_READY_MAX_ATTEMPTS = 200;
 const OFFSCREEN_PORT_READY_WAIT_MS = 25;
-const STOP_DRAIN_ACK_TIMEOUT_MS = 3_000;
+const STOP_DRAIN_ACK_TIMEOUT_MS = 6_000;
 const CDP_ARTIFACT_TIMEOUT_MS = 5_000;
 const CDP_HEAP_SNAPSHOT_TIMEOUT_MS = 8_000;
 const SCREEN_RECORDING_OFFSCREEN_SOURCE = "tab";
@@ -960,9 +965,7 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "content.stop-drained") {
-    if (normalizeSenderFrameId(sender) === 0) {
-      markStopDrainAckReceived(message.sid);
-    }
+    markStopDrainAckReceived(message, sender);
     return;
   }
 
@@ -980,13 +983,52 @@ async function handleInboundMessage(
 
     const runtime = sessionsByTab.get(tabId);
 
-    if (!runtime || !authorizeContentSender(runtime, sender, message.documentUrl)) {
-      if (runtime && normalizeSenderFrameId(sender) === 0) {
+    if (!runtime) {
+      return;
+    }
+
+    const activeCapture =
+      isVolatileCaptureOpen(runtime.captureFence) && !runtime.stopping && !runtime.stoppedAt;
+    const activeSenderAuthorized =
+      activeCapture && authorizeContentSender(runtime, sender, message.documentUrl);
+    const stopDrain = pendingStopDrainAcks.get(runtime.sid)?.capability;
+
+    if (!activeSenderAuthorized && !stopDrain) {
+      if (activeCapture && normalizeSenderFrameId(sender) === 0) {
         await stopSession(tabId);
-      } else if (runtime) {
+      } else if (activeCapture) {
         await deactivateDeniedContentFrame(runtime, sender, port);
       }
 
+      return;
+    }
+
+    const acceptedEvents: Array<{
+      rawEvent: RawRecorderEvent;
+      stopDrainClaim: StopDrainClaim | null;
+    }> = [];
+
+    for (const rawEvent of message.events) {
+      const stopDrainClaim = activeSenderAuthorized
+        ? null
+        : claimStopDrainEvent(stopDrain!, {
+            runtime,
+            fence: runtime.captureFence,
+            token: message.stopDrainToken ?? "",
+            sid: rawEvent.sid,
+            tabId,
+            frameId: normalizeSenderFrameId(sender),
+            documentUrl: message.documentUrl ?? "",
+            rawType: rawEvent.rawType,
+            reason: asRecord(rawEvent.payload)?.reason
+          });
+
+      if (activeSenderAuthorized || stopDrainClaim) {
+        acceptedEvents.push({ rawEvent, stopDrainClaim });
+      }
+    }
+
+    if (acceptedEvents.length === 0) {
       return;
     }
 
@@ -994,13 +1036,16 @@ async function handleInboundMessage(
     let sliceStartedAt = perfNow();
 
     try {
-      for (const rawEvent of message.events) {
-        ingestRawEvent({
-          ...rawEvent,
-          tabId,
-          sid: runtime.sid,
-          frame
-        });
+      for (const { rawEvent, stopDrainClaim } of acceptedEvents) {
+        ingestRawEvent(
+          {
+            ...rawEvent,
+            tabId,
+            sid: runtime.sid,
+            frame
+          },
+          stopDrainClaim
+        );
 
         if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
           await wait(0);
@@ -1399,19 +1444,28 @@ async function stopSessionOnce(tabId: number): Promise<void> {
         ? () => undefined
         : () => persistRuntimeStoppingTombstone(runtime, stopRequestedAt, cleanupDeadline),
       teardownSteps: [
-        async () => {
-          stopDrainAck = createStopDrainAck(runtime);
-          await stopScreenRecording(runtime, "session-stop");
-        },
+        () => stopScreenRecording(runtime, "session-stop"),
         () =>
           runBestEffortStopStep(runtime, "pipeline-buffer", () =>
             flushBufferedPipelineEvents(runtime)
           ),
         () => teardownCaptureInstrumentation(runtime),
-        () =>
-          runBestEffortStopStep(runtime, "content-notification", () =>
-            notifyAuthorizedContentFrames(runtime, false)
-          ),
+        async () => {
+          const drain = createStopDrainAck(runtime);
+          stopDrainAck = drain.wait;
+          await runBestEffortStopStep(runtime, "content-notification", () =>
+            notifyAuthorizedContentFrames(runtime, false, drain.notice)
+          );
+        },
+        async () => {
+          await stopDrainAck;
+          await runBestEffortStopStep(runtime, "final-pipeline-buffer", () =>
+            flushBufferedPipelineEvents(runtime)
+          );
+          await runBestEffortStopStep(runtime, "final-pipeline-flush", () =>
+            runtime.pipeline.flush()
+          );
+        },
         async () => {
           sessionsByTab.delete(runtime.tabId);
           uninstallLiteWebRequestCaptureIfUnused();
@@ -1462,10 +1516,6 @@ async function stopSessionOnce(tabId: number): Promise<void> {
     throw error;
   }
   notifyOffscreenPipelineStatus();
-  await stopDrainAck;
-  await runBestEffortStopStep(runtime, "final-pipeline-buffer", () =>
-    flushBufferedPipelineEvents(runtime)
-  );
 }
 
 async function runBestEffortStopStep(
@@ -1614,14 +1664,24 @@ function hasExportPassphrase(passphrase: string | undefined): passphrase is stri
   return typeof passphrase === "string" && passphrase.length > 0;
 }
 
-function ingestRawEvent(rawEvent: RawRecorderEvent): void {
+function ingestRawEvent(
+  rawEvent: RawRecorderEvent,
+  stopDrainClaim: StopDrainClaim | null = null
+): void {
   const runtime =
     sessionsByTab.get(rawEvent.tabId) ??
     (typeof rawEvent.sid === "string" ? sessionsBySid.get(rawEvent.sid) : undefined);
+  const stopDrainAuthorized = Boolean(
+    runtime &&
+    stopDrainClaim &&
+    isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence)
+  );
 
   if (
     !runtime ||
-    (!isVolatileCaptureOpen(runtime.captureFence) && !isCaptureClosureEvent(rawEvent))
+    (!isVolatileCaptureOpen(runtime.captureFence) &&
+      !stopDrainAuthorized &&
+      !isCaptureClosureEvent(rawEvent))
   ) {
     return;
   }
@@ -1644,11 +1704,7 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
     return;
   }
 
-  if (
-    runtime.stopping &&
-    rawEvent.source !== "system" &&
-    !shouldAllowStopDrainContentEvent(runtime, rawEvent)
-  ) {
+  if (runtime.stopping && rawEvent.source !== "system" && !stopDrainAuthorized) {
     return;
   }
 
@@ -1665,13 +1721,13 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
 
   if (shouldMaterializeLiteContentEvent(runtime, nextRawEvent)) {
     enqueue(runtime, async () => {
-      if (!isRuntimeCaptureScopeActive(runtime)) {
+      if (!isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim)) {
         return;
       }
 
-      const materialized = await materializeLiteContentEvent(runtime, nextRawEvent);
+      const materialized = await materializeLiteContentEvent(runtime, nextRawEvent, stopDrainClaim);
 
-      if (!materialized || !isRuntimeCaptureScopeActive(runtime)) {
+      if (!materialized || !isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim)) {
         return;
       }
 
@@ -1700,17 +1756,6 @@ function isCaptureClosureEvent(rawEvent: RawRecorderEvent): boolean {
   return (
     rawEvent.source === "system" &&
     (rawEvent.rawType === "screen.recording.end" || rawEvent.rawType === "screen.recording.error")
-  );
-}
-
-function shouldAllowStopDrainContentEvent(
-  runtime: SessionRuntime,
-  rawEvent: RawRecorderEvent
-): boolean {
-  return (
-    rawEvent.source === "content" &&
-    rawEvent.sid === runtime.sid &&
-    STOP_DRAIN_CONTENT_RAW_TYPES.has(rawEvent.rawType)
   );
 }
 
@@ -1752,7 +1797,7 @@ function shouldMaterializeLiteContentEvent(
   }
 
   if (rawEvent.rawType === "localStorageSnapshot") {
-    return asRecord(payload.entries) !== null;
+    return true;
   }
 
   if (rawEvent.rawType === "indexedDbSnapshot") {
@@ -1775,18 +1820,19 @@ function shouldMaterializeLiteContentEvent(
 
 async function materializeLiteContentEvent(
   runtime: SessionRuntime,
-  rawEvent: RawRecorderEvent
+  rawEvent: RawRecorderEvent,
+  stopDrainClaim: StopDrainClaim | null = null
 ): Promise<RawRecorderEvent | null> {
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  if (!isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim)) {
     return null;
   }
 
   if (rawEvent.rawType === "screenshot") {
-    return materializeLiteScreenshot(runtime, rawEvent);
+    return materializeLiteScreenshot(runtime, rawEvent, stopDrainClaim);
   }
 
   if (rawEvent.rawType === "snapshot") {
-    return materializeLiteDomSnapshot(runtime, rawEvent);
+    return materializeLiteDomSnapshot(runtime, rawEvent, stopDrainClaim);
   }
 
   if (
@@ -1794,7 +1840,7 @@ async function materializeLiteContentEvent(
     rawEvent.rawType === "indexedDbSnapshot" ||
     rawEvent.rawType === "cookieSnapshot"
   ) {
-    return materializeLiteStorageSnapshot(runtime, rawEvent);
+    return materializeLiteStorageSnapshot(runtime, rawEvent, stopDrainClaim);
   }
 
   if (rawEvent.rawType === "networkBody") {
@@ -1806,7 +1852,8 @@ async function materializeLiteContentEvent(
 
 async function materializeLiteScreenshot(
   runtime: SessionRuntime,
-  rawEvent: RawRecorderEvent
+  rawEvent: RawRecorderEvent,
+  stopDrainClaim: StopDrainClaim | null
 ): Promise<RawRecorderEvent | null> {
   if (runtime.config.capturePolicy?.categories.screenshots !== "allow") {
     return null;
@@ -1829,7 +1876,7 @@ async function materializeLiteScreenshot(
     return null;
   }
 
-  const shotId = await putRuntimeCaptureBlob(runtime, decoded.mime, decoded.bytes);
+  const shotId = await putRuntimeCaptureBlob(runtime, decoded.mime, decoded.bytes, stopDrainClaim);
 
   if (!shotId) {
     return null;
@@ -1860,7 +1907,8 @@ async function materializeLiteScreenshot(
 
 async function materializeLiteDomSnapshot(
   runtime: SessionRuntime,
-  rawEvent: RawRecorderEvent
+  rawEvent: RawRecorderEvent,
+  stopDrainClaim: StopDrainClaim | null
 ): Promise<RawRecorderEvent | null> {
   const payload = asRecord(rawEvent.payload);
   const html = asString(payload?.html);
@@ -1870,7 +1918,12 @@ async function materializeLiteDomSnapshot(
   }
 
   const encoded = encodeTextWithByteLimit(html, LITE_DOM_SNAPSHOT_MAX_BYTES);
-  const contentHash = await putRuntimeCaptureBlob(runtime, "text/html", encoded.bytes);
+  const contentHash = await putRuntimeCaptureBlob(
+    runtime,
+    "text/html",
+    encoded.bytes,
+    stopDrainClaim
+  );
 
   if (!contentHash) {
     return null;
@@ -1897,7 +1950,8 @@ async function materializeLiteDomSnapshot(
 
 async function materializeLiteStorageSnapshot(
   runtime: SessionRuntime,
-  rawEvent: RawRecorderEvent
+  rawEvent: RawRecorderEvent,
+  stopDrainClaim: StopDrainClaim | null
 ): Promise<RawRecorderEvent | null> {
   const payload = asRecord(rawEvent.payload);
 
@@ -1908,28 +1962,29 @@ async function materializeLiteStorageSnapshot(
   const reason = asString(payload.reason) ?? undefined;
 
   if (rawEvent.rawType === "localStorageSnapshot") {
-    const entries = asRecord(payload.entries) ?? {};
-    const serialized = JSON.stringify(entries);
-    const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
+    const entries = asRecord(payload.entries);
+    const encoded = entries
+      ? encodeTextWithByteLimit(JSON.stringify(entries), LITE_STORAGE_SNAPSHOT_MAX_BYTES)
+      : null;
     const hash =
-      encoded.bytes.byteLength > 0
-        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes)
+      encoded && encoded.bytes.byteLength > 0
+        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes, stopDrainClaim)
         : undefined;
 
-    if (encoded.bytes.byteLength > 0 && !hash) {
+    if (encoded && encoded.bytes.byteLength > 0 && !hash) {
       return null;
     }
-    const count = normalizeNonNegativeInt(payload.count) ?? Object.keys(entries).length;
+    const count = normalizeNonNegativeInt(payload.count) ?? Object.keys(entries ?? {}).length;
 
     return {
       ...rawEvent,
       payload: {
         hash,
         count,
-        mode: "sample",
+        mode: entries ? "sample" : "schema-only",
         redacted: true,
         reason,
-        truncated: payload.truncated === true || encoded.truncated
+        truncated: payload.truncated === true || encoded?.truncated === true
       }
     };
   }
@@ -2057,8 +2112,15 @@ async function materializeLiteNetworkBody(
 async function putRuntimeCaptureBlob(
   runtime: SessionRuntime,
   mime: string,
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  stopDrainClaim: StopDrainClaim | null = null
 ): Promise<string | null> {
+  if (stopDrainClaim) {
+    return runStopDrainBlobOperation(stopDrainClaim, runtime, runtime.captureFence, () =>
+      runtime.pipeline.putBlob(mime, bytes)
+    );
+  }
+
   if (!isRuntimeCaptureScopeActive(runtime)) {
     return null;
   }
@@ -2854,6 +2916,16 @@ function isRuntimeCaptureScopeActive(runtime: SessionRuntime): boolean {
     !runtime.stoppedAt &&
     isRuntimeDocumentWithinScope(runtime)
   );
+}
+
+function isRuntimeEventMaterializationAllowed(
+  runtime: SessionRuntime,
+  stopDrainClaim: StopDrainClaim | null
+): boolean {
+  return stopDrainClaim
+    ? isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence) &&
+        isRuntimeDocumentWithinScope(runtime)
+    : isRuntimeCaptureScopeActive(runtime);
 }
 
 function isRuntimeDocumentWithinScope(runtime: SessionRuntime): boolean {
@@ -6647,7 +6719,8 @@ async function notifyTabStatus(
   mode?: CaptureMode,
   sampling?: RecordingSampling,
   capturePolicy?: CapturePolicy,
-  frameId?: number
+  frameId?: number,
+  stopDrain?: { token: string; deadline: number; documentUrl: string }
 ): Promise<void> {
   if (!chromeApi?.tabs?.sendMessage) {
     return;
@@ -6663,7 +6736,8 @@ async function notifyTabStatus(
         sid,
         mode,
         sampling,
-        capturePolicy
+        capturePolicy,
+        stopDrain
       },
       frameId === undefined ? undefined : { frameId }
     )
@@ -6672,7 +6746,8 @@ async function notifyTabStatus(
 
 async function notifyAuthorizedContentFrames(
   runtime: SessionRuntime,
-  active: boolean
+  active: boolean,
+  stopDrain?: { token: string; deadline: number; documentUrl: string }
 ): Promise<void> {
   const frameIds = [...runtime.authorizedContentFrames];
 
@@ -6685,7 +6760,8 @@ async function notifyAuthorizedContentFrames(
         runtime.mode,
         toStatusSampling(runtime),
         runtime.config.capturePolicy,
-        frameId
+        frameId,
+        frameId === 0 ? stopDrain : undefined
       )
     )
   );
@@ -6703,34 +6779,105 @@ function adjustInFlightContentMessages(tabId: number, delta: 1 | -1): void {
   inFlightContentMessagesByTab.set(tabId, next);
 }
 
-function createStopDrainAck(runtime: SessionRuntime): Promise<void> {
+function createStopDrainAck(runtime: SessionRuntime): {
+  wait: Promise<void>;
+  notice?: { token: string; deadline: number; documentUrl: string };
+} {
   const existing = pendingStopDrainAcks.get(runtime.sid);
 
   if (existing) {
     clearTimeout(existing.timeout);
     pendingStopDrainAcks.delete(runtime.sid);
+    closeStopDrain(existing.capability);
+    existing.resolve();
   }
 
-  return new Promise((resolve) => {
+  if (
+    runtime.mode !== "lite" ||
+    !runtime.authorizedContentFrames.has(0) ||
+    !isRuntimeDocumentWithinScope(runtime)
+  ) {
+    return { wait: Promise.resolve() };
+  }
+
+  const deadline = Date.now() + STOP_DRAIN_ACK_TIMEOUT_MS;
+  let capability: StopDrainCapability;
+
+  try {
+    capability = createStopDrainCapability({
+      runtime,
+      fence: runtime.captureFence,
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      documentUrl: runtime.captureUrl,
+      deadline
+    });
+  } catch (error) {
+    console.warn("[WebBlackbox] stop-drain capability creation failed closed", {
+      sid: runtime.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return { wait: Promise.resolve() };
+  }
+
+  const wait = new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {
-      pendingStopDrainAcks.delete(runtime.sid);
-      resolve();
+      const pending = pendingStopDrainAcks.get(runtime.sid);
+
+      if (!pending || pending.capability !== capability) {
+        return;
+      }
+
+      pending.capability.accepting = false;
+      pending.ackReceived = true;
+      resolveStopDrainAckIfReady(pending);
     }, STOP_DRAIN_ACK_TIMEOUT_MS);
 
     pendingStopDrainAcks.set(runtime.sid, {
       sid: runtime.sid,
       tabId: runtime.tabId,
+      capability,
       ackReceived: false,
+      settling: false,
       resolve,
       timeout
     });
   });
+
+  return {
+    wait,
+    notice: {
+      token: capability.token,
+      deadline: capability.deadline,
+      documentUrl: capability.documentUrl
+    }
+  };
 }
 
-function markStopDrainAckReceived(sid: string): void {
-  const pending = pendingStopDrainAcks.get(sid);
+function markStopDrainAckReceived(
+  message: Extract<ExtensionInboundMessage, { kind: "content.stop-drained" }>,
+  sender: MessageSenderLike | undefined
+): void {
+  const pending = pendingStopDrainAcks.get(message.sid);
 
   if (!pending) {
+    return;
+  }
+
+  const runtime = sessionsBySid.get(message.sid);
+
+  if (
+    !runtime ||
+    !acknowledgeStopDrain(pending.capability, {
+      runtime,
+      fence: runtime.captureFence,
+      token: message.token,
+      sid: message.sid,
+      tabId: sender?.tab?.id ?? -1,
+      frameId: normalizeSenderFrameId(sender),
+      documentUrl: message.documentUrl
+    })
+  ) {
     return;
   }
 
@@ -6749,11 +6896,13 @@ function resolveStopDrainAcksForTab(tabId: number): void {
 function resolveStopDrainAckIfReady(pending: {
   sid: string;
   tabId: number;
+  capability: StopDrainCapability;
   ackReceived: boolean;
+  settling: boolean;
   resolve: () => void;
   timeout: ReturnType<typeof setTimeout>;
 }): void {
-  if (!pending.ackReceived) {
+  if (!pending.ackReceived || pending.settling) {
     return;
   }
 
@@ -6761,19 +6910,25 @@ function resolveStopDrainAckIfReady(pending: {
     return;
   }
 
-  pendingStopDrainAcks.delete(pending.sid);
-  clearTimeout(pending.timeout);
-
   const runtime = sessionsBySid.get(pending.sid);
+  pending.settling = true;
+
+  const finalize = () => {
+    if (pendingStopDrainAcks.get(pending.sid) === pending) {
+      pendingStopDrainAcks.delete(pending.sid);
+    }
+
+    clearTimeout(pending.timeout);
+    closeStopDrain(pending.capability);
+    pending.resolve();
+  };
 
   if (!runtime) {
-    pending.resolve();
+    finalize();
     return;
   }
 
-  void runtime.queue.finally(() => {
-    pending.resolve();
-  });
+  void runtime.queue.then(finalize, finalize);
 }
 
 async function relayMarkerCommand(): Promise<void> {

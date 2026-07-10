@@ -7,6 +7,12 @@ import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
 import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
 import { resolveRecordingStatusTabId } from "./recording-status.js";
+import {
+  buildContentStopDrainedMessage,
+  resolveContentStopDrainContext,
+  stopDrainEventFields,
+  type ContentStopDrainContext
+} from "./stop-drain.js";
 
 type ContentAgentModule = typeof import("./content-agent.js");
 
@@ -23,6 +29,7 @@ let recordingStatusVersion = 0;
 let pendingEvents: RawRecorderEvent[] = [];
 let pendingEventFlushTimer = 0;
 let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
+let stopDrainContext: ContentStopDrainContext | null = null;
 
 const PORT_RECONNECT_INITIAL_MS = 250;
 const PORT_RECONNECT_MAX_MS = 5_000;
@@ -50,6 +57,7 @@ window.addEventListener("pagehide", cleanup, { once: true });
 
 function cleanup(): void {
   recordingActive = false;
+  stopDrainContext = null;
   recordingStatusVersion += 1;
   stopPortReconnect();
   stopPendingEventFlush();
@@ -169,7 +177,7 @@ function flushPendingEventsChunk(): boolean {
     contentPort.postMessage({
       kind: "content.events",
       events: batch,
-      documentUrl: readDocumentUrl()
+      ...stopDrainEventFields(stopDrainContext, readDocumentUrl())
     });
   } catch (error) {
     debugPortSendFailure("content.events.replay", error);
@@ -236,15 +244,14 @@ function emitMarker(message: string): void {
 }
 
 function emitStopDrained(sid?: string): void {
-  if (!contentPort || window.top !== window || typeof sid !== "string" || sid.length === 0) {
+  const message = buildContentStopDrainedMessage(sid, stopDrainContext);
+
+  if (!contentPort || window.top !== window || !message) {
     return;
   }
 
   try {
-    contentPort.postMessage({
-      kind: "content.stop-drained",
-      sid
-    });
+    contentPort.postMessage(message);
   } catch (error) {
     debugPortSendFailure("content.stop-drained", error);
   }
@@ -268,6 +275,7 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
     };
 
     if (message.active) {
+      stopDrainContext = null;
       recordingActive = true;
       connectContentPort();
       const agent = await ensureCaptureAgent();
@@ -281,6 +289,7 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
     } else {
       const wasRecording = recordingActive;
       const agent = captureAgent;
+      stopDrainContext = resolveContentStopDrainContext(message, window.top === window);
 
       if (wasRecording && agent) {
         await agent.prepareStopCapture();
@@ -308,6 +317,7 @@ async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void>
       }
 
       recordingActive = false;
+      stopDrainContext = null;
       stopPendingEventFlush();
       pendingEvents = [];
       disconnectContentPort();

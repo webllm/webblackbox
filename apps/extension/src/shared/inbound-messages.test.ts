@@ -9,6 +9,7 @@ import {
 import { CONTENT_EVENT_BATCH_MAX, PORT_NAMES } from "./messages.js";
 
 const EXTENSION_BASE_URL = "chrome-extension://webblackbox-test/";
+const STOP_DRAIN_TOKEN = "a".repeat(64);
 
 const POPUP_SENDER: MessageSenderLike = {
   url: `${EXTENSION_BASE_URL}popup.html`,
@@ -323,6 +324,43 @@ describe("extension inbound schema validation", () => {
         })
       ])
     );
+  });
+
+  it("strictly parses stop-drain tokens and acknowledgements", () => {
+    const context = portContext(PORT_NAMES.content, CONTENT_SENDER);
+    const stopBatch = {
+      ...contentBatch([
+        validRawEvent({
+          rawType: "snapshot",
+          sid: "S-stop-drain",
+          payload: { reason: "stop", html: "<main>done</main>" }
+        })
+      ]),
+      stopDrainToken: STOP_DRAIN_TOKEN
+    };
+    const acknowledgement = {
+      kind: "content.stop-drained",
+      sid: "S-stop-drain",
+      token: STOP_DRAIN_TOKEN,
+      documentUrl: CONTENT_SENDER.url
+    };
+
+    expect(parseExtensionInboundMessage(stopBatch, context)).toEqual(stopBatch);
+    expect(parseExtensionInboundMessage(acknowledgement, context)).toEqual(acknowledgement);
+    expect(parseExtensionInboundMessage({ ...acknowledgement, token: "" }, context)).toBeNull();
+    expect(
+      parseExtensionInboundMessage({ ...acknowledgement, token: "a".repeat(63) }, context)
+    ).toBeNull();
+    expect(
+      parseExtensionInboundMessage({ ...acknowledgement, token: `${"a".repeat(63)}G` }, context)
+    ).toBeNull();
+    expect(
+      parseExtensionInboundMessage({ ...stopBatch, stopDrainToken: "short" }, context)
+    ).toBeNull();
+    expect(
+      parseExtensionInboundMessage({ ...acknowledgement, documentUrl: "not a url" }, context)
+    ).toBeNull();
+    expect(parseExtensionInboundMessage({ ...acknowledgement, replay: true }, context)).toBeNull();
   });
 
   it("enforces the sender-aligned content batch limit", () => {

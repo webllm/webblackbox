@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Preserved Lite mode's final DOM, local-storage, and screenshot artifacts during stop with a
+  short-lived, top-frame-bound drain capability, while keeping the synchronous capture fence and
+  completing queued ingestion before the stopped checkpoint; count-only storage records are also
+  normalized to the archive schema before persistence.
 - Kept Lite webRequest wall-clock timestamps separate from monotonic capture time so delayed
   multi-source events retain a coherent replay timeline.
 - Restored active and stopped runtime sessions safely across MV3 service-worker restarts, with

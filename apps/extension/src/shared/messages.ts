@@ -68,6 +68,7 @@ export type ContentEventBatchMessage = {
   kind: "content.events";
   events: RawRecorderEvent[];
   documentUrl?: string;
+  stopDrainToken?: string;
 };
 
 export type ContentMarkerMessage = {
@@ -84,6 +85,8 @@ export type ContentReadyMessage = {
 export type ContentStopDrainedMessage = {
   kind: "content.stop-drained";
   sid: string;
+  token: string;
+  documentUrl: string;
 };
 
 export type ExtensionInboundMessage =
@@ -114,6 +117,11 @@ export type RecordingStatusMessage = {
     | "bodyCaptureMaxBytes"
   >;
   capturePolicy?: CapturePolicy;
+  stopDrain?: {
+    token: string;
+    deadline: number;
+    documentUrl: string;
+  };
 };
 
 export type FreezeNoticeMessage = {

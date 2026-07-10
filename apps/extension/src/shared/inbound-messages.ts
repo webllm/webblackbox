@@ -10,6 +10,7 @@ import {
   type UiExportSessionMessage,
   type UiStartSessionMessage
 } from "./messages.js";
+import { isStopDrainToken } from "./stop-drain-token.js";
 
 export type ExtensionInboundContext =
   | {
@@ -103,10 +104,10 @@ const UI_EXPORT_KEYS = new Set(["kind", "passphrase", "policy", "saveAs", "sid"]
 const UI_DELETE_KEYS = new Set(["kind", "sid"]);
 const UI_ANNOTATE_KEYS = new Set(["kind", "note", "sid", "tags"]);
 const KIND_ONLY_KEYS = new Set(["kind"]);
-const CONTENT_EVENTS_KEYS = new Set(["documentUrl", "events", "kind"]);
+const CONTENT_EVENTS_KEYS = new Set(["documentUrl", "events", "kind", "stopDrainToken"]);
 const CONTENT_MARKER_KEYS = new Set(["documentUrl", "kind", "message"]);
 const CONTENT_READY_KEYS = new Set(["documentUrl", "kind"]);
-const CONTENT_STOP_DRAINED_KEYS = new Set(["kind", "sid"]);
+const CONTENT_STOP_DRAINED_KEYS = new Set(["documentUrl", "kind", "sid", "token"]);
 const EXPORT_POLICY_KEYS = new Set([
   "includeScreenRecordings",
   "includeScreenshots",
@@ -467,8 +468,13 @@ function parseContentEvents(row: Record<string, unknown>): ContentEventBatchMess
   }
 
   const documentUrl = parseDocumentUrl(row.documentUrl);
+  const stopDrainToken = parseOptionalStopDrainToken(row.stopDrainToken);
 
-  if (documentUrl === null || !isDenseArray(row.events, CONTENT_EVENT_BATCH_MAX, 1)) {
+  if (
+    documentUrl === null ||
+    stopDrainToken === null ||
+    !isDenseArray(row.events, CONTENT_EVENT_BATCH_MAX, 1)
+  ) {
     return null;
   }
 
@@ -491,7 +497,8 @@ function parseContentEvents(row: Record<string, unknown>): ContentEventBatchMess
   return {
     kind: "content.events",
     events,
-    ...(documentUrl === undefined ? {} : { documentUrl })
+    ...(documentUrl === undefined ? {} : { documentUrl }),
+    ...(stopDrainToken === undefined ? {} : { stopDrainToken })
   };
 }
 
@@ -536,14 +543,34 @@ function parseContentReady(row: Record<string, unknown>): ExtensionInboundMessag
 }
 
 function parseContentStopDrained(row: Record<string, unknown>): ExtensionInboundMessage | null {
-  if (!hasExactKeys(row, CONTENT_STOP_DRAINED_KEYS) || !isIdentifier(row.sid, false)) {
+  if (
+    !hasExactKeys(row, CONTENT_STOP_DRAINED_KEYS) ||
+    !isIdentifier(row.sid, false) ||
+    !isStopDrainToken(row.token)
+  ) {
+    return null;
+  }
+
+  const documentUrl = parseDocumentUrl(row.documentUrl);
+
+  if (typeof documentUrl !== "string") {
     return null;
   }
 
   return {
     kind: "content.stop-drained",
-    sid: row.sid
+    sid: row.sid,
+    token: row.token,
+    documentUrl
   };
+}
+
+function parseOptionalStopDrainToken(value: unknown): string | undefined | null {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return isStopDrainToken(value) ? value : null;
 }
 
 function parseRawContentEvent(value: unknown, budget: PayloadBudget): RawRecorderEvent | null {
