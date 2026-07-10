@@ -169,7 +169,6 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
 );
 const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
 const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
-const PLAINTEXT_INSPECTION_SAMPLE_BYTES = 64 * 1024;
 const AES_GCM_IV_BYTES = 12;
 const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
 const SHARE_READ_SESSION_TTL_MS = 10 * 60 * 1000;
@@ -1056,186 +1055,176 @@ async function inspectActualArchiveEntries(
 }
 
 function looksLikePlaintextPrivateArchiveFile(path: string, bytes: Uint8Array): boolean {
-  const truncated = bytes.byteLength > PLAINTEXT_INSPECTION_SAMPLE_BYTES;
-  const sample = truncated ? bytes.subarray(0, PLAINTEXT_INSPECTION_SAMPLE_BYTES) : bytes;
-
   if (path === "index/time.json" || path === "index/req.json" || path === "index/inv.json") {
-    return isPlainJsonBytes(sample, truncated);
+    return isPlainJsonBytes(bytes);
   }
 
   if (path === "privacy/manifest.json") {
-    return isPlainJsonBytes(sample, truncated);
+    return isPlainJsonBytes(bytes);
   }
 
   if (path.startsWith("events/") && path.endsWith(".ndjson")) {
-    return isPlainNdjsonBytes(sample, truncated);
+    return isPlainNdjsonBytes(bytes);
   }
 
   if (path.startsWith("blobs/")) {
-    return looksLikePlaintextBlobFile(path, sample, truncated);
+    return looksLikePlaintextBlobFile(path, bytes);
   }
 
   return false;
 }
 
-function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array, truncated: boolean): boolean {
+function looksLikePlaintextBlobFile(path: string, bytes: Uint8Array): boolean {
   const normalizedPath = path.toLowerCase();
 
   if (normalizedPath.endsWith(".json")) {
-    return isPlainJsonBytes(bytes, truncated);
+    return isPlainJsonBytes(bytes);
   }
 
   if (normalizedPath.endsWith(".html")) {
-    return isPlainHtmlBytes(bytes, truncated);
+    return isPlainHtmlBytes(bytes);
   }
 
   if (normalizedPath.endsWith(".png")) {
-    return hasPngSignature(bytes);
+    return hasPngSignature(bytes, firstNonWhitespaceByte(bytes));
   }
 
   if (normalizedPath.endsWith(".webp")) {
-    return hasWebpSignature(bytes);
+    return hasWebpSignature(bytes, firstNonWhitespaceByte(bytes));
   }
 
+  return isPlainTextBytes(bytes);
+}
+
+function isPlainJsonBytes(bytes: Uint8Array): boolean {
+  const start = firstNonWhitespaceByte(bytes);
   return (
-    isPlainJsonBytes(bytes, truncated) ||
-    isPlainHtmlBytes(bytes, truncated) ||
-    isPlainTextBytes(bytes, truncated)
+    start < bytes.byteLength &&
+    (bytes[start] === 0x7b || bytes[start] === 0x5b) &&
+    isMostlyPrintableUtf8Bytes(bytes)
   );
 }
 
-function isPlainJsonBytes(bytes: Uint8Array, truncated = false): boolean {
-  const text = decodeUtf8Strict(bytes, truncated);
-  if (!text) {
-    return false;
-  }
-
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
-    return false;
-  }
-
-  if (truncated) {
-    return isMostlyPrintableText(trimmed);
-  }
-
-  try {
-    JSON.parse(trimmed);
-    return true;
-  } catch {
-    return false;
-  }
+function isPlainNdjsonBytes(bytes: Uint8Array): boolean {
+  const start = firstNonWhitespaceByte(bytes);
+  return start < bytes.byteLength && bytes[start] === 0x7b && isMostlyPrintableUtf8Bytes(bytes);
 }
 
-function isPlainNdjsonBytes(bytes: Uint8Array, truncated = false): boolean {
-  const text = decodeUtf8Strict(bytes, truncated);
-  if (!text) {
-    return false;
-  }
-
-  const lines = text
-    .trim()
-    .split(/\r?\n/)
-    .filter((line) => line.trim().length > 0);
-  if (lines.length === 0) {
-    return false;
-  }
-
-  try {
-    for (const line of lines.slice(0, 32)) {
-      JSON.parse(line);
-    }
-    return true;
-  } catch {
-    return truncated && text.trimStart().startsWith("{") && isMostlyPrintableText(text);
-  }
-}
-
-function isPlainHtmlBytes(bytes: Uint8Array, truncated = false): boolean {
-  const text = decodeUtf8Strict(bytes, truncated);
-  if (!text) {
-    return false;
-  }
-
-  const trimmed = text.trim().toLowerCase();
+function isPlainHtmlBytes(bytes: Uint8Array): boolean {
+  const start = firstNonWhitespaceByte(bytes);
   return (
-    trimmed.startsWith("<!doctype html") ||
-    trimmed.startsWith("<html") ||
-    trimmed.includes("<script") ||
-    trimmed.includes("<body")
+    isMostlyPrintableUtf8Bytes(bytes) &&
+    (startsWithAsciiCaseInsensitive(bytes, start, "<!doctype html") ||
+      startsWithAsciiCaseInsensitive(bytes, start, "<html") ||
+      includesAsciiCaseInsensitive(bytes, "<script") ||
+      includesAsciiCaseInsensitive(bytes, "<body"))
   );
 }
 
-function isPlainTextBytes(bytes: Uint8Array, truncated = false): boolean {
-  const text = decodeUtf8Strict(bytes, truncated);
-  if (!text) {
-    return false;
-  }
-
-  const trimmed = text.trim();
-  if (trimmed.length === 0) {
-    return false;
-  }
-
-  return isMostlyPrintableText(trimmed);
+function isPlainTextBytes(bytes: Uint8Array): boolean {
+  return firstNonWhitespaceByte(bytes) < bytes.byteLength && isMostlyPrintableUtf8Bytes(bytes);
 }
 
-function isMostlyPrintableText(value: string): boolean {
+function isMostlyPrintableUtf8Bytes(bytes: Uint8Array): boolean {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const chunkBytes = 64 * 1024;
+  let characters = 0;
   let printable = 0;
 
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-
-    if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f)) {
-      printable += 1;
+  try {
+    for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
+      const text = decoder.decode(bytes.subarray(offset, offset + chunkBytes), { stream: true });
+      for (let index = 0; index < text.length; index += 1) {
+        const code = text.charCodeAt(index);
+        characters += 1;
+        if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f)) {
+          printable += 1;
+        }
+      }
     }
+
+    const trailing = decoder.decode();
+    for (let index = 0; index < trailing.length; index += 1) {
+      const code = trailing.charCodeAt(index);
+      characters += 1;
+      if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f)) {
+        printable += 1;
+      }
+    }
+  } catch {
+    return false;
   }
 
-  return value.length > 0 && printable / value.length >= 0.9;
+  return characters > 0 && printable / characters >= 0.9;
 }
 
-function hasPngSignature(bytes: Uint8Array): boolean {
+function firstNonWhitespaceByte(bytes: Uint8Array): number {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const byte = bytes[offset];
+    if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) {
+      break;
+    }
+    offset += 1;
+  }
+  return offset;
+}
+
+function startsWithAsciiCaseInsensitive(
+  bytes: Uint8Array,
+  offset: number,
+  expected: string
+): boolean {
+  if (offset + expected.length > bytes.byteLength) {
+    return false;
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    if (toLowerAscii(bytes[offset + index] ?? -1) !== expected.charCodeAt(index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function includesAsciiCaseInsensitive(bytes: Uint8Array, expected: string): boolean {
+  for (let offset = 0; offset <= bytes.byteLength - expected.length; offset += 1) {
+    if (startsWithAsciiCaseInsensitive(bytes, offset, expected)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function toLowerAscii(byte: number): number {
+  return byte >= 0x41 && byte <= 0x5a ? byte + 0x20 : byte;
+}
+
+function hasPngSignature(bytes: Uint8Array, offset = 0): boolean {
   return (
-    bytes.length >= 8 &&
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
+    bytes.length - offset >= 8 &&
+    bytes[offset] === 0x89 &&
+    bytes[offset + 1] === 0x50 &&
+    bytes[offset + 2] === 0x4e &&
+    bytes[offset + 3] === 0x47 &&
+    bytes[offset + 4] === 0x0d &&
+    bytes[offset + 5] === 0x0a &&
+    bytes[offset + 6] === 0x1a &&
+    bytes[offset + 7] === 0x0a
   );
 }
 
-function hasWebpSignature(bytes: Uint8Array): boolean {
+function hasWebpSignature(bytes: Uint8Array, offset = 0): boolean {
   return (
-    bytes.length >= 12 &&
-    bytes[0] === 0x52 &&
-    bytes[1] === 0x49 &&
-    bytes[2] === 0x46 &&
-    bytes[3] === 0x46 &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
+    bytes.length - offset >= 12 &&
+    bytes[offset] === 0x52 &&
+    bytes[offset + 1] === 0x49 &&
+    bytes[offset + 2] === 0x46 &&
+    bytes[offset + 3] === 0x46 &&
+    bytes[offset + 8] === 0x57 &&
+    bytes[offset + 9] === 0x45 &&
+    bytes[offset + 10] === 0x42 &&
+    bytes[offset + 11] === 0x50
   );
-}
-
-function decodeUtf8Strict(bytes: Uint8Array, truncated = false): string | null {
-  const maxTrim = truncated ? Math.min(3, bytes.byteLength) : 0;
-
-  for (let trim = 0; trim <= maxTrim; trim += 1) {
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(
-        trim === 0 ? bytes : bytes.subarray(0, bytes.byteLength - trim)
-      );
-    } catch {
-      // A bounded UTF-8 prefix can end in the middle of one multi-byte code point.
-    }
-  }
-
-  return null;
 }
 
 function decodeBase64Strict(value: string): Buffer | null {

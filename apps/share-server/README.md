@@ -74,7 +74,7 @@ Body:
 
 - Raw encrypted `.webblackbox` bytes. Public deployments do not accept plaintext uploads by default.
 - Outer ZIP entry count, actual per-entry inflater output, metadata bytes, total expanded bytes, and compression ratio are checked against non-relaxable safety ceilings before the upload is retained. Plaintext uploads that opt into server analysis additionally receive Player event-codec, event-count, and index-cardinality checks. The server has no key for encrypted inner files, so clients must apply those inner checks before encryption and upload. The current client preflight summary is not cryptographically bound to the encrypted plaintext; signed or remotely attested preflight remains a separate deployment concern.
-- Encrypted uploads must include encryption metadata for every private archive path: `events/*`, `blobs/*`, `index/time.json`, `index/req.json`, `index/inv.json`, and `privacy/manifest.json` when present. Legacy encrypted archives that left private indexes in plaintext must be re-exported with the current exporter before public share upload.
+- Encrypted uploads must include encryption metadata for every private archive path: `events/*`, `blobs/*`, `index/time.json`, `index/req.json`, `index/inv.json`, and `privacy/manifest.json` when present. The server scans the full bounded contents of those entries for recognizable plaintext formats rather than trusting a fixed prefix sample. This is a rejection heuristic, not cryptographic proof that opaque bytes are ciphertext. Legacy encrypted archives that left private indexes in plaintext must be re-exported with the current exporter before public share upload.
 
 Response:
 

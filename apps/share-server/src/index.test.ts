@@ -419,6 +419,33 @@ describe("share-server", () => {
     expect(payload.plaintextEncryptedPaths).toContain(TEXT_BLOB_FIXTURE_PATH);
   });
 
+  it("scans complete private entries for plaintext beyond the former prefix window", async () => {
+    const server = await startShareServer();
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      },
+      body: Buffer.from(
+        await createEncryptedEnvelopeArchive({
+          privateFileMode: "plaintext",
+          textBlobFileMode: "plaintext",
+          plaintextPrefixBytes: 64 * 1024 + 1
+        })
+      )
+    });
+    const payload = (await response.json()) as {
+      plaintextEncryptedPaths: string[];
+    };
+
+    expect(response.status).toBe(400);
+    expect(payload.plaintextEncryptedPaths).toEqual(
+      expect.arrayContaining(["index/time.json", TEXT_BLOB_FIXTURE_PATH])
+    );
+  });
+
   it("expires shares and blocks archive download after ttl", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000"
@@ -910,6 +937,7 @@ async function createEncryptedEnvelopeArchive(
     privateFileMode?: "ciphertext" | "plaintext";
     blobFileMode?: "ciphertext" | "plaintext";
     textBlobFileMode?: "ciphertext" | "plaintext";
+    plaintextPrefixBytes?: number;
   } = {}
 ): Promise<Uint8Array> {
   return createEnvelopeArchive(true, options);
@@ -945,6 +973,7 @@ async function createEnvelopeArchive(
     privateFileMode?: "ciphertext" | "plaintext";
     blobFileMode?: "ciphertext" | "plaintext";
     textBlobFileMode?: "ciphertext" | "plaintext";
+    plaintextPrefixBytes?: number;
   } = {}
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -998,16 +1027,41 @@ async function createEnvelopeArchive(
   };
 
   addJsonFile(zip, files, "manifest.json", manifest);
-  addPrivateFile(zip, files, "index/time.json", [], encrypted, options.privateFileMode);
-  addPrivateFile(zip, files, "index/req.json", [], encrypted, options.privateFileMode);
-  addPrivateFile(zip, files, "index/inv.json", [], encrypted, options.privateFileMode);
+  addPrivateFile(
+    zip,
+    files,
+    "index/time.json",
+    [],
+    encrypted,
+    options.privateFileMode,
+    options.plaintextPrefixBytes
+  );
+  addPrivateFile(
+    zip,
+    files,
+    "index/req.json",
+    [],
+    encrypted,
+    options.privateFileMode,
+    options.plaintextPrefixBytes
+  );
+  addPrivateFile(
+    zip,
+    files,
+    "index/inv.json",
+    [],
+    encrypted,
+    options.privateFileMode,
+    options.plaintextPrefixBytes
+  );
   addPrivateFile(
     zip,
     files,
     BLOB_FIXTURE_PATH,
     { token: "blob-secret-token" },
     encrypted,
-    options.blobFileMode
+    options.blobFileMode,
+    options.plaintextPrefixBytes
   );
   addPrivateFile(
     zip,
@@ -1015,7 +1069,8 @@ async function createEnvelopeArchive(
     TEXT_BLOB_FIXTURE_PATH,
     "plain-text-secret-token",
     encrypted,
-    options.textBlobFileMode
+    options.textBlobFileMode,
+    options.plaintextPrefixBytes
   );
   addJsonFile(zip, files, "integrity/hashes.json", {
     manifestSha256: files["manifest.json"],
@@ -1045,13 +1100,14 @@ function addPrivateFile(
   path: string,
   value: unknown,
   encrypted: boolean,
-  mode: "ciphertext" | "plaintext" = "ciphertext"
+  mode: "ciphertext" | "plaintext" = "ciphertext",
+  plaintextPrefixBytes = 0
 ): void {
   const content = Buffer.from(JSON.stringify(value));
   const bytes =
     encrypted && mode === "ciphertext"
       ? randomBytes(Math.max(32, content.byteLength + 16))
-      : content;
+      : Buffer.concat([Buffer.alloc(plaintextPrefixBytes, 0x20), content]);
 
   zip.file(path, bytes);
   files[path] = createHash("sha256").update(bytes).digest("hex");
