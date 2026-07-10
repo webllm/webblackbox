@@ -462,6 +462,38 @@ describe("WebBlackboxLiteSdk", () => {
     expect(() => sdk.emitMarker("after-dispose")).toThrow(/disposed/i);
   });
 
+  it("drops forged capture-agent network bodies before blob persistence", async () => {
+    const storage = new MemoryPipelineStorage();
+    const putBlob = vi.spyOn(storage, "putBlob");
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-forged-network-body",
+      injectHooks: false,
+      useDefaultPlugins: false,
+      pipelineStorage: storage,
+      config: {
+        sampling: {
+          bodyCaptureMaxBytes: 4 * 1024
+        },
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
+    });
+
+    await sdk.start();
+    mockRuntime.instances.at(-1)?.emitBatch([
+      createRawEvent("networkBody", {
+        reqId: "R-forged-agent",
+        url: "https://example.test/api/private",
+        mimeType: "application/json",
+        encoding: "utf8",
+        body: '{"secret":"must-not-reach-storage"}'
+      })
+    ]);
+    await sdk.flush();
+
+    expect(putBlob).not.toHaveBeenCalled();
+    await sdk.dispose();
+  });
+
   it("uses safer lite defaults and skips resource-error freeze", async () => {
     const freezeSpy = vi.fn();
     const sdk = new WebBlackboxLiteSdk({

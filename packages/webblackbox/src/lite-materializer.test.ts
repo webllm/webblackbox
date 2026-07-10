@@ -34,6 +34,16 @@ function cloneConfig(): RecorderConfig {
   };
 }
 
+function enableNetworkBodyCapture(config: RecorderConfig): void {
+  config.capturePolicy = {
+    ...config.capturePolicy!,
+    categories: {
+      ...config.capturePolicy!.categories,
+      network: "body-allowlist"
+    }
+  };
+}
+
 describe("lite-materializer", () => {
   it("detects which raw events need lite materialization", () => {
     expect(
@@ -137,6 +147,7 @@ describe("lite-materializer", () => {
 
   it("materializes network bodies with redaction and byte caps", async () => {
     const config = cloneConfig();
+    enableNetworkBodyCapture(config);
     config.sampling.bodyCaptureMaxBytes = 4 * 1024;
 
     const putBlobCalls: Array<{ mime: string; text: string; bytes: Uint8Array }> = [];
@@ -183,6 +194,7 @@ describe("lite-materializer", () => {
 
   it("decodes base64 JSON and redacts nested sensitive values before persistence", async () => {
     const config = cloneConfig();
+    enableNetworkBodyCapture(config);
     config.sampling.bodyCaptureMaxBytes = 64 * 1024;
     const putBlobCalls: Array<{ mime: string; text: string }> = [];
     const body = JSON.stringify({
@@ -234,6 +246,7 @@ describe("lite-materializer", () => {
 
   it("does not persist malformed structured or undecodable textual bodies", async () => {
     const config = cloneConfig();
+    enableNetworkBodyCapture(config);
     config.sampling.bodyCaptureMaxBytes = 64 * 1024;
     const putBlob = vi.fn(async () => "unexpected-hash");
     const context = { config, putBlob };
@@ -266,6 +279,7 @@ describe("lite-materializer", () => {
 
   it("does not persist network bodies without an allowed MIME type", async () => {
     const config = cloneConfig();
+    enableNetworkBodyCapture(config);
     config.sampling.bodyCaptureMaxBytes = 4 * 1024;
     const putBlob = vi.fn(async () => "unexpected-hash");
 
@@ -289,6 +303,7 @@ describe("lite-materializer", () => {
 
   it("respects site policy deny rules for body capture", async () => {
     const config = cloneConfig();
+    enableNetworkBodyCapture(config);
     config.sitePolicies = [
       {
         originPattern: "https://example.test",
@@ -317,6 +332,39 @@ describe("lite-materializer", () => {
     );
 
     expect(result).toBeNull();
+  });
+
+  it("drops forged network bodies before persistence outside body-allowlist policy", async () => {
+    for (const networkPolicy of ["metadata", "headers-allowlist", undefined] as const) {
+      const config = cloneConfig();
+      config.sampling.bodyCaptureMaxBytes = 4 * 1024;
+      if (networkPolicy === undefined) {
+        delete config.capturePolicy;
+      } else {
+        config.capturePolicy = {
+          ...config.capturePolicy!,
+          categories: {
+            ...config.capturePolicy!.categories,
+            network: networkPolicy
+          }
+        };
+      }
+      const putBlob = vi.fn(async () => "unexpected-hash");
+
+      const result = await materializeLiteRawEvent(
+        createRawEvent("networkBody", {
+          reqId: `R-forged-${networkPolicy ?? "missing"}`,
+          url: "https://example.test/api/private",
+          mimeType: "application/json",
+          encoding: "utf8",
+          body: '{"secret":"must-not-be-persisted"}'
+        }),
+        { config, putBlob }
+      );
+
+      expect(result).toBeNull();
+      expect(putBlob).not.toHaveBeenCalled();
+    }
   });
 
   it("drops localStorage entry samples during materialization", async () => {
@@ -387,6 +435,7 @@ describe("lite-materializer", () => {
 
   it("treats a zero body-capture budget as disabled", async () => {
     const config = cloneConfig();
+    enableNetworkBodyCapture(config);
     config.sampling.bodyCaptureMaxBytes = 0;
 
     const result = await materializeLiteRawEvent(

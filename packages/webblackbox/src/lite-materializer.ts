@@ -248,6 +248,10 @@ async function materializeLiteNetworkBody(
   rawEvent: RawRecorderEvent,
   context: LiteMaterializerContext
 ): Promise<RawRecorderEvent | null> {
+  if (context.config.capturePolicy?.categories.network !== "body-allowlist") {
+    return null;
+  }
+
   const payload = asRecord(rawEvent.payload);
 
   if (!payload) {
