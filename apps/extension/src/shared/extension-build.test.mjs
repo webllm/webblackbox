@@ -5,11 +5,39 @@ import { dirname, resolve } from "node:path";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 
+import { parseExtensionBuildArgs } from "../../scripts/lib/extension-build-cli.mjs";
 import {
+  assertChromeArchive,
   createChromeArchive,
   createExtensionManifest,
   validateExtensionManifest
 } from "../../scripts/lib/extension-build.mjs";
+
+describe("extension build CLI", () => {
+  it("defaults package builds to release store-safe artifacts", () => {
+    expect(parseExtensionBuildArgs(["--package"])).toMatchObject({
+      release: true,
+      packageArchive: true,
+      profile: "store-safe"
+    });
+  });
+
+  it("requires an explicit dev profile for enterprise packages", () => {
+    expect(parseExtensionBuildArgs(["--package", "--profile", "dev"])).toMatchObject({
+      release: true,
+      packageArchive: true,
+      profile: "dev"
+    });
+  });
+
+  it("keeps ordinary unpacked builds in development mode", () => {
+    expect(parseExtensionBuildArgs([])).toMatchObject({
+      release: false,
+      packageArchive: false,
+      profile: "dev"
+    });
+  });
+});
 
 describe("extension build manifest", () => {
   it("creates a development manifest with explicit CSP", () => {
@@ -129,9 +157,46 @@ describe("extension build manifest", () => {
       expect(packagedManifest).not.toHaveProperty("key");
       expect(packagedManifest.permissions).toContain("tabCapture");
       expect(packagedManifest.permissions).not.toContain("debugger");
+      expect(packagedManifest.permissions).not.toContain("tabs");
       expect(packagedManifest.permissions).not.toContain("webRequest");
       expect(packagedManifest).not.toHaveProperty("host_permissions");
       expect(packagedManifest).not.toHaveProperty("content_scripts");
+      await expect(
+        assertChromeArchive(archive.path, {
+          version: "1.2.3",
+          profile: "store-safe"
+        })
+      ).resolves.toMatchObject({ version: "1.2.3" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a dev archive when a store-safe artifact is required", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-unsafe-store-test-"));
+    const sourceDir = resolve(root, "build");
+    const archivePath = resolve(root, "archive.zip");
+
+    try {
+      await writeBuildFixture(
+        sourceDir,
+        createExtensionManifest({
+          version: "1.2.3",
+          profile: "dev"
+        })
+      );
+
+      const archive = await createChromeArchive({
+        sourceDir,
+        outputPath: archivePath
+      });
+
+      await expect(
+        assertChromeArchive(archive.path, {
+          version: "1.2.3",
+          profile: "store-safe"
+        })
+      ).rejects.toThrow("Store-safe manifest must not request the debugger permission");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

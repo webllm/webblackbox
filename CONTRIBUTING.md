@@ -94,6 +94,8 @@ pnpm --filter @webblackbox/extension e2e:perf:lite
 pnpm --filter @webblackbox/extension package:chrome
 ```
 
+`package:chrome` is the release, store-safe Chrome Web Store artifact. Use the explicitly separate `package:chrome:enterprise` command only when a broader dev/enterprise permission package is required; never upload that archive to the Web Store.
+
 ## Working on the Player
 
 ```bash

@@ -88,6 +88,19 @@ The extension consists of multiple main components:
 
 ## Permissions
 
+The Chrome Web Store package uses the `store-safe` profile:
+
+| Permission   | Purpose                                                |
+| ------------ | ------------------------------------------------------ |
+| `activeTab`  | Temporary page access after the user starts recording  |
+| `scripting`  | Programmatic capture injection after that user gesture |
+| `storage`    | Extension settings and session data                    |
+| `offscreen`  | Pipeline processing in the background                  |
+| `tabCapture` | User-initiated tab media capture                       |
+| `downloads`  | Archive file download                                  |
+
+The separately packaged development/enterprise profile adds the following broader capabilities and is not the Web Store artifact:
+
 | Permission   | Purpose                                          |
 | ------------ | ------------------------------------------------ |
 | `debugger`   | CDP access for network, runtime, and page events |
@@ -115,10 +128,13 @@ cd apps/extension
 pnpm build
 pnpm build:release
 pnpm package:chrome
+pnpm package:chrome:enterprise
 pnpm verify
 ```
 
-The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local `pnpm build` runs keep the stable development `key`, while `pnpm build:release` generates an unpacked release build without that `key` so you can do store-parity checks before upload. `pnpm package:chrome` rebuilds the extension once, validates the generated manifest, and creates a Chrome Web Store upload ZIP in `dist/` with the release manifest. Packaging is pure Node.js, so it does not depend on a system `zip` binary being installed. `pnpm verify` runs the extension's lint, typecheck, test, and packaging pipeline in one command. You can override the ZIP path with `node scripts/build-extension.mjs --package --output ./dist/custom-name.zip`.
+The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local `pnpm build` runs keep the stable development `key`, while `pnpm build:release` generates an unpacked, keyless `store-safe` build for store-parity checks. `pnpm package:chrome` always rebuilds with `--release --profile store-safe`, writes `dist/webblackbox-<version>-chrome.zip`, then reopens the ZIP and validates its release manifest. That Web Store artifact contains no `debugger`, `tabs`, or `webRequest` permission, no persistent host permissions, and no static content script registration.
+
+The broader profile is an explicit opt-in: `pnpm package:chrome:enterprise` writes `dist/webblackbox-<version>-enterprise-chrome.zip` with `--profile dev`. Do not upload that archive to the Chrome Web Store. A raw `node scripts/build-extension.mjs --package` invocation also defaults to a release `store-safe` package; producing the broader archive requires `--profile dev`. Packaging is pure Node.js, so it does not depend on a system `zip` binary. `pnpm verify` runs lint, typecheck, tests, and the store-safe packaging pipeline. You can override the ZIP path with `node scripts/build-extension.mjs --package --output ./dist/custom-name.zip`.
 
 Build entries:
 

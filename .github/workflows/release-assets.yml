@@ -38,13 +38,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Package Chrome extension
+      - name: Package and verify store-safe Chrome extension
         run: pnpm --filter @webblackbox/extension package:chrome
 
       - name: Resolve Chrome extension archive
         id: archive
         run: |
-          archive_path=$(ls -t apps/extension/dist/*-chrome.zip | head -n 1)
+          archive_path=$(find apps/extension/dist -maxdepth 1 -type f \
+            -name 'webblackbox-*-chrome.zip' \
+            ! -name '*-enterprise-chrome.zip' \
+            -print | head -n 1)
           if [ -z "$archive_path" ]; then
             echo "Could not find packaged Chrome extension archive." >&2
             exit 1

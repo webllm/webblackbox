@@ -325,15 +325,16 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
   }
 
   const archiveSlug = slugify(EXTENSION_ARCHIVE_SLUG);
+  const archiveVariant = sourceProfile === "store-safe" ? "chrome" : "enterprise-chrome";
   const resolvedOutputPath = outputPath
     ? resolve(process.cwd(), outputPath)
-    : resolve(distDir, `${archiveSlug}-${version}-chrome.zip`);
+    : resolve(distDir, `${archiveSlug}-${version}-${archiveVariant}.zip`);
 
   await mkdir(dirname(resolvedOutputPath), { recursive: true });
   await mkdir(distDir, { recursive: true });
 
   if (!outputPath) {
-    await removeStaleArchives(distDir, archiveSlug, resolvedOutputPath);
+    await removeStaleArchives(distDir, archiveSlug, archiveVariant, resolvedOutputPath);
   }
 
   await rm(resolvedOutputPath, { force: true });
@@ -365,6 +366,11 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
 
   await writeFile(resolvedOutputPath, archiveBytes);
 
+  await assertChromeArchive(resolvedOutputPath, {
+    version,
+    profile: sourceProfile
+  });
+
   const archiveStat = await stat(resolvedOutputPath);
 
   return {
@@ -372,10 +378,34 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
     bytes: archiveStat.size,
     manifest: {
       name: EXTENSION_ARCHIVE_NAME,
-      version: releaseManifest.version
+      version: releaseManifest.version,
+      profile: sourceProfile
     },
     strippedKeys: Object.hasOwn(sourceManifest ?? {}, "key") ? ["key"] : []
   };
+}
+
+export async function assertChromeArchive(archivePath, { version, profile = "store-safe" } = {}) {
+  const archiveBytes = await readFile(archivePath);
+  const zip = await JSZip.loadAsync(archiveBytes);
+  const manifestEntry = zip.file("manifest.json");
+
+  if (!manifestEntry) {
+    throw new Error(`Chrome archive is missing manifest.json: ${archivePath}`);
+  }
+
+  const manifest = JSON.parse(await manifestEntry.async("text"));
+  const issues = validateExtensionManifest(manifest, {
+    version,
+    release: true,
+    profile
+  });
+
+  if (issues.length > 0) {
+    throw new Error(`Chrome archive manifest is invalid:\n- ${issues.join("\n- ")}`);
+  }
+
+  return manifest;
 }
 
 function validateUniqueStringArray(value, fieldName, issues) {
@@ -478,12 +508,12 @@ function inferManifestProfile(manifest) {
   return "dev";
 }
 
-async function removeStaleArchives(directory, slug, keepPath) {
+async function removeStaleArchives(directory, slug, variant, keepPath) {
   const entries = await readdir(directory).catch(() => []);
 
   await Promise.all(
     entries
-      .filter((entry) => entry.startsWith(`${slug}-`) && entry.endsWith("-chrome.zip"))
+      .filter((entry) => isArchiveForVariant(entry, slug, variant))
       .map(async (entry) => {
         const candidatePath = resolve(directory, entry);
 
@@ -494,6 +524,18 @@ async function removeStaleArchives(directory, slug, keepPath) {
         await rm(candidatePath, { force: true });
       })
   );
+}
+
+function isArchiveForVariant(entry, slug, variant) {
+  if (!entry.startsWith(`${slug}-`)) {
+    return false;
+  }
+
+  if (variant === "enterprise-chrome") {
+    return entry.endsWith("-enterprise-chrome.zip");
+  }
+
+  return entry.endsWith("-chrome.zip") && !entry.endsWith("-enterprise-chrome.zip");
 }
 
 async function listPackagedFiles(rootDir, currentDir = rootDir) {
