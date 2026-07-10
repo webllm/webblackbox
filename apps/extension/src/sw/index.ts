@@ -29,6 +29,10 @@ import {
 
 import { getChromeApi, type MessageSenderLike, type PortLike } from "../shared/chrome-api.js";
 import {
+  isAuthorizedExtensionPort,
+  parseExtensionInboundMessage
+} from "../shared/inbound-messages.js";
+import {
   PORT_NAMES,
   type ExportPrivacyWarning,
   type ExtensionInboundMessage,
@@ -359,6 +363,7 @@ type LiteBodyCaptureRule = {
 };
 
 const chromeApi = getChromeApi();
+const extensionBaseUrl = chromeApi?.runtime?.getURL("") ?? "";
 
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
@@ -513,9 +518,8 @@ chromeApi?.runtime?.onInstalled.addListener(() => {
 });
 
 chromeApi?.runtime?.onConnect.addListener((port) => {
-  if (
-    !Object.values(PORT_NAMES).includes(port.name as (typeof PORT_NAMES)[keyof typeof PORT_NAMES])
-  ) {
+  if (!isAuthorizedExtensionPort(port, extensionBaseUrl)) {
+    port.disconnect?.();
     return;
   }
 
@@ -539,7 +543,12 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
       return;
     }
 
-    const message = parseInboundMessage(rawMessage);
+    const message = parseExtensionInboundMessage(rawMessage, {
+      transport: "port",
+      portName: port.name,
+      sender: port.sender,
+      extensionBaseUrl
+    });
 
     if (!message) {
       return;
@@ -668,7 +677,11 @@ function sendContentPortRecordingState(
 }
 
 chromeApi?.runtime?.onMessage.addListener((rawMessage, sender, sendResponse) => {
-  const message = parseInboundMessage(rawMessage);
+  const message = parseExtensionInboundMessage(rawMessage, {
+    transport: "runtime",
+    sender,
+    extensionBaseUrl
+  });
 
   if (!message) {
     return;
@@ -5997,20 +6010,6 @@ async function resolveUiActionTabId(tabId?: number): Promise<number | undefined>
   }
 
   return sessionsByTab.keys().next().value;
-}
-
-function parseInboundMessage(message: unknown): ExtensionInboundMessage | null {
-  if (message === null || typeof message !== "object" || Array.isArray(message)) {
-    return null;
-  }
-
-  const kind = (message as { kind?: unknown }).kind;
-
-  if (typeof kind !== "string") {
-    return null;
-  }
-
-  return message as ExtensionInboundMessage;
 }
 
 async function setIdleBadge(): Promise<void> {

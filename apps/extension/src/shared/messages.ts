@@ -17,6 +17,8 @@ export const PORT_NAMES = {
   offscreen: "webblackbox:offscreen"
 } as const;
 
+export const CONTENT_EVENT_BATCH_MAX = 120;
+
 export type FullModeVisualCapture = "screenshots" | "recording" | "both" | "none";
 
 export type UiStartSessionMessage = {
