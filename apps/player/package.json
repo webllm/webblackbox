@@ -10,7 +10,7 @@
     "e2e:playback": "pnpm run build && node scripts/e2e-playback-regression.mjs",
     "pages:build": "pnpm build && node scripts/prepare-pages-build.mjs",
     "pages:deploy": "node scripts/deploy-gh-pages.mjs",
-    "serve": "npx -y http-server ./ -p 4177",
+    "serve": "vite preview --host 127.0.0.1 --port 4177 --strictPort --outDir build",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
