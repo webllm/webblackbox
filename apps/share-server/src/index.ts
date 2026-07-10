@@ -35,6 +35,16 @@ type ShareRecord = {
   summary: ShareSummary;
 };
 
+type PendingShareUpload = {
+  id: string;
+  tempPath: string;
+  archivePath: string;
+  archiveDirectoryIdentity: BigIntStats;
+  tempIdentity: BigIntStats | null;
+  archiveIdentity: BigIntStats | null;
+  committed: boolean;
+};
+
 type ShareRecordIndexEntry = Readonly<{
   id: string;
   createdAt: number;
@@ -753,10 +763,15 @@ async function handleUploadWithinInspectionSlot(
   response: ServerResponse
 ): Promise<void> {
   const id = randomUUID().replaceAll("-", "");
-  const upload = {
+  const archiveDirectoryIdentity = getManagedStorageDirectoryIdentity(ARCHIVES_DIR);
+  await assertStoragePathIdentity(ARCHIVES_DIR, archiveDirectoryIdentity, "directory");
+  const upload: PendingShareUpload = {
     id,
     tempPath: join(ARCHIVES_DIR, `.${id}.upload`),
     archivePath: archivePathForId(id),
+    archiveDirectoryIdentity,
+    tempIdentity: null,
+    archiveIdentity: null,
     committed: false
   };
 
@@ -764,24 +779,78 @@ async function handleUploadWithinInspectionSlot(
     await processUploadWithinInspectionSlot(request, response, upload);
   } finally {
     if (!upload.committed) {
-      await Promise.all([
-        rm(upload.tempPath, { force: true }),
-        rm(upload.archivePath, { force: true })
-      ]);
+      await removeUncommittedUploadFiles(upload);
     }
   }
+}
+
+async function commitUploadedArchive(upload: PendingShareUpload): Promise<void> {
+  const temporaryIdentity = upload.tempIdentity;
+  if (!temporaryIdentity) {
+    throw new Error("Upload temporary file identity is unavailable.");
+  }
+
+  await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
+  await assertPrivateArchiveFilePathIdentity(upload.tempPath, temporaryIdentity);
+  await rename(upload.tempPath, upload.archivePath);
+  upload.tempIdentity = null;
+  upload.archiveIdentity = temporaryIdentity;
+
+  await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
+  await assertPrivateArchiveFilePathIdentity(upload.archivePath, temporaryIdentity);
+  await syncDirectoryBestEffort(ARCHIVES_DIR);
+  await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
+  await assertPrivateArchiveFilePathIdentity(upload.archivePath, temporaryIdentity);
+}
+
+async function removeUncommittedUploadFiles(upload: PendingShareUpload): Promise<void> {
+  if (upload.tempIdentity) {
+    await removePrivateArchiveFileIfUnchanged(
+      upload.tempPath,
+      upload.tempIdentity,
+      upload.archiveDirectoryIdentity
+    );
+    upload.tempIdentity = null;
+  }
+
+  if (upload.archiveIdentity) {
+    await removePrivateArchiveFileIfUnchanged(
+      upload.archivePath,
+      upload.archiveIdentity,
+      upload.archiveDirectoryIdentity
+    );
+    upload.archiveIdentity = null;
+  }
+}
+
+async function removePrivateArchiveFileIfUnchanged(
+  filePath: string,
+  expectedFileIdentity: BigIntStats,
+  archiveDirectoryIdentity: BigIntStats
+): Promise<void> {
+  await assertStoragePathIdentity(ARCHIVES_DIR, archiveDirectoryIdentity, "directory");
+  try {
+    await assertStoragePathIdentity(filePath, expectedFileIdentity, "file");
+  } catch (error) {
+    if (error instanceof UnsafeStoragePathError && isFileNotFoundError(error.cause)) {
+      return;
+    }
+    throw error;
+  }
+  await rm(filePath, { force: true });
+  await assertStoragePathIdentity(ARCHIVES_DIR, archiveDirectoryIdentity, "directory");
 }
 
 async function processUploadWithinInspectionSlot(
   request: IncomingMessage,
   response: ServerResponse,
-  upload: { id: string; tempPath: string; archivePath: string; committed: boolean }
+  upload: PendingShareUpload
 ): Promise<void> {
-  const { id, tempPath, archivePath } = upload;
+  const { id } = upload;
   let bytes: Uint8Array;
   let checksumSha256: string;
   try {
-    const stored = await readRequestBodyToTempFile(request, tempPath, MAX_UPLOAD_BYTES);
+    const stored = await readRequestBodyToTempFile(request, upload, MAX_UPLOAD_BYTES);
     bytes = stored.bytes;
     checksumSha256 = stored.checksumSha256;
   } catch (error) {
@@ -1029,8 +1098,7 @@ async function processUploadWithinInspectionSlot(
     summary
   };
 
-  await rename(tempPath, archivePath);
-  await syncDirectoryBestEffort(ARCHIVES_DIR);
+  await commitUploadedArchive(upload);
   await writeRecord(record);
   upload.committed = true;
   const auditPromise = writeShareAuditEvent(request, {
@@ -2584,6 +2652,39 @@ async function hardenStorageFileIfPresent(filePath: string): Promise<void> {
     throw unsafeStoragePathError(filePath, "refusing to follow or replace this path", error);
   } finally {
     await handle?.close().catch(() => undefined);
+  }
+}
+
+function assertPrivateArchiveFileStat(
+  filePath: string,
+  stat: BigIntStats,
+  expectedSize: bigint,
+  requirePrivateMode = true
+): void {
+  if (
+    !stat.isFile() ||
+    stat.nlink !== 1n ||
+    stat.size !== expectedSize ||
+    (requirePrivateMode && process.platform !== "win32" && (stat.mode & 0o777n) !== 0o600n)
+  ) {
+    throw unsafeStoragePathError(filePath, "expected a private regular archive file");
+  }
+}
+
+async function assertPrivateArchiveFilePathIdentity(
+  filePath: string,
+  expectedStat: BigIntStats
+): Promise<void> {
+  let currentStat: BigIntStats;
+  try {
+    currentStat = await lstat(filePath, { bigint: true });
+  } catch (error) {
+    throw unsafeStoragePathError(filePath, "disappeared during an archive operation", error);
+  }
+
+  assertPrivateArchiveFileStat(filePath, currentStat, expectedStat.size);
+  if (!isSameFileSystemObject(currentStat, expectedStat)) {
+    throw unsafeStoragePathError(filePath, "changed during an archive operation");
   }
 }
 
@@ -4203,7 +4304,7 @@ function normalizeAllowedOrigin(rawValue: string | undefined): string {
 
 async function readRequestBodyToTempFile(
   request: IncomingMessage,
-  tempPath: string,
+  upload: PendingShareUpload,
   maxBytes: number
 ): Promise<{ bytes: Uint8Array; checksumSha256: string }> {
   const declaredBytes = readDeclaredContentLength(request);
@@ -4211,7 +4312,12 @@ async function readRequestBodyToTempFile(
     throw new PayloadTooLargeError(maxBytes);
   }
 
-  const handle = await open(tempPath, "wx+", 0o600);
+  await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
+  const handle = await open(
+    upload.tempPath,
+    fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+    0o600
+  );
   const checksum = createHash("sha256");
   let totalBytes = 0;
   let storedBytes: Buffer | null = null;
@@ -4238,6 +4344,18 @@ async function readRequestBodyToTempFile(
   armIdleTimer();
 
   try {
+    let temporaryStat = await handle.stat({ bigint: true });
+    assertPrivateArchiveFileStat(upload.tempPath, temporaryStat, 0n, false);
+    upload.tempIdentity = temporaryStat;
+    if (process.platform !== "win32") {
+      await handle.chmod(0o600);
+      temporaryStat = await handle.stat({ bigint: true });
+      assertPrivateArchiveFileStat(upload.tempPath, temporaryStat, 0n);
+      upload.tempIdentity = temporaryStat;
+    }
+    await assertPrivateArchiveFilePathIdentity(upload.tempPath, temporaryStat);
+    await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
+
     for await (const chunk of request) {
       armIdleTimer();
       const bytes = chunk instanceof Buffer ? chunk : Buffer.from(chunk as Uint8Array);
@@ -4258,11 +4376,21 @@ async function readRequestBodyToTempFile(
     }
 
     await handle.sync();
-    const storedStat = await handle.stat();
-    if (storedStat.size !== totalBytes) {
-      throw new Error("Upload temporary file size changed unexpectedly.");
-    }
+    let storedStat = await handle.stat({ bigint: true });
+    assertPrivateArchiveFileStat(upload.tempPath, storedStat, BigInt(totalBytes));
+    upload.tempIdentity = storedStat;
+    await assertPrivateArchiveFilePathIdentity(upload.tempPath, storedStat);
+    await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
     storedBytes = await readFileHandleExactly(handle, totalBytes);
+    const verifiedStat = await handle.stat({ bigint: true });
+    assertPrivateArchiveFileStat(upload.tempPath, verifiedStat, BigInt(totalBytes));
+    if (!isSameFileSystemObject(storedStat, verifiedStat)) {
+      throw unsafeStoragePathError(upload.tempPath, "changed while its contents were verified");
+    }
+    storedStat = verifiedStat;
+    upload.tempIdentity = storedStat;
+    await assertPrivateArchiveFilePathIdentity(upload.tempPath, storedStat);
+    await assertStoragePathIdentity(ARCHIVES_DIR, upload.archiveDirectoryIdentity, "directory");
   } catch (error) {
     throw timeoutError ?? error;
   } finally {

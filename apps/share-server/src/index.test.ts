@@ -10,6 +10,7 @@ import {
   open,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -1549,6 +1550,46 @@ describe("share-server", () => {
       await expect(readFile(outsideFile, "utf8")).resolves.toBe("outside");
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an upload after the archive directory is replaced at runtime", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const server = await startShareServer();
+    const archive = Buffer.from(await createEncryptedEnvelopeArchive());
+    const archivesPath = resolve(server.dataDir, "archives");
+    const originalArchivesPath = resolve(server.dataDir, "archives-before-runtime-swap");
+    const outsideDirectory = await mkdtemp(resolve(tmpdir(), "webblackbox-share-runtime-swap-"));
+    let originalDirectoryMoved = false;
+
+    try {
+      await rename(archivesPath, originalArchivesPath);
+      originalDirectoryMoved = true;
+      await symlink(outsideDirectory, archivesPath, "dir");
+      const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-webblackbox-api-key": apiKey,
+          "x-webblackbox-share-summary": encodeURIComponent(
+            JSON.stringify(buildPassedShareSummary(archive))
+          )
+        },
+        body: archive
+      });
+
+      expect(response.status).not.toBe(201);
+      await expect(response.json()).resolves.toEqual({ error: "Internal server error." });
+      await expect(readdir(outsideDirectory)).resolves.toEqual([]);
+    } finally {
+      if (originalDirectoryMoved) {
+        await rm(archivesPath, { force: true });
+        await rename(originalArchivesPath, archivesPath);
+      }
+      await rm(outsideDirectory, { recursive: true, force: true });
     }
   });
 
