@@ -252,8 +252,10 @@ const shareReadSessions = new Map<string, ShareReadSession>();
 const verifiedArchiveCache = new Map<string, { checksumSha256: string; statFingerprint: string }>();
 let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
+let reservedShareRecordSlots = 0;
 let sharePublicOrigin = DEFAULT_BASE_URL;
 let auditWriteQueue = Promise.resolve();
+let shareRecordAdmissionQueue = Promise.resolve();
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -461,8 +463,10 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
     return;
   }
 
+  let reservedRecordSlot = false;
   try {
-    if (!(await hasShareRecordCapacity())) {
+    reservedRecordSlot = await tryReserveShareRecordSlot();
+    if (!reservedRecordSlot) {
       closeRequestAfterResponse(request, response);
       await writeShareAuditEvent(request, {
         action: "upload",
@@ -480,6 +484,9 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
 
     await handleUploadWithinInspectionSlot(request, response);
   } finally {
+    if (reservedRecordSlot) {
+      reservedShareRecordSlots -= 1;
+    }
     activeUploadInspections -= 1;
   }
 }
@@ -2091,16 +2098,28 @@ async function loadAllRecords(): Promise<ShareRecord[]> {
   return records;
 }
 
-async function hasShareRecordCapacity(): Promise<boolean> {
-  const initialCount = await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT);
-  if (initialCount < SHARE_RECORD_ADMISSION_LIMIT) {
-    return true;
-  }
+async function tryReserveShareRecordSlot(): Promise<boolean> {
+  const reservation = shareRecordAdmissionQueue.then(async () => {
+    const initialCount = await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT);
+    if (initialCount + reservedShareRecordSlots < SHARE_RECORD_ADMISSION_LIMIT) {
+      reservedShareRecordSlots += 1;
+      return true;
+    }
 
-  await pruneExpiredShareRecords(Date.now());
-  return (
-    (await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT)) < SHARE_RECORD_ADMISSION_LIMIT
+    await pruneExpiredShareRecords(Date.now());
+    const retainedCount = await countShareRecordFilesUpTo(SHARE_RECORD_ADMISSION_LIMIT);
+    if (retainedCount + reservedShareRecordSlots >= SHARE_RECORD_ADMISSION_LIMIT) {
+      return false;
+    }
+
+    reservedShareRecordSlots += 1;
+    return true;
+  });
+  shareRecordAdmissionQueue = reservation.then(
+    () => undefined,
+    () => undefined
   );
+  return reservation;
 }
 
 async function countShareRecordFilesUpTo(stopAt: number): Promise<number> {

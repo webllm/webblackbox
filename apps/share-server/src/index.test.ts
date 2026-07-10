@@ -956,6 +956,38 @@ describe("share-server", () => {
     await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toHaveLength(2);
   });
 
+  it("reserves record capacity across concurrent upload inspections", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_MAX_RECORDS: "1",
+      WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS: "2"
+    });
+    const archive = await createEncryptedEnvelopeArchive();
+    const headers = {
+      "content-type": "application/octet-stream",
+      "x-webblackbox-api-key": apiKey,
+      "x-webblackbox-share-summary": encodeURIComponent(
+        JSON.stringify(buildPassedShareSummary(archive))
+      )
+    };
+
+    const responses = await Promise.all([
+      fetch(`${server.baseUrl}/api/share/upload`, {
+        method: "POST",
+        headers,
+        body: Buffer.from(archive)
+      }),
+      fetch(`${server.baseUrl}/api/share/upload`, {
+        method: "POST",
+        headers,
+        body: Buffer.from(archive)
+      })
+    ]);
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([201, 507]);
+    await expect(readdir(resolve(server.dataDir, "records"))).resolves.toHaveLength(1);
+    await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toHaveLength(1);
+  });
+
   it("keeps existing shares operable when the upload admission limit is lowered", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_MAX_RECORDS: "4"
