@@ -13,8 +13,9 @@ import { PORT_NAMES } from "../shared/messages.js";
 import { getExtensionPipelineStorage } from "./pipeline-storage.js";
 import { ResilientRuntimePort } from "./runtime-port.js";
 import {
+  parseActiveScreenRecordingSessionIds,
   pauseScreenRecordingForPortDisconnect,
-  resumeScreenRecordingAfterPortReconnect
+  reconcileScreenRecordingsWithWorkerSessions
 } from "./screen-recording-port.js";
 
 type OffscreenPipelineRequest = {
@@ -135,6 +136,7 @@ const state: OffscreenState = {
 };
 
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+let screenRecordingHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
 let runtimePort: ResilientRuntimePort | null = null;
 
 console.info("[WebBlackbox] offscreen pipeline initialized");
@@ -152,11 +154,17 @@ function handleRuntimePortMessage(message: unknown): void {
 
     if (kind === "sw.pipeline-status") {
       const activeSessions = (message as { activeSessions?: unknown }).activeSessions;
+      const activeScreenRecordingSessionIds = parseActiveScreenRecordingSessionIds(
+        (message as { sessions?: unknown }).sessions
+      );
       const updatedAt = (message as { updatedAt?: unknown }).updatedAt;
 
       state.activeSessions =
         typeof activeSessions === "number" && Number.isFinite(activeSessions) ? activeSessions : 0;
       state.updatedAt = typeof updatedAt === "number" ? updatedAt : Date.now();
+      if (activeScreenRecordingSessionIds) {
+        reconcileScreenRecordingsAfterWorkerHandshake(activeScreenRecordingSessionIds);
+      }
       syncServiceWorkerKeepalive();
 
       console.info("[WebBlackbox] offscreen pipeline status", {
@@ -175,6 +183,7 @@ function handleRuntimePortMessage(message: unknown): void {
 
 function handleRuntimePortDisconnect(): void {
   stopServiceWorkerKeepalive();
+  let needsHandshake = false;
   for (const recording of screenRecordings.values()) {
     if (!pauseScreenRecordingForPortDisconnect(recording)) {
       void stopOffscreenScreenRecording(
@@ -183,22 +192,16 @@ function handleRuntimePortDisconnect(): void {
         "service-worker-disconnected",
         false
       );
+    } else if (!recording.stopping) {
+      needsHandshake = true;
     }
+  }
+  if (needsHandshake) {
+    startScreenRecordingHandshakeDeadline();
   }
 }
 
 function handleRuntimePortReconnect(): void {
-  for (const recording of screenRecordings.values()) {
-    if (!resumeScreenRecordingAfterPortReconnect(recording)) {
-      void stopOffscreenScreenRecording(
-        recording.sid,
-        recording.recordingId,
-        "service-worker-reconnect-failed",
-        true
-      );
-    }
-  }
-
   postToSw({
     kind: "offscreen.ready",
     t: Date.now()
@@ -206,7 +209,41 @@ function handleRuntimePortReconnect(): void {
   syncServiceWorkerKeepalive();
 }
 
+function reconcileScreenRecordingsAfterWorkerHandshake(
+  activeSessionIds: ReadonlySet<string>
+): void {
+  clearScreenRecordingHandshakeDeadline();
+  const failures = reconcileScreenRecordingsWithWorkerSessions(
+    screenRecordings.values(),
+    activeSessionIds
+  );
+  for (const { recording, reason } of failures) {
+    void stopOffscreenScreenRecording(recording.sid, recording.recordingId, reason, true);
+  }
+}
+
+function startScreenRecordingHandshakeDeadline(): void {
+  if (screenRecordingHandshakeTimer !== null) {
+    return;
+  }
+
+  screenRecordingHandshakeTimer = setTimeout(() => {
+    screenRecordingHandshakeTimer = null;
+    handleRuntimePortDisconnectDeadline();
+  }, OFFSCREEN_PORT_DISCONNECT_DEADLINE_MS);
+}
+
+function clearScreenRecordingHandshakeDeadline(): void {
+  if (screenRecordingHandshakeTimer === null) {
+    return;
+  }
+
+  clearTimeout(screenRecordingHandshakeTimer);
+  screenRecordingHandshakeTimer = null;
+}
+
 function handleRuntimePortDisconnectDeadline(): void {
+  clearScreenRecordingHandshakeDeadline();
   for (const recording of screenRecordings.values()) {
     void stopOffscreenScreenRecording(
       recording.sid,
@@ -666,6 +703,10 @@ function cleanupOffscreenScreenRecording(recording: OffscreenScreenRecordingStat
 
   if (screenRecordings.get(recording.sid) === recording) {
     screenRecordings.delete(recording.sid);
+  }
+
+  if (screenRecordings.size === 0) {
+    clearScreenRecordingHandshakeDeadline();
   }
 
   syncServiceWorkerKeepalive();

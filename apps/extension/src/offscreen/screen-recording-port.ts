@@ -5,6 +5,58 @@ export type PortBoundScreenRecording = {
   pausedForPortDisconnect: boolean;
 };
 
+export type SessionBoundScreenRecording = PortBoundScreenRecording & { sid: string };
+
+export type ScreenRecordingHandshakeFailure<TRecording extends SessionBoundScreenRecording> = {
+  recording: TRecording;
+  reason: "service-worker-session-not-active" | "service-worker-reconnect-failed";
+};
+
+/** Parses the authoritative active-session list sent by the current service worker. */
+export function parseActiveScreenRecordingSessionIds(input: unknown): ReadonlySet<string> | null {
+  if (!Array.isArray(input) || input.length > 10_000) {
+    return null;
+  }
+
+  const activeSessionIds = new Set<string>();
+  for (const item of input) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      return null;
+    }
+
+    const record = item as Record<string, unknown>;
+    if (typeof record.sid !== "string" || record.sid.length === 0 || record.sid.length > 256) {
+      return null;
+    }
+    if (record.active !== true) {
+      return null;
+    }
+    activeSessionIds.add(record.sid);
+  }
+
+  return activeSessionIds;
+}
+
+/** Resumes only recordings claimed by the restored worker and reports every fail-closed stop. */
+export function reconcileScreenRecordingsWithWorkerSessions<
+  TRecording extends SessionBoundScreenRecording
+>(
+  recordings: Iterable<TRecording>,
+  activeSessionIds: ReadonlySet<string>
+): ScreenRecordingHandshakeFailure<TRecording>[] {
+  const failures: ScreenRecordingHandshakeFailure<TRecording>[] = [];
+  for (const recording of recordings) {
+    if (!activeSessionIds.has(recording.sid)) {
+      failures.push({ recording, reason: "service-worker-session-not-active" });
+      continue;
+    }
+    if (!resumeScreenRecordingAfterPortReconnect(recording)) {
+      failures.push({ recording, reason: "service-worker-reconnect-failed" });
+    }
+  }
+  return failures;
+}
+
 /** Suspends sensitive media production while the service worker cannot receive chunks. */
 export function pauseScreenRecordingForPortDisconnect(
   recording: PortBoundScreenRecording

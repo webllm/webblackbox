@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  parseActiveScreenRecordingSessionIds,
   pauseScreenRecordingForPortDisconnect,
+  reconcileScreenRecordingsWithWorkerSessions,
   resumeScreenRecordingAfterPortReconnect,
   type PortBoundScreenRecording
 } from "./screen-recording-port.js";
@@ -31,6 +33,18 @@ function createRecording(): PortBoundScreenRecording & {
 }
 
 describe("screen recording port lifecycle", () => {
+  it("accepts only an authoritative bounded list of active session ids", () => {
+    expect(
+      parseActiveScreenRecordingSessionIds([
+        { sid: "S-active-1", active: true, tabId: 1 },
+        { sid: "S-active-2", active: true, tabId: 2 }
+      ])
+    ).toEqual(new Set(["S-active-1", "S-active-2"]));
+    expect(parseActiveScreenRecordingSessionIds([{ sid: "S-stopped", active: false }])).toBeNull();
+    expect(parseActiveScreenRecordingSessionIds([{ sid: "", active: true }])).toBeNull();
+    expect(parseActiveScreenRecordingSessionIds({ sid: "S-not-an-array" })).toBeNull();
+  });
+
   it("disables tracks and pauses until the worker port reconnects", () => {
     const recording = createRecording();
 
@@ -48,5 +62,28 @@ describe("screen recording port lifecycle", () => {
 
     expect(pauseScreenRecordingForPortDisconnect(recording)).toBe(false);
     expect(recording.stream.getTracks().every((track) => !track.enabled)).toBe(true);
+  });
+
+  it("resumes only recordings claimed by the restored worker handshake", () => {
+    const claimed = { ...createRecording(), sid: "S-claimed" };
+    const unclaimed = { ...createRecording(), sid: "S-unclaimed" };
+    pauseScreenRecordingForPortDisconnect(claimed);
+    pauseScreenRecordingForPortDisconnect(unclaimed);
+
+    const failures = reconcileScreenRecordingsWithWorkerSessions(
+      [claimed, unclaimed],
+      new Set(["S-claimed"])
+    );
+
+    expect(claimed.recorder.resume).toHaveBeenCalledOnce();
+    expect(claimed.stream.getTracks().every((track) => track.enabled)).toBe(true);
+    expect(unclaimed.recorder.resume).not.toHaveBeenCalled();
+    expect(unclaimed.stream.getTracks().every((track) => !track.enabled)).toBe(true);
+    expect(failures).toEqual([
+      {
+        recording: unclaimed,
+        reason: "service-worker-session-not-active"
+      }
+    ]);
   });
 });
