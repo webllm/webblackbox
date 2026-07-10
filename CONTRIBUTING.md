@@ -45,18 +45,18 @@ webblackbox/
 
 ## Common Commands
 
-| Command                 | What it does                                         |
-| ----------------------- | ---------------------------------------------------- |
-| `pnpm build`            | Build the whole workspace                            |
-| `pnpm dev`              | Run workspace watch tasks                            |
-| `pnpm test`             | Run workspace tests                                  |
-| `pnpm lint`             | Run ESLint across packages                           |
-| `pnpm typecheck`        | Run TypeScript checks                                |
-| `pnpm format`           | Format the repo with Prettier                        |
-| `pnpm format:check`     | Verify formatting                                    |
-| `pnpm changeset`        | Create a release changeset                           |
-| `pnpm version-packages` | Apply changesets and sync extension manifest version |
-| `pnpm release`          | Publish npm packages via Changesets                  |
+| Command                 | What it does                                 |
+| ----------------------- | -------------------------------------------- |
+| `pnpm build`            | Build the whole workspace                    |
+| `pnpm dev`              | Run workspace watch tasks                    |
+| `pnpm test`             | Run workspace tests                          |
+| `pnpm lint`             | Run ESLint across packages                   |
+| `pnpm typecheck`        | Run TypeScript checks                        |
+| `pnpm format`           | Format the repo with Prettier                |
+| `pnpm format:check`     | Verify formatting                            |
+| `pnpm changeset`        | Create a release changeset                   |
+| `pnpm version-packages` | Apply the lockstep workspace release version |
+| `pnpm release`          | Publish npm packages via Changesets          |
 
 Use `pnpm --filter <package-name> <script>` for package-specific work.
 
@@ -153,6 +153,7 @@ pnpm release
 
 Notes:
 
+- Every public package plus the Extension, Player, and Share Server is one Changesets fixed group. A release changeset therefore advances every shipped surface to the same version, including private app manifests used to build release assets.
 - `version-packages` also syncs the Chrome extension manifest version from `apps/extension/package.json`.
 - Release automation publishes npm packages, uploads the Chrome extension ZIP to GitHub Releases, and deploys the hosted Player to GitHub Pages.
 
