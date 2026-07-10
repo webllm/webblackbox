@@ -36,13 +36,17 @@ npm install @webblackbox/protocol
 
 ## Event Types
 
-WebBlackbox currently defines 57 event types, organized by category:
+WebBlackbox currently defines 62 event types, organized across 12 categories:
 
 ### Meta Events
 
 - `meta.session.start` — Session initialization with URL, title, viewport, and permissions
 - `meta.session.end` — Session termination
 - `meta.config` — Configuration snapshot
+
+### Privacy Events
+
+- `privacy.violation` — Capture-policy or redaction violation notice
 
 ### System Events
 
@@ -101,6 +105,10 @@ WebBlackbox currently defines 57 event types, organized by category:
 ### Screen Events
 
 - `screen.screenshot` — Page screenshot with pointer position
+- `screen.recording.start` — Screen recording session started
+- `screen.recording.chunk` — Screen recording media chunk
+- `screen.recording.end` — Screen recording session completed
+- `screen.recording.error` — Screen recording failure
 - `screen.viewport` — Viewport dimension changes
 
 ### Storage Events

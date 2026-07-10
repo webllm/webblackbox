@@ -87,7 +87,7 @@ Full SDK details are in [packages/webblackbox/README.md](packages/webblackbox/RE
 
 ## What It Captures
 
-WebBlackbox currently records 57 event types across 13 categories, including:
+WebBlackbox currently records 62 event types across 12 categories, including:
 
 - User input and navigation
 - Console logs and runtime errors
