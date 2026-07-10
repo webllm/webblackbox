@@ -695,7 +695,7 @@ describe("WebBlackboxPlayer", () => {
 
     const curl = player.generateCurl("R-1");
     expect(curl).toContain("curl 'https://example.com/api'");
-    expect(curl).toContain("-X POST");
+    expect(curl).toContain("-X 'POST'");
 
     const fetchSnippet = player.generateFetch("R-1");
     expect(fetchSnippet).toContain("await fetch");
@@ -721,6 +721,15 @@ describe("WebBlackboxPlayer", () => {
       text: '{"ok":true}'
     });
     expect(har.log.entries[0]?.response.content.encoding).toBeUndefined();
+  });
+
+  it("shell-quotes untrusted HTTP methods in generated curl commands", async () => {
+    const bytes = await createRichFixtureArchive("get`id`");
+    const player = await WebBlackboxPlayer.open(bytes);
+    const curl = player.generateCurl("R-1");
+
+    expect(curl).toContain("-X 'GET`ID`'");
+    expect(curl).not.toContain("-X GET`ID`");
   });
 
   it("builds storage timeline, report, and playwright script", async () => {
@@ -1728,7 +1737,7 @@ async function createArchiveWithDeprecatedBlobPath(): Promise<Uint8Array> {
   return zip.generateAsync({ type: "uint8array" });
 }
 
-async function createRichFixtureArchive(): Promise<Uint8Array> {
+async function createRichFixtureArchive(requestMethod = "POST"): Promise<Uint8Array> {
   const zip = new JSZip();
   const events: WebBlackboxEvent[] = [
     {
@@ -1772,7 +1781,7 @@ async function createRichFixtureArchive(): Promise<Uint8Array> {
       data: {
         requestId: "R-1",
         request: {
-          method: "POST",
+          method: requestMethod,
           url: "https://example.com/api",
           headers: {
             "content-type": "application/json",

@@ -1503,7 +1503,10 @@ export class WebBlackboxPlayer {
       return null;
     }
 
-    const lines = [`curl ${shellQuote(entry.url)} \\`, `  -X ${entry.method.toUpperCase()} \\`];
+    const lines = [
+      `curl ${shellQuote(entry.url)} \\`,
+      `  -X ${shellQuote(entry.method.toUpperCase())} \\`
+    ];
 
     for (const [name, value] of Object.entries(entry.requestHeaders)) {
       lines.push(`  -H ${shellQuote(`${name}: ${value}`)} \\`);
