@@ -12,14 +12,24 @@ export type ScreenRecordingHandshakeFailure<TRecording extends SessionBoundScree
   reason: "service-worker-session-not-active" | "service-worker-reconnect-failed";
 };
 
-/** Parses the authoritative active-session list sent by the current service worker. */
-export function parseActiveScreenRecordingSessionIds(input: unknown): ReadonlySet<string> | null {
-  if (!Array.isArray(input) || input.length > 10_000) {
+/** Parses an active-session list only after the current worker has finished state restoration. */
+export function parseActiveScreenRecordingSessionIds(status: unknown): ReadonlySet<string> | null {
+  if (status === null || typeof status !== "object" || Array.isArray(status)) {
+    return null;
+  }
+
+  const record = status as Record<string, unknown>;
+  const sessions = record.sessions;
+  if (
+    record.runtimeStateRestored !== true ||
+    !Array.isArray(sessions) ||
+    sessions.length > 10_000
+  ) {
     return null;
   }
 
   const activeSessionIds = new Set<string>();
-  for (const item of input) {
+  for (const item of sessions) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
       return null;
     }

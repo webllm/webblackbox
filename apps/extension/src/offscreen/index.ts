@@ -122,7 +122,7 @@ const SCREEN_RECORDING_MAX_FRAME_RATE = 30;
 const SCREEN_RECORDING_VIDEO_BITS_PER_SECOND = 3_500_000;
 const OFFSCREEN_PORT_RECONNECT_INITIAL_MS = 250;
 const OFFSCREEN_PORT_RECONNECT_MAX_MS = 2_000;
-const OFFSCREEN_PORT_DISCONNECT_DEADLINE_MS = 5_000;
+const OFFSCREEN_PORT_DISCONNECT_DEADLINE_MS = 30_000;
 const SCREEN_RECORDING_MIME_CANDIDATES = [
   "video/webm;codecs=vp9",
   "video/webm;codecs=vp8",
@@ -154,9 +154,7 @@ function handleRuntimePortMessage(message: unknown): void {
 
     if (kind === "sw.pipeline-status") {
       const activeSessions = (message as { activeSessions?: unknown }).activeSessions;
-      const activeScreenRecordingSessionIds = parseActiveScreenRecordingSessionIds(
-        (message as { sessions?: unknown }).sessions
-      );
+      const activeScreenRecordingSessionIds = parseActiveScreenRecordingSessionIds(message);
       const updatedAt = (message as { updatedAt?: unknown }).updatedAt;
 
       state.activeSessions =

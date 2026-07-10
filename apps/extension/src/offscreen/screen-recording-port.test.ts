@@ -35,13 +35,32 @@ function createRecording(): PortBoundScreenRecording & {
 describe("screen recording port lifecycle", () => {
   it("accepts only an authoritative bounded list of active session ids", () => {
     expect(
-      parseActiveScreenRecordingSessionIds([
-        { sid: "S-active-1", active: true, tabId: 1 },
-        { sid: "S-active-2", active: true, tabId: 2 }
-      ])
+      parseActiveScreenRecordingSessionIds({
+        runtimeStateRestored: true,
+        sessions: [
+          { sid: "S-active-1", active: true, tabId: 1 },
+          { sid: "S-active-2", active: true, tabId: 2 }
+        ]
+      })
     ).toEqual(new Set(["S-active-1", "S-active-2"]));
-    expect(parseActiveScreenRecordingSessionIds([{ sid: "S-stopped", active: false }])).toBeNull();
-    expect(parseActiveScreenRecordingSessionIds([{ sid: "", active: true }])).toBeNull();
+    expect(
+      parseActiveScreenRecordingSessionIds({
+        runtimeStateRestored: false,
+        sessions: [{ sid: "S-active-1", active: true }]
+      })
+    ).toBeNull();
+    expect(
+      parseActiveScreenRecordingSessionIds({
+        runtimeStateRestored: true,
+        sessions: [{ sid: "S-stopped", active: false }]
+      })
+    ).toBeNull();
+    expect(
+      parseActiveScreenRecordingSessionIds({
+        runtimeStateRestored: true,
+        sessions: [{ sid: "", active: true }]
+      })
+    ).toBeNull();
     expect(parseActiveScreenRecordingSessionIds({ sid: "S-not-an-array" })).toBeNull();
   });
 

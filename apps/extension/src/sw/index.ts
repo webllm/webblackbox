@@ -532,10 +532,16 @@ const runtimeCleanupScheduler = new RuntimeCleanupScheduler({
     }
   }
 });
-const runtimeStateRestorePromise = restoreRuntimeState().catch(async (error) => {
-  console.warn("[WebBlackbox] runtime state restoration failed closed", error);
-  await failClosedRuntimeRestoration();
-});
+let runtimeStateRestored = false;
+const runtimeStateRestorePromise = restoreRuntimeState()
+  .catch(async (error) => {
+    console.warn("[WebBlackbox] runtime state restoration failed closed", error);
+    await failClosedRuntimeRestoration();
+  })
+  .finally(() => {
+    runtimeStateRestored = true;
+    notifyOffscreenPipelineStatus();
+  });
 
 chromeApi?.alarms?.onAlarm.addListener((alarm) => {
   void runtimeCleanupScheduler.handleAlarm(alarm.name).catch((error) => {
@@ -6405,6 +6411,7 @@ function notifyOffscreenPipelineStatus(): void {
   try {
     port.postMessage({
       kind: "sw.pipeline-status",
+      runtimeStateRestored,
       activeSessions: activeRuntimes.length,
       sessions: activeRuntimes.map((runtime) => ({
         sid: runtime.sid,
