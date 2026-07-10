@@ -11,7 +11,19 @@ export async function sha256HexFromText(value: string): Promise<string | null> {
 
   try {
     const bytes = new TextEncoder().encode(value);
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return await sha256HexFromBytes(bytes);
+  } catch {
+    return null;
+  }
+}
+
+export async function sha256HexFromBytes(value: BufferSource): Promise<string | null> {
+  if (typeof globalThis.crypto === "undefined" || !globalThis.crypto?.subtle) {
+    return null;
+  }
+
+  try {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", value);
     return toHex(new Uint8Array(digest));
   } catch {
     return null;

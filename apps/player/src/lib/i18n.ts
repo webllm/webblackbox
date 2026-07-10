@@ -268,7 +268,9 @@ type PlayerMessages = {
   feedbackPlaywrightMocksExported: string;
   feedbackLoadArchiveBeforeSharing: string;
   feedbackInvalidShareServerUrl: string;
+  feedbackSharePreflightRequired: string;
   feedbackShareUploadProgress: string;
+  feedbackShareDigestUnavailable: string;
   feedbackShareMissingUrl: string;
   feedbackShareSucceeded: string;
   feedbackShareFailed: string;
@@ -411,7 +413,7 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     sharePlaceholderApiKeyRequired: "Required when server auth is enabled",
     sharePrivacyPreflightTitle: "Privacy Preflight",
     sharePrivacyPreflightDescription:
-      "Review redaction coverage and detected sensitive signals before uploading.",
+      "Review redaction coverage and detected sensitive signals before uploading. Sharing requires a passed pre-encryption scanner result.",
     sharePrivacyRedactionProfile: "Redaction profile",
     sharePrivacyDetectedSignals: "Detected signals",
     sharePrivacySensitivePreview: "Sensitive preview",
@@ -558,8 +560,12 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     feedbackPlaywrightMocksExported: "Playwright mock script exported.",
     feedbackLoadArchiveBeforeSharing: "Load an archive before sharing.",
     feedbackInvalidShareServerUrl: "Invalid share server URL.",
+    feedbackSharePreflightRequired:
+      "Sharing requires a passed pre-encryption privacy scanner result.",
     feedbackShareUploadProgress:
       "Uploading share archive... {percent}% ({loadedBytes} / {totalBytes})",
+    feedbackShareDigestUnavailable:
+      "Unable to bind the privacy summary to the archive because SHA-256 is unavailable.",
     feedbackShareMissingUrl: "Share server did not return a share URL.",
     feedbackShareSucceeded: "Shared archive. URL copied: {shareUrl}",
     feedbackShareFailed: "Share failed: {error}",
@@ -730,7 +736,8 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     sharePlaceholderServerUrl: "https://share.example.com",
     sharePlaceholderApiKeyRequired: "当服务启用鉴权时必填",
     sharePrivacyPreflightTitle: "隐私预检",
-    sharePrivacyPreflightDescription: "上传前审核脱敏覆盖范围和检测到的敏感信号。",
+    sharePrivacyPreflightDescription:
+      "上传前审核脱敏覆盖范围和检测到的敏感信号；仅预加密扫描通过的归档可从播放器分享。",
     sharePrivacyRedactionProfile: "脱敏配置",
     sharePrivacyDetectedSignals: "检测信号",
     sharePrivacySensitivePreview: "敏感预览",
@@ -874,7 +881,9 @@ const PLAYER_MESSAGES: Record<PlayerLocale, PlayerMessages> = {
     feedbackPlaywrightMocksExported: "已导出 Playwright Mock 脚本。",
     feedbackLoadArchiveBeforeSharing: "请先加载归档，再执行分享。",
     feedbackInvalidShareServerUrl: "分享服务 URL 无效。",
+    feedbackSharePreflightRequired: "分享前必须有通过的预加密隐私扫描结果。",
     feedbackShareUploadProgress: "正在上传分享归档... {percent}%（{loadedBytes} / {totalBytes}）",
+    feedbackShareDigestUnavailable: "当前环境不支持 SHA-256，无法将隐私摘要绑定到归档。",
     feedbackShareMissingUrl: "分享服务未返回分享 URL。",
     feedbackShareSucceeded: "分享归档已完成，链接已复制：{shareUrl}",
     feedbackShareFailed: "分享失败：{error}",

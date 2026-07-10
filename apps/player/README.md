@@ -139,6 +139,7 @@ pnpm player:pages:deploy
 - Jira issue templates
 - HAR export
 - Share upload and link-based reload via `@webblackbox/share-server`
+- Share upload stays disabled unless the archive carries a passed pre-encryption scanner result. The Player binds its allowlisted public privacy claim to the exact uploaded bytes with SHA-256; the Share server exposes that claim as client-unverified, not as server attestation.
 - Share API keys are retained only in page memory after a successful request; they are never persisted to `localStorage`, and legacy persisted keys are removed on startup
 
 ### Session Comparison

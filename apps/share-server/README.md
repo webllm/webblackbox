@@ -66,15 +66,19 @@ Headers:
 
 - `content-type: application/octet-stream`
 - `x-webblackbox-filename: <optional>`
-- `x-webblackbox-share-summary: <optional URL-encoded JSON public summary computed client-side>`
+- `x-webblackbox-share-summary: <optional URL-encoded schema-v2 public claim computed client-side>`
 - `x-webblackbox-share-ttl-ms: <optional requested TTL, clamped by WEBBLACKBOX_SHARE_MAX_TTL_MS>`
 - `x-webblackbox-api-key: <optional if WEBBLACKBOX_SHARE_API_KEY is set>`
 
 Body:
 
 - Raw encrypted `.webblackbox` bytes. Public deployments do not accept plaintext uploads by default.
-- Outer ZIP entry count, actual per-entry inflater output, metadata bytes, total expanded bytes, and compression ratio are checked against non-relaxable safety ceilings before the upload is retained. Plaintext uploads that opt into server analysis additionally receive Player event-codec, event-count, and index-cardinality checks. The server has no key for encrypted inner files, so clients must apply those inner checks before encryption and upload. The current client preflight summary is not cryptographically bound to the encrypted plaintext; signed or remotely attested preflight remains a separate deployment concern.
-- Encrypted uploads must include encryption metadata for every private archive path: `events/*`, `blobs/*`, `index/time.json`, `index/req.json`, `index/inv.json`, and `privacy/manifest.json` when present. The server scans the full bounded contents of those entries for recognizable plaintext formats rather than trusting a fixed prefix sample. This is a rejection heuristic, not cryptographic proof that opaque bytes are ciphertext. Legacy encrypted archives that left private indexes in plaintext must be re-exported with the current exporter before public share upload.
+- Outer ZIP entry count, actual per-entry inflater output, metadata bytes, total expanded bytes, compression ratio, manifest shape, encryption map coverage, and obvious plaintext private files are checked against non-relaxable safety ceilings before the upload is retained. Plaintext uploads that opt into server analysis additionally receive Player event-codec, event-count, and index-cardinality checks.
+- Encrypted uploads must include encryption metadata for every private archive path: `events/*`, `blobs/*`, `index/time.json`, `index/req.json`, `index/inv.json`, and `privacy/manifest.json` when present. The server scans the full bounded contents of those entries for recognizable plaintext formats. This is a rejection heuristic, not cryptographic proof that opaque bytes are ciphertext. Legacy encrypted archives that left private indexes in plaintext must be re-exported with the current exporter before public share upload.
+
+When the optional client claim is sent, it must use `schemaVersion: 2`, include the SHA-256 of the exact archive bytes in `archiveSha256`, and agree with server-inspected outer manifest facts. A digest mismatch, a conflicting encryption/manifest claim, or any legacy `x-webblackbox-encryption`, `x-webblackbox-policy-eligible`, or `x-webblackbox-redaction-summary` header is rejected. The digest prevents a summary for one archive from being attached to another; it does **not** authenticate the uploader or prove that the claimed pre-encryption scan ran honestly.
+
+The server never receives the passphrase, so it cannot inspect encrypted private content. Bound client fields are isolated under `clientClaim` and returned as `source: "client-unverified"`, `analyzed: false`, with `trust.privateContent: "client-claim-unverified"`; verified server analysis uses the top-level `privacy` field instead. A missing client claim is accepted only as an encrypted envelope and is returned as `source: "unavailable"`. Neither encrypted state is privacy attestation. Legacy stored client summaries are downgraded to the same unverified shape without claiming a digest match. Deployments that require attestation must add a trusted signer or remote pre-encryption scanner and verify its signature outside this protocol.
 
 Response:
 
@@ -86,10 +90,24 @@ Response:
   "fileName": "webblackbox-share-abc123.webblackbox",
   "sizeBytes": 123456,
   "summary": {
-    "schemaVersion": 1,
-    "source": "client",
-    "analyzed": true,
-    "encrypted": true
+    "schemaVersion": 2,
+    "source": "client-unverified",
+    "analyzed": false,
+    "encrypted": true,
+    "trust": {
+      "archiveEnvelope": "server-inspected",
+      "privateContent": "client-claim-unverified",
+      "archiveDigestMatched": true
+    },
+    "clientClaim": {
+      "privacy": {
+        "scanner": {
+          "preEncryption": true,
+          "status": "passed",
+          "findingCount": 0
+        }
+      }
+    }
   }
 }
 ```

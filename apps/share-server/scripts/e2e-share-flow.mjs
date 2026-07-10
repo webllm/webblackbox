@@ -54,18 +54,36 @@ async function main() {
       "content-type": "application/octet-stream",
       "x-webblackbox-api-key": apiKey,
       "x-webblackbox-filename": "share-flow.webblackbox",
-      "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      "x-webblackbox-share-summary": encodeURIComponent(
+        JSON.stringify(buildPassedShareSummary(archive))
+      )
     },
     body: archive
   });
 
   assert(typeof upload.shareId === "string", "Upload did not return shareId", upload);
   assert(upload.summary?.encrypted === true, "Upload summary is not encrypted", upload);
-  assert(upload.summary?.privacy, "Upload summary missing privacy preflight", upload);
   assert(
-    upload.summary?.privacy?.scanner?.preEncryption === true &&
-      upload.summary?.privacy?.scanner?.status === "passed",
-    "Upload summary missing passed privacy scanner status",
+    upload.summary?.source === "client-unverified" &&
+      upload.summary?.trust?.privateContent === "client-claim-unverified" &&
+      upload.summary?.trust?.archiveDigestMatched === true,
+    "Upload summary does not expose the client-claim trust boundary",
+    upload
+  );
+  assert(
+    upload.summary?.privacy === undefined,
+    "Unverified client privacy fields leaked into the verified summary namespace",
+    upload
+  );
+  assert(
+    upload.summary?.clientClaim?.privacy,
+    "Upload summary missing client privacy claim",
+    upload
+  );
+  assert(
+    upload.summary?.clientClaim?.privacy?.scanner?.preEncryption === true &&
+      upload.summary?.clientClaim?.privacy?.scanner?.status === "passed",
+    "Upload summary missing passed client privacy scanner claim",
     upload
   );
 
@@ -76,8 +94,8 @@ async function main() {
   });
   assert(
     meta.summary?.encrypted === true &&
-      meta.summary?.privacy?.redaction?.headerRuleCount >= 1 &&
-      meta.summary?.privacy?.detected?.redactedMarkers >= 1,
+      meta.summary?.clientClaim?.privacy?.redaction?.headerRuleCount >= 1 &&
+      meta.summary?.clientClaim?.privacy?.detected?.redactedMarkers >= 1,
     "Metadata redaction summary missing",
     meta
   );
@@ -199,10 +217,11 @@ async function createFixtureArchive() {
   return zip.generateAsync({ type: "uint8array" });
 }
 
-function buildPassedShareSummary() {
+function buildPassedShareSummary(archive) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: "client",
+    archiveSha256: createHash("sha256").update(archive).digest("hex"),
     analyzed: true,
     encrypted: true,
     manifest: {

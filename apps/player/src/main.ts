@@ -29,7 +29,7 @@ import {
 } from "./lib/i18n.js";
 import { describeRequestName, resolveNetworkInitiator } from "./lib/network-labels.js";
 import { clamp, readPointerRatio } from "./lib/math.js";
-import { sha256HexFromText } from "./lib/hash.js";
+import { sha256HexFromBytes, sha256HexFromText } from "./lib/hash.js";
 import { formatByteSize, formatNetworkSize, sumNetworkTransferBytes } from "./lib/network-size.js";
 import {
   applyNetworkViewFilters,
@@ -69,6 +69,7 @@ import {
   getShareServerApiKeyForBaseUrl,
   setShareServerApiKeyForBaseUrl
 } from "./lib/share-api-key.js";
+import { hasPassedSharePrivacyPreflight } from "./lib/share-privacy.js";
 import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./lib/share.js";
 import {
   readScreenshotContext,
@@ -316,8 +317,9 @@ type PlayerState = {
 };
 
 type PublicShareSummary = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   source: "client";
+  archiveSha256: string;
   analyzed: boolean;
   encrypted: boolean;
   manifest: {
@@ -1891,6 +1893,11 @@ async function shareLoadedArchive(): Promise<void> {
     return;
   }
 
+  if (!hasPassedSharePrivacyPreflight(player.archive.privacyManifest?.scanner)) {
+    setFeedback(i18n.messages.feedbackSharePreflightRequired);
+    return;
+  }
+
   const normalizedBaseUrl = normalizeShareServerBaseUrl(shareConfig.baseUrl);
 
   if (!normalizedBaseUrl) {
@@ -1901,23 +1908,31 @@ async function shareLoadedArchive(): Promise<void> {
   state.shareServerBaseUrl = normalizedBaseUrl;
   writeStoredText(SHARE_SERVER_BASE_URL_STORAGE_KEY, normalizedBaseUrl);
 
-  const headers: Record<string, string> = {
-    "content-type": "application/octet-stream",
-    "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox",
-    [SHARE_SUMMARY_HEADER]: encodeShareSummaryHeader(buildClientShareSummary(player))
-  };
-
-  if (shareConfig.apiKey.length > 0) {
-    headers["x-webblackbox-api-key"] = shareConfig.apiKey;
-  }
-
   try {
+    const archiveBody = toArrayBuffer(bytes);
+    const archiveSha256 = await sha256HexFromBytes(archiveBody);
+    if (!archiveSha256) {
+      throw new Error(i18n.messages.feedbackShareDigestUnavailable);
+    }
+
+    const headers: Record<string, string> = {
+      "content-type": "application/octet-stream",
+      "x-webblackbox-filename": state.loadedArchiveName ?? "session.webblackbox",
+      [SHARE_SUMMARY_HEADER]: encodeShareSummaryHeader(
+        buildClientShareSummary(player, archiveSha256)
+      )
+    };
+
+    if (shareConfig.apiKey.length > 0) {
+      headers["x-webblackbox-api-key"] = shareConfig.apiKey;
+    }
+
     const totalBytes = bytes.byteLength;
     let lastProgressUpdate = 0;
     const payload = (await uploadArchiveWithProgress(
       `${normalizedBaseUrl}/api/share/upload`,
       headers,
-      toArrayBuffer(bytes),
+      archiveBody,
       (loadedBytes, uploadTotalBytes) => {
         const targetTotal =
           uploadTotalBytes && uploadTotalBytes > 0 ? uploadTotalBytes : totalBytes;
@@ -2151,17 +2166,23 @@ function renderSharePrivacyPreflight(): void {
 }
 
 function updateShareUploadConfirmState(): void {
-  refs.shareUploadConfirm.disabled = !refs.shareUploadPrivacyReviewed.checked;
+  const scanner = state.player?.archive.privacyManifest?.scanner;
+  const scannerPassed = hasPassedSharePrivacyPreflight(scanner);
+  refs.shareUploadConfirm.disabled = !refs.shareUploadPrivacyReviewed.checked || !scannerPassed;
 }
 
-function buildClientShareSummary(player: WebBlackboxPlayer): PublicShareSummary {
+function buildClientShareSummary(
+  player: WebBlackboxPlayer,
+  archiveSha256: string
+): PublicShareSummary {
   const manifest = player.archive.manifest;
   const derived = player.buildDerived();
   const privacyReport = player.getPrivacyProtectionReport();
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: "client",
+    archiveSha256,
     analyzed: true,
     encrypted: Boolean(manifest.encryption),
     manifest: {

@@ -26,6 +26,7 @@ import {
   assertLoadedArchiveResourceLimits,
   resolveArchiveResourceLimits
 } from "@webblackbox/player-sdk";
+import { exportManifestSchema, type ExportManifest } from "@webblackbox/protocol";
 
 import { parseShareApiCredentials, type ShareApiScope } from "./auth-config.js";
 
@@ -55,6 +56,16 @@ type ShareReadSession = {
 
 type ArchiveEnvelopeSummary = {
   encrypted: boolean;
+  manifest?: {
+    mode: ExportManifest["mode"];
+    chunkCodec: ExportManifest["chunkCodec"];
+    recordedAt: string;
+  };
+  totals?: {
+    events: number;
+    blobs: number;
+    durationMs: number;
+  };
   encryptedPrivatePathsComplete: boolean;
   missingEncryptedPaths: string[];
   encryptedPrivatePathsConfidential: boolean;
@@ -62,11 +73,43 @@ type ArchiveEnvelopeSummary = {
   analysisError?: string;
 };
 
+type ShareActionTriggerSummary = {
+  triggerType: string;
+  count: number;
+  errorRate: number;
+};
+
+type SharePrivacySummary = {
+  redaction: {
+    hashSensitiveValues: boolean;
+    headerRuleCount: number;
+    cookieRuleCount: number;
+    bodyPatternCount: number;
+    blockedSelectorCount: number;
+  };
+  detected: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["detected"];
+  scanner: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["scanner"];
+  categories?: Array<{
+    category: string;
+    events: number;
+    low: number;
+    medium: number;
+    high: number;
+    redacted: number;
+    unredacted: number;
+  }>;
+};
+
 type ShareSummary = {
-  schemaVersion: 1;
-  source: "client" | "server" | "unavailable";
+  schemaVersion: 2;
+  source: "client-unverified" | "server" | "unavailable";
   analyzed: boolean;
   encrypted: boolean;
+  trust: {
+    archiveEnvelope: "server-inspected";
+    privateContent: "server-analyzed" | "client-claim-unverified" | "not-analyzed";
+    archiveDigestMatched?: true;
+  };
   analysisError?: string;
   manifest?: {
     mode: string;
@@ -77,36 +120,29 @@ type ShareSummary = {
     events: number;
     blobs?: number;
     privacyViolations?: number;
-    errors: number;
-    requests: number;
-    actions: number;
+    errors?: number;
+    requests?: number;
+    actions?: number;
     durationMs: number;
   };
-  topActionTriggers?: Array<{
-    triggerType: string;
-    count: number;
-    errorRate: number;
-  }>;
-  privacy?: {
-    redaction: {
-      hashSensitiveValues: boolean;
-      headerRuleCount: number;
-      cookieRuleCount: number;
-      bodyPatternCount: number;
-      blockedSelectorCount: number;
+  topActionTriggers?: ShareActionTriggerSummary[];
+  privacy?: SharePrivacySummary;
+  clientClaim?: {
+    totals?: {
+      privacyViolations?: number;
+      errors?: number;
+      requests?: number;
+      actions?: number;
     };
-    detected: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["detected"];
-    scanner: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["scanner"];
-    categories?: Array<{
-      category: string;
-      events: number;
-      low: number;
-      medium: number;
-      high: number;
-      redacted: number;
-      unredacted: number;
-    }>;
+    topActionTriggers?: ShareActionTriggerSummary[];
+    privacy?: SharePrivacySummary;
   };
+};
+
+type ClientShareClaim = Omit<ShareSummary, "source" | "analyzed" | "trust" | "analysisError"> & {
+  source: "client";
+  analyzed: true;
+  archiveSha256: string;
 };
 
 const DEFAULT_PORT = 8787;
@@ -168,6 +204,11 @@ const UPLOAD_RATE_LIMIT_WINDOW_MS = parseRateLimitWindowMs(
   60_000
 );
 const SHARE_SUMMARY_HEADER = "x-webblackbox-share-summary";
+const LEGACY_CLIENT_ASSURANCE_HEADERS = [
+  "x-webblackbox-encryption",
+  "x-webblackbox-policy-eligible",
+  "x-webblackbox-redaction-summary"
+] as const;
 const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
 const AES_GCM_IV_BYTES = 12;
 const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
@@ -395,10 +436,10 @@ async function processUploadWithinInspectionSlot(
     id,
     typeof filenameHeader === "string" ? filenameHeader : undefined
   );
-  let clientSummary: ShareSummary | null;
+  let clientSummary: ClientShareClaim | null;
 
   try {
-    clientSummary = readClientShareSummary(request);
+    clientSummary = readClientShareSummary(request, checksumSha256);
   } catch (error) {
     if (error instanceof ShareSummaryHeaderError) {
       respondJson(response, 400, {
@@ -468,11 +509,25 @@ async function processUploadWithinInspectionSlot(
     });
     return;
   }
+
+  if (clientSummary) {
+    try {
+      assertClientShareClaimMatchesArchive(clientSummary, archiveEnvelope);
+    } catch (error) {
+      if (error instanceof ShareSummaryHeaderError) {
+        respondJson(response, 400, { error: error.message });
+        return;
+      }
+      throw error;
+    }
+  }
+
   const sizeBytes = bytes.byteLength;
   bytes = new Uint8Array(0);
-  const summary = clientSummary
-    ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
-    : archiveEnvelopeSummary;
+  const summary =
+    archiveEnvelope.encrypted && clientSummary
+      ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
+      : archiveEnvelopeSummary;
 
   if (archiveEnvelope.encrypted && !archiveEnvelope.encryptedPrivatePathsComplete) {
     await writeShareAuditEvent(request, {
@@ -500,35 +555,10 @@ async function processUploadWithinInspectionSlot(
     return;
   }
 
-  if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
-    await writeShareAuditEvent(request, {
-      action: "upload",
-      shareId: id,
-      outcome: "blocked"
-    });
-    respondJson(response, 422, {
-      error: "Share upload blocked by privacy scanner.",
-      scanner: summary.privacy.scanner
-    });
-    return;
-  }
-
-  if (archiveEnvelope.encrypted && !clientSummary) {
-    await writeShareAuditEvent(request, {
-      action: "upload",
-      shareId: id,
-      outcome: "blocked"
-    });
-    respondJson(response, 422, {
-      error: "Encrypted public share uploads require a passed client privacy preflight summary."
-    });
-    return;
-  }
-
   if (
-    archiveEnvelope.encrypted &&
-    clientSummary &&
-    !hasPassedClientPrivacyPreflight(clientSummary)
+    summary.source === "server" &&
+    summary.analyzed &&
+    summary.privacy?.scanner.status === "blocked"
   ) {
     await writeShareAuditEvent(request, {
       action: "upload",
@@ -536,8 +566,21 @@ async function processUploadWithinInspectionSlot(
       outcome: "blocked"
     });
     respondJson(response, 422, {
-      error: "Encrypted public share uploads require a passed client privacy preflight summary.",
-      scanner: clientSummary.privacy?.scanner
+      error: "Share upload blocked by the server privacy scanner.",
+      scanner: summary.privacy.scanner
+    });
+    return;
+  }
+
+  if (clientSummary?.privacy?.scanner.status === "blocked") {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 422, {
+      error: "Share upload blocked by the client's privacy scanner claim.",
+      scanner: clientSummary.privacy.scanner
     });
     return;
   }
@@ -895,10 +938,14 @@ async function buildShareSummary(
     const privacyReport = player.getPrivacyProtectionReport();
 
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       source: "server",
       analyzed: true,
       encrypted: envelope.encrypted || Boolean(manifest.encryption),
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "server-analyzed"
+      },
       manifest: {
         mode: manifest.mode,
         chunkCodec: manifest.chunkCodec,
@@ -934,11 +981,26 @@ async function buildShareSummary(
 
     const message = error instanceof Error ? error.message : String(error);
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       source: "unavailable",
       analyzed: false,
       encrypted: envelope.encrypted,
-      analysisError: redactText(message, 240)
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "not-analyzed"
+      },
+      manifest: envelope.manifest,
+      totals:
+        envelope.totals === undefined
+          ? undefined
+          : {
+              events: envelope.totals.events,
+              blobs: envelope.totals.blobs,
+              durationMs: envelope.totals.durationMs
+            },
+      analysisError: envelope.encrypted
+        ? "Encrypted private content was not analyzed because the share server has no passphrase."
+        : redactText(message, 240)
     };
   }
 }
@@ -949,8 +1011,9 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
     const zip = await JSZip.loadAsync(bytes);
     assertLoadedArchiveResourceLimits(zip, SHARE_ARCHIVE_RESOURCE_LIMITS);
     const zipReader = new BoundedZipReader(zip, SHARE_ARCHIVE_RESOURCE_LIMITS, false);
-    const manifest = asRecord(JSON.parse(await readZipText(zipReader, "manifest.json")));
-    const encryption = asRecord(manifest.encryption);
+    const rawManifest = JSON.parse(await readZipText(zipReader, "manifest.json")) as unknown;
+    const manifestRecord = asRecord(rawManifest);
+    const encryption = asRecord(manifestRecord.encryption);
     const encrypted = Object.keys(encryption).length > 0;
     const encryptedFiles = asRecord(encryption.files);
     const privatePaths = collectArchivePrivatePaths(zip);
@@ -964,9 +1027,20 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
       new Set(privatePaths),
       encryptedFiles
     );
+    const manifest = exportManifestSchema.parse(rawManifest);
 
     return {
       encrypted,
+      manifest: {
+        mode: manifest.mode,
+        chunkCodec: manifest.chunkCodec,
+        recordedAt: manifest.createdAt
+      },
+      totals: {
+        events: manifest.stats.eventCount,
+        blobs: manifest.stats.blobCount,
+        durationMs: Math.round(manifest.stats.durationMs)
+      },
       encryptedPrivatePathsComplete: encrypted && missingEncryptedPaths.length === 0,
       missingEncryptedPaths,
       encryptedPrivatePathsConfidential: encrypted && plaintextEncryptedPaths.length === 0,
@@ -1243,7 +1317,16 @@ async function readZipText(zipReader: BoundedZipReader, path: string): Promise<s
   return new TextDecoder().decode(await zipReader.read(path));
 }
 
-function readClientShareSummary(request: IncomingMessage): ShareSummary | null {
+function readClientShareSummary(
+  request: IncomingMessage,
+  archiveSha256: string
+): ClientShareClaim | null {
+  if (LEGACY_CLIENT_ASSURANCE_HEADERS.some((name) => request.headers[name] !== undefined)) {
+    throw new ShareSummaryHeaderError(
+      "Legacy client assurance headers are not accepted. Use an archive-bound share summary."
+    );
+  }
+
   const rawHeader = request.headers[SHARE_SUMMARY_HEADER];
 
   if (rawHeader === undefined) {
@@ -1272,20 +1355,40 @@ function readClientShareSummary(request: IncomingMessage): ShareSummary | null {
     throw new ShareSummaryHeaderError("Share summary header is not valid encoded JSON.");
   }
 
-  return normalizeClientShareSummary(parsed);
+  return normalizeClientShareSummary(parsed, archiveSha256);
 }
 
-function normalizeClientShareSummary(value: unknown): ShareSummary {
+function normalizeClientShareSummary(
+  value: unknown,
+  expectedArchiveSha256: string
+): ClientShareClaim {
   const record = asRecord(value);
+  if (record.schemaVersion !== 2 || record.source !== "client") {
+    throw new ShareSummaryHeaderError(
+      "Share summary must use schemaVersion 2 with source 'client'."
+    );
+  }
+  if (record.analyzed !== true || typeof record.encrypted !== "boolean") {
+    throw new ShareSummaryHeaderError(
+      "Share summary must declare a completed client analysis and encryption state."
+    );
+  }
+
+  const archiveSha256 = readArchiveSha256(record.archiveSha256);
+  if (!sha256HexMatches(archiveSha256, expectedArchiveSha256)) {
+    throw new ShareSummaryHeaderError("Share summary archive digest does not match the upload.");
+  }
+
   const manifest = asRecord(record.manifest);
   const totals = asRecord(record.totals);
   const privacy = asRecord(record.privacy);
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: "client",
-    analyzed: readBoolean(record.analyzed, true),
-    encrypted: readBoolean(record.encrypted, true),
+    archiveSha256,
+    analyzed: true,
+    encrypted: record.encrypted,
     manifest: {
       mode: readString(manifest.mode, "unknown", 32),
       chunkCodec: readString(manifest.chunkCodec, "unknown", 32),
@@ -1306,21 +1409,62 @@ function normalizeClientShareSummary(value: unknown): ShareSummary {
 }
 
 function applyArchiveEnvelopeToClientSummary(
-  clientSummary: ShareSummary,
+  clientSummary: ClientShareClaim,
   archiveEnvelopeSummary: ShareSummary
 ): ShareSummary {
+  if (!clientSummary.totals || !archiveEnvelopeSummary.totals) {
+    throw new Error("Archive-bound client summary is missing inspected totals.");
+  }
+
   return {
-    ...clientSummary,
+    schemaVersion: 2,
+    source: "client-unverified",
+    analyzed: false,
     encrypted: archiveEnvelopeSummary.encrypted,
-    analysisError: archiveEnvelopeSummary.encrypted
-      ? undefined
-      : archiveEnvelopeSummary.analysisError
+    trust: {
+      archiveEnvelope: "server-inspected",
+      privateContent: "client-claim-unverified",
+      archiveDigestMatched: true
+    },
+    manifest: archiveEnvelopeSummary.manifest,
+    totals: archiveEnvelopeSummary.totals,
+    clientClaim: {
+      totals: {
+        privacyViolations: clientSummary.totals.privacyViolations,
+        errors: clientSummary.totals.errors,
+        requests: clientSummary.totals.requests,
+        actions: clientSummary.totals.actions
+      },
+      topActionTriggers: clientSummary.topActionTriggers,
+      privacy: clientSummary.privacy
+    },
+    analysisError:
+      "Encrypted private content was not analyzed by the share server; privacy fields are unverified client claims."
   };
 }
 
-function hasPassedClientPrivacyPreflight(summary: ShareSummary): boolean {
-  const scanner = summary.privacy?.scanner;
-  return summary.analyzed && scanner?.preEncryption === true && scanner.status === "passed";
+function assertClientShareClaimMatchesArchive(
+  summary: ClientShareClaim,
+  envelope: ArchiveEnvelopeSummary
+): void {
+  if (!envelope.manifest || !envelope.totals) {
+    throw new Error("Archive envelope facts are unavailable after successful inspection.");
+  }
+
+  const manifestMatches =
+    summary.manifest?.mode === envelope.manifest.mode &&
+    summary.manifest.chunkCodec === envelope.manifest.chunkCodec &&
+    summary.manifest.recordedAt === envelope.manifest.recordedAt;
+  const totalsMatch =
+    summary.totals?.events === envelope.totals.events &&
+    summary.totals.durationMs === envelope.totals.durationMs &&
+    (summary.totals.blobs === undefined || summary.totals.blobs === envelope.totals.blobs);
+
+  if (summary.encrypted !== envelope.encrypted || !manifestMatches || !totalsMatch) {
+    throw new ShareSummaryHeaderError(
+      "Share summary conflicts with server-inspected archive envelope facts."
+    );
+  }
 }
 
 function normalizeSharePrivacySummary(value: Record<string, unknown>): ShareSummary["privacy"] {
@@ -1510,7 +1654,102 @@ function buildPublicShareMetadata(record: ShareRecord): {
     sizeBytes: record.sizeBytes,
     checksumSha256: record.checksumSha256,
     shareUrl: record.shareUrl,
-    summary: record.summary
+    summary: normalizePersistedShareSummary(record.summary)
+  };
+}
+
+function normalizePersistedShareSummary(value: unknown): ShareSummary {
+  const record = asRecord(value);
+  const source = record.source;
+  const trust = asRecord(record.trust);
+  const currentTrustIsConsistent =
+    (source === "server" &&
+      record.analyzed === true &&
+      trust.privateContent === "server-analyzed") ||
+    (source === "client-unverified" &&
+      record.analyzed === false &&
+      trust.privateContent === "client-claim-unverified") ||
+    (source === "unavailable" &&
+      record.analyzed === false &&
+      trust.privateContent === "not-analyzed");
+
+  if (
+    record.schemaVersion === 2 &&
+    trust.archiveEnvelope === "server-inspected" &&
+    currentTrustIsConsistent
+  ) {
+    return value as ShareSummary;
+  }
+
+  const legacy = value as Partial<ShareSummary> & {
+    source?: string;
+    archiveSha256?: unknown;
+  };
+  const legacyWithoutDigest = { ...legacy };
+  delete legacyWithoutDigest.archiveSha256;
+  const encrypted = legacy.encrypted === true;
+
+  if (source === "client" || source === "client-unverified") {
+    const legacyTotals = legacy.totals;
+
+    return {
+      schemaVersion: 2,
+      source: "client-unverified",
+      analyzed: false,
+      encrypted,
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "client-claim-unverified"
+      },
+      manifest: legacy.manifest,
+      totals: legacyTotals
+        ? {
+            events: legacyTotals.events,
+            blobs: legacyTotals.blobs,
+            durationMs: legacyTotals.durationMs
+          }
+        : undefined,
+      clientClaim: {
+        totals: legacyTotals
+          ? {
+              privacyViolations: legacyTotals.privacyViolations,
+              errors: legacyTotals.errors,
+              requests: legacyTotals.requests,
+              actions: legacyTotals.actions
+            }
+          : undefined,
+        topActionTriggers: legacy.topActionTriggers,
+        privacy: legacy.privacy
+      },
+      analysisError:
+        "Legacy client privacy fields were not archive-digest-bound and remain unverified claims."
+    };
+  }
+
+  if (source === "server" && legacy.analyzed === true) {
+    return {
+      ...legacyWithoutDigest,
+      schemaVersion: 2,
+      source: "server",
+      analyzed: true,
+      encrypted,
+      trust: {
+        archiveEnvelope: "server-inspected",
+        privateContent: "server-analyzed"
+      }
+    } as ShareSummary;
+  }
+
+  return {
+    schemaVersion: 2,
+    source: "unavailable",
+    analyzed: false,
+    encrypted,
+    trust: {
+      archiveEnvelope: "server-inspected",
+      privateContent: "not-analyzed"
+    },
+    analysisError: "Stored share analysis is unavailable or uses an unsupported legacy schema."
   };
 }
 
@@ -1851,6 +2090,20 @@ function readString(value: unknown, fallback: string, maxLength: number): string
   }
 
   return redactText(value, maxLength);
+}
+
+function readArchiveSha256(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value)) {
+    throw new ShareSummaryHeaderError(
+      "Share summary archiveSha256 must be a 64-character SHA-256 hex digest."
+    );
+  }
+
+  return value.toLowerCase();
+}
+
+function sha256HexMatches(left: string, right: string): boolean {
+  return equalsSecret(left.toLowerCase(), right.toLowerCase());
 }
 
 function readBoolean(value: unknown, fallback: boolean): boolean {

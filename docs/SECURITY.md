@@ -13,7 +13,7 @@ The dev/enterprise profile can enable deeper diagnostics, including CDP, but the
 3. Capture adapters sanitize data before it enters the recorder pipeline.
 4. The ingest gate rejects or replaces policy-violating artifacts with `privacy.violation` events.
 5. Archives include `privacy/manifest.json` with policy, categories, encryption status, and pre-encryption scanner result.
-6. Exports and shares recompute policy eligibility instead of trusting imported archive metadata.
+6. Exports recompute policy eligibility. The Player evaluates decrypted content before sharing, while the keyless Share server enforces only server-inspected outer facts and labels client private-content results as unverified claims.
 
 MAIN-world capture hooks run in the page's JavaScript environment and are therefore treated as untrusted observations, not authenticated evidence. Their bridge accepts only bounded, allowlisted event payloads, ignores page-supplied timestamps, rate-limits input, and exposes no marker or other extension control operation. Privileged decisions remain in the isolated content script and service worker.
 
@@ -21,7 +21,7 @@ Global visual and profiler artifacts fail closed when the page contains a child 
 
 ## Encryption
 
-Real-user archives require export encryption. Public share uploads require encrypted `.webblackbox` archives and never accept passphrases. Private archive paths include event chunks, blobs, indexes, and `privacy/manifest.json`; older encrypted archives with plaintext private files must be re-exported before public sharing. Client-side share metadata is limited to an allowlisted public summary.
+Real-user archives require export encryption. Public share uploads require encrypted `.webblackbox` archives and never accept passphrases. Private archive paths include event chunks, blobs, indexes, and `privacy/manifest.json`; older encrypted archives with plaintext private files must be re-exported before public sharing. Client-side share metadata is limited to an allowlisted public claim bound to the exact archive bytes by SHA-256.
 
 Local event chunks and blobs are also protected before persistent storage. The pipeline rejects persistent storage that does not declare authenticated AES-GCM payload protection when `localAtRest` is required. The extension stores a non-extractable, purpose-specific Web Crypto key in an extension-origin IndexedDB keyring so offscreen/service-worker restarts can recover the cache without exporting raw key material. On upgrade, the legacy plaintext database is purged; if the managed key is lost, unverifiable cached payloads are purged rather than read as plaintext.
 
@@ -33,7 +33,7 @@ The player treats archives as untrusted input. It does not load captured externa
 
 ## Share Server
 
-The share server supports scoped API keys, upload rate limits, expiry, revocation, redacted metadata, and redacted audit logs. Public deployments should keep plaintext uploads disabled.
+The share server supports scoped API keys, upload rate limits, expiry, revocation, redacted metadata, and redacted audit logs. Public deployments should keep plaintext uploads disabled. The server derives encryption and outer manifest facts itself and rejects mismatched client claims. Because it has no archive passphrase, it labels encrypted-content privacy results as archive-bound but unverified client claims; matching a digest is not proof that the client scanner ran honestly. Deployments that require privacy attestation need a trusted signed or remote pre-encryption analysis path.
 
 ## Reporting Security Issues
 

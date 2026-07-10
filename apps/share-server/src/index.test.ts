@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request as createHttpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -197,18 +197,19 @@ describe("share-server", () => {
     const secret = "customer-alpha.internal/users/reset-token-123";
     const encryptedArchive = await createEncryptedEnvelopeArchive();
     const summary = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       source: "client",
+      archiveSha256: sha256Hex(encryptedArchive),
       analyzed: true,
       encrypted: true,
       manifest: {
         origin: `https://${secret}`,
         mode: "lite",
-        chunkCodec: "ndjson",
+        chunkCodec: "none",
         recordedAt: "2026-02-13T00:00:00.000Z"
       },
       totals: {
-        events: 1,
+        events: 0,
         errors: 0,
         requests: 0,
         actions: 0,
@@ -296,8 +297,9 @@ describe("share-server", () => {
     expect(response.status).toBe(422);
   });
 
-  it("rejects encrypted public share uploads without a passed client privacy preflight", async () => {
+  it("does not present an encrypted upload without a client claim as analyzed", async () => {
     const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
 
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
@@ -306,17 +308,241 @@ describe("share-server", () => {
         "x-webblackbox-api-key": apiKey,
         "x-webblackbox-filename": "encrypted.webblackbox"
       },
-      body: Buffer.from(await createEncryptedEnvelopeArchive())
+      body: Buffer.from(archive)
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        schemaVersion: number;
+        source: string;
+        analyzed: boolean;
+        trust: { privateContent: string };
+      };
+    };
+
+    expect(response.status).toBe(201);
+    expect(payload.summary).toMatchObject({
+      schemaVersion: 2,
+      source: "unavailable",
+      analyzed: false,
+      trust: { privateContent: "not-analyzed" }
+    });
+  });
+
+  it("rejects legacy client privacy assurance headers", async () => {
+    const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-encryption": "encrypted",
+        "x-webblackbox-policy-eligible": "true",
+        "x-webblackbox-redaction-summary": "passed"
+      },
+      body: Buffer.from(archive)
     });
 
     await expect(response.json()).resolves.toEqual({
-      error: "Encrypted public share uploads require a passed client privacy preflight summary."
+      error: "Legacy client assurance headers are not accepted. Use an archive-bound share summary."
     });
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects client summaries that are not bound to the uploaded archive", async () => {
+    const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
+    const summary = buildPassedShareSummary(archive) as Record<string, unknown>;
+    summary.archiveSha256 = "0".repeat(64);
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(summary))
+      },
+      body: Buffer.from(archive)
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      error: "Share summary archive digest does not match the upload."
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects legacy unbound share-summary schemas on new uploads", async () => {
+    const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
+    const summary = buildPassedShareSummary(archive) as Record<string, unknown>;
+    summary.schemaVersion = 1;
+    delete summary.archiveSha256;
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(summary))
+      },
+      body: Buffer.from(archive)
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      error: "Share summary must use schemaVersion 2 with source 'client'."
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects archive-bound client summaries that contradict inspected envelope facts", async () => {
+    const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
+    const summary = buildPassedShareSummary(archive) as Record<string, unknown>;
+    summary.encrypted = false;
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(summary))
+      },
+      body: Buffer.from(archive)
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      error: "Share summary conflicts with server-inspected archive envelope facts."
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("labels bound client privacy fields as unverified claims", async () => {
+    const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
+      },
+      body: Buffer.from(archive)
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        source: string;
+        analyzed: boolean;
+        archiveSha256?: string;
+        privacy?: unknown;
+        clientClaim?: { privacy?: { scanner?: { status?: string } } };
+        trust: { privateContent: string; archiveDigestMatched?: boolean };
+        analysisError?: string;
+      };
+    };
+
+    expect(response.status).toBe(201);
+    expect(payload.summary).toMatchObject({
+      source: "client-unverified",
+      analyzed: false,
+      trust: {
+        privateContent: "client-claim-unverified",
+        archiveDigestMatched: true
+      }
+    });
+    expect(payload.summary.archiveSha256).toBeUndefined();
+    expect(payload.summary.privacy).toBeUndefined();
+    expect(payload.summary.clientClaim?.privacy?.scanner?.status).toBe("passed");
+    expect(payload.summary.analysisError).toMatch(/unverified client claims/i);
+  });
+
+  it("uses a client's explicit blocked result only to reject, never to attest acceptance", async () => {
+    const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive();
+    const summary = buildPassedShareSummary(archive) as {
+      privacy: { scanner: { status: string; findingCount: number } };
+    };
+    summary.privacy.scanner.status = "blocked";
+    summary.privacy.scanner.findingCount = 1;
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(summary))
+      },
+      body: Buffer.from(archive)
+    });
+    const payload = (await response.json()) as { error: string };
+
     expect(response.status).toBe(422);
+    expect(payload.error).toBe("Share upload blocked by the client's privacy scanner claim.");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toEqual([]);
+  });
+
+  it("downgrades legacy stored client summaries instead of exposing them as analyzed", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as {
+      summary: Record<string, unknown>;
+    };
+    record.summary.schemaVersion = 1;
+    record.summary.source = "client";
+    record.summary.analyzed = true;
+    const storedClientClaim = record.summary.clientClaim as
+      | {
+          totals?: Record<string, unknown>;
+          topActionTriggers?: unknown;
+          privacy?: unknown;
+        }
+      | undefined;
+    record.summary.totals = {
+      ...(record.summary.totals as Record<string, unknown>),
+      ...storedClientClaim?.totals
+    };
+    record.summary.topActionTriggers = storedClientClaim?.topActionTriggers;
+    record.summary.privacy = storedClientClaim?.privacy;
+    delete record.summary.clientClaim;
+    delete record.summary.trust;
+    await writeFile(recordPath, JSON.stringify(record));
+
+    const response = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        schemaVersion: number;
+        source: string;
+        analyzed: boolean;
+        privacy?: unknown;
+        clientClaim?: { privacy?: unknown };
+        trust: { privateContent: string; archiveDigestMatched?: boolean };
+        analysisError: string;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.summary).toMatchObject({
+      schemaVersion: 2,
+      source: "client-unverified",
+      analyzed: false,
+      trust: { privateContent: "client-claim-unverified" }
+    });
+    expect(payload.summary.privacy).toBeUndefined();
+    expect(payload.summary.clientClaim?.privacy).toBeDefined();
+    expect(payload.summary.trust.archiveDigestMatched).toBeUndefined();
+    expect(payload.summary.analysisError).toMatch(/not archive-digest-bound/i);
   });
 
   it("rejects encrypted public share uploads with incomplete encrypted file metadata", async () => {
     const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive({ completeEncryptionMap: false });
 
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
@@ -324,9 +550,11 @@ describe("share-server", () => {
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
         "x-webblackbox-filename": "encrypted.webblackbox",
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
       },
-      body: Buffer.from(await createEncryptedEnvelopeArchive({ completeEncryptionMap: false }))
+      body: Buffer.from(archive)
     });
     const payload = (await response.json()) as {
       error: string;
@@ -340,6 +568,7 @@ describe("share-server", () => {
 
   it("rejects encrypted public share uploads with plaintext private files", async () => {
     const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive({ privateFileMode: "plaintext" });
 
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
@@ -347,13 +576,11 @@ describe("share-server", () => {
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
         "x-webblackbox-filename": "encrypted.webblackbox",
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
       },
-      body: Buffer.from(
-        await createEncryptedEnvelopeArchive({
-          privateFileMode: "plaintext"
-        })
-      )
+      body: Buffer.from(archive)
     });
     const payload = (await response.json()) as {
       error: string;
@@ -367,6 +594,7 @@ describe("share-server", () => {
 
   it("rejects encrypted public share uploads with plaintext private blobs", async () => {
     const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive({ blobFileMode: "plaintext" });
 
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
@@ -374,13 +602,11 @@ describe("share-server", () => {
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
         "x-webblackbox-filename": "encrypted.webblackbox",
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
       },
-      body: Buffer.from(
-        await createEncryptedEnvelopeArchive({
-          blobFileMode: "plaintext"
-        })
-      )
+      body: Buffer.from(archive)
     });
     const payload = (await response.json()) as {
       error: string;
@@ -394,6 +620,7 @@ describe("share-server", () => {
 
   it("rejects encrypted public share uploads with plaintext text blobs", async () => {
     const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive({ textBlobFileMode: "plaintext" });
 
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
@@ -401,13 +628,11 @@ describe("share-server", () => {
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
         "x-webblackbox-filename": "encrypted.webblackbox",
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
       },
-      body: Buffer.from(
-        await createEncryptedEnvelopeArchive({
-          textBlobFileMode: "plaintext"
-        })
-      )
+      body: Buffer.from(archive)
     });
     const payload = (await response.json()) as {
       error: string;
@@ -421,20 +646,21 @@ describe("share-server", () => {
 
   it("scans complete private entries for plaintext beyond the former prefix window", async () => {
     const server = await startShareServer();
+    const archive = await createEncryptedEnvelopeArchive({
+      privateFileMode: "plaintext",
+      textBlobFileMode: "plaintext",
+      plaintextPrefixBytes: 64 * 1024 + 1
+    });
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
       headers: {
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
       },
-      body: Buffer.from(
-        await createEncryptedEnvelopeArchive({
-          privateFileMode: "plaintext",
-          textBlobFileMode: "plaintext",
-          plaintextPrefixBytes: 64 * 1024 + 1
-        })
-      )
+      body: Buffer.from(archive)
     });
     const payload = (await response.json()) as {
       plaintextEncryptedPaths: string[];
@@ -474,7 +700,9 @@ describe("share-server", () => {
       headers: {
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(archive))
+        )
       },
       body: Buffer.from(archive)
     });
@@ -653,7 +881,9 @@ describe("share-server", () => {
         "x-forwarded-proto": "https",
         "content-type": "application/octet-stream",
         "x-webblackbox-api-key": apiKey,
-        "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+        "x-webblackbox-share-summary": encodeURIComponent(
+          JSON.stringify(buildPassedShareSummary(encryptedArchive))
+        )
       },
       body: Buffer.from(encryptedArchive)
     });
@@ -876,30 +1106,34 @@ async function uploadEncryptedFixture(
   server: RunningShareServer,
   credential = apiKey
 ): Promise<{ shareId: string }> {
+  const archive = await createEncryptedEnvelopeArchive();
   const response = await fetch(`${server.baseUrl}/api/share/upload`, {
     method: "POST",
     headers: {
       "content-type": "application/octet-stream",
       "x-webblackbox-api-key": credential,
       "x-webblackbox-filename": "fixture.webblackbox",
-      "x-webblackbox-share-summary": encodeURIComponent(JSON.stringify(buildPassedShareSummary()))
+      "x-webblackbox-share-summary": encodeURIComponent(
+        JSON.stringify(buildPassedShareSummary(archive))
+      )
     },
-    body: Buffer.from(await createEncryptedEnvelopeArchive())
+    body: Buffer.from(archive)
   });
 
   expect(response.status).toBe(201);
   return (await response.json()) as { shareId: string };
 }
 
-function buildPassedShareSummary(): unknown {
+function buildPassedShareSummary(archive: Uint8Array): unknown {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: "client",
+    archiveSha256: sha256Hex(archive),
     analyzed: true,
     encrypted: true,
     manifest: {
       mode: "lite",
-      chunkCodec: "ndjson",
+      chunkCodec: "none",
       recordedAt: "2026-02-13T00:00:00.000Z"
     },
     totals: {
@@ -929,6 +1163,10 @@ function buildPassedShareSummary(): unknown {
       }
     }
   };
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 async function createEncryptedEnvelopeArchive(
@@ -987,7 +1225,11 @@ async function createEnvelopeArchive(
           [BLOB_FIXTURE_PATH]: { ivBase64: toBase64(randomBytes(12)) },
           [TEXT_BLOB_FIXTURE_PATH]: { ivBase64: toBase64(randomBytes(12)) }
         }
-      : {};
+      : encrypted
+        ? {
+            "index/req.json": { ivBase64: toBase64(randomBytes(12)) }
+          }
+        : {};
   const manifest = {
     protocolVersion: 1,
     createdAt: "2026-02-13T00:00:00.000Z",
