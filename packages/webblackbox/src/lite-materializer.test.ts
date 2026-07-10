@@ -180,6 +180,29 @@ describe("lite-materializer", () => {
     });
   });
 
+  it("does not persist network bodies without an allowed MIME type", async () => {
+    const config = cloneConfig();
+    config.sampling.bodyCaptureMaxBytes = 4 * 1024;
+    const putBlob = vi.fn(async () => "unexpected-hash");
+
+    const result = await materializeLiteRawEvent(
+      createRawEvent("networkBody", {
+        reqId: "R-missing-mime",
+        url: "https://example.test/api/binary",
+        encoding: "base64",
+        body: Buffer.from([0, 1, 2, 3]).toString("base64"),
+        size: 4
+      }),
+      {
+        config,
+        putBlob
+      }
+    );
+
+    expect(result).toBeNull();
+    expect(putBlob).not.toHaveBeenCalled();
+  });
+
   it("respects site policy deny rules for body capture", async () => {
     const config = cloneConfig();
     config.sitePolicies = [

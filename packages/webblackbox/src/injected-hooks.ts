@@ -1194,7 +1194,7 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
   function isBodyCaptureMimeAllowed(mimeType: string | undefined): boolean {
     if (!mimeType) {
-      return true;
+      return false;
     }
 
     const normalized = mimeType.toLowerCase();

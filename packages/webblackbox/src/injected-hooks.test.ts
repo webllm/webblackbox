@@ -186,6 +186,27 @@ describe("injected-hooks", () => {
     expect(String((networkBody?.payload as { body?: unknown }).body ?? "")).toContain('"ok":true');
   });
 
+  it("does not sample fetch bodies without an allowed content type", async () => {
+    const flag = "__WB_TEST_INJECTED_FETCH_MISSING_MIME__";
+
+    window.fetch = vi.fn(async () => {
+      return new Response(new Uint8Array([0, 1, 2, 3]), {
+        status: 200
+      });
+    }) as typeof fetch;
+
+    installInjectedLiteCaptureHooks({
+      flag,
+      bodyCaptureMaxBytes: 128 * 1024,
+      capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+    });
+
+    await window.fetch("https://example.test/api/binary");
+    await delay(20);
+
+    expect(captured.some((message) => message.rawType === "networkBody")).toBe(false);
+  });
+
   it("skips response-body sampling until capture config enables it", async () => {
     const flag = "__WB_TEST_INJECTED_FETCH_CONFIG__";
 
