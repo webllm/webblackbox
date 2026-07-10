@@ -157,6 +157,14 @@ async function startShareServer(): Promise<void> {
   const server = createServer((request, response) => {
     void routeRequest(request, response).catch((error) => {
       console.warn("[share-server] request failed", error);
+
+      if (response.headersSent || response.writableEnded) {
+        if (!response.writableEnded) {
+          response.destroy(error instanceof Error ? error : undefined);
+        }
+        return;
+      }
+
       respondJson(response, 500, {
         error: "Internal server error."
       });
@@ -1335,7 +1343,15 @@ async function writeShareAuditEvent(
     details: input.details
   };
 
-  await appendFile(SHARE_AUDIT_LOG_PATH, `${JSON.stringify(event)}\n`, "utf8");
+  try {
+    await appendFile(SHARE_AUDIT_LOG_PATH, `${JSON.stringify(event)}\n`, "utf8");
+  } catch (error) {
+    console.warn("[share-server] audit append failed", {
+      action: input.action,
+      shareId: input.shareId,
+      error: redactText(error instanceof Error ? error.message : String(error), 240)
+    });
+  }
 }
 
 function hashAuditValue(value: string): string {

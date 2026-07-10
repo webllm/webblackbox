@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -357,6 +357,27 @@ describe("share-server", () => {
     expect(auditEvents.every((event) => typeof event.clientHash === "string")).toBe(true);
     expect(auditLog).not.toContain("127.0.0.1");
     expect(auditLog).not.toContain("webblackbox-share-");
+  });
+
+  it("keeps committed operations successful when the audit sink is unavailable", async () => {
+    const server = await startShareServer();
+    const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");
+    await rm(auditPath, { force: true });
+    await mkdir(auditPath);
+
+    const uploadPayload = await uploadEncryptedFixture(server);
+    const metadataResponse = await fetch(
+      `${server.baseUrl}/api/share/${uploadPayload.shareId}/meta`,
+      {
+        headers: {
+          "x-webblackbox-api-key": apiKey
+        }
+      }
+    );
+
+    expect(metadataResponse.status).toBe(200);
+    expect(server.child.exitCode).toBeNull();
+    expect(server.logs.join("")).toContain("[share-server] audit append failed");
   });
 
   it("enforces scoped API keys", async () => {

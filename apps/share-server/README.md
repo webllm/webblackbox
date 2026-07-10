@@ -113,3 +113,4 @@ Each share writes:
 - `audit/share-access.jsonl` (action, outcome, share id, timestamp, and client hash only)
 
 Audit logs must not contain archive plaintext, passphrases, API keys, raw URLs, filenames supplied by the client, or request payloads.
+Audit append failures are reported through operational logs but do not turn an already committed upload, revoke, metadata response, page response, or download into a failed HTTP operation.
