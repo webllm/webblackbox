@@ -318,8 +318,8 @@ export function clearCdpCaptureScopeState(state: CdpCaptureScopeState): void {
 }
 
 export function hasDisallowedCdpFrames(state: CdpCaptureScopeState): boolean {
-  for (const [frameId, allowed] of state.frameScopes) {
-    if (frameId !== state.rootFrameId && !allowed) {
+  for (const allowed of state.frameScopes.values()) {
+    if (!allowed) {
       return true;
     }
   }
@@ -343,7 +343,7 @@ export function filterCdpSnapshotDocuments(
       return false;
     }
 
-    return frameId === state.rootFrameId || state.frameScopes.get(frameId) === true;
+    return state.frameScopes.get(frameId) === true;
   });
 }
 

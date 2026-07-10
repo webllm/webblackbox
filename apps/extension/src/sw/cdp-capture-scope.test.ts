@@ -91,6 +91,13 @@ describe("CDP capture scope", () => {
 
     expect(stopped.allowed).toBe(false);
     expect(stopped.topNavigation?.decision.reason).toBe("origin-changed");
+    expect(stoppingScope.frameScopes.get("root")).toBe(false);
+    expect(hasDisallowedCdpFrames(stoppingScope)).toBe(true);
+    expect(
+      filterCdpSnapshotDocuments(stoppingScope, [
+        { frameId: "root", marker: "must-not-cross-denied-root" }
+      ])
+    ).toEqual([]);
 
     const continuingScope = state(
       policy({

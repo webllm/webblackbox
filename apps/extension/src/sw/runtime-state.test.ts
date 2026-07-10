@@ -7,12 +7,14 @@ import {
   RuntimeStartCoordinator,
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
+  createVolatileCaptureFence,
   createRuntimeCleanupAlarmName,
   createRuntimeStateSnapshot,
   createStoppingRuntimeTombstone,
   compactScreenRecordingChunkHashes,
   deriveDurableScreenRecordingChunkCount,
   evaluateActiveRuntimeRestoration,
+  isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
   mergeRuntimeCountersWithSequenceWatermark,
   normalizeOffscreenScreenRecordingStatus,
@@ -23,6 +25,7 @@ import {
   recoverStoppingRuntimeFailClosed,
   restoreScreenRecordingChunkHashes,
   runDurableRuntimeStopWorkflow,
+  runVolatileCaptureOperation,
   type PersistedActiveRuntime,
   type PersistedRuntime
 } from "./runtime-state.js";
@@ -97,6 +100,20 @@ function createRuntime(
         stoppedAt: stopTime,
         cleanupDeadline
       };
+}
+
+function createDeferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("runtime state checkpoint", () => {
@@ -192,20 +209,97 @@ describe("runtime state checkpoint", () => {
     expect(activated).toBe(true);
   });
 
-  it("does not begin teardown when the stopping tombstone write fails", async () => {
+  it("closes capture synchronously while the stopping tombstone write is deferred", async () => {
+    const captureFence = createVolatileCaptureFence();
+    const checkpoint = createDeferred();
+    const teardown = vi.fn();
+    const persistStopped = vi.fn();
+    const stopTask = runDurableRuntimeStopWorkflow({
+      captureFence,
+      persistStopping: () => checkpoint.promise,
+      teardownSteps: [teardown],
+      persistStopped
+    });
+
+    expect(isVolatileCaptureOpen(captureFence)).toBe(false);
+    const writes = vi.fn(async () => "hash");
+    const representatives = ["event", "screenshot", "dom", "storage", "indexeddb", "video"];
+    const blockedResults = await Promise.all(
+      representatives.map(() => runVolatileCaptureOperation(captureFence, writes))
+    );
+
+    expect(blockedResults).toEqual(representatives.map(() => null));
+    expect(writes).not.toHaveBeenCalled();
+    expect(teardown).not.toHaveBeenCalled();
+    checkpoint.resolve(undefined);
+    await stopTask;
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(persistStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps capture blocked and does not begin teardown when the tombstone write fails", async () => {
+    const captureFence = createVolatileCaptureFence();
     const teardown = vi.fn();
     const persistStopped = vi.fn();
 
     await expect(
       runDurableRuntimeStopWorkflow({
+        captureFence,
         persistStopping: () => Promise.reject(new Error("checkpoint failed")),
         teardownSteps: [teardown],
         persistStopped
       })
     ).rejects.toThrow(/checkpoint failed/);
 
+    expect(isVolatileCaptureOpen(captureFence)).toBe(false);
     expect(teardown).not.toHaveBeenCalled();
     expect(persistStopped).not.toHaveBeenCalled();
+  });
+
+  it("drops an in-flight capture result when stop closes the fence", async () => {
+    const captureFence = createVolatileCaptureFence();
+    const captureResult = createDeferred<string>();
+    const write = vi.fn(() => captureResult.promise);
+    const inFlight = runVolatileCaptureOperation(captureFence, write);
+
+    expect(write).toHaveBeenCalledTimes(1);
+    await expect(
+      runDurableRuntimeStopWorkflow({
+        captureFence,
+        persistStopping: () => Promise.reject(new Error("checkpoint failed")),
+        teardownSteps: [],
+        persistStopped: vi.fn()
+      })
+    ).rejects.toThrow(/checkpoint failed/);
+
+    captureResult.resolve("orphaned-hash");
+    await expect(inFlight).resolves.toBeNull();
+    expect(isVolatileCaptureOpen(captureFence)).toBe(false);
+  });
+
+  it("opens a fresh fence only for a newly authorized active runtime", async () => {
+    const blockedFence = createVolatileCaptureFence();
+    await expect(
+      runDurableRuntimeStopWorkflow({
+        captureFence: blockedFence,
+        persistStopping: () => Promise.reject(new Error("checkpoint failed")),
+        teardownSteps: [],
+        persistStopped: vi.fn()
+      })
+    ).rejects.toThrow(/checkpoint failed/);
+    expect(isVolatileCaptureOpen(blockedFence)).toBe(false);
+
+    const restored = evaluateActiveRuntimeRestoration(
+      createRuntime("active") as PersistedActiveRuntime,
+      { id: 7, url: "https://example.test/restored" },
+      Date.parse("2026-01-01T00:30:00.000Z")
+    );
+    expect(restored.allowed).toBe(true);
+
+    const freshFence = createVolatileCaptureFence();
+    const write = vi.fn(async () => "restored-hash");
+    await expect(runVolatileCaptureOperation(freshFence, write)).resolves.toBe("restored-hash");
+    expect(write).toHaveBeenCalledTimes(1);
   });
 
   it.each([0, 1, 2])(
@@ -220,6 +314,7 @@ describe("runtime state checkpoint", () => {
 
       await expect(
         runDurableRuntimeStopWorkflow({
+          captureFence: createVolatileCaptureFence(),
           persistStopping: () => {
             durableState = "stopping";
           },
@@ -251,6 +346,7 @@ describe("runtime state checkpoint", () => {
 
     await expect(
       runDurableRuntimeStopWorkflow({
+        captureFence: createVolatileCaptureFence(),
         persistStopping: () => {
           durableState = "stopping";
           order.push("stopping");

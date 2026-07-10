@@ -110,13 +110,16 @@ import {
 import {
   RuntimeCleanupScheduler,
   RuntimeStartCoordinator,
+  blockVolatileCapture,
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
   compactScreenRecordingChunkHashes,
+  createVolatileCaptureFence,
   createRuntimeStateSnapshot,
   createStoppingRuntimeTombstone,
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
+  isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
   mergeRuntimeCountersWithSequenceWatermark,
   normalizeOffscreenScreenRecordingStatus,
@@ -127,12 +130,14 @@ import {
   recoverStoppingRuntimeFailClosed,
   restoreScreenRecordingChunkHashes,
   runDurableRuntimeStopWorkflow,
+  runVolatileCaptureOperation,
   type PersistedActiveRuntime,
   type PersistedRuntime,
   type PersistedRuntimeCounters,
   type PersistedScreenRecording,
   type PersistedStoppedRuntime,
-  type PersistedStoppingRuntime
+  type PersistedStoppingRuntime,
+  type VolatileCaptureFence
 } from "./runtime-state.js";
 
 type SessionRuntime = {
@@ -167,6 +172,7 @@ type SessionRuntime = {
   pipelineEventBuffer: WebBlackboxEvent[];
   pipelineFlushTimer: ReturnType<typeof setTimeout> | null;
   pipelineFlushQueued: boolean;
+  captureFence: VolatileCaptureFence;
   stopping: boolean;
   responseBodyCaptures: number;
   responseBodyCaptureTimestamps: number[];
@@ -625,7 +631,12 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
 
   const runtime = sessionsByTab.get(tabId);
 
-  if (!runtime || runtime.stopping || runtime.stoppedAt) {
+  if (
+    !runtime ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
+    runtime.stopping ||
+    runtime.stoppedAt
+  ) {
     sendInactiveContentPortState(port);
     return;
   }
@@ -659,7 +670,12 @@ function syncContentPortRecordingState(port: PortLike): void {
 
   const runtime = sessionsByTab.get(tabId);
 
-  if (!runtime || runtime.stopping || runtime.stoppedAt) {
+  if (
+    !runtime ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
+    runtime.stopping ||
+    runtime.stoppedAt
+  ) {
     sendInactiveContentPortState(port);
     return;
   }
@@ -889,7 +905,12 @@ async function handleInboundMessage(
 
     const runtime = sessionsByTab.get(tabId);
 
-    if (!runtime || runtime.stopping || runtime.stoppedAt) {
+    if (
+      !runtime ||
+      !isVolatileCaptureOpen(runtime.captureFence) ||
+      runtime.stopping ||
+      runtime.stoppedAt
+    ) {
       return {
         kind: "sw.recording-status",
         active: false
@@ -1267,6 +1288,7 @@ function createSessionRuntime(input: {
     pipelineEventBuffer: [],
     pipelineFlushTimer: null,
     pipelineFlushQueued: false,
+    captureFence: createVolatileCaptureFence(input.stoppedAt !== undefined),
     stopping: false,
     responseBodyCaptures: counters.responseBodyCaptures,
     responseBodyCaptureTimestamps: [],
@@ -1305,6 +1327,7 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
 
   if (
     !runtime ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
     runtime.stopping ||
     runtime.stoppedAt ||
     !shouldInjectHooksForMode(runtime.mode)
@@ -1330,6 +1353,13 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
 }
 
 function stopSession(tabId: number): Promise<void> {
+  const runtime = sessionsByTab.get(tabId);
+
+  if (runtime) {
+    blockVolatileCapture(runtime.captureFence);
+    notifyOffscreenPipelineStatus();
+  }
+
   const existing = stopSessionTasks.get(tabId);
 
   if (existing) {
@@ -1360,6 +1390,7 @@ async function stopSessionOnce(tabId: number): Promise<void> {
 
   try {
     await runDurableRuntimeStopWorkflow({
+      captureFence: runtime.captureFence,
       persistStopping: runtime.stopping
         ? () => undefined
         : () => persistRuntimeStoppingTombstone(runtime, stopRequestedAt, cleanupDeadline),
@@ -1583,7 +1614,10 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
     sessionsByTab.get(rawEvent.tabId) ??
     (typeof rawEvent.sid === "string" ? sessionsBySid.get(rawEvent.sid) : undefined);
 
-  if (!runtime) {
+  if (
+    !runtime ||
+    (!isVolatileCaptureOpen(runtime.captureFence) && !isCaptureClosureEvent(rawEvent))
+  ) {
     return;
   }
 
@@ -1626,9 +1660,13 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
 
   if (shouldMaterializeLiteContentEvent(runtime, nextRawEvent)) {
     enqueue(runtime, async () => {
+      if (!isRuntimeCaptureScopeActive(runtime)) {
+        return;
+      }
+
       const materialized = await materializeLiteContentEvent(runtime, nextRawEvent);
 
-      if (!materialized) {
+      if (!materialized || !isRuntimeCaptureScopeActive(runtime)) {
         return;
       }
 
@@ -1650,6 +1688,14 @@ function ingestRawEvent(rawEvent: RawRecorderEvent): void {
   }
 
   runtime.recorder.ingest(nextRawEvent);
+}
+
+function isCaptureClosureEvent(rawEvent: RawRecorderEvent): boolean {
+  // These records close already-captured video state and contain no new page payload.
+  return (
+    rawEvent.source === "system" &&
+    (rawEvent.rawType === "screen.recording.end" || rawEvent.rawType === "screen.recording.error")
+  );
 }
 
 function shouldAllowStopDrainContentEvent(
@@ -1726,7 +1772,7 @@ async function materializeLiteContentEvent(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent
 ): Promise<RawRecorderEvent | null> {
-  if (!isRuntimeDocumentWithinScope(runtime)) {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return null;
   }
 
@@ -1778,7 +1824,11 @@ async function materializeLiteScreenshot(
     return null;
   }
 
-  const shotId = await runtime.pipeline.putBlob(decoded.mime, decoded.bytes);
+  const shotId = await putRuntimeCaptureBlob(runtime, decoded.mime, decoded.bytes);
+
+  if (!shotId) {
+    return null;
+  }
   const width = normalizePositiveInt(payload.w) ?? normalizePositiveInt(payload.width);
   const height = normalizePositiveInt(payload.h) ?? normalizePositiveInt(payload.height);
   const quality = normalizePositiveInt(payload.quality);
@@ -1815,7 +1865,11 @@ async function materializeLiteDomSnapshot(
   }
 
   const encoded = encodeTextWithByteLimit(html, LITE_DOM_SNAPSHOT_MAX_BYTES);
-  const contentHash = await runtime.pipeline.putBlob("text/html", encoded.bytes);
+  const contentHash = await putRuntimeCaptureBlob(runtime, "text/html", encoded.bytes);
+
+  if (!contentHash) {
+    return null;
+  }
   const snapshotId = asString(payload.snapshotId) ?? `D-${Math.round(rawEvent.mono)}`;
   const nodeCount = normalizeNonNegativeInt(payload.nodeCount);
   const reason = asString(payload.reason) ?? undefined;
@@ -1854,8 +1908,12 @@ async function materializeLiteStorageSnapshot(
     const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
     const hash =
       encoded.bytes.byteLength > 0
-        ? await runtime.pipeline.putBlob("application/json", encoded.bytes)
+        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes)
         : undefined;
+
+    if (encoded.bytes.byteLength > 0 && !hash) {
+      return null;
+    }
     const count = normalizeNonNegativeInt(payload.count) ?? Object.keys(entries).length;
 
     return {
@@ -1877,8 +1935,12 @@ async function materializeLiteStorageSnapshot(
     const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
     const hash =
       encoded.bytes.byteLength > 0
-        ? await runtime.pipeline.putBlob("application/json", encoded.bytes)
+        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes)
         : undefined;
+
+    if (encoded.bytes.byteLength > 0 && !hash) {
+      return null;
+    }
     const count = normalizeNonNegativeInt(payload.count) ?? names.length;
 
     return {
@@ -1900,8 +1962,12 @@ async function materializeLiteStorageSnapshot(
     const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
     const hash =
       encoded.bytes.byteLength > 0
-        ? await runtime.pipeline.putBlob("application/json", encoded.bytes)
+        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes)
         : undefined;
+
+    if (encoded.bytes.byteLength > 0 && !hash) {
+      return null;
+    }
     const count = normalizeNonNegativeInt(payload.count) ?? names.length;
 
     return {
@@ -1962,7 +2028,11 @@ async function materializeLiteNetworkBody(
 
   const size = normalizeNonNegativeInt(payload.size) ?? transformed.originalBytes.byteLength;
   const truncatedByInput = payload.truncated === true;
-  const contentHash = await runtime.pipeline.putBlob(mimeType, transformed.sampledBytes);
+  const contentHash = await putRuntimeCaptureBlob(runtime, mimeType, transformed.sampledBytes);
+
+  if (!contentHash) {
+    return null;
+  }
 
   return {
     ...rawEvent,
@@ -1977,6 +2047,21 @@ async function materializeLiteNetworkBody(
       redacted: payload.redacted === true || transformed.redacted
     }
   };
+}
+
+async function putRuntimeCaptureBlob(
+  runtime: SessionRuntime,
+  mime: string,
+  bytes: Uint8Array
+): Promise<string | null> {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
+    return null;
+  }
+
+  const hash = await runVolatileCaptureOperation(runtime.captureFence, () =>
+    runtime.pipeline.putBlob(mime, bytes)
+  );
+  return isRuntimeCaptureScopeActive(runtime) ? hash : null;
 }
 
 function updateRuntimeInteractionState(runtime: SessionRuntime, rawEvent: RawRecorderEvent): void {
@@ -2211,7 +2296,11 @@ function queuePipelineBatchFlush(runtime: SessionRuntime): void {
     } finally {
       runtime.pipelineFlushQueued = false;
 
-      if (runtime.pipelineEventBuffer.length > 0 && !runtime.stopping) {
+      if (
+        runtime.pipelineEventBuffer.length > 0 &&
+        isVolatileCaptureOpen(runtime.captureFence) &&
+        !runtime.stopping
+      ) {
         queuePipelineBatchFlush(runtime);
       }
     }
@@ -2537,7 +2626,7 @@ function rejectPendingOffscreenRequests(message: string): void {
 
 async function recoverAllActiveOffscreenPipelines(): Promise<void> {
   for (const runtime of sessionsByTab.values()) {
-    if (runtime.stopping || runtime.stoppedAt) {
+    if (!isVolatileCaptureOpen(runtime.captureFence) || runtime.stopping || runtime.stoppedAt) {
       continue;
     }
 
@@ -2556,7 +2645,12 @@ async function recoverOffscreenSession(sid: string): Promise<void> {
   const task = (async () => {
     const runtime = sessionsBySid.get(sid);
 
-    if (!runtime || runtime.stopping || runtime.stoppedAt) {
+    if (
+      !runtime ||
+      !isVolatileCaptureOpen(runtime.captureFence) ||
+      runtime.stopping ||
+      runtime.stoppedAt
+    ) {
       return;
     }
 
@@ -2603,6 +2697,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         event.sessionId
       );
       const scopeAllowed = scopeEvaluation.allowed;
+      const captureAllowed = scopeAllowed && isVolatileCaptureOpen(runtime.captureFence);
 
       if (scopeEvaluation.topNavigation) {
         const { url, decision } = scopeEvaluation.topNavigation;
@@ -2617,7 +2712,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         }
       }
 
-      if (scopeAllowed && event.method === "HeapProfiler.addHeapSnapshotChunk") {
+      if (captureAllowed && event.method === "HeapProfiler.addHeapSnapshotChunk") {
         const payload = asRecord(normalizedPayload);
         const chunk = typeof payload?.chunk === "string" ? payload.chunk : undefined;
 
@@ -2634,7 +2729,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         }
       }
 
-      if (scopeAllowed) {
+      if (captureAllowed) {
         ingestRawEvent({
           source: "cdp",
           rawType: event.method,
@@ -2649,7 +2744,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
       if (
         !FULL_MODE_FOLLOWUP_METHODS.has(event.method) ||
-        (!scopeAllowed &&
+        (!captureAllowed &&
           event.method !== "Target.attachedToTarget" &&
           event.method !== "Target.detachedFromTarget")
       ) {
@@ -2748,7 +2843,12 @@ function evaluateRuntimeFrameDocument(
 }
 
 function isRuntimeCaptureScopeActive(runtime: SessionRuntime): boolean {
-  return !runtime.stopping && !runtime.stoppedAt && isRuntimeDocumentWithinScope(runtime);
+  return (
+    isVolatileCaptureOpen(runtime.captureFence) &&
+    !runtime.stopping &&
+    !runtime.stoppedAt &&
+    isRuntimeDocumentWithinScope(runtime)
+  );
 }
 
 function isRuntimeDocumentWithinScope(runtime: SessionRuntime): boolean {
@@ -2761,7 +2861,7 @@ async function processFullModeEvent(
   params: unknown,
   sessionId?: string
 ): Promise<void> {
-  if (runtime.stopping) {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return;
   }
 
@@ -2918,10 +3018,15 @@ async function captureResponseBody(
     return;
   }
 
-  const hash = await runtime.pipeline.putBlob(
+  const hash = await putRuntimeCaptureBlob(
+    runtime,
     metadata?.mimeType ?? "application/octet-stream",
     transformed.sampledBytes
   );
+
+  if (!hash) {
+    return;
+  }
 
   runtime.responseBodyCaptures += 1;
 
@@ -2950,7 +3055,7 @@ function shouldCaptureResponseBody(
   loadingFinishedPayload: Record<string, unknown> | null,
   sessionId?: string
 ): boolean {
-  if (runtime.mode !== "full" || runtime.stopping) {
+  if (runtime.mode !== "full" || !isRuntimeCaptureScopeActive(runtime)) {
     return false;
   }
 
@@ -3020,7 +3125,7 @@ function isLikelyTextualResourceType(resourceType?: string): boolean {
 }
 
 function shouldCaptureIncidentArtifacts(runtime: SessionRuntime): boolean {
-  if (runtime.stopping) {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return false;
   }
 
@@ -3049,7 +3154,7 @@ async function captureIncidentArtifacts(runtime: SessionRuntime, reason: string)
 }
 
 function shouldCaptureNavigationSnapshot(runtime: SessionRuntime): boolean {
-  if (runtime.stopping) {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return false;
   }
 
@@ -3072,7 +3177,7 @@ function shouldCaptureNavigationSnapshot(runtime: SessionRuntime): boolean {
 }
 
 function handleFreezeNotice(runtime: SessionRuntime, reason: FreezeReason): void {
-  if (runtime.stopping) {
+  if (!isRuntimeCaptureScopeActive(runtime)) {
     return;
   }
 
@@ -3143,7 +3248,12 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
   }
 
   const bytes = decodeBase64(screenshot.data);
-  const hash = await runtime.pipeline.putBlob("image/webp", bytes);
+  const hash = await putRuntimeCaptureBlob(runtime, "image/webp", bytes);
+
+  if (!hash) {
+    return;
+  }
+
   const viewport = runtime.lastViewport;
   const pointer =
     runtime.lastPointer && Date.now() - runtime.lastPointer.t <= POINTER_STALE_MS
@@ -3198,7 +3308,7 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
     throw new Error("Chrome tabCapture API is unavailable for screen recording.");
   }
 
-  if (runtime.screenRecording) {
+  if (runtime.screenRecording || !isRuntimeCaptureScopeActive(runtime)) {
     return;
   }
 
@@ -3208,6 +3318,10 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
   const streamId = await chromeApi.tabCapture.getMediaStreamId({
     targetTabId: runtime.tabId
   });
+
+  if (!isRuntimeCaptureScopeActive(runtime)) {
+    return;
+  }
 
   if (!streamId) {
     throw new Error("Chrome did not grant a tab capture stream.");
@@ -3239,6 +3353,11 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
       streamId,
       source: SCREEN_RECORDING_OFFSCREEN_SOURCE
     });
+
+    if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+      await stopScreenRecording(runtime, "capture-fence").catch(() => undefined);
+      return;
+    }
 
     recording.mime = result.mime;
     recording.width = result.width;
@@ -3326,8 +3445,21 @@ async function handleOffscreenScreenRecordingChunk(
 
   const index = resolveScreenRecordingChunkIndex(message.index, recording.chunkCount);
   const task = (async () => {
+    if (!isRuntimeCaptureScopeActive(runtime)) {
+      return;
+    }
+
     const mime = typeof message.mime === "string" && message.mime ? message.mime : recording.mime;
-    const hash = await runtime.pipeline.putBlob(mime, bytes);
+    const hash = await putRuntimeCaptureBlob(runtime, mime, bytes);
+
+    if (
+      !hash ||
+      !isRuntimeCaptureScopeActive(runtime) ||
+      hasDisallowedCdpFrames(runtime.cdpScope)
+    ) {
+      return;
+    }
+
     const size = bytes.byteLength;
     recording.chunks[index] = hash;
     recording.chunkCount = Math.max(recording.chunkCount, index + 1);
@@ -3523,7 +3655,12 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
     documents: scopedDocuments
   };
   const bytes = new TextEncoder().encode(JSON.stringify(scopedSnapshot));
-  const hash = await runtime.pipeline.putBlob("application/json", bytes);
+  const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+  if (!hash) {
+    return;
+  }
+
   const firstDocument = scopedDocuments[0] as Record<string, unknown> | undefined;
   const nodes = firstDocument ? asRecord(firstDocument.nodes) : null;
   const nodeNameArray = Array.isArray(nodes?.nodeName) ? nodes.nodeName : [];
@@ -3574,7 +3711,11 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
       .slice(0, FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS);
     const bytes = new TextEncoder().encode(JSON.stringify(cookieNames));
-    const hash = await runtime.pipeline.putBlob("application/json", bytes);
+    const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+    if (!hash) {
+      return;
+    }
 
     ingestRawEvent({
       source: "system",
@@ -3601,7 +3742,12 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
 
   if (typeof localStorageData === "string" && isRuntimeCaptureScopeActive(runtime)) {
     const bytes = new TextEncoder().encode(localStorageData);
-    const hash = await runtime.pipeline.putBlob("application/json", bytes);
+    const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+    if (!hash) {
+      return;
+    }
+
     const parsed = parseStorageSnapshotMeta(localStorageData);
 
     ingestRawEvent({
@@ -3640,7 +3786,11 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
 
     if (dbNames?.databaseNames && isRuntimeCaptureScopeActive(runtime)) {
       const bytes = new TextEncoder().encode(JSON.stringify(dbNames.databaseNames));
-      const hash = await runtime.pipeline.putBlob("application/json", bytes);
+      const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+      if (!hash) {
+        return;
+      }
 
       ingestRawEvent({
         source: "system",
@@ -3698,7 +3848,11 @@ async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Pro
   }
 
   const bytes = new TextEncoder().encode(JSON.stringify(metrics));
-  const hash = await runtime.pipeline.putBlob("application/json", bytes);
+  const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+  if (!hash) {
+    return;
+  }
 
   ingestRawEvent({
     source: "system",
@@ -3767,7 +3921,11 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
     }
 
     const bytes = new TextEncoder().encode(JSON.stringify(profileResult.profile));
-    const hash = await runtime.pipeline.putBlob("application/json", bytes);
+    const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+    if (!hash) {
+      return;
+    }
 
     ingestRawEvent({
       source: "system",
@@ -3839,7 +3997,11 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
 
   const joined = snapshot.chunks.join("");
   const bytes = new TextEncoder().encode(joined);
-  const hash = await runtime.pipeline.putBlob("application/json", bytes);
+  const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
+
+  if (!hash) {
+    return;
+  }
 
   ingestRawEvent({
     source: "system",
@@ -3888,7 +4050,7 @@ async function sendCdpCommandOutcome<TResult = unknown>(
   params?: Record<string, unknown>,
   timeoutMs = CDP_ARTIFACT_TIMEOUT_MS
 ): Promise<CdpCommandOutcome<TResult>> {
-  if (!runtime.cdpRouter || runtime.stopping) {
+  if (!runtime.cdpRouter || !isRuntimeCaptureScopeActive(runtime)) {
     return { ok: false };
   }
 
@@ -4106,6 +4268,10 @@ function authorizeContentSender(
   sender: MessageSenderLike | undefined,
   documentUrl?: string
 ): boolean {
+  if (!isVolatileCaptureOpen(runtime.captureFence)) {
+    return false;
+  }
+
   const tabId = sender?.tab?.id;
   const frameId = normalizeSenderFrameId(sender);
 
@@ -4816,7 +4982,12 @@ function uninstallLiteWebRequestCaptureIfUnused(): void {
 
 function hasActiveLiteRuntime(): boolean {
   for (const runtime of sessionsByTab.values()) {
-    if (runtime.mode === "lite" && !runtime.stopping && !runtime.stoppedAt) {
+    if (
+      runtime.mode === "lite" &&
+      isVolatileCaptureOpen(runtime.captureFence) &&
+      !runtime.stopping &&
+      !runtime.stoppedAt
+    ) {
       return true;
     }
   }
@@ -4834,7 +5005,12 @@ function resolveLiteRuntimeForWebRequest(
 
   const runtime = sessionsByTab.get(tabId);
 
-  if (!runtime || runtime.mode !== "lite" || runtime.stopping) {
+  if (
+    !runtime ||
+    runtime.mode !== "lite" ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
+    runtime.stopping
+  ) {
     return undefined;
   }
 
@@ -4897,7 +5073,11 @@ function enqueue(
   options: { bestEffort?: boolean } = {}
 ): boolean {
   if (options.bestEffort) {
-    if (runtime.stopping || runtime.queueDepth >= BEST_EFFORT_QUEUE_MAX_PENDING) {
+    if (
+      !isVolatileCaptureOpen(runtime.captureFence) ||
+      runtime.stopping ||
+      runtime.queueDepth >= BEST_EFFORT_QUEUE_MAX_PENDING
+    ) {
       runtime.droppedBestEffortTasks += 1;
 
       if (shouldLogPerf() && runtime.droppedBestEffortTasks % 50 === 0) {
@@ -5101,7 +5281,11 @@ async function downloadExportedBundle(
 
 function toSessionListItem(runtime: SessionRuntime): SessionListItem {
   const activeRuntime = sessionsByTab.get(runtime.tabId);
-  const active = activeRuntime?.sid === runtime.sid && !runtime.stopping && !runtime.stoppedAt;
+  const active =
+    activeRuntime?.sid === runtime.sid &&
+    isVolatileCaptureOpen(runtime.captureFence) &&
+    !runtime.stopping &&
+    !runtime.stoppedAt;
 
   return {
     sid: runtime.sid,
@@ -5251,7 +5435,12 @@ function buildSessionListMessage(): SessionListMessage {
 async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void> {
   const runtime = sessionsByTab.get(tabId);
 
-  if (!runtime || runtime.stopping || runtime.stoppedAt) {
+  if (
+    !runtime ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
+    runtime.stopping ||
+    runtime.stoppedAt
+  ) {
     return;
   }
 
@@ -6405,7 +6594,8 @@ function notifyOffscreenPipelineStatus(): void {
   }
 
   const activeRuntimes = [...sessionsByTab.values()].filter(
-    (runtime) => !runtime.stopping && !runtime.stoppedAt
+    (runtime) =>
+      isVolatileCaptureOpen(runtime.captureFence) && !runtime.stopping && !runtime.stoppedAt
   );
 
   try {

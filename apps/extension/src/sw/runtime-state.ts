@@ -143,7 +143,12 @@ export type RuntimeCleanupSchedulerOptions = {
   onDue: (sid: string) => void | Promise<void>;
 };
 
+export type VolatileCaptureFence = {
+  blocked: boolean;
+};
+
 export type DurableRuntimeStopWorkflowOptions = {
+  captureFence: VolatileCaptureFence;
   persistStopping: () => void | Promise<void>;
   teardownSteps: ReadonlyArray<() => void | Promise<void>>;
   persistStopped: () => void | Promise<void>;
@@ -186,10 +191,38 @@ export class RuntimeStartCoordinator {
   }
 }
 
-/** Runs no teardown until the stop intent is durably checkpointed. */
+/** Creates the per-runtime fence. Only authoritative session creation may start it open. */
+export function createVolatileCaptureFence(blocked = false): VolatileCaptureFence {
+  return { blocked };
+}
+
+/** Closes capture synchronously. There is intentionally no corresponding reopen operation. */
+export function blockVolatileCapture(fence: VolatileCaptureFence): void {
+  fence.blocked = true;
+}
+
+export function isVolatileCaptureOpen(fence: VolatileCaptureFence): boolean {
+  return !fence.blocked;
+}
+
+/** Drops the result of work that crosses a fence closure; callers must not publish references. */
+export async function runVolatileCaptureOperation<T>(
+  fence: VolatileCaptureFence,
+  operation: () => Promise<T>
+): Promise<T | null> {
+  if (!isVolatileCaptureOpen(fence)) {
+    return null;
+  }
+
+  const result = await operation();
+  return isVolatileCaptureOpen(fence) ? result : null;
+}
+
+/** Closes capture immediately, then runs no teardown until stop is durably checkpointed. */
 export async function runDurableRuntimeStopWorkflow(
   options: DurableRuntimeStopWorkflowOptions
 ): Promise<void> {
+  blockVolatileCapture(options.captureFence);
   await options.persistStopping();
 
   for (const step of options.teardownSteps) {
