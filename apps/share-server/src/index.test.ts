@@ -1,9 +1,10 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { createRequire } from "node:module";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   open,
@@ -27,6 +28,8 @@ const require = createRequire(import.meta.url);
 const tsxCli = require.resolve("tsx/cli");
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const apiKey = "share-test-key";
+const testAuditHmacSecretBytes = Buffer.from(Array.from({ length: 32 }, (_, index) => index));
+const testAuditHmacSecret = testAuditHmacSecretBytes.toString("base64url");
 const BLOB_FIXTURE_PATH =
   "blobs/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json";
 const TEXT_BLOB_FIXTURE_PATH =
@@ -1269,8 +1272,16 @@ describe("share-server", () => {
     const first = await startShareServer();
     const archiveTemporaryPath = resolve(first.dataDir, "archives", ".first-writer.upload");
     const recordTemporaryPath = resolve(first.dataDir, "records", ".first-writer.record");
+    const auditHmacKeyPath = resolve(first.dataDir, "audit", "client-hash.hmac.key");
+    const auditHmacKeyBefore = await readFile(auditHmacKeyPath);
+    const auditHmacTemporaryPath = resolve(
+      first.dataDir,
+      "audit",
+      `.client-hash.${"b".repeat(32)}.hmac-key.tmp`
+    );
     await writeFile(archiveTemporaryPath, "first-writer-upload");
     await writeFile(recordTemporaryPath, "first-writer-record");
+    await writeFile(auditHmacTemporaryPath, "first-writer-audit-key-temp");
 
     const second = await spawnShareServer({}, first.dataDir);
     const secondExit = await waitForShareServerExit(second);
@@ -1279,6 +1290,10 @@ describe("share-server", () => {
     expect(second.logs.join("")).toContain("is already in use by a running share-server process");
     await expect(readFile(archiveTemporaryPath, "utf8")).resolves.toBe("first-writer-upload");
     await expect(readFile(recordTemporaryPath, "utf8")).resolves.toBe("first-writer-record");
+    await expect(readFile(auditHmacTemporaryPath, "utf8")).resolves.toBe(
+      "first-writer-audit-key-temp"
+    );
+    await expect(readFile(auditHmacKeyPath)).resolves.toEqual(auditHmacKeyBefore);
 
     const upload = await uploadEncryptedFixture(first);
     const metadataResponse = await fetch(`${first.baseUrl}/api/share/${upload.shareId}/meta`, {
@@ -1297,6 +1312,7 @@ describe("share-server", () => {
     ).toEqual([]);
 
     const restarted = await startShareServer({}, first.dataDir);
+    await expect(stat(auditHmacTemporaryPath)).rejects.toMatchObject({ code: "ENOENT" });
     const restartedMetadataResponse = await fetch(
       `${restarted.baseUrl}/api/share/${upload.shareId}/meta`,
       {
@@ -1386,17 +1402,20 @@ describe("share-server", () => {
     const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
     const activeAuditPath = resolve(server.dataDir, "audit", "share-access.jsonl");
     const rotatedAuditPath = resolve(server.dataDir, "audit", "share-access.1.jsonl");
+    const auditHmacKeyPath = resolve(server.dataDir, "audit", "client-hash.hmac.key");
     const directoryPaths = [
       server.dataDir,
       resolve(server.dataDir, "archives"),
       resolve(server.dataDir, "records"),
       resolve(server.dataDir, "audit")
     ];
-    const committedFilePaths = [archivePath, recordPath, activeAuditPath, rotatedAuditPath];
+    const committedFilePaths = [archivePath, recordPath, activeAuditPath, auditHmacKeyPath];
 
     await writeFile(rotatedAuditPath, '{"legacy":true}\n');
     await Promise.all(directoryPaths.map((directoryPath) => chmod(directoryPath, 0o755)));
-    await Promise.all(committedFilePaths.map((filePath) => chmod(filePath, 0o644)));
+    await Promise.all(
+      [...committedFilePaths, rotatedAuditPath].map((filePath) => chmod(filePath, 0o644))
+    );
 
     const restarted = await startShareServer({}, server.dataDir);
 
@@ -1406,6 +1425,7 @@ describe("share-server", () => {
     for (const filePath of committedFilePaths) {
       expect((await stat(filePath)).mode & 0o777).toBe(0o600);
     }
+    await expect(stat(rotatedAuditPath)).rejects.toMatchObject({ code: "ENOENT" });
 
     const metadataResponse = await fetch(`${restarted.baseUrl}/api/share/${upload.shareId}/meta`, {
       headers: { "x-webblackbox-api-key": apiKey }
@@ -1759,6 +1779,152 @@ describe("share-server", () => {
     expect(auditLog).not.toContain("webblackbox-share-");
   });
 
+  it("replaces legacy enumerable client hashes with a private HMAC epoch", async () => {
+    const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-audit-migration-"));
+    const auditDir = resolve(dataDir, "audit");
+    const auditPath = resolve(auditDir, "share-access.jsonl");
+    const legacyHash = createHash("sha256")
+      .update("webblackbox-share-audit:ip:127.0.0.1")
+      .digest("hex");
+    await mkdir(auditDir, { recursive: true });
+    await writeFile(
+      auditPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        action: "list",
+        outcome: "ok",
+        clientHash: legacyHash
+      })}\n`
+    );
+
+    const server = await startShareServer({}, dataDir);
+    const clientHash = await readLatestAuditClientHash(server, "list");
+    const auditLog = await readFile(auditPath, "utf8");
+    const events = auditLog
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            schemaVersion: number;
+            clientHashAlgorithm: string;
+            clientHash: string;
+          }
+      );
+    const keyStat = await stat(resolve(auditDir, "client-hash.hmac.key"));
+
+    expect(clientHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(clientHash).not.toBe(legacyHash);
+    expect(auditLog).not.toContain(legacyHash);
+    expect(auditLog).not.toContain("127.0.0.1");
+    expect(events).not.toHaveLength(0);
+    expect(
+      events.every(
+        (event) => event.schemaVersion === 2 && event.clientHashAlgorithm === "HMAC-SHA256-v1"
+      )
+    ).toBe(true);
+    expect(keyStat.size).toBe(32);
+    if (process.platform !== "win32") {
+      expect(keyStat.mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("keeps generated audit client hashes stable across data-directory restarts", async () => {
+    const firstServer = await startShareServer();
+    const dataDir = firstServer.dataDir;
+    const firstHash = await readLatestAuditClientHash(firstServer, "list");
+
+    await stopShareServer(firstServer, false);
+    const restartedServer = await startShareServer({}, dataDir);
+    const restartedHash = await readLatestAuditClientHash(restartedServer, "list");
+
+    expect(restartedHash).toBe(firstHash);
+  });
+
+  it("uses independent audit client hash keys for different data directories", async () => {
+    const firstServer = await startShareServer();
+    const secondServer = await startShareServer();
+
+    const [firstHash, secondHash] = await Promise.all([
+      readLatestAuditClientHash(firstServer, "list"),
+      readLatestAuditClientHash(secondServer, "list")
+    ]);
+
+    expect(secondHash).not.toBe(firstHash);
+  });
+
+  it.each([
+    ["short", Buffer.alloc(16, 0x5a).toString("base64url")],
+    ["low-entropy", Buffer.alloc(32, 0x5a).toString("base64url")]
+  ])("rejects %s configured audit HMAC secrets", async (_label, weakSecret) => {
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_AUDIT_HMAC_SECRET: weakSecret
+      })
+    ).rejects.toThrow(/must be canonical base64url encoding of 32 to 64 high-entropy bytes/);
+  });
+
+  it("uses a validated environment audit key without exposing it", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_AUDIT_HMAC_SECRET: testAuditHmacSecret
+    });
+    const response = await fetch(`${server.baseUrl}/api/share/list`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const responseBody = await response.text();
+    const expectedHash = auditClientHmac(testAuditHmacSecretBytes, "ip:127.0.0.1");
+
+    await waitForAuditClientHash(server, "list", expectedHash);
+    const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
+    expect(response.status).toBe(200);
+    expect(responseBody).not.toContain(testAuditHmacSecret);
+    expect(auditLog).not.toContain(testAuditHmacSecret);
+    expect(server.logs.join("")).not.toContain(testAuditHmacSecret);
+    await expect(stat(resolve(server.dataDir, "audit/client-hash.hmac.key"))).rejects.toMatchObject(
+      {
+        code: "ENOENT"
+      }
+    );
+  });
+
+  it("recovers an interrupted atomic audit HMAC key publication", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-audit-key-recovery-"));
+    const auditDir = resolve(dataDir, "audit");
+    const temporaryKeyPath = resolve(auditDir, `.client-hash.${"a".repeat(32)}.hmac-key.tmp`);
+    const finalKeyPath = resolve(auditDir, "client-hash.hmac.key");
+    await mkdir(auditDir, { recursive: true });
+    await writeFile(temporaryKeyPath, testAuditHmacSecretBytes, { mode: 0o600 });
+    await link(temporaryKeyPath, finalKeyPath);
+
+    const server = await startShareServer({}, dataDir);
+    const expectedHash = auditClientHmac(testAuditHmacSecretBytes, "ip:127.0.0.1");
+
+    await waitForAuditClientHash(server, "list", expectedHash);
+    await expect(stat(temporaryKeyPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await stat(finalKeyPath)).nlink).toBe(1);
+  });
+
+  it("refuses to follow an audit HMAC key symlink", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-audit-symlink-"));
+    const auditDir = resolve(dataDir, "audit");
+    const outsideKeyPath = resolve(dataDir, "outside.key");
+    const outsideKey = randomBytes(32);
+    await mkdir(auditDir, { recursive: true });
+    await writeFile(outsideKeyPath, outsideKey);
+    await symlink(outsideKeyPath, resolve(auditDir, "client-hash.hmac.key"));
+
+    await expect(startShareServer({}, dataDir)).rejects.toThrow(/Unsafe share storage path/);
+    await expect(readFile(outsideKeyPath)).resolves.toEqual(outsideKey);
+  });
+
   it("audits authorization failures within a bounded rotating log", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES: "512"
@@ -1774,7 +1940,9 @@ describe("share-server", () => {
       expect(response.status).toBe(401);
     }
 
-    const auditFiles = await readdir(resolve(server.dataDir, "audit"));
+    const auditFiles = (await readdir(resolve(server.dataDir, "audit"))).filter((name) =>
+      name.endsWith(".jsonl")
+    );
     expect(auditFiles).toEqual(
       expect.arrayContaining(["share-access.jsonl", "share-access.1.jsonl"])
     );
@@ -2156,7 +2324,8 @@ describe("share-server", () => {
   it("derives forwarded clients from the first untrusted hop next to trusted proxies", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true",
-      WEBBLACKBOX_TRUSTED_PROXY_IPS: "127.0.0.1"
+      WEBBLACKBOX_TRUSTED_PROXY_IPS: "127.0.0.1",
+      WEBBLACKBOX_SHARE_AUDIT_HMAC_SECRET: testAuditHmacSecret
     });
     const response = await fetch(`${server.baseUrl}/api/share/list`, {
       headers: {
@@ -2166,12 +2335,8 @@ describe("share-server", () => {
     });
     expect(response.status).toBe(200);
 
-    const expectedHash = createHash("sha256")
-      .update("webblackbox-share-audit:ip:203.0.113.10")
-      .digest("hex");
-    const spoofedHash = createHash("sha256")
-      .update("webblackbox-share-audit:ip:198.51.100.99")
-      .digest("hex");
+    const expectedHash = auditClientHmac(testAuditHmacSecretBytes, "ip:203.0.113.10");
+    const spoofedHash = auditClientHmac(testAuditHmacSecretBytes, "ip:198.51.100.99");
     await waitForAuditClientHash(server, "list", expectedHash);
     const refreshedAuditLog = await readFile(
       resolve(server.dataDir, "audit", "share-access.jsonl"),
@@ -2193,7 +2358,8 @@ describe("share-server", () => {
     async (_label, configuredProxy, forwardedProxy) => {
       const server = await startShareServer({
         WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true",
-        WEBBLACKBOX_TRUSTED_PROXY_IPS: `127.0.0.1,${configuredProxy}`
+        WEBBLACKBOX_TRUSTED_PROXY_IPS: `127.0.0.1,${configuredProxy}`,
+        WEBBLACKBOX_SHARE_AUDIT_HMAC_SECRET: testAuditHmacSecret
       });
       const clientAddress = "198.51.100.99";
       const response = await fetch(`${server.baseUrl}/api/share/list`, {
@@ -2204,9 +2370,7 @@ describe("share-server", () => {
       });
       expect(response.status).toBe(200);
 
-      const expectedHash = createHash("sha256")
-        .update(`webblackbox-share-audit:ip:${clientAddress}`)
-        .digest("hex");
+      const expectedHash = auditClientHmac(testAuditHmacSecretBytes, `ip:${clientAddress}`);
       await waitForAuditClientHash(server, "list", expectedHash);
       const refreshedAuditLog = await readFile(
         resolve(server.dataDir, "audit/share-access.jsonl"),
@@ -2363,6 +2527,40 @@ async function waitForAuditClientHash(
   }
 
   throw new Error(`Timed out waiting for ${action} audit event with client hash ${clientHash}.`);
+}
+
+async function readLatestAuditClientHash(
+  server: RunningShareServer,
+  action: string
+): Promise<string> {
+  const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    try {
+      const events = (await readFile(auditPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { action?: string; clientHash?: string });
+      const clientHash = events.findLast((event) => event.action === action)?.clientHash;
+      if (typeof clientHash === "string") {
+        return clientHash;
+      }
+    } catch {
+      // Audit creation may still be in flight after the HTTP response completes.
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+
+  throw new Error(`Timed out waiting for ${action} audit event.`);
+}
+
+function auditClientHmac(secret: Uint8Array, clientKey: string): string {
+  return createHmac("sha256", secret)
+    .update("webblackbox-share-audit:v1\0")
+    .update(clientKey)
+    .digest("hex");
 }
 
 async function createFullNamedPipe(path: string): Promise<Awaited<ReturnType<typeof open>>> {

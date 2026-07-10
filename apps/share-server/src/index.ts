@@ -1,6 +1,6 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants, type BigIntStats } from "node:fs";
-import { lstat, mkdir, open, opendir, rename, rm, type FileHandle } from "node:fs/promises";
+import { link, lstat, mkdir, open, opendir, rename, rm, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP, SocketAddress } from "node:net";
 import { join, resolve } from "node:path";
@@ -187,6 +187,13 @@ const RECORDS_DIR = join(DATA_ROOT, "records");
 const AUDIT_DIR = join(DATA_ROOT, "audit");
 const SHARE_AUDIT_LOG_PATH = join(AUDIT_DIR, "share-access.jsonl");
 const SHARE_AUDIT_ROTATED_LOG_PATH = join(AUDIT_DIR, "share-access.1.jsonl");
+const SHARE_AUDIT_HMAC_KEY_PATH = join(AUDIT_DIR, "client-hash.hmac.key");
+const SHARE_AUDIT_HMAC_SECRET_ENV = "WEBBLACKBOX_SHARE_AUDIT_HMAC_SECRET";
+const SHARE_AUDIT_HMAC_KEY_BYTES = 32;
+const MAX_SHARE_AUDIT_HMAC_KEY_BYTES = 64;
+const MIN_SHARE_AUDIT_HMAC_ESTIMATED_ENTROPY_BITS = 128;
+const SHARE_AUDIT_CLIENT_HASH_ALGORITHM = "HMAC-SHA256-v1";
+const SHARE_AUDIT_CLIENT_HASH_DOMAIN = "webblackbox-share-audit:v1\0";
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
 const SHARE_API_CREDENTIALS = parseShareApiCredentials(
   process.env.WEBBLACKBOX_SHARE_API_KEYS,
@@ -302,6 +309,7 @@ let sharePublicOrigin = DEFAULT_BASE_URL;
 let shareRecordAdmissionQueue = Promise.resolve();
 let lastAuditDegradationWarningAt = 0;
 let suppressedAuditDegradationWarnings = 0;
+let shareAuditHmacSecret: Buffer | null = null;
 const auditWriter = new BoundedAuditWriter({
   append: appendShareAuditLine,
   maxQueuedEntries: MAX_SHARE_AUDIT_QUEUE_ENTRIES,
@@ -318,6 +326,9 @@ void startShareServer().catch((error) => {
 async function startShareServer(): Promise<void> {
   const port = parsePort(process.env.PORT);
   const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
+  const configuredAuditHmacSecret = parseAuditHmacEnvironmentSecret(
+    process.env[SHARE_AUDIT_HMAC_SECRET_ENV]
+  );
   sharePublicOrigin = resolvePublicOrigin(process.env.WEBBLACKBOX_SHARE_PUBLIC_ORIGIN, host, port);
   validateAuthorizationConfiguration(host, sharePublicOrigin);
   if (SHARE_API_CREDENTIALS.length === 0 && !isLoopbackHost(new URL(sharePublicOrigin).hostname)) {
@@ -331,7 +342,11 @@ async function startShareServer(): Promise<void> {
 
   try {
     await ensureStorageLayout(dataRootIdentity);
+    await removeStaleAuditHmacSecretTemps();
     await migrateLegacyStoragePermissions();
+    shareAuditHmacSecret =
+      configuredAuditHmacSecret ?? (await loadOrCreatePersistedAuditHmacSecret());
+    await migrateLegacyAuditLogs();
     await reconcileAuditLogLayout();
     await reconcileStorageLayout();
     await pruneExpiredShareRecords(Date.now());
@@ -2104,11 +2119,281 @@ async function migrateLegacyStoragePermissions(): Promise<void> {
   await hardenCommittedStorageFiles(ARCHIVES_DIR, (name) => name.endsWith(".webblackbox"));
   await hardenCommittedStorageFiles(RECORDS_DIR, (name) => name.endsWith(".json"));
   const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
-  for (const auditPath of [SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH]) {
+  for (const auditPath of [
+    SHARE_AUDIT_LOG_PATH,
+    SHARE_AUDIT_ROTATED_LOG_PATH,
+    SHARE_AUDIT_HMAC_KEY_PATH
+  ]) {
     await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
     await hardenStorageFileIfPresent(auditPath);
   }
   await assertManagedStorageLayout();
+}
+
+async function loadOrCreatePersistedAuditHmacSecret(): Promise<Buffer> {
+  const existingSecret = await readPersistedAuditHmacSecret();
+  if (existingSecret) {
+    return existingSecret;
+  }
+
+  const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+  const secret = generateAuditHmacSecret();
+  const temporaryPath = join(
+    AUDIT_DIR,
+    `.client-hash.${randomUUID().replaceAll("-", "")}.hmac-key.tmp`
+  );
+  let handle: FileHandle | null = null;
+
+  try {
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    handle = await open(
+      temporaryPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600
+    );
+    await writeFileHandleFully(handle, secret);
+    await handle.sync();
+    if (process.platform !== "win32") {
+      await handle.chmod(0o600);
+    }
+    const temporaryStat = await handle.stat({ bigint: true });
+    if (
+      !temporaryStat.isFile() ||
+      temporaryStat.nlink !== 1n ||
+      temporaryStat.size !== BigInt(SHARE_AUDIT_HMAC_KEY_BYTES) ||
+      (process.platform !== "win32" && (temporaryStat.mode & 0o777n) !== 0o600n)
+    ) {
+      throw unsafeStoragePathError(temporaryPath, "could not create a private HMAC key file");
+    }
+    await handle.close();
+    handle = null;
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    await assertStoragePathIdentity(temporaryPath, temporaryStat, "file");
+
+    let published = false;
+    try {
+      await link(temporaryPath, SHARE_AUDIT_HMAC_KEY_PATH);
+      published = true;
+    } catch (error) {
+      if (!hasFileSystemErrorCode(error, "EEXIST")) {
+        throw error;
+      }
+    }
+    await rm(temporaryPath, { force: true });
+    await syncDirectoryBestEffort(AUDIT_DIR);
+
+    if (!published) {
+      secret.fill(0);
+      const concurrentlyCreatedSecret = await readPersistedAuditHmacSecret();
+      if (!concurrentlyCreatedSecret) {
+        throw new Error("The Share audit HMAC key was not published atomically.");
+      }
+      return concurrentlyCreatedSecret;
+    }
+
+    const persistedSecret = await readPersistedAuditHmacSecret();
+    const persistedSecretMatches =
+      persistedSecret !== null && timingSafeEqual(secret, persistedSecret);
+    persistedSecret?.fill(0);
+    if (!persistedSecretMatches) {
+      throw new Error("The persisted Share audit HMAC key failed verification.");
+    }
+    return secret;
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function readPersistedAuditHmacSecret(): Promise<Buffer | null> {
+  const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+  await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+  let pathStat: BigIntStats;
+  try {
+    pathStat = await lstat(SHARE_AUDIT_HMAC_KEY_PATH, { bigint: true });
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return null;
+    }
+    throw error;
+  }
+
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(SHARE_AUDIT_HMAC_KEY_PATH, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const openedStat = await handle.stat({ bigint: true });
+    if (
+      !pathStat.isFile() ||
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1n ||
+      openedStat.size !== BigInt(SHARE_AUDIT_HMAC_KEY_BYTES) ||
+      !isSameFileSystemObject(pathStat, openedStat) ||
+      (process.platform !== "win32" && (openedStat.mode & 0o777n) !== 0o600n)
+    ) {
+      throw unsafeStoragePathError(
+        SHARE_AUDIT_HMAC_KEY_PATH,
+        `expected a ${SHARE_AUDIT_HMAC_KEY_BYTES}-byte mode-0600 regular file`
+      );
+    }
+
+    const secret = await readFileHandleExactly(handle, SHARE_AUDIT_HMAC_KEY_BYTES);
+    if (estimateByteEntropyBits(secret) < MIN_SHARE_AUDIT_HMAC_ESTIMATED_ENTROPY_BITS) {
+      secret.fill(0);
+      throw unsafeStoragePathError(
+        SHARE_AUDIT_HMAC_KEY_PATH,
+        "stored HMAC key does not meet the entropy floor"
+      );
+    }
+    await assertStoragePathIdentity(SHARE_AUDIT_HMAC_KEY_PATH, openedStat, "file");
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    return secret;
+  } catch (error) {
+    if (error instanceof UnsafeStoragePathError) {
+      throw error;
+    }
+    throw unsafeStoragePathError(
+      SHARE_AUDIT_HMAC_KEY_PATH,
+      "refusing to follow or read this path",
+      error
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function removeStaleAuditHmacSecretTemps(): Promise<void> {
+  const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+  await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+  const directory = await opendir(AUDIT_DIR);
+  let directoryEntries = 0;
+
+  for await (const entry of directory) {
+    directoryEntries += 1;
+    if (directoryEntries > MAX_SHARE_RECORD_DIRECTORY_ENTRIES) {
+      throw new Error(
+        `Share audit directory entry limit exceeded (${MAX_SHARE_RECORD_DIRECTORY_ENTRIES}).`
+      );
+    }
+    if (/^\.client-hash\.[a-f0-9]{32}\.hmac-key\.tmp$/i.test(entry.name)) {
+      await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+      await rm(join(AUDIT_DIR, entry.name), { force: true });
+    }
+  }
+
+  await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+}
+
+type AuditLogHmacMigrationState =
+  | { kind: "current-or-missing" }
+  | { kind: "defer-to-reconciliation" }
+  | { kind: "legacy"; stat: BigIntStats; path: string };
+
+async function migrateLegacyAuditLogs(): Promise<void> {
+  const auditDirectoryIdentity = getManagedStorageDirectoryIdentity(AUDIT_DIR);
+  const states: AuditLogHmacMigrationState[] = [];
+  for (const auditPath of [SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH]) {
+    states.push(await classifyAuditLogHmacMigration(auditPath, auditDirectoryIdentity));
+  }
+
+  if (states.some((state) => state.kind === "defer-to-reconciliation")) {
+    return;
+  }
+
+  let removedLegacyLog = false;
+  for (const state of states) {
+    if (state.kind !== "legacy") {
+      continue;
+    }
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+    await assertStoragePathIdentity(state.path, state.stat, "file");
+    await rm(state.path, { force: true });
+    removedLegacyLog = true;
+  }
+  if (removedLegacyLog) {
+    await syncDirectoryBestEffort(AUDIT_DIR);
+  }
+}
+
+async function classifyAuditLogHmacMigration(
+  auditPath: string,
+  auditDirectoryIdentity: BigIntStats
+): Promise<AuditLogHmacMigrationState> {
+  await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+  let handle: FileHandle;
+  try {
+    handle = await open(auditPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return { kind: "current-or-missing" };
+    }
+    throw unsafeStoragePathError(auditPath, "refusing to follow or replace this path", error);
+  }
+
+  try {
+    const openedStat = await handle.stat({ bigint: true });
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1n ||
+      (process.platform !== "win32" && (openedStat.mode & 0o777n) !== 0o600n)
+    ) {
+      throw unsafeStoragePathError(auditPath, "expected a private regular audit log");
+    }
+    if (openedStat.size === 0n) {
+      return { kind: "current-or-missing" };
+    }
+    if (openedStat.size > BigInt(MAX_SHARE_AUDIT_LOG_BYTES)) {
+      return { kind: "defer-to-reconciliation" };
+    }
+
+    const finalByte = Buffer.allocUnsafe(1);
+    const { bytesRead } = await handle.read(finalByte, 0, 1, Number(openedStat.size - 1n));
+    if (bytesRead !== 1 || finalByte[0] !== 0x0a) {
+      return { kind: "defer-to-reconciliation" };
+    }
+
+    let contents: Buffer;
+    try {
+      contents = await readFileHandleExactly(handle, Number(openedStat.size));
+    } catch (error) {
+      throw unsafeStoragePathError(auditPath, "changed during HMAC migration", error);
+    }
+    const verifiedStat = await handle.stat({ bigint: true });
+    if (
+      verifiedStat.size !== openedStat.size ||
+      !isSameFileSystemObject(verifiedStat, openedStat)
+    ) {
+      throw unsafeStoragePathError(auditPath, "changed during HMAC migration");
+    }
+    await assertStoragePathIdentity(auditPath, verifiedStat, "file");
+    await assertStoragePathIdentity(AUDIT_DIR, auditDirectoryIdentity, "directory");
+
+    if (auditLogContainsOnlyHmacEvents(contents)) {
+      return { kind: "current-or-missing" };
+    }
+    return { kind: "legacy", path: auditPath, stat: verifiedStat };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+function auditLogContainsOnlyHmacEvents(contents: Buffer): boolean {
+  try {
+    const lines = new TextDecoder("utf-8", { fatal: true }).decode(contents).split("\n");
+    if (lines.pop() !== "" || lines.length === 0) {
+      return false;
+    }
+    return lines.every((line) => {
+      const event = asRecord(JSON.parse(line) as unknown);
+      return (
+        event.schemaVersion === 2 &&
+        event.clientHashAlgorithm === SHARE_AUDIT_CLIENT_HASH_ALGORITHM &&
+        typeof event.clientHash === "string" &&
+        /^[a-f0-9]{64}$/.test(event.clientHash)
+      );
+    });
+  } catch {
+    return false;
+  }
 }
 
 async function reconcileAuditLogLayout(): Promise<void> {
@@ -3607,11 +3892,12 @@ async function writeShareAuditEvent(
   }
 ): Promise<void> {
   const event = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     timestamp: new Date().toISOString(),
     action: input.action,
     outcome: input.outcome,
     shareId: input.shareId,
+    clientHashAlgorithm: SHARE_AUDIT_CLIENT_HASH_ALGORITHM,
     clientHash: hashAuditValue(resolveClientKey(request)),
     details: input.details
   };
@@ -3773,7 +4059,14 @@ function hasFileSystemErrorCode(error: unknown, code: string): boolean {
 }
 
 function hashAuditValue(value: string): string {
-  return createHash("sha256").update(`webblackbox-share-audit:${value}`).digest("hex");
+  if (!shareAuditHmacSecret) {
+    throw new Error("Share audit HMAC key is not initialized.");
+  }
+
+  return createHmac("sha256", shareAuditHmacSecret)
+    .update(SHARE_AUDIT_CLIENT_HASH_DOMAIN)
+    .update(value)
+    .digest("hex");
 }
 
 function recordPathForId(id: string): string {
@@ -4521,6 +4814,59 @@ function readOptionalSecret(value: string | undefined): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseAuditHmacEnvironmentSecret(value: string | undefined): Buffer | null {
+  if (value === undefined || value.length === 0) {
+    return null;
+  }
+
+  const invalidSecret = () =>
+    new Error(
+      `${SHARE_AUDIT_HMAC_SECRET_ENV} must be canonical base64url encoding of 32 to 64 high-entropy bytes (at least 128 bits of estimated entropy).`
+    );
+  if (value !== value.trim() || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw invalidSecret();
+  }
+
+  const secret = Buffer.from(value, "base64url");
+  if (
+    secret.toString("base64url") !== value ||
+    secret.byteLength < SHARE_AUDIT_HMAC_KEY_BYTES ||
+    secret.byteLength > MAX_SHARE_AUDIT_HMAC_KEY_BYTES ||
+    estimateByteEntropyBits(secret) < MIN_SHARE_AUDIT_HMAC_ESTIMATED_ENTROPY_BITS
+  ) {
+    secret.fill(0);
+    throw invalidSecret();
+  }
+
+  return secret;
+}
+
+function generateAuditHmacSecret(): Buffer {
+  let secret = randomBytes(SHARE_AUDIT_HMAC_KEY_BYTES);
+  while (estimateByteEntropyBits(secret) < MIN_SHARE_AUDIT_HMAC_ESTIMATED_ENTROPY_BITS) {
+    secret.fill(0);
+    secret = randomBytes(SHARE_AUDIT_HMAC_KEY_BYTES);
+  }
+  return secret;
+}
+
+function estimateByteEntropyBits(bytes: Uint8Array): number {
+  const counts = new Uint16Array(256);
+  for (const byte of bytes) {
+    counts[byte] = (counts[byte] ?? 0) + 1;
+  }
+
+  let bitsPerByte = 0;
+  for (const count of counts) {
+    if (count === 0) {
+      continue;
+    }
+    const probability = count / bytes.byteLength;
+    bitsPerByte -= probability * Math.log2(probability);
+  }
+  return bitsPerByte * bytes.byteLength;
 }
 
 function parseRateLimitCount(value: string | undefined, fallback: number): number {
