@@ -894,6 +894,7 @@ describe("share-server", () => {
 
     const orphanArchiveId = "c".repeat(32);
     const orphanRecordId = "d".repeat(32);
+    const unsafeExpiryId = "e".repeat(32);
     await writeFile(
       resolve(server.dataDir, "archives", `${orphanArchiveId}.webblackbox`),
       "orphan"
@@ -901,6 +902,18 @@ describe("share-server", () => {
     await writeFile(
       resolve(server.dataDir, "records", `${orphanRecordId}.json`),
       JSON.stringify({ ...validRecord, id: orphanRecordId })
+    );
+    await writeFile(
+      resolve(server.dataDir, "archives", `${unsafeExpiryId}.webblackbox`),
+      await readFile(resolve(server.dataDir, "archives", `${upload.shareId}.webblackbox`))
+    );
+    await writeFile(
+      resolve(server.dataDir, "records", `${unsafeExpiryId}.json`),
+      JSON.stringify({
+        ...validRecord,
+        id: unsafeExpiryId,
+        expiresAt: Number.MAX_SAFE_INTEGER
+      })
     );
     await writeFile(resolve(server.dataDir, "archives", ".interrupted.upload"), "partial");
     await writeFile(resolve(server.dataDir, "records", ".interrupted.record"), "partial");
@@ -1017,6 +1030,44 @@ describe("share-server", () => {
       error: "Share has expired."
     });
     expect(response.status).toBe(410);
+  });
+
+  it("accepts zero retention and prunes an expired share on restart", async () => {
+    const durationEnv = {
+      WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000",
+      WEBBLACKBOX_SHARE_MAX_TTL_MS: "1000",
+      WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS: "0"
+    };
+    const server = await startShareServer(durationEnv);
+    await uploadEncryptedFixture(server);
+
+    await stopShareServer(server, false);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_100));
+    const restarted = await startShareServer(durationEnv, server.dataDir);
+
+    await expect(readdir(resolve(restarted.dataDir, "records"))).resolves.toEqual([]);
+    await expect(readdir(resolve(restarted.dataDir, "archives"))).resolves.toEqual([]);
+  });
+
+  it("rejects unsafe or contradictory duration configuration", async () => {
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_MAX_TTL_MS: String(Number.MAX_SAFE_INTEGER)
+      })
+    ).rejects.toThrow(/safe timestamp range/);
+
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "2000",
+        WEBBLACKBOX_SHARE_MAX_TTL_MS: "1000"
+      })
+    ).rejects.toThrow(/must not exceed/);
+
+    await expect(
+      startShareServer({
+        WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS: "not-a-duration"
+      })
+    ).rejects.toThrow(/must be an integer/);
   });
 
   it("cancels a streamed archive download when the client disconnects", async () => {

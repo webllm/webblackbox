@@ -188,18 +188,25 @@ const ALLOW_QUERY_API_KEY = parseBooleanFlag(process.env.WEBBLACKBOX_SHARE_ALLOW
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
 );
-const SHARE_DEFAULT_TTL_MS = parseDurationMs(
+const SHARE_DEFAULT_TTL_MS = parseConfiguredDurationMs(
+  "WEBBLACKBOX_SHARE_DEFAULT_TTL_MS",
   process.env.WEBBLACKBOX_SHARE_DEFAULT_TTL_MS,
-  7 * 24 * 60 * 60 * 1000
+  7 * 24 * 60 * 60 * 1000,
+  1_000
 );
-const SHARE_MAX_TTL_MS = parseDurationMs(
+const SHARE_MAX_TTL_MS = parseConfiguredDurationMs(
+  "WEBBLACKBOX_SHARE_MAX_TTL_MS",
   process.env.WEBBLACKBOX_SHARE_MAX_TTL_MS,
-  30 * 24 * 60 * 60 * 1000
+  30 * 24 * 60 * 60 * 1000,
+  1_000
 );
-const SHARE_RETAIN_EXPIRED_MS = parseDurationMs(
+const SHARE_RETAIN_EXPIRED_MS = parseConfiguredDurationMs(
+  "WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS",
   process.env.WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS,
-  30 * 24 * 60 * 60 * 1000
+  30 * 24 * 60 * 60 * 1000,
+  0
 );
+validateShareDurationConfiguration(SHARE_DEFAULT_TTL_MS, SHARE_MAX_TTL_MS, SHARE_RETAIN_EXPIRED_MS);
 const UPLOAD_RATE_LIMIT_MAX = parseRateLimitCount(
   process.env.WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX,
   10
@@ -2169,6 +2176,7 @@ function normalizePersistedShareRecord(value: unknown, expectedId: string): Shar
     createdAt === null ||
     expiresAt === null ||
     expiresAt < createdAt ||
+    addSafeIntegers(expiresAt, SHARE_RETAIN_EXPIRED_MS) === null ||
     revokedAt === null ||
     (revokedAt !== undefined && revokedAt < createdAt) ||
     sizeBytes === null ||
@@ -3220,7 +3228,50 @@ function parseDurationMs(value: string | undefined, fallback: number): number {
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback;
   }
-  return Math.max(1_000, Math.floor(parsed));
+  const durationMs = Math.max(1_000, Math.floor(parsed));
+  return Number.isSafeInteger(durationMs) ? durationMs : fallback;
+}
+
+function parseConfiguredDurationMs(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+  minimum: number
+): number {
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
+
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`${name} must be an integer number of milliseconds.`);
+  }
+
+  const durationMs = Number(value);
+  if (!Number.isSafeInteger(durationMs) || durationMs < minimum) {
+    throw new Error(`${name} must be a safe integer greater than or equal to ${minimum}.`);
+  }
+  return durationMs;
+}
+
+function validateShareDurationConfiguration(
+  defaultTtlMs: number,
+  maxTtlMs: number,
+  retainExpiredMs: number
+): void {
+  if (defaultTtlMs > maxTtlMs) {
+    throw new Error(
+      "WEBBLACKBOX_SHARE_DEFAULT_TTL_MS must not exceed WEBBLACKBOX_SHARE_MAX_TTL_MS."
+    );
+  }
+
+  const maximumExpiry = addSafeIntegers(Date.now(), maxTtlMs);
+  const maximumRetentionDeadline =
+    maximumExpiry === null ? null : addSafeIntegers(maximumExpiry, retainExpiredMs);
+  if (maximumRetentionDeadline === null) {
+    throw new Error(
+      "The configured share TTL and expired-record retention exceed the safe timestamp range."
+    );
+  }
 }
 
 function resolveClientKey(request: IncomingMessage): string {
