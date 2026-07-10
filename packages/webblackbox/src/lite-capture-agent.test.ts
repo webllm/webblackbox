@@ -688,6 +688,51 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("binds the first activation to the policy tab before evaluating scope", () => {
+    const tabBoundPolicy: CapturePolicy = {
+      ...DEFAULT_CAPTURE_POLICY,
+      scope: {
+        ...DEFAULT_CAPTURE_POLICY.scope,
+        tabId: 7
+      }
+    };
+    const matching = createAgent({ capturePolicy: tabBoundPolicy, tabId: 7 });
+    const mismatching = createAgent({ capturePolicy: tabBoundPolicy, tabId: 8 });
+
+    clickTarget();
+    matching.agent.flush();
+    mismatching.agent.flush();
+
+    expect(emittedRawTypes(matching.emitBatch)).toContain("click");
+    expect(mismatching.emitBatch).not.toHaveBeenCalled();
+    matching.agent.dispose();
+    mismatching.agent.dispose();
+  });
+
+  it("deactivates capture when a later status targets a different tab", () => {
+    const tabBoundPolicy: CapturePolicy = {
+      ...DEFAULT_CAPTURE_POLICY,
+      scope: {
+        ...DEFAULT_CAPTURE_POLICY.scope,
+        tabId: 7
+      }
+    };
+    const { agent, emitBatch } = createAgent({ capturePolicy: tabBoundPolicy, tabId: 7 });
+
+    agent.setRecordingStatus({
+      active: true,
+      sid: "S-lite-agent-test",
+      tabId: 8,
+      mode: "lite",
+      capturePolicy: tabBoundPolicy
+    });
+    clickTarget();
+    agent.flush();
+
+    expect(emitBatch).not.toHaveBeenCalled();
+    agent.dispose();
+  });
+
   it("fails closed when the current document URL is excluded", () => {
     const excludedPolicy: CapturePolicy = {
       ...DEFAULT_CAPTURE_POLICY,

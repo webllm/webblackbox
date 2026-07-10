@@ -259,6 +259,11 @@ export class LiteCaptureAgent {
 
     const wasRecording = this.recordingActive;
     const nextPolicy = state.capturePolicy ?? this.capturePolicy;
+
+    if (typeof state.tabId === "number" && Number.isFinite(state.tabId)) {
+      this.tabId = Math.round(state.tabId);
+    }
+
     const nextActive = state.active && this.isDocumentWithinScope(nextPolicy);
 
     this.capturePolicy = nextPolicy;
@@ -288,10 +293,6 @@ export class LiteCaptureAgent {
 
     if (typeof state.sid === "string") {
       this.sid = state.sid;
-    }
-
-    if (typeof state.tabId === "number" && Number.isFinite(state.tabId)) {
-      this.tabId = Math.round(state.tabId);
     }
 
     if (this.recordingActive) {
@@ -1912,6 +1913,7 @@ export class LiteCaptureAgent {
   private isDocumentWithinScope(policy: CapturePolicy = this.capturePolicy): boolean {
     return evaluateCaptureScope(policy, {
       url: readDocumentUrl(),
+      tabId: this.tabId,
       topLevel: this.isTopLevelFrame,
       frameId: this.isTopLevelFrame ? 0 : 1
     }).allowed;
