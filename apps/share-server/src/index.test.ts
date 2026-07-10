@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { request as createHttpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -794,6 +794,44 @@ describe("share-server", () => {
     await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toHaveLength(2);
   });
 
+  it("atomically persists records and reconciles interrupted storage on restart", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const validRecordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const validRecord = JSON.parse(await readFile(validRecordPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect((await stat(validRecordPath)).mode & 0o777).toBe(0o600);
+
+    const orphanArchiveId = "c".repeat(32);
+    const orphanRecordId = "d".repeat(32);
+    await writeFile(
+      resolve(server.dataDir, "archives", `${orphanArchiveId}.webblackbox`),
+      "orphan"
+    );
+    await writeFile(
+      resolve(server.dataDir, "records", `${orphanRecordId}.json`),
+      JSON.stringify({ ...validRecord, id: orphanRecordId })
+    );
+    await writeFile(resolve(server.dataDir, "archives", ".interrupted.upload"), "partial");
+    await writeFile(resolve(server.dataDir, "records", ".interrupted.record"), "partial");
+
+    await stopShareServer(server, false);
+    const restarted = await startShareServer({}, server.dataDir);
+
+    await expect(readdir(resolve(restarted.dataDir, "archives"))).resolves.toEqual([
+      `${upload.shareId}.webblackbox`
+    ]);
+    await expect(readdir(resolve(restarted.dataDir, "records"))).resolves.toEqual([
+      `${upload.shareId}.json`
+    ]);
+    const metadataResponse = await fetch(`${restarted.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(metadataResponse.status).toBe(200);
+  });
+
   it("expires shares and blocks archive download after ttl", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000"
@@ -1102,10 +1140,11 @@ describe("share-server", () => {
 });
 
 async function startShareServer(
-  envOverrides: Record<string, string> = {}
+  envOverrides: Record<string, string> = {},
+  existingDataDir?: string
 ): Promise<RunningShareServer> {
   const port = await reservePort();
-  const dataDir = await mkdtemp(resolve(tmpdir(), "webblackbox-share-test-"));
+  const dataDir = existingDataDir ?? (await mkdtemp(resolve(tmpdir(), "webblackbox-share-test-")));
   const child = spawn(process.execPath, [tsxCli, resolve(appRoot, "src/index.ts")], {
     cwd: appRoot,
     env: {
@@ -1138,7 +1177,7 @@ async function startShareServer(
   return server;
 }
 
-async function stopShareServer(server: RunningShareServer): Promise<void> {
+async function stopShareServer(server: RunningShareServer, removeData = true): Promise<void> {
   if (server.child.exitCode === null && !server.child.killed) {
     server.child.kill("SIGTERM");
     await new Promise((resolve) => {
@@ -1150,10 +1189,16 @@ async function stopShareServer(server: RunningShareServer): Promise<void> {
     });
   }
 
-  await rm(server.dataDir, {
-    recursive: true,
-    force: true
-  });
+  if (!removeData) {
+    runningServers = runningServers.filter((candidate) => candidate !== server);
+  }
+
+  if (removeData) {
+    await rm(server.dataDir, {
+      recursive: true,
+      force: true
+    });
+  }
 }
 
 async function waitForShareServer(server: RunningShareServer): Promise<void> {

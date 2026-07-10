@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, mkdir, open, opendir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, opendir, rename, rm, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -227,12 +227,13 @@ void startShareServer().catch((error) => {
 });
 
 async function startShareServer(): Promise<void> {
-  await ensureStorageLayout();
-  await pruneExpiredShareRecords(Date.now());
-
   const port = parsePort(process.env.PORT);
   const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
   sharePublicOrigin = resolvePublicOrigin(process.env.WEBBLACKBOX_SHARE_PUBLIC_ORIGIN, host, port);
+  await ensureStorageLayout();
+  await reconcileStorageLayout();
+  await pruneExpiredShareRecords(Date.now());
+
   const server = createServer((request, response) => {
     void routeRequest(request, response).catch((error) => {
       console.warn("[share-server] request failed", error);
@@ -621,6 +622,7 @@ async function processUploadWithinInspectionSlot(
   };
 
   await rename(tempPath, archivePath);
+  await syncDirectoryBestEffort(ARCHIVES_DIR);
   await writeRecord(record);
   upload.committed = true;
   await writeShareAuditEvent(request, {
@@ -1620,15 +1622,79 @@ function roundTo(value: number, digits: number): number {
 }
 
 async function ensureStorageLayout(): Promise<void> {
+  await mkdir(DATA_ROOT, {
+    recursive: true,
+    mode: 0o700
+  });
   await mkdir(ARCHIVES_DIR, {
-    recursive: true
+    recursive: true,
+    mode: 0o700
   });
   await mkdir(RECORDS_DIR, {
-    recursive: true
+    recursive: true,
+    mode: 0o700
   });
   await mkdir(AUDIT_DIR, {
-    recursive: true
+    recursive: true,
+    mode: 0o700
   });
+}
+
+async function reconcileStorageLayout(): Promise<void> {
+  const archiveIds = await collectStoredIds(ARCHIVES_DIR, ".webblackbox", ".upload");
+  const recordIds = await collectStoredIds(RECORDS_DIR, ".json", ".record");
+
+  for (const id of recordIds) {
+    if (archiveIds.has(id) && (await readRecord(id))) {
+      continue;
+    }
+
+    await Promise.all([
+      rm(recordPathForId(id), { force: true }),
+      rm(archivePathForId(id), { force: true })
+    ]);
+    archiveIds.delete(id);
+  }
+
+  for (const id of archiveIds) {
+    if (!recordIds.has(id)) {
+      await rm(archivePathForId(id), { force: true });
+    }
+  }
+}
+
+async function collectStoredIds(
+  directoryPath: string,
+  committedSuffix: string,
+  temporarySuffix: string
+): Promise<Set<string>> {
+  const directory = await opendir(directoryPath);
+  const ids = new Set<string>();
+  let directoryEntries = 0;
+
+  for await (const entry of directory) {
+    directoryEntries += 1;
+    assertShareRecordDirectoryEntryBudget(directoryEntries);
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    if (entry.name.startsWith(".") && entry.name.endsWith(temporarySuffix)) {
+      await rm(join(directoryPath, entry.name), { force: true });
+      continue;
+    }
+
+    if (!entry.name.endsWith(committedSuffix)) {
+      continue;
+    }
+
+    const id = entry.name.slice(0, -committedSuffix.length);
+    if (SHARE_ID_PATTERN.test(id)) {
+      ids.add(id);
+    }
+  }
+
+  return ids;
 }
 
 async function readRecord(id: string): Promise<ShareRecord | null> {
@@ -1728,7 +1794,45 @@ function assertShareRecordDirectoryEntryBudget(entries: number): void {
 }
 
 async function writeRecord(record: ShareRecord): Promise<void> {
-  await writeFile(recordPathForId(record.id), JSON.stringify(record, null, 2));
+  const payload = Buffer.from(JSON.stringify(record, null, 2), "utf8");
+  if (payload.byteLength > MAX_SHARE_RECORD_BYTES) {
+    throw new Error(`Share record exceeds ${MAX_SHARE_RECORD_BYTES} bytes.`);
+  }
+
+  const temporaryPath = join(
+    RECORDS_DIR,
+    `.${record.id}.${randomUUID().replaceAll("-", "")}.record`
+  );
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let committed = false;
+
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await writeFileHandleFully(handle, payload);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporaryPath, recordPathForId(record.id));
+    committed = true;
+    await syncDirectoryBestEffort(RECORDS_DIR);
+  } finally {
+    await handle?.close();
+    if (!committed) {
+      await rm(temporaryPath, { force: true });
+    }
+  }
+}
+
+async function syncDirectoryBestEffort(directoryPath: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(directoryPath, "r");
+    await handle.sync();
+  } catch {
+    // Some supported filesystems do not allow directory handles to be fsynced.
+  } finally {
+    await handle?.close();
+  }
 }
 
 function normalizePersistedShareRecord(value: unknown, expectedId: string): ShareRecord | null {
@@ -2178,6 +2282,7 @@ async function readRequestBodyToTempFile(
       throw timeoutError ?? new Error("Upload request was aborted.");
     }
 
+    await handle.sync();
     const storedStat = await handle.stat();
     if (storedStat.size !== totalBytes) {
       throw new Error("Upload temporary file size changed unexpectedly.");

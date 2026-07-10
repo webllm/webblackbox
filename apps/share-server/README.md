@@ -137,7 +137,7 @@ Each share writes:
 - `records/<id>.json` (redacted public summary only)
 - `audit/share-access.jsonl` (action, outcome, share id, timestamp, and client hash only)
 
-Uploads are streamed to mode-`0600` temporary files under `archives/`, removed on every rejection or disconnect, and atomically renamed only after validation succeeds.
+New storage directories are mode `0700`. Uploads are streamed to mode-`0600` temporary files under `archives/`, synced, removed on every rejection or disconnect, and atomically renamed only after validation succeeds. Record JSON is likewise written through a synced mode-`0600` temporary file and atomic rename. At startup the server removes interrupted temporary files, orphan archives, orphan records, and corrupt record/archive pairs before serving requests.
 
 Audit logs must not contain archive plaintext, passphrases, API keys, raw URLs, filenames supplied by the client, or request payloads.
 Audit append failures are reported through operational logs but do not turn an already committed upload, revoke, metadata response, page response, or download into a failed HTTP operation.
