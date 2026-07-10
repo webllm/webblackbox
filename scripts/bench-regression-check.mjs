@@ -159,9 +159,46 @@ function runChecks(recorder, pipeline, thresholds) {
 
   checks.push(
     assertCheck(
+      "pipeline.filteredParseDurationMs",
+      pipeline.filteredParseDurationMs <= thresholds.pipeline.filteredParseMaxMs,
+      `expected <= ${thresholds.pipeline.filteredParseMaxMs}, got ${pipeline.filteredParseDurationMs.toFixed(
+        2
+      )}`
+    )
+  );
+
+  checks.push(
+    assertCheck(
+      "pipeline.filteredExportEvents.nonEmpty",
+      pipeline.filteredExportEvents > 0,
+      `expected > 0, got ${pipeline.filteredExportEvents}`
+    )
+  );
+
+  checks.push(
+    assertCheck(
+      "pipeline.filteredExportEvents.reduced",
+      pipeline.filteredExportEvents < pipeline.fullExportEvents,
+      `expected < ${pipeline.fullExportEvents}, got ${pipeline.filteredExportEvents}`
+    )
+  );
+
+  checks.push(
+    assertCheck(
       "pipeline.archiveDropRatio",
       pipeline.archiveDropRatio >= thresholds.pipeline.archiveDropRatioMin,
       `expected >= ${thresholds.pipeline.archiveDropRatioMin}, got ${pipeline.archiveDropRatio.toFixed(3)}`
+    )
+  );
+
+  checks.push(
+    assertCheck(
+      "pipeline.eventDropRatio",
+      pipeline.eventDropRatio >= thresholds.pipeline.eventDropRatioMin &&
+        pipeline.eventDropRatio <= thresholds.pipeline.eventDropRatioMax,
+      `expected ${thresholds.pipeline.eventDropRatioMin}..${thresholds.pipeline.eventDropRatioMax}, got ${pipeline.eventDropRatio.toFixed(
+        3
+      )}`
     )
   );
 

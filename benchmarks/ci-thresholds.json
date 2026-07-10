@@ -8,6 +8,9 @@
     "ingestMinOpsPerSec": 20000,
     "fullExportMaxMs": 10000,
     "filteredExportMaxMs": 8000,
-    "archiveDropRatioMin": 0.2
+    "filteredParseMaxMs": 5000,
+    "archiveDropRatioMin": 0.2,
+    "eventDropRatioMin": 0.2,
+    "eventDropRatioMax": 0.8
   }
 }

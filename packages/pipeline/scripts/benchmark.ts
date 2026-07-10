@@ -1,11 +1,13 @@
 import { performance } from "node:perf_hooks";
 
 import type {
+  CapturePolicy,
   PrivacyClassification,
   PrivacyDataCategory,
   SessionMetadata,
   WebBlackboxEvent
 } from "@webblackbox/protocol";
+import { DEFAULT_CAPTURE_POLICY } from "@webblackbox/protocol";
 
 import {
   FlightRecorderPipeline,
@@ -21,6 +23,17 @@ const DEFAULT_SCREENSHOT_INTERVAL = 120;
 const DEFAULT_BLOB_POOL = 24;
 const DEFAULT_BLOB_BYTES = 24 * 1024;
 const EVENT_STEP_MS = 120;
+const BENCHMARK_EVIDENCE_REF = "local-attestation:pipeline-benchmark";
+const BENCHMARK_CAPTURE_POLICY: CapturePolicy = {
+  ...DEFAULT_CAPTURE_POLICY,
+  captureContext: "local-debug",
+  captureContextEvidenceRef: BENCHMARK_EVIDENCE_REF,
+  encryption: {
+    localAtRest: "required",
+    archive: "synthetic-local-debug-exempt",
+    archiveKeyEnvelope: "none"
+  }
+};
 const FULL_EXPORT_OPTIONS = {
   includeScreenshots: true,
   includeScreenRecordings: true,
@@ -34,6 +47,7 @@ type PipelineBenchmarkReport = {
   screenshotInterval: number;
   maxArchiveMb: number;
   recentMinutes: number;
+  eventStepMs: number;
   ingestDurationMs: number;
   ingestThroughputOpsPerSec: number;
   chunkCount: number;
@@ -119,7 +133,9 @@ async function createBenchmarkPipeline(): Promise<{
     session,
     storage,
     maxChunkBytes: 512 * 1024,
-    chunkCodec: "none"
+    chunkCodec: "none",
+    capturePolicy: BENCHMARK_CAPTURE_POLICY,
+    trustedPlaintextExemptionEvidenceRefs: [BENCHMARK_EVIDENCE_REF]
   });
 
   await pipeline.start();
@@ -267,14 +283,18 @@ async function run(): Promise<void> {
     screenshotHashes.push(hash);
   }
 
-  const baseTime = Date.now() - 45 * 60 * 1000;
+  const eventStepMs = Math.max(
+    EVENT_STEP_MS,
+    Math.ceil((recentWindowMs * 2) / Math.max(1, eventCount - 1))
+  );
+  const baseTime = Date.now() - eventStepMs * Math.max(0, eventCount - 1);
   const ingestStart = performance.now();
 
   for (let index = 0; index < eventCount; index += 1) {
     const event = createEvent(
       session.sid,
       index,
-      baseTime + index * EVENT_STEP_MS,
+      baseTime + index * eventStepMs,
       textPool,
       screenshotHashes,
       screenshotInterval,
@@ -326,6 +346,7 @@ async function run(): Promise<void> {
     screenshotInterval,
     maxArchiveMb,
     recentMinutes,
+    eventStepMs,
     ingestDurationMs: ingestMs,
     ingestThroughputOpsPerSec: ingestOps,
     chunkCount: chunks.length,
