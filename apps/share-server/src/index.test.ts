@@ -1336,6 +1336,7 @@ describe("share-server", () => {
     });
     expect(archiveResponse.status).toBe(410);
 
+    await waitForAuditEvent(server, "download", uploadPayload.shareId);
     const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
     const auditEvents = auditLog
       .trim()

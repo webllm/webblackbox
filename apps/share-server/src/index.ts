@@ -29,6 +29,7 @@ import {
 } from "@webblackbox/player-sdk";
 import { exportManifestSchema, type ExportManifest } from "@webblackbox/protocol";
 
+import { BoundedAuditWriter, type AuditWriteResult } from "./audit-writer.js";
 import { parseShareApiCredentials, type ShareApiScope } from "./auth-config.js";
 
 type ShareRecord = {
@@ -249,9 +250,26 @@ const SHARE_SHUTDOWN_TIMEOUT_MS = Math.min(
   parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_SHUTDOWN_TIMEOUT_MS, 10_000),
   MAX_SHARE_SHUTDOWN_TIMEOUT_MS
 );
+const MAX_SHARE_AUDIT_QUEUE_ENTRIES = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_AUDIT_QUEUE_ENTRIES, 128),
+  1_024
+);
+const SHARE_AUDIT_QUEUE_TIMEOUT_MS = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_AUDIT_QUEUE_TIMEOUT_MS, 1_000),
+  30_000
+);
+const SHARE_AUDIT_WRITE_TIMEOUT_MS = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_AUDIT_WRITE_TIMEOUT_MS, 2_000),
+  30_000
+);
+const SHARE_AUDIT_RETRY_COOLDOWN_MS = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_AUDIT_RETRY_COOLDOWN_MS, 5_000),
+  300_000
+);
 const MAX_SHARE_READ_SESSIONS = 4096;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
+const AUDIT_DEGRADATION_WARNING_INTERVAL_MS = 5_000;
 const uploadRateWindows = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
 const shareReadSessions = new Map<string, ShareReadSession>();
 const verifiedArchiveCache = new Map<string, { checksumSha256: string; statFingerprint: string }>();
@@ -259,8 +277,16 @@ let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
 let reservedShareRecordSlots = 0;
 let sharePublicOrigin = DEFAULT_BASE_URL;
-let auditWriteQueue = Promise.resolve();
 let shareRecordAdmissionQueue = Promise.resolve();
+let lastAuditDegradationWarningAt = 0;
+let suppressedAuditDegradationWarnings = 0;
+const auditWriter = new BoundedAuditWriter({
+  append: appendShareAuditLine,
+  maxQueuedEntries: MAX_SHARE_AUDIT_QUEUE_ENTRIES,
+  queueWaitTimeoutMs: SHARE_AUDIT_QUEUE_TIMEOUT_MS,
+  writeTimeoutMs: SHARE_AUDIT_WRITE_TIMEOUT_MS,
+  retryCooldownMs: SHARE_AUDIT_RETRY_COOLDOWN_MS
+});
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -395,7 +421,7 @@ async function shutdownShareServer(
   const closePromise = closeHttpServer(server);
   const drainPromise = (async () => {
     await waitForActiveRequests(activeRequests);
-    await auditWriteQueue;
+    await auditWriter.drain();
     await closePromise;
   })();
   const drained = await waitWithinTimeout(drainPromise, SHARE_SHUTDOWN_TIMEOUT_MS);
@@ -3032,26 +3058,25 @@ async function writeShareAuditEvent(
     details: input.details
   };
   const line = `${JSON.stringify(event)}\n`;
-  const writeOperation = auditWriteQueue.then(() => appendShareAuditLine(line));
-  auditWriteQueue = writeOperation.catch(() => undefined);
+  const result = await auditWriter.write(line);
 
-  try {
-    await writeOperation;
-  } catch (error) {
-    console.warn("[share-server] audit append failed", {
-      action: input.action,
-      shareId: input.shareId,
-      error: redactText(error instanceof Error ? error.message : String(error), 240)
-    });
+  if (result.status === "written") {
+    if (result.recovered) {
+      console.info("[share-server] audit sink recovered");
+    }
+    return;
   }
+
+  reportAuditWriteDegradation(result, input.action, input.shareId);
 }
 
-async function appendShareAuditLine(line: string): Promise<void> {
+async function appendShareAuditLine(line: string, signal: AbortSignal): Promise<void> {
   const lineBytes = Buffer.byteLength(line, "utf8");
   if (lineBytes > MAX_SHARE_AUDIT_LOG_BYTES) {
     throw new Error("Share audit event exceeds the configured log size ceiling.");
   }
 
+  throwIfAuditWriteAborted(signal);
   let currentBytes = 0;
   try {
     const current = await stat(SHARE_AUDIT_LOG_PATH);
@@ -3062,8 +3087,10 @@ async function appendShareAuditLine(line: string): Promise<void> {
     }
   }
 
+  throwIfAuditWriteAborted(signal);
   if (currentBytes > 0 && currentBytes + lineBytes > MAX_SHARE_AUDIT_LOG_BYTES) {
     await rm(SHARE_AUDIT_ROTATED_LOG_PATH, { force: true });
+    throwIfAuditWriteAborted(signal);
     try {
       await rename(SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH);
     } catch (error) {
@@ -3073,10 +3100,55 @@ async function appendShareAuditLine(line: string): Promise<void> {
     }
   }
 
+  throwIfAuditWriteAborted(signal);
   await appendFile(SHARE_AUDIT_LOG_PATH, line, {
     encoding: "utf8",
     mode: 0o600
   });
+}
+
+function reportAuditWriteDegradation(
+  result: Exclude<AuditWriteResult, { status: "written" }>,
+  action: ShareAuditAction,
+  shareId?: string
+): void {
+  const now = Date.now();
+  if (now - lastAuditDegradationWarningAt < AUDIT_DEGRADATION_WARNING_INTERVAL_MS) {
+    suppressedAuditDegradationWarnings += 1;
+    return;
+  }
+
+  const suppressedWarnings = suppressedAuditDegradationWarnings;
+  lastAuditDegradationWarningAt = now;
+  suppressedAuditDegradationWarnings = 0;
+  const details: Record<string, number | string | undefined> = {
+    action,
+    shareId,
+    reason: result.reason,
+    suppressedWarnings: suppressedWarnings || undefined
+  };
+
+  if (result.status === "failed" && result.error !== undefined) {
+    details.error = redactText(
+      result.error instanceof Error ? result.error.message : String(result.error),
+      240
+    );
+  }
+
+  console.warn(
+    result.status === "failed"
+      ? "[share-server] audit append failed"
+      : "[share-server] audit event dropped",
+    details
+  );
+}
+
+function throwIfAuditWriteAborted(signal: AbortSignal): void {
+  if (!signal.aborted) {
+    return;
+  }
+
+  throw signal.reason instanceof Error ? signal.reason : new Error("Share audit append aborted.");
 }
 
 function isFileNotFoundError(error: unknown): boolean {
