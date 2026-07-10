@@ -1580,6 +1580,57 @@ describe("recorder", () => {
     ]);
   });
 
+  it("excludes delayed future-timeline events from root-cause suspects", () => {
+    const recorder = new WebBlackboxRecorder(
+      TEST_CONFIG,
+      {},
+      undefined,
+      createDefaultRecorderPlugins()
+    );
+
+    const futureNetworkFailure = recorder.ingest(
+      createRawEvent({
+        source: "cdp",
+        rawType: "Network.loadingFailed",
+        sid: "S-root-cause-delayed",
+        tabId: 11,
+        t: 300,
+        mono: 300,
+        payload: {
+          requestId: "R-future",
+          errorText: "net::ERR_FAILED"
+        }
+      })
+    );
+    expect(futureNetworkFailure.event?.type).toBe("network.failed");
+    const delayedError = recorder.ingest(
+      createRawEvent({
+        rawType: "pageError",
+        sid: "S-root-cause-delayed",
+        tabId: 11,
+        t: 200,
+        mono: 200,
+        payload: {
+          message: "earlier sampled error"
+        }
+      })
+    );
+    const delayedPayload = delayedError.event?.data as
+      | {
+          aiRootCause?: {
+            suspects?: Array<{ type?: string; eventId?: string }>;
+          };
+        }
+      | undefined;
+
+    expect(delayedPayload?.aiRootCause?.suspects).toEqual([
+      {
+        type: "runtime",
+        reason: "No strong precursor signal was found; inspect nearby console and runtime events."
+      }
+    ]);
+  });
+
   it("isolates plugin hook exceptions without dropping ingest flow", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const recorder = new WebBlackboxRecorder(TEST_CONFIG, {}, undefined, [

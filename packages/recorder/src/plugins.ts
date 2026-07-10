@@ -100,7 +100,9 @@ export function createAiRootCausePlugin(windowMs = 10_000): RecorderPlugin {
       }
 
       const windowStart = event.mono - windowMs;
-      const scoped = recent.filter((item) => item.id !== event.id && item.mono >= windowStart);
+      const scoped = recent.filter(
+        (item) => item.id !== event.id && item.mono >= windowStart && item.mono <= event.mono
+      );
       const suspects: Array<{ type: string; reason: string; eventId?: string }> = [];
 
       const networkIssue = scoped.find((item) => {
