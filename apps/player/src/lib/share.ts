@@ -16,7 +16,12 @@ export function resolveShareArchiveRequest(
   }
 
   if (/^[a-zA-Z0-9_-]{8,}$/.test(trimmed)) {
-    const baseUrl = fallbackBaseUrl;
+    const baseUrl = normalizeShareServerBaseUrl(fallbackBaseUrl);
+
+    if (!baseUrl) {
+      return null;
+    }
+
     return {
       shareId: trimmed,
       baseUrl,
@@ -32,16 +37,27 @@ export function resolveShareArchiveRequest(
     return null;
   }
 
+  const baseUrl = safeShareServerOrigin(parsed);
+
+  if (!baseUrl) {
+    return null;
+  }
+
+  const queryApiKey = readQueryApiKey(parsed);
+
+  if (queryApiKey === null) {
+    return null;
+  }
+
   const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(parsed.pathname);
 
   if (sharePageMatch?.[1]) {
     const shareId = sharePageMatch[1];
-    const baseUrl = parsed.origin;
     return {
       shareId,
       baseUrl,
       archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive`,
-      ...readQueryApiKey(parsed)
+      ...queryApiKey
     };
   }
 
@@ -50,9 +66,9 @@ export function resolveShareArchiveRequest(
   if (archiveMatch?.[1]) {
     return {
       shareId: archiveMatch[1],
-      baseUrl: parsed.origin,
-      archiveUrl: `${parsed.origin}${parsed.pathname}`,
-      ...readQueryApiKey(parsed)
+      baseUrl,
+      archiveUrl: `${baseUrl}${parsed.pathname}`,
+      ...queryApiKey
     };
   }
 
@@ -62,9 +78,9 @@ export function resolveShareArchiveRequest(
     const shareId = metadataMatch[1];
     return {
       shareId,
-      baseUrl: parsed.origin,
-      archiveUrl: `${parsed.origin}/api/share/${encodeURIComponent(shareId)}/archive`,
-      ...readQueryApiKey(parsed)
+      baseUrl,
+      archiveUrl: `${baseUrl}/api/share/${encodeURIComponent(shareId)}/archive`,
+      ...queryApiKey
     };
   }
 
@@ -80,7 +96,7 @@ export function normalizeShareServerBaseUrl(value: string): string | null {
 
   try {
     const url = new URL(trimmed);
-    return url.origin;
+    return safeShareServerOrigin(url);
   } catch {
     return null;
   }
@@ -104,13 +120,65 @@ export function resolveShareServerOrigin(value: string | null): string | null {
   }
 }
 
-function readQueryApiKey(url: URL): Pick<ShareArchiveRequest, "queryApiKey"> {
+function safeShareServerOrigin(url: URL): string | null {
+  if (url.username.length > 0 || url.password.length > 0) {
+    return null;
+  }
+
+  if (url.protocol === "https:") {
+    return url.origin;
+  }
+
+  if (url.protocol === "http:" && isLoopbackHostname(url.hostname)) {
+    return url.origin;
+  }
+
+  return null;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+
+  if (normalized === "localhost" || normalized === "[::1]" || normalized === "::1") {
+    return true;
+  }
+
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+  );
+}
+
+function readQueryApiKey(url: URL): Pick<ShareArchiveRequest, "queryApiKey"> | null {
   const key = url.searchParams.get("key");
   if (!key) {
     return {};
   }
 
+  const normalized = key.trim();
+
+  if (
+    normalized.length === 0 ||
+    normalized.length > 4_096 ||
+    containsAsciiControlCharacter(normalized)
+  ) {
+    return null;
+  }
+
   return {
-    queryApiKey: key
+    queryApiKey: normalized
   };
+}
+
+function containsAsciiControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) {
+      return true;
+    }
+  }
+
+  return false;
 }

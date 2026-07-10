@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveShareArchiveRequest } from "./share.js";
+import { normalizeShareServerBaseUrl, resolveShareArchiveRequest } from "./share.js";
 
 describe("resolveShareArchiveRequest", () => {
   it("resolves a share id against the configured server", () => {
@@ -41,5 +41,47 @@ describe("resolveShareArchiveRequest", () => {
     expect(
       resolveShareArchiveRequest("https://share.example.test/other/path", "https://fallback")
     ).toBeNull();
+  });
+
+  it.each([
+    "http://share.example.test/share/abcdefgh",
+    "ftp://share.example.test/share/abcdefgh",
+    "file:///share/abcdefgh",
+    "https://user:secret@share.example.test/share/abcdefgh"
+  ])("rejects an unsafe share reference %s", (reference) => {
+    expect(resolveShareArchiveRequest(reference, "https://fallback.invalid")).toBeNull();
+  });
+
+  it("rejects an id when its fallback server is unsafe", () => {
+    expect(resolveShareArchiveRequest("abcdefgh", "http://share.example.test")).toBeNull();
+  });
+
+  it("rejects query credentials that cannot be sent as safe headers", () => {
+    expect(
+      resolveShareArchiveRequest(
+        "https://share.example.test/share/abcdefgh?key=line%0Abreak",
+        "https://fallback.invalid"
+      )
+    ).toBeNull();
+  });
+});
+
+describe("normalizeShareServerBaseUrl", () => {
+  it.each([
+    ["https://share.example.test/path?ignored=true", "https://share.example.test"],
+    ["http://localhost:8787", "http://localhost:8787"],
+    ["http://127.42.0.9:8787", "http://127.42.0.9:8787"],
+    ["http://[::1]:8787", "http://[::1]:8787"]
+  ])("normalizes a safe server URL %s", (input, expected) => {
+    expect(normalizeShareServerBaseUrl(input)).toBe(expected);
+  });
+
+  it.each([
+    "http://share.example.test",
+    "ws://localhost:8787",
+    "javascript:alert(1)",
+    "https://user:secret@share.example.test"
+  ])("rejects an unsafe server URL %s", (input) => {
+    expect(normalizeShareServerBaseUrl(input)).toBeNull();
   });
 });
