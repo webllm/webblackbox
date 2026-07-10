@@ -941,6 +941,37 @@ describe("share-server", () => {
     expect(auditLog).not.toContain("webblackbox-share-");
   });
 
+  it("audits authorization failures within a bounded rotating log", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES: "512"
+    });
+    const rejectedKey = "raw-rejected-api-key";
+
+    for (let index = 0; index < 8; index += 1) {
+      const response = await fetch(`${server.baseUrl}/api/share/list`, {
+        headers: {
+          "x-webblackbox-api-key": rejectedKey
+        }
+      });
+      expect(response.status).toBe(401);
+    }
+
+    const auditFiles = await readdir(resolve(server.dataDir, "audit"));
+    expect(auditFiles).toEqual(
+      expect.arrayContaining(["share-access.jsonl", "share-access.1.jsonl"])
+    );
+    const auditLogs = await Promise.all(
+      auditFiles.map((name) => readFile(resolve(server.dataDir, "audit", name), "utf8"))
+    );
+    expect(auditLogs.join("\n")).toContain('"outcome":"blocked"');
+    expect(auditLogs.join("\n")).toContain('"reason":"unauthorized"');
+    expect(auditLogs.join("\n")).not.toContain(rejectedKey);
+
+    for (const name of auditFiles) {
+      expect((await stat(resolve(server.dataDir, "audit", name))).size).toBeLessThanOrEqual(512);
+    }
+  });
+
   it("keeps committed operations successful when the audit sink is unavailable", async () => {
     const server = await startShareServer();
     const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");

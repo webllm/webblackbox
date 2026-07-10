@@ -162,6 +162,7 @@ const ARCHIVES_DIR = join(DATA_ROOT, "archives");
 const RECORDS_DIR = join(DATA_ROOT, "records");
 const AUDIT_DIR = join(DATA_ROOT, "audit");
 const SHARE_AUDIT_LOG_PATH = join(AUDIT_DIR, "share-access.jsonl");
+const SHARE_AUDIT_ROTATED_LOG_PATH = join(AUDIT_DIR, "share-access.1.jsonl");
 const SHARE_API_KEY = readOptionalSecret(process.env.WEBBLACKBOX_SHARE_API_KEY);
 const SHARE_API_CREDENTIALS = parseShareApiCredentials(
   process.env.WEBBLACKBOX_SHARE_API_KEYS,
@@ -212,6 +213,10 @@ const MAX_SHARE_RECORDS = Math.min(
 const MAX_SHARE_RECORD_DIRECTORY_ENTRIES = 20_000;
 const DEFAULT_SHARE_LIST_LIMIT = 100;
 const MAX_SHARE_LIST_LIMIT = 200;
+const MAX_SHARE_AUDIT_LOG_BYTES = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_AUDIT_LOG_BYTES, 16 * 1024 * 1024),
+  64 * 1024 * 1024
+);
 const MAX_SHARE_READ_SESSIONS = 4096;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
@@ -220,6 +225,7 @@ const shareReadSessions = new Map<string, ShareReadSession>();
 let rateLimitCleanupCounter = 0;
 let activeUploadInspections = 0;
 let sharePublicOrigin = DEFAULT_BASE_URL;
+let auditWriteQueue = Promise.resolve();
 
 void startShareServer().catch((error) => {
   console.error("[share-server] startup failed", error);
@@ -235,8 +241,19 @@ async function startShareServer(): Promise<void> {
   await pruneExpiredShareRecords(Date.now());
 
   const server = createServer((request, response) => {
-    void routeRequest(request, response).catch((error) => {
+    void routeRequest(request, response).catch(async (error) => {
       console.warn("[share-server] request failed", error);
+
+      const auditContext = resolveShareAuditRequest(request);
+      if (auditContext) {
+        await writeShareAuditEvent(request, {
+          ...auditContext,
+          outcome: "error",
+          details: {
+            reason: "request-failed"
+          }
+        });
+      }
 
       if (response.headersSent || response.writableEnded) {
         if (!response.writableEnded) {
@@ -272,10 +289,21 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const pathname = requestUrl.pathname;
 
   const requiredScope = resolveRequiredShareScope(method, pathname);
+  const auditContext = resolveShareAuditContext(method, pathname);
 
   if (requiredScope) {
     const authorization = authorizeRequest(request, requestUrl, method, pathname, requiredScope);
     if (!authorization.authorized) {
+      if (auditContext) {
+        await writeShareAuditEvent(request, {
+          ...auditContext,
+          outcome: "blocked",
+          details: {
+            reason: "unauthorized"
+          }
+        });
+      }
+
       if (pathname.startsWith("/share/")) {
         respondHtml(response, 401, "<h1>Unauthorized</h1><p>Provide a valid share API key.</p>");
         return;
@@ -289,6 +317,14 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
     const readShareId = requiredScope === "read" ? extractReadShareId(pathname) : null;
     if (readShareId && authorization.source === "query") {
       issueShareReadSessionCookie(response, readShareId);
+      await writeShareAuditEvent(request, {
+        action: "page",
+        shareId: readShareId,
+        outcome: "ok",
+        details: {
+          authorization: "query-bootstrap"
+        }
+      });
       redirectToUrlWithoutQueryKey(response, requestUrl);
       return;
     }
@@ -351,6 +387,14 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
 
   if (!rateLimited.ok) {
     closeRequestAfterResponse(request, response);
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      outcome: "blocked",
+      details: {
+        reason: "rate-limit",
+        retryAfterSec: rateLimited.retryAfterSec
+      }
+    });
     respondJson(response, 429, {
       error: `Upload rate limit exceeded. Retry in ${rateLimited.retryAfterSec}s.`
     });
@@ -360,6 +404,13 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
   if (!tryAcquireUploadInspectionSlot()) {
     closeRequestAfterResponse(request, response);
     response.setHeader("retry-after", "1");
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      outcome: "blocked",
+      details: {
+        reason: "inspection-capacity"
+      }
+    });
     respondJson(response, 503, {
       error: "Archive inspection capacity is temporarily exhausted."
     });
@@ -369,6 +420,14 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
   try {
     if (!(await hasShareRecordCapacity())) {
       closeRequestAfterResponse(request, response);
+      await writeShareAuditEvent(request, {
+        action: "upload",
+        outcome: "blocked",
+        details: {
+          reason: "record-capacity",
+          limit: MAX_SHARE_RECORDS
+        }
+      });
       respondJson(response, 507, {
         error: `Share record capacity is exhausted (${MAX_SHARE_RECORDS}). Revoke or expire retained shares before uploading.`
       });
@@ -420,12 +479,29 @@ async function processUploadWithinInspectionSlot(
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {
       closeRequestAfterResponse(request, response);
+      await writeShareAuditEvent(request, {
+        action: "upload",
+        shareId: id,
+        outcome: "blocked",
+        details: {
+          reason: "payload-too-large",
+          limit: error.maxBytes
+        }
+      });
       respondJson(response, 413, {
         error: `Upload payload exceeds ${error.maxBytes} bytes.`
       });
       return;
     }
     if (error instanceof UploadTimeoutError || request.aborted) {
+      await writeShareAuditEvent(request, {
+        action: "upload",
+        shareId: id,
+        outcome: "error",
+        details: {
+          reason: error instanceof UploadTimeoutError ? `upload-${error.kind}-timeout` : "aborted"
+        }
+      });
       return;
     }
 
@@ -433,6 +509,14 @@ async function processUploadWithinInspectionSlot(
   }
 
   if (bytes.byteLength === 0) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked",
+      details: {
+        reason: "empty-payload"
+      }
+    });
     respondJson(response, 400, {
       error: "Upload payload is empty."
     });
@@ -450,6 +534,14 @@ async function processUploadWithinInspectionSlot(
     clientSummary = readClientShareSummary(request, checksumSha256);
   } catch (error) {
     if (error instanceof ShareSummaryHeaderError) {
+      await writeShareAuditEvent(request, {
+        action: "upload",
+        shareId: id,
+        outcome: "blocked",
+        details: {
+          reason: "invalid-client-claim"
+        }
+      });
       respondJson(response, 400, {
         error: error.message
       });
@@ -523,6 +615,14 @@ async function processUploadWithinInspectionSlot(
       assertClientShareClaimMatchesArchive(clientSummary, archiveEnvelope);
     } catch (error) {
       if (error instanceof ShareSummaryHeaderError) {
+        await writeShareAuditEvent(request, {
+          action: "upload",
+          shareId: id,
+          outcome: "blocked",
+          details: {
+            reason: "client-claim-conflict"
+          }
+        });
         respondJson(response, 400, { error: error.message });
         return;
       }
@@ -652,6 +752,13 @@ async function handleList(
 ): Promise<void> {
   const pagination = parseShareListPagination(requestUrl);
   if (!pagination) {
+    await writeShareAuditEvent(request, {
+      action: "list",
+      outcome: "blocked",
+      details: {
+        reason: "invalid-pagination"
+      }
+    });
     respondJson(response, 400, {
       error: `List pagination requires integer offset >= 0 and limit between 1 and ${MAX_SHARE_LIST_LIMIT}.`
     });
@@ -2109,9 +2216,12 @@ async function writeShareAuditEvent(
     clientHash: hashAuditValue(resolveClientKey(request)),
     details: input.details
   };
+  const line = `${JSON.stringify(event)}\n`;
+  const writeOperation = auditWriteQueue.then(() => appendShareAuditLine(line));
+  auditWriteQueue = writeOperation.catch(() => undefined);
 
   try {
-    await appendFile(SHARE_AUDIT_LOG_PATH, `${JSON.stringify(event)}\n`, "utf8");
+    await writeOperation;
   } catch (error) {
     console.warn("[share-server] audit append failed", {
       action: input.action,
@@ -2119,6 +2229,47 @@ async function writeShareAuditEvent(
       error: redactText(error instanceof Error ? error.message : String(error), 240)
     });
   }
+}
+
+async function appendShareAuditLine(line: string): Promise<void> {
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  if (lineBytes > MAX_SHARE_AUDIT_LOG_BYTES) {
+    throw new Error("Share audit event exceeds the configured log size ceiling.");
+  }
+
+  let currentBytes = 0;
+  try {
+    const current = await stat(SHARE_AUDIT_LOG_PATH);
+    currentBytes = current.isFile() ? current.size : 0;
+  } catch (error) {
+    if (!isFileNotFoundError(error)) {
+      throw error;
+    }
+  }
+
+  if (currentBytes > 0 && currentBytes + lineBytes > MAX_SHARE_AUDIT_LOG_BYTES) {
+    await rm(SHARE_AUDIT_ROTATED_LOG_PATH, { force: true });
+    try {
+      await rename(SHARE_AUDIT_LOG_PATH, SHARE_AUDIT_ROTATED_LOG_PATH);
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  await appendFile(SHARE_AUDIT_LOG_PATH, line, {
+    encoding: "utf8",
+    mode: 0o600
+  });
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as Error & { code?: unknown }).code === "ENOENT"
+  );
 }
 
 function hashAuditValue(value: string): string {
@@ -2366,7 +2517,7 @@ class PayloadTooLargeError extends Error {
 }
 
 class UploadTimeoutError extends Error {
-  public constructor(kind: "idle" | "total") {
+  public constructor(public readonly kind: "idle" | "total") {
     super(`Upload ${kind} timeout exceeded.`);
   }
 }
@@ -2525,6 +2676,56 @@ function resolveAllowedOrigin(
   }
 
   return originHeader === SHARE_ALLOWED_ORIGIN ? SHARE_ALLOWED_ORIGIN : null;
+}
+
+function resolveShareAuditRequest(
+  request: IncomingMessage
+): { action: ShareAuditAction; shareId?: string } | null {
+  try {
+    const requestUrl = new URL(request.url ?? "/", sharePublicOrigin);
+    return resolveShareAuditContext(request.method ?? "GET", requestUrl.pathname);
+  } catch {
+    return null;
+  }
+}
+
+function resolveShareAuditContext(
+  method: string,
+  pathname: string
+): { action: ShareAuditAction; shareId?: string } | null {
+  if (method === "POST" && pathname === "/api/share/upload") {
+    return { action: "upload" };
+  }
+  if (method === "GET" && pathname === "/api/share/list") {
+    return { action: "list" };
+  }
+
+  const route =
+    /^\/(?:api\/share\/([a-zA-Z0-9_-]{1,128})\/(meta|archive|revoke)|share\/([a-zA-Z0-9_-]{1,128}))$/.exec(
+      pathname
+    );
+  if (!route) {
+    return null;
+  }
+
+  const shareId = route[1] ?? route[3];
+  const routeKind = route[2] ?? "page";
+  if (!shareId) {
+    return null;
+  }
+  if (method === "GET" && routeKind === "meta") {
+    return { action: "metadata", shareId };
+  }
+  if (method === "GET" && routeKind === "archive") {
+    return { action: "download", shareId };
+  }
+  if (method === "GET" && routeKind === "page") {
+    return { action: "page", shareId };
+  }
+  if (method === "POST" && routeKind === "revoke") {
+    return { action: "revoke", shareId };
+  }
+  return null;
 }
 
 function resolveRequiredShareScope(method: string, pathname: string): ShareApiScope | null {
