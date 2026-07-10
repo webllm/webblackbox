@@ -39,6 +39,7 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_DEFAULT_TTL_MS`: default share lifetime in ms (default `604800000`, seven days).
 - `WEBBLACKBOX_SHARE_MAX_TTL_MS`: maximum accepted share lifetime in ms (default `2592000000`, 30 days).
 - `WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS`: how long expired share records/files are retained before pruning (default `2592000000`, 30 days).
+- `WEBBLACKBOX_SHARE_MAX_RECORDS`: maximum retained record files admitted by one server (default and hard ceiling `10000`). Uploads fail with `507` before body buffering when capacity remains full after expiry pruning.
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX`: max uploads per client in each window (default `10`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS`: upload rate limit window in ms (default `60000`).
 - `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: set `true` only behind a trusted proxy; otherwise upload rate limiting uses socket IP.
@@ -114,7 +115,7 @@ Response:
 
 ### Metadata and archive
 
-- `GET /api/share/list`
+- `GET /api/share/list?offset=0&limit=100` (strict offset pagination; maximum page size `200`, with `total` and `nextOffset` in the response)
 - `GET /api/share/:id/meta`
 - `GET /api/share/:id/archive`
 - `GET /share/:id`

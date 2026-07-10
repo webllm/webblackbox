@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, opendir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -205,6 +205,13 @@ const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
 const SHARE_READ_SESSION_TTL_MS = 10 * 60 * 1000;
 const MAX_SHARE_RECORD_BYTES = 256 * 1024;
 const SHARE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const MAX_SHARE_RECORDS = Math.min(
+  parsePositiveInteger(process.env.WEBBLACKBOX_SHARE_MAX_RECORDS, 10_000),
+  10_000
+);
+const MAX_SHARE_RECORD_DIRECTORY_ENTRIES = 20_000;
+const DEFAULT_SHARE_LIST_LIMIT = 100;
+const MAX_SHARE_LIST_LIMIT = 200;
 const MAX_SHARE_READ_SESSIONS = 4096;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
@@ -301,7 +308,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   }
 
   if (method === "GET" && pathname === "/api/share/list") {
-    await handleList(request, response);
+    await handleList(request, response, requestUrl);
     return;
   }
 
@@ -359,6 +366,14 @@ async function handleUpload(request: IncomingMessage, response: ServerResponse):
   }
 
   try {
+    if (!(await hasShareRecordCapacity())) {
+      closeRequestAfterResponse(request, response);
+      respondJson(response, 507, {
+        error: `Share record capacity is exhausted (${MAX_SHARE_RECORDS}). Revoke or expire retained shares before uploading.`
+      });
+      return;
+    }
+
     await handleUploadWithinInspectionSlot(request, response);
   } finally {
     activeUploadInspections -= 1;
@@ -628,11 +643,26 @@ async function processUploadWithinInspectionSlot(
   });
 }
 
-async function handleList(request: IncomingMessage, response: ServerResponse): Promise<void> {
+async function handleList(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestUrl: URL
+): Promise<void> {
+  const pagination = parseShareListPagination(requestUrl);
+  if (!pagination) {
+    respondJson(response, 400, {
+      error: `List pagination requires integer offset >= 0 and limit between 1 and ${MAX_SHARE_LIST_LIMIT}.`
+    });
+    return;
+  }
+
   await pruneExpiredShareRecords(Date.now());
-  const records = await loadAllRecords();
+  const records = (await loadAllRecords()).sort(
+    (left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id)
+  );
+  const endOffset = Math.min(records.length, pagination.offset + pagination.limit);
   const items = records
-    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(pagination.offset, endOffset)
     .map((record) => buildPublicShareMetadata(record));
 
   await writeShareAuditEvent(request, {
@@ -640,7 +670,11 @@ async function handleList(request: IncomingMessage, response: ServerResponse): P
     outcome: "ok"
   });
   respondJson(response, 200, {
-    items
+    items,
+    total: records.length,
+    offset: pagination.offset,
+    limit: pagination.limit,
+    nextOffset: endOffset < records.length ? endOffset : null
   });
 }
 
@@ -1626,17 +1660,71 @@ async function readRecord(id: string): Promise<ShareRecord | null> {
 }
 
 async function loadAllRecords(): Promise<ShareRecord[]> {
-  const fileNames = await readdir(RECORDS_DIR);
-  const records = await Promise.all(
-    fileNames
-      .filter((name) => name.endsWith(".json"))
-      .map(async (name) => {
-        const id = name.slice(0, -".json".length);
-        return SHARE_ID_PATTERN.test(id) ? readRecord(id) : null;
-      })
-  );
+  const directory = await opendir(RECORDS_DIR);
+  const records: ShareRecord[] = [];
+  let directoryEntries = 0;
+  let recordFiles = 0;
 
-  return records.filter((record): record is ShareRecord => Boolean(record));
+  for await (const entry of directory) {
+    directoryEntries += 1;
+    assertShareRecordDirectoryEntryBudget(directoryEntries);
+    if (!entry.isFile() || !entry.name.endsWith(".json")) {
+      continue;
+    }
+
+    recordFiles += 1;
+    if (recordFiles > MAX_SHARE_RECORDS) {
+      throw new Error(`Share record capacity exceeded (${MAX_SHARE_RECORDS}).`);
+    }
+
+    const id = entry.name.slice(0, -".json".length);
+    const record = SHARE_ID_PATTERN.test(id) ? await readRecord(id) : null;
+    if (record) {
+      records.push(record);
+    }
+  }
+
+  return records;
+}
+
+async function hasShareRecordCapacity(): Promise<boolean> {
+  const initialCount = await countShareRecordFiles();
+  if (initialCount < MAX_SHARE_RECORDS) {
+    return true;
+  }
+  if (initialCount > MAX_SHARE_RECORDS) {
+    return false;
+  }
+
+  await pruneExpiredShareRecords(Date.now());
+  return (await countShareRecordFiles()) < MAX_SHARE_RECORDS;
+}
+
+async function countShareRecordFiles(): Promise<number> {
+  const directory = await opendir(RECORDS_DIR);
+  let directoryEntries = 0;
+  let recordFiles = 0;
+
+  for await (const entry of directory) {
+    directoryEntries += 1;
+    assertShareRecordDirectoryEntryBudget(directoryEntries);
+    if (entry.isFile() && entry.name.endsWith(".json")) {
+      recordFiles += 1;
+      if (recordFiles > MAX_SHARE_RECORDS) {
+        return recordFiles;
+      }
+    }
+  }
+
+  return recordFiles;
+}
+
+function assertShareRecordDirectoryEntryBudget(entries: number): void {
+  if (entries > MAX_SHARE_RECORD_DIRECTORY_ENTRIES) {
+    throw new Error(
+      `Share record directory entry limit exceeded (${MAX_SHARE_RECORD_DIRECTORY_ENTRIES}).`
+    );
+  }
 }
 
 async function writeRecord(record: ShareRecord): Promise<void> {
@@ -1849,24 +1937,54 @@ function resolveShareTtlMs(request: IncomingMessage): number {
   return Math.min(SHARE_MAX_TTL_MS, Math.max(1_000, requestedTtl));
 }
 
+function parseShareListPagination(requestUrl: URL): { offset: number; limit: number } | null {
+  const offset = parseBoundedQueryInteger(
+    requestUrl.searchParams.get("offset"),
+    0,
+    0,
+    MAX_SHARE_RECORDS
+  );
+  const limit = parseBoundedQueryInteger(
+    requestUrl.searchParams.get("limit"),
+    DEFAULT_SHARE_LIST_LIMIT,
+    1,
+    MAX_SHARE_LIST_LIMIT
+  );
+  return offset === null || limit === null ? null : { offset, limit };
+}
+
+function parseBoundedQueryInteger(
+  raw: string | null,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number | null {
+  if (raw === null) {
+    return fallback;
+  }
+  if (!/^\d+$/.test(raw)) {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
+}
+
 async function pruneExpiredShareRecords(now: number): Promise<void> {
   const records = await loadAllRecords();
   const retentionMs = Math.max(0, SHARE_RETAIN_EXPIRED_MS);
 
-  await Promise.all(
-    records.map(async (record) => {
-      const retentionDeadline = resolveShareExpiresAt(record) + retentionMs;
+  for (const record of records) {
+    const retentionDeadline = resolveShareExpiresAt(record) + retentionMs;
 
-      if (retentionDeadline > now) {
-        return;
-      }
+    if (retentionDeadline > now) {
+      continue;
+    }
 
-      await Promise.all([
-        rm(recordPathForId(record.id), { force: true }),
-        rm(archivePathForId(record.id), { force: true })
-      ]);
-    })
-  );
+    await Promise.all([
+      rm(recordPathForId(record.id), { force: true }),
+      rm(archivePathForId(record.id), { force: true })
+    ]);
+  }
 }
 
 async function writeShareAuditEvent(
