@@ -15,6 +15,8 @@ The dev/enterprise profile can enable deeper diagnostics, including CDP, but the
 5. Archives include `privacy/manifest.json` with policy, categories, encryption status, and pre-encryption scanner result.
 6. Exports and shares recompute policy eligibility instead of trusting imported archive metadata.
 
+MAIN-world capture hooks run in the page's JavaScript environment and are therefore treated as untrusted observations, not authenticated evidence. Their bridge accepts only bounded, allowlisted event payloads, ignores page-supplied timestamps, rate-limits input, and exposes no marker or other extension control operation. Privileged decisions remain in the isolated content script and service worker.
+
 Global visual and profiler artifacts fail closed when the page contains a child frame that is outside the effective scope. CDP DOM snapshots are filtered to frame IDs that independently passed the scope gate.
 
 ## Encryption

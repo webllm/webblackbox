@@ -16,6 +16,7 @@ import { INJECTED_MESSAGE_SOURCE } from "./injected-hooks.js";
 import { LiteCaptureAgent } from "./lite-capture-agent.js";
 import type { LiteCaptureAgentOptions, LiteCaptureState } from "./types.js";
 import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
+import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 const SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
@@ -94,31 +95,28 @@ function createInactiveAgent(options: Partial<LiteCaptureAgentOptions> = {}) {
   };
 }
 
-function dispatchInjectedEvents(rawType: string, count: number): void {
+function queueSyntheticEvents(agent: LiteCaptureAgent, rawType: string, count: number): void {
   const startedAt = Date.now();
-  const events = Array.from({ length: count }, (_, index) => {
-    const now = startedAt + index;
+  const queueRawEvent = (
+    agent as unknown as {
+      queueRawEvent(event: RawRecorderEvent): void;
+    }
+  ).queueRawEvent.bind(agent);
 
-    return {
+  for (let index = 0; index < count; index += 1) {
+    const now = startedAt + index;
+    queueRawEvent({
+      source: "content",
       rawType,
+      tabId: 7,
+      sid: "S-lite-agent-test",
       payload: {
         index
       },
       t: now,
       mono: performance.timeOrigin + now
-    };
-  });
-
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: {
-        source: INJECTED_MESSAGE_SOURCE,
-        kind: "capture-events",
-        events
-      },
-      source: window
-    })
-  );
+    });
+  }
 }
 
 function clickTarget(): void {
@@ -411,6 +409,93 @@ describe("LiteCaptureAgent", () => {
     agent.flush();
     expect(emitBatch).not.toHaveBeenCalled();
 
+    agent.dispose();
+  });
+
+  it("treats page-world bridge messages as bounded observations only", () => {
+    const onMarker = vi.fn();
+    const { agent, emitBatch } = createAgent({}, { onMarker });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "marker",
+          message: "forged marker",
+          t: 1,
+          mono: 1
+        },
+        source: window
+      })
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          rawType: "mutation",
+          payload: { count: 999 },
+          t: 1,
+          mono: 1
+        },
+        source: window
+      })
+    );
+
+    agent.flush();
+
+    expect(onMarker).not.toHaveBeenCalled();
+    expect(countEmittedEvents(emitBatch)).toBe(0);
+
+    const beforeReceipt = Date.now();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          rawType: "console",
+          payload: { method: "info", redacted: true },
+          t: 1,
+          mono: 1
+        },
+        source: window
+      })
+    );
+    agent.flush();
+
+    const captured = emitBatch.mock.calls.flatMap((call) => call[0] as RawRecorderEvent[]);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.rawType).toBe("console");
+    expect(captured[0]?.t).toBeGreaterThanOrEqual(beforeReceipt);
+    expect(captured[0]?.mono).not.toBe(1);
+
+    agent.dispose();
+  });
+
+  it("rate-limits untrusted page-world observation batches", () => {
+    const { agent, emitBatch } = createAgent();
+
+    for (let batch = 0; batch < 6; batch += 1) {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: {
+            source: INJECTED_MESSAGE_SOURCE,
+            kind: "capture-events",
+            events: Array.from({ length: 24 }, (_, index) => ({
+              rawType: "console",
+              payload: { method: "info", batch, index, redacted: true },
+              t: Date.now(),
+              mono: performance.timeOrigin + performance.now()
+            }))
+          },
+          source: window
+        })
+      );
+    }
+
+    agent.flush();
+
+    expect(countEmittedEvents(emitBatch)).toBe(120);
     agent.dispose();
   });
 
@@ -1673,7 +1758,7 @@ describe("LiteCaptureAgent", () => {
   it("suppresses mousemove capture while the event buffer is under pressure", () => {
     const { agent, emitBatch } = createAgent();
 
-    dispatchInjectedEvents("mutation", 130);
+    queueSyntheticEvents(agent, "mutation", 130);
     movePointer();
     agent.flush();
 
@@ -1686,7 +1771,7 @@ describe("LiteCaptureAgent", () => {
   it("flushes buffered low-priority events asynchronously in chunks", async () => {
     const { agent, emitBatch } = createAgent();
 
-    dispatchInjectedEvents("mutation", 130);
+    queueSyntheticEvents(agent, "mutation", 130);
 
     expect(emitBatch).not.toHaveBeenCalled();
 
@@ -1706,7 +1791,7 @@ describe("LiteCaptureAgent", () => {
   it("sheds low-priority overflow before draining the backlog", () => {
     const { agent, emitBatch } = createAgent();
 
-    dispatchInjectedEvents("mutation", 1_300);
+    queueSyntheticEvents(agent, "mutation", 1_300);
 
     expect(emitBatch).not.toHaveBeenCalled();
 

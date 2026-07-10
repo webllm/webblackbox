@@ -8,7 +8,7 @@ import type { RawRecorderEvent } from "@webblackbox/recorder";
 import { snapdom } from "@zumer/snapdom";
 
 import type { LiteCaptureAgentOptions, LiteCaptureSampling, LiteCaptureState } from "./types.js";
-import { INJECTED_MESSAGE_SOURCE, type InjectedCaptureWindowMessage } from "./injected-hooks.js";
+import { parseInjectedCaptureWindowMessage } from "./injected-hooks.js";
 
 const PRE_RECORDING_BUFFER_MAX = 400;
 const SCREENSHOT_MAX_DATA_URL_LENGTH = 10 * 1024 * 1024;
@@ -63,6 +63,8 @@ const MUTATION_SAMPLE_TARGETS_MAX = 24;
 const MUTATION_SAMPLE_ATTRIBUTES_MAX = 16;
 const SELECTOR_CACHE_MAX = 1_500;
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
+const INJECTED_BRIDGE_MAX_EVENTS_PER_SECOND = 120;
+const INJECTED_BRIDGE_MAX_PAYLOAD_CHARS_PER_MINUTE = 4 * 1024 * 1024 + 256 * 1024;
 const OBSERVED_MUTATION_ATTRIBUTES = [
   "hidden",
   "open",
@@ -237,6 +239,10 @@ export class LiteCaptureAgent {
   private droppedLowPriorityEvents = 0;
   private disposed = false;
   private pendingQuietRecoverySummary = false;
+  private injectedBridgeWindowStartedAt = 0;
+  private injectedBridgeEventCount = 0;
+  private injectedBridgePayloadWindowStartedAt = 0;
+  private injectedBridgePayloadChars = 0;
 
   /** Creates and installs capture hooks for the current page context. */
   public constructor(private readonly options: LiteCaptureAgentOptions) {
@@ -402,47 +408,57 @@ export class LiteCaptureAgent {
         return;
       }
 
-      const data = event.data as InjectedCaptureWindowMessage | undefined;
-
-      if (!data || data.source !== INJECTED_MESSAGE_SOURCE) {
+      const events = parseInjectedCaptureWindowMessage(event.data);
+      const payloadChars = events ? JSON.stringify(events).length : 0;
+      if (!events || !this.consumeInjectedBridgeBudget(events.length, payloadChars)) {
         return;
       }
 
-      if (data.kind === "capture-event" && typeof data.rawType === "string") {
-        this.queueInjectedRawEvent(data);
-        return;
-      }
-
-      if (data.kind === "capture-events" && Array.isArray(data.events)) {
-        for (const item of data.events) {
-          if (item && typeof item.rawType === "string") {
-            this.queueInjectedRawEvent(item);
-          }
-        }
-
-        return;
-      }
-
-      if (data.kind === "marker") {
-        this.emitMarker(typeof data.message === "string" ? data.message : "Marker");
+      const receivedAt = Date.now();
+      const receivedMono = monotonicTime();
+      for (const [index, item] of events.entries()) {
+        this.queueInjectedRawEvent(item, receivedAt, receivedMono + index / 1_000);
       }
     });
   }
 
-  private queueInjectedRawEvent(event: {
-    rawType: string;
-    payload?: Record<string, unknown>;
-    t?: number;
-    mono?: number;
-  }): void {
+  private consumeInjectedBridgeBudget(eventCount: number, payloadChars: number): boolean {
+    const now = Date.now();
+    if (now - this.injectedBridgeWindowStartedAt >= 1_000) {
+      this.injectedBridgeWindowStartedAt = now;
+      this.injectedBridgeEventCount = 0;
+    }
+
+    if (now - this.injectedBridgePayloadWindowStartedAt >= 60_000) {
+      this.injectedBridgePayloadWindowStartedAt = now;
+      this.injectedBridgePayloadChars = 0;
+    }
+
+    if (
+      this.injectedBridgeEventCount + eventCount > INJECTED_BRIDGE_MAX_EVENTS_PER_SECOND ||
+      this.injectedBridgePayloadChars + payloadChars > INJECTED_BRIDGE_MAX_PAYLOAD_CHARS_PER_MINUTE
+    ) {
+      return false;
+    }
+
+    this.injectedBridgeEventCount += eventCount;
+    this.injectedBridgePayloadChars += payloadChars;
+    return true;
+  }
+
+  private queueInjectedRawEvent(
+    event: { rawType: string; payload: Record<string, unknown> },
+    receivedAt = Date.now(),
+    receivedMono = monotonicTime()
+  ): void {
     this.queueRawEvent({
       source: "content",
       rawType: event.rawType,
       tabId: this.tabId,
       sid: this.sid,
-      t: typeof event.t === "number" ? event.t : Date.now(),
-      mono: typeof event.mono === "number" ? event.mono : monotonicTime(),
-      payload: event.payload ?? {}
+      t: receivedAt,
+      mono: receivedMono,
+      payload: event.payload
     });
   }
 

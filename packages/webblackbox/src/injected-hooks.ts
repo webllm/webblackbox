@@ -16,6 +16,10 @@ const SAFE_SERIALIZE_MAX_DEPTH = 3;
 const SAFE_SERIALIZE_MAX_PROPERTIES = 24;
 const SAFE_SERIALIZE_MAX_STRING_CHARS = 1_200;
 const EMIT_FLUSH_MAX_EVENTS = 24;
+const INJECTED_MESSAGE_MAX_PAYLOAD_CHARS = 4 * 1024 * 1024 + 256 * 1024;
+const INJECTED_MESSAGE_MAX_NODES = 512;
+const INJECTED_MESSAGE_MAX_DEPTH = 6;
+const INJECTED_MESSAGE_MAX_COLLECTION_ITEMS = 64;
 const NETWORK_HEADER_ALLOWLIST = new Set([
   "accept",
   "accept-language",
@@ -43,6 +47,13 @@ export type InjectedCaptureConfig = {
   capturePolicy?: CapturePolicy;
 };
 
+export type InjectedCaptureEvent = {
+  rawType: string;
+  payload: CapturePayload;
+  t: number;
+  mono: number;
+};
+
 /** Message contract emitted by injected hooks into the page window. */
 export type InjectedCaptureWindowMessage =
   | {
@@ -56,20 +67,161 @@ export type InjectedCaptureWindowMessage =
   | {
       source: typeof INJECTED_MESSAGE_SOURCE;
       kind: "capture-events";
-      events: Array<{
-        rawType: string;
-        payload: CapturePayload;
-        t: number;
-        mono: number;
-      }>;
-    }
-  | {
-      source: typeof INJECTED_MESSAGE_SOURCE;
-      kind: "marker";
-      message?: string;
-      t: number;
-      mono: number;
+      events: InjectedCaptureEvent[];
     };
+
+const INJECTED_CAPTURE_RAW_TYPES = new Set([
+  "console",
+  "fetch",
+  "fetchError",
+  "indexedDbOp",
+  "localStorageOp",
+  "networkBody",
+  "pageError",
+  "privacyViolation",
+  "resourceError",
+  "sessionStorageOp",
+  "sse",
+  "unhandledrejection",
+  "xhr"
+]);
+
+/**
+ * Treats MAIN-world messages as hostile page input. This parser intentionally
+ * accepts observations only; it never exposes extension control operations.
+ */
+export function parseInjectedCaptureWindowMessage(value: unknown): InjectedCaptureEvent[] | null {
+  try {
+    return parseInjectedCaptureWindowMessageUnchecked(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseInjectedCaptureWindowMessageUnchecked(value: unknown): InjectedCaptureEvent[] | null {
+  const message = asPlainRecord(value);
+
+  if (!message || message.source !== INJECTED_MESSAGE_SOURCE) {
+    return null;
+  }
+
+  const candidates =
+    message.kind === "capture-event"
+      ? [message]
+      : message.kind === "capture-events" && Array.isArray(message.events)
+        ? message.events
+        : null;
+
+  if (!candidates || candidates.length === 0 || candidates.length > EMIT_FLUSH_MAX_EVENTS) {
+    return null;
+  }
+
+  const budget = {
+    nodes: 0,
+    chars: 0
+  };
+  const events: InjectedCaptureEvent[] = [];
+
+  for (const candidate of candidates) {
+    const event = asPlainRecord(candidate);
+    const payload = asPlainRecord(event?.payload);
+
+    if (
+      !event ||
+      typeof event.rawType !== "string" ||
+      !INJECTED_CAPTURE_RAW_TYPES.has(event.rawType) ||
+      !payload ||
+      typeof event.t !== "number" ||
+      !Number.isFinite(event.t) ||
+      typeof event.mono !== "number" ||
+      !Number.isFinite(event.mono) ||
+      !isBoundedInjectedValue(payload, 0, budget)
+    ) {
+      return null;
+    }
+
+    const safePayload = asPlainRecord(structuredClone(payload));
+    if (!safePayload) {
+      return null;
+    }
+
+    events.push({
+      rawType: event.rawType,
+      payload: safePayload,
+      t: event.t,
+      mono: event.mono
+    });
+  }
+
+  return events;
+}
+
+function isBoundedInjectedValue(
+  value: unknown,
+  depth: number,
+  budget: { nodes: number; chars: number }
+): boolean {
+  budget.nodes += 1;
+  if (budget.nodes > INJECTED_MESSAGE_MAX_NODES || depth > INJECTED_MESSAGE_MAX_DEPTH) {
+    return false;
+  }
+
+  if (value === null || value === undefined || typeof value === "boolean") {
+    return true;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  if (typeof value === "string") {
+    budget.chars += value.length;
+    return budget.chars <= INJECTED_MESSAGE_MAX_PAYLOAD_CHARS;
+  }
+
+  if (Array.isArray(value)) {
+    return (
+      value.length <= INJECTED_MESSAGE_MAX_COLLECTION_ITEMS &&
+      value.every((entry) => isBoundedInjectedValue(entry, depth + 1, budget))
+    );
+  }
+
+  const record = asPlainRecord(value);
+  if (!record) {
+    return false;
+  }
+
+  const entries = Object.entries(record);
+  if (entries.length > INJECTED_MESSAGE_MAX_COLLECTION_ITEMS) {
+    return false;
+  }
+
+  for (const [key, entry] of entries) {
+    if (key.length > 128 || key === "__proto__" || key === "constructor" || key === "prototype") {
+      return false;
+    }
+    budget.chars += key.length;
+    if (
+      budget.chars > INJECTED_MESSAGE_MAX_PAYLOAD_CHARS ||
+      !isBoundedInjectedValue(entry, depth + 1, budget)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 /** Options for installing browser-side injected hooks. */
 export type InjectedHooksOptions = {

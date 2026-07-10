@@ -7,6 +7,7 @@ import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protoco
 import {
   INJECTED_CAPTURE_CONFIG_EVENT,
   INJECTED_MESSAGE_SOURCE,
+  parseInjectedCaptureWindowMessage,
   type InjectedCaptureConfig,
   type InjectedCaptureWindowMessage,
   installInjectedLiteCaptureHooks
@@ -74,6 +75,76 @@ describe("injected-hooks", () => {
     window.fetch = originalFetch;
     localStorage.clear();
     sessionStorage.clear();
+  });
+
+  it("accepts only bounded observation messages from the page-world bridge", () => {
+    const validEvent = {
+      rawType: "console",
+      payload: { method: "info", redacted: true },
+      t: Date.now(),
+      mono: performance.timeOrigin + performance.now()
+    };
+
+    expect(
+      parseInjectedCaptureWindowMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "capture-events",
+        events: [validEvent]
+      })
+    ).toEqual([validEvent]);
+
+    expect(
+      parseInjectedCaptureWindowMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "marker",
+        message: "forged control action",
+        t: Date.now(),
+        mono: performance.now()
+      })
+    ).toBeNull();
+
+    expect(
+      parseInjectedCaptureWindowMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "capture-event",
+        ...validEvent,
+        rawType: "mutation"
+      })
+    ).toBeNull();
+
+    expect(
+      parseInjectedCaptureWindowMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "capture-events",
+        events: Array.from({ length: 25 }, () => validEvent)
+      })
+    ).toBeNull();
+
+    let nestedPayload: Record<string, unknown> = {};
+    for (let depth = 0; depth < 8; depth += 1) {
+      nestedPayload = { nested: nestedPayload };
+    }
+    expect(
+      parseInjectedCaptureWindowMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "capture-event",
+        ...validEvent,
+        payload: nestedPayload
+      })
+    ).toBeNull();
+
+    expect(
+      parseInjectedCaptureWindowMessage(
+        new Proxy(
+          {},
+          {
+            getPrototypeOf() {
+              throw new Error("hostile proxy");
+            }
+          }
+        )
+      )
+    ).toBeNull();
   });
 
   it("omits IndexedDB names when policy is counts-only", async () => {
