@@ -672,6 +672,51 @@ describe("share-server", () => {
     );
   });
 
+  it("binds persisted records to safe filenames before metadata or cleanup", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const persisted = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+    persisted.shareUrl = "https://attacker.example/share/poisoned";
+    persisted.fileName = 'poisoned".zip';
+    await writeFile(recordPath, JSON.stringify(persisted));
+
+    const metadataResponse = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const metadata = (await metadataResponse.json()) as { shareUrl: string; fileName: string };
+    expect(metadataResponse.status).toBe(200);
+    expect(metadata.shareUrl).toBe(`${server.baseUrl}/share/${upload.shareId}`);
+    expect(metadata.fileName).toMatch(/^webblackbox-share-[a-f0-9]+\.zip$/);
+
+    const sentinelPath = resolve(server.dataDir, "sentinel.json");
+    await writeFile(sentinelPath, "keep-me");
+    await writeFile(
+      resolve(server.dataDir, "records", "malicious.json"),
+      JSON.stringify({
+        ...persisted,
+        id: "../sentinel",
+        createdAt: 1,
+        expiresAt: 2
+      })
+    );
+
+    const listResponse = await fetch(`${server.baseUrl}/api/share/list`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(listResponse.status).toBe(200);
+    await expect(readFile(sentinelPath, "utf8")).resolves.toBe("keep-me");
+
+    await writeFile(
+      resolve(server.dataDir, "records", "oversized.json"),
+      " ".repeat(256 * 1024 + 1)
+    );
+    const oversizedResponse = await fetch(`${server.baseUrl}/api/share/oversized/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    expect(oversizedResponse.status).toBe(404);
+  });
+
   it("expires shares and blocks archive download after ttl", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_DEFAULT_TTL_MS: "1000"

@@ -1,16 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import {
-  appendFile,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  writeFile
-} from "node:fs/promises";
+import { appendFile, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -213,6 +203,8 @@ const MAX_SHARE_SUMMARY_HEADER_BYTES = 16 * 1024;
 const AES_GCM_IV_BYTES = 12;
 const SHARE_READ_SESSION_COOKIE = "webblackbox_share_read";
 const SHARE_READ_SESSION_TTL_MS = 10 * 60 * 1000;
+const MAX_SHARE_RECORD_BYTES = 256 * 1024;
+const SHARE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_SHARE_READ_SESSIONS = 4096;
 const RATE_LIMIT_CLEANUP_INTERVAL = 64;
 const MAX_TRACKED_RATE_BUCKETS = 4096;
@@ -296,7 +288,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
     if (
       readShareId &&
       method === "GET" &&
-      /^\/share\/[a-zA-Z0-9_-]+$/.test(pathname) &&
+      /^\/share\/[a-zA-Z0-9_-]{1,128}$/.test(pathname) &&
       authorization.source !== "read-session"
     ) {
       issueShareReadSessionCookie(response, readShareId);
@@ -313,28 +305,28 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
     return;
   }
 
-  const metadataMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/meta$/.exec(pathname);
+  const metadataMatch = /^\/api\/share\/([a-zA-Z0-9_-]{1,128})\/meta$/.exec(pathname);
 
   if (method === "GET" && metadataMatch?.[1]) {
     await handleGetMetadata(request, response, metadataMatch[1]);
     return;
   }
 
-  const archiveMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/archive$/.exec(pathname);
+  const archiveMatch = /^\/api\/share\/([a-zA-Z0-9_-]{1,128})\/archive$/.exec(pathname);
 
   if (method === "GET" && archiveMatch?.[1]) {
     await handleDownloadArchive(request, response, archiveMatch[1]);
     return;
   }
 
-  const revokeMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/revoke$/.exec(pathname);
+  const revokeMatch = /^\/api\/share\/([a-zA-Z0-9_-]{1,128})\/revoke$/.exec(pathname);
 
   if (method === "POST" && revokeMatch?.[1]) {
     await handleRevokeShare(request, response, revokeMatch[1]);
     return;
   }
 
-  const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(pathname);
+  const sharePageMatch = /^\/share\/([a-zA-Z0-9_-]{1,128})$/.exec(pathname);
 
   if (method === "GET" && sharePageMatch?.[1]) {
     await handleSharePage(request, response, sharePageMatch[1]);
@@ -1606,11 +1598,30 @@ async function ensureStorageLayout(): Promise<void> {
 }
 
 async function readRecord(id: string): Promise<ShareRecord | null> {
+  if (!SHARE_ID_PATTERN.test(id)) {
+    return null;
+  }
+
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
-    const raw = await readFile(recordPathForId(id), "utf8");
-    return JSON.parse(raw) as ShareRecord;
+    handle = await open(recordPathForId(id), "r");
+    const recordStat = await handle.stat();
+    if (
+      !recordStat.isFile() ||
+      !Number.isSafeInteger(recordStat.size) ||
+      recordStat.size <= 0 ||
+      recordStat.size > MAX_SHARE_RECORD_BYTES
+    ) {
+      return null;
+    }
+
+    const raw = await readFileHandleExactly(handle, recordStat.size);
+    const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)) as unknown;
+    return normalizePersistedShareRecord(parsed, id);
   } catch {
     return null;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -1621,7 +1632,7 @@ async function loadAllRecords(): Promise<ShareRecord[]> {
       .filter((name) => name.endsWith(".json"))
       .map(async (name) => {
         const id = name.slice(0, -".json".length);
-        return readRecord(id);
+        return SHARE_ID_PATTERN.test(id) ? readRecord(id) : null;
       })
   );
 
@@ -1630,6 +1641,64 @@ async function loadAllRecords(): Promise<ShareRecord[]> {
 
 async function writeRecord(record: ShareRecord): Promise<void> {
   await writeFile(recordPathForId(record.id), JSON.stringify(record, null, 2));
+}
+
+function normalizePersistedShareRecord(value: unknown, expectedId: string): ShareRecord | null {
+  const record = asRecord(value);
+  if (record.id !== expectedId || !SHARE_ID_PATTERN.test(expectedId)) {
+    return null;
+  }
+
+  const createdAt = readSafeNonNegativeInteger(record.createdAt);
+  const persistedExpiresAt = readSafeNonNegativeInteger(record.expiresAt);
+  const defaultExpiresAt =
+    createdAt === null ? null : addSafeIntegers(createdAt, SHARE_DEFAULT_TTL_MS);
+  const expiresAt = persistedExpiresAt ?? defaultExpiresAt;
+  const revokedAt =
+    record.revokedAt === undefined ? undefined : readSafeNonNegativeInteger(record.revokedAt);
+  const sizeBytes = readSafeNonNegativeInteger(record.sizeBytes);
+  const checksumSha256 =
+    typeof record.checksumSha256 === "string" && /^[a-f0-9]{64}$/i.test(record.checksumSha256)
+      ? record.checksumSha256.toLowerCase()
+      : null;
+
+  if (
+    createdAt === null ||
+    expiresAt === null ||
+    expiresAt < createdAt ||
+    revokedAt === null ||
+    (revokedAt !== undefined && revokedAt < createdAt) ||
+    sizeBytes === null ||
+    sizeBytes <= 0 ||
+    sizeBytes > MAX_UPLOAD_BYTES ||
+    checksumSha256 === null
+  ) {
+    return null;
+  }
+
+  return {
+    id: expectedId,
+    createdAt,
+    expiresAt,
+    revokedAt,
+    fileName: publicArchiveFileName(
+      expectedId,
+      typeof record.fileName === "string" ? record.fileName : undefined
+    ),
+    sizeBytes,
+    checksumSha256,
+    shareUrl: `${sharePublicOrigin}/share/${expectedId}`,
+    summary: normalizePersistedShareSummary(record.summary)
+  };
+}
+
+function readSafeNonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function addSafeIntegers(left: number, right: number): number | null {
+  const sum = left + right;
+  return Number.isSafeInteger(sum) ? sum : null;
 }
 
 function buildPublicShareMetadata(record: ShareRecord): {
@@ -1835,11 +1904,19 @@ function hashAuditValue(value: string): string {
 }
 
 function recordPathForId(id: string): string {
+  assertSafeShareId(id);
   return join(RECORDS_DIR, `${id}.json`);
 }
 
 function archivePathForId(id: string): string {
+  assertSafeShareId(id);
   return join(ARCHIVES_DIR, `${id}.webblackbox`);
+}
+
+function assertSafeShareId(id: string): void {
+  if (!SHARE_ID_PATTERN.test(id)) {
+    throw new Error("Invalid share id.");
+  }
 }
 
 function parsePort(rawValue: string | undefined): number {
@@ -2236,19 +2313,19 @@ function resolveRequiredShareScope(method: string, pathname: string): ShareApiSc
     return "list";
   }
 
-  if (method === "GET" && /^\/api\/share\/[a-zA-Z0-9_-]+\/meta$/.test(pathname)) {
+  if (method === "GET" && /^\/api\/share\/[a-zA-Z0-9_-]{1,128}\/meta$/.test(pathname)) {
     return "read";
   }
 
-  if (method === "GET" && /^\/api\/share\/[a-zA-Z0-9_-]+\/archive$/.test(pathname)) {
+  if (method === "GET" && /^\/api\/share\/[a-zA-Z0-9_-]{1,128}\/archive$/.test(pathname)) {
     return "read";
   }
 
-  if (method === "GET" && /^\/share\/[a-zA-Z0-9_-]+$/.test(pathname)) {
+  if (method === "GET" && /^\/share\/[a-zA-Z0-9_-]{1,128}$/.test(pathname)) {
     return "read";
   }
 
-  if (method === "POST" && /^\/api\/share\/[a-zA-Z0-9_-]+\/revoke$/.test(pathname)) {
+  if (method === "POST" && /^\/api\/share\/[a-zA-Z0-9_-]{1,128}\/revoke$/.test(pathname)) {
     return "revoke";
   }
 
@@ -2314,16 +2391,16 @@ function isAuthorizedToken(token: string, requiredScope: ShareApiScope): boolean
 }
 
 function isQueryApiKeyAllowedRoute(method: string, pathname: string): boolean {
-  return method === "GET" && /^\/share\/[a-zA-Z0-9_-]+$/.test(pathname);
+  return method === "GET" && /^\/share\/[a-zA-Z0-9_-]{1,128}$/.test(pathname);
 }
 
 function extractReadShareId(pathname: string): string | null {
-  const pageMatch = /^\/share\/([a-zA-Z0-9_-]+)$/.exec(pathname);
+  const pageMatch = /^\/share\/([a-zA-Z0-9_-]{1,128})$/.exec(pathname);
   if (pageMatch?.[1]) {
     return pageMatch[1];
   }
 
-  const apiMatch = /^\/api\/share\/([a-zA-Z0-9_-]+)\/(?:meta|archive)$/.exec(pathname);
+  const apiMatch = /^\/api\/share\/([a-zA-Z0-9_-]{1,128})\/(?:meta|archive)$/.exec(pathname);
   return apiMatch?.[1] ?? null;
 }
 
