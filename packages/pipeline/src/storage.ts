@@ -689,45 +689,92 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     const trackingSid = normalizeTrackingSid(sidHint);
 
-    if (trackingSid && (await this.hasTrackedBlobHashForSession(trackingSid, blob.hash))) {
-      return;
+    if (trackingSid && !SHA256_HEX_PATTERN.test(blob.hash)) {
+      throw new Error("A session-tracked pipeline blob must have a SHA-256 hex hash.");
     }
 
-    const existing = await this.getBlob(blob.hash);
+    let attempt = 0;
 
-    if (existing) {
-      await this.put<BlobRow>(
-        "blobs",
-        {
-          key: blob.hash,
-          value: {
-            ...existing,
-            refCount: existing.refCount + 1
+    while (true) {
+      const db = await this.db();
+
+      try {
+        await runMultiStoreTransaction(
+          db,
+          ["sessions", "blobs", "blobRefs"],
+          "readwrite",
+          async (transaction) => {
+            const blobsStore = transaction.objectStore("blobs");
+            const blobRefsStore = transaction.objectStore("blobRefs");
+            const existingBlobRequest = requestToPromise<BlobRow | undefined>(
+              blobsStore.get(blob.hash)
+            );
+
+            if (!trackingSid) {
+              const existingBlob = await existingBlobRequest;
+              blobsStore.put({
+                key: blob.hash,
+                value: existingBlob
+                  ? {
+                      ...existingBlob.value,
+                      refCount: existingBlob.value.refCount + 1
+                    }
+                  : blob
+              } satisfies BlobRow);
+              return;
+            }
+
+            const [session, existingBlob, existingRefs] = await Promise.all([
+              requestToPromise<SessionRow | undefined>(
+                transaction.objectStore("sessions").get(trackingSid)
+              ),
+              existingBlobRequest,
+              requestToPromise<BlobRefsRow | undefined>(blobRefsStore.get(trackingSid))
+            ]);
+
+            if (!session) {
+              throw new Error(
+                `Cannot attach pipeline blob ${blob.hash} to missing session ${trackingSid}.`
+              );
+            }
+
+            const trackedHashes = normalizeBlobHashes(existingRefs?.value ?? []);
+
+            if (trackedHashes.includes(blob.hash)) {
+              return;
+            }
+
+            blobsStore.put({
+              key: blob.hash,
+              value: existingBlob
+                ? {
+                    ...existingBlob.value,
+                    refCount: existingBlob.value.refCount + 1
+                  }
+                : {
+                    ...blob,
+                    refCount: 1
+                  }
+            } satisfies BlobRow);
+            blobRefsStore.put({
+              key: trackingSid,
+              value: [...trackedHashes, blob.hash]
+            } satisfies BlobRefsRow);
           }
-        },
-        {
-          allowQuotaRecovery: false
+        );
+        return;
+      } catch (error) {
+        if (!isQuotaExceededError(error) || attempt >= MAX_QUOTA_RECOVERY_ATTEMPTS) {
+          throw error;
         }
-      );
-      if (trackingSid) {
-        await this.trackBlobHashForSession(trackingSid, blob.hash);
-      }
-      return;
-    }
 
-    await this.put<BlobRow>(
-      "blobs",
-      {
-        key: blob.hash,
-        value: blob
-      },
-      {
-        allowQuotaRecovery: true,
-        protectedSid: sidHint
+        attempt += 1;
+        const recovered = await this.recoverQuotaPressure(trackingSid ?? undefined);
+
+        if (!recovered) {
+          throw error;
+        }
       }
-    );
-    if (trackingSid) {
-      await this.trackBlobHashForSession(trackingSid, blob.hash);
     }
   }
 
@@ -780,25 +827,62 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async deleteSession(sid: string, blobHashes: string[] = []): Promise<void> {
-    const trackedBlobHashes = await this.getTrackedBlobHashes(sid);
-    const mergedBlobHashes = mergeBlobHashes(blobHashes, trackedBlobHashes);
     const db = await this.db();
 
-    await runTransaction(db, "sessions", "readwrite", (store) => {
-      return requestToPromise(store.delete(sid));
-    });
-    await runTransaction(db, "indexes", "readwrite", (store) => {
-      return requestToPromise(store.delete(sid));
-    });
-    await runTransaction(db, "integrity", "readwrite", (store) => {
-      return requestToPromise(store.delete(sid));
-    });
-    await this.deleteChunksBySid(sid);
-    await this.deleteTrackedBlobHashes(sid);
+    await runMultiStoreTransaction(
+      db,
+      ["sessions", "chunks", "blobs", "blobRefs", "indexes", "integrity"],
+      "readwrite",
+      async (transaction) => {
+        const sessionsStore = transaction.objectStore("sessions");
+        const chunksStore = transaction.objectStore("chunks");
+        const blobsStore = transaction.objectStore("blobs");
+        const blobRefsStore = transaction.objectStore("blobRefs");
+        const indexesStore = transaction.objectStore("indexes");
+        const integrityStore = transaction.objectStore("integrity");
+        const [session, trackedRefs, chunks] = await Promise.all([
+          requestToPromise<SessionRow | undefined>(sessionsStore.get(sid)),
+          requestToPromise<BlobRefsRow | undefined>(blobRefsStore.get(sid)),
+          deleteChunksBySidInTransaction(chunksStore, sid)
+        ]);
+        const inferredBlobHashes = collectBlobHashesFromChunks(chunks);
+        const ownedBlobHashes = trackedRefs
+          ? normalizeBlobHashes(trackedRefs.value)
+          : session || chunks.length > 0
+            ? mergeBlobHashes(blobHashes, [...inferredBlobHashes])
+            : [];
 
-    for (const hash of mergedBlobHashes) {
-      await this.decrementOrDeleteBlob(hash);
-    }
+        const storedBlobs = await Promise.all(
+          ownedBlobHashes.map((hash) => requestToPromise<BlobRow | undefined>(blobsStore.get(hash)))
+        );
+
+        for (let index = 0; index < ownedBlobHashes.length; index += 1) {
+          const hash = ownedBlobHashes[index];
+          const storedBlob = storedBlobs[index];
+
+          if (!hash || !storedBlob) {
+            continue;
+          }
+
+          if (storedBlob.value.refCount <= 1) {
+            blobsStore.delete(hash);
+          } else {
+            blobsStore.put({
+              key: hash,
+              value: {
+                ...storedBlob.value,
+                refCount: storedBlob.value.refCount - 1
+              }
+            } satisfies BlobRow);
+          }
+        }
+
+        sessionsStore.delete(sid);
+        indexesStore.delete(sid);
+        integrityStore.delete(sid);
+        blobRefsStore.delete(sid);
+      }
+    );
   }
 
   private chunkKey(sid: string, chunkId: string): string {
@@ -906,13 +990,8 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       return null;
     }
 
-    await this.deleteSessionWithBlobCleanup(oldest.sid);
+    await this.deleteSession(oldest.sid);
     return oldest.sid;
-  }
-
-  private async deleteSessionWithBlobCleanup(sid: string): Promise<void> {
-    const blobHashes = await this.resolveBlobHashesForSession(sid);
-    await this.deleteSession(sid, blobHashes);
   }
 
   private open(): Promise<IDBDatabase> {
@@ -958,111 +1037,6 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
         reject(request.error ?? new Error("Failed to open IndexedDB"));
       };
     });
-  }
-
-  private async deleteChunksBySid(sid: string): Promise<void> {
-    const db = await this.db();
-
-    await runTransaction(db, "chunks", "readwrite", (store) => {
-      if (store.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
-        const index = store.index(CHUNKS_BY_SID_SEQ_INDEX);
-        const range = IDBKeyRange.bound([sid, 0], [sid, Number.MAX_SAFE_INTEGER]);
-        return deleteByCursor(index.openCursor(range));
-      }
-
-      return requestToPromise<ChunkRow[]>(store.getAll()).then(async (rows) => {
-        for (const row of rows) {
-          if (row.value.sid !== sid) {
-            continue;
-          }
-
-          await requestToPromise(store.delete(row.key));
-        }
-      });
-    });
-  }
-
-  private async resolveBlobHashesForSession(sid: string): Promise<string[]> {
-    const tracked = await this.getTrackedBlobHashes(sid);
-
-    if (tracked.length > 0) {
-      return tracked;
-    }
-
-    const chunks = await this.listChunks(sid);
-    return [...collectBlobHashesFromChunks(chunks)];
-  }
-
-  private async trackBlobHashForSession(sid: string, hash: string): Promise<void> {
-    if (!SHA256_HEX_PATTERN.test(hash)) {
-      return;
-    }
-
-    const existing = await this.get<BlobRefsRow>("blobRefs", sid);
-    const next = mergeBlobHashes(existing?.value ?? [], [hash]);
-
-    await this.put<BlobRefsRow>(
-      "blobRefs",
-      {
-        key: sid,
-        value: next
-      },
-      {
-        allowQuotaRecovery: true,
-        protectedSid: sid
-      }
-    );
-  }
-
-  private async getTrackedBlobHashes(sid: string): Promise<string[]> {
-    const row = await this.get<BlobRefsRow>("blobRefs", sid);
-    return normalizeBlobHashes(row?.value ?? []);
-  }
-
-  private async hasTrackedBlobHashForSession(sid: string, hash: string): Promise<boolean> {
-    if (!SHA256_HEX_PATTERN.test(hash)) {
-      return false;
-    }
-
-    const tracked = await this.getTrackedBlobHashes(sid);
-    return tracked.includes(hash);
-  }
-
-  private async deleteTrackedBlobHashes(sid: string): Promise<void> {
-    const db = await this.db();
-    await runTransaction(db, "blobRefs", "readwrite", (store) => {
-      return requestToPromise(store.delete(sid));
-    });
-  }
-
-  private async decrementOrDeleteBlob(hash: string): Promise<void> {
-    const existing = await this.getBlob(hash);
-
-    if (!existing) {
-      return;
-    }
-
-    if (existing.refCount <= 1) {
-      const db = await this.db();
-      await runTransaction(db, "blobs", "readwrite", (store) => {
-        return requestToPromise(store.delete(hash));
-      });
-      return;
-    }
-
-    await this.put<BlobRow>(
-      "blobs",
-      {
-        key: hash,
-        value: {
-          ...existing,
-          refCount: existing.refCount - 1
-        }
-      },
-      {
-        allowQuotaRecovery: false
-      }
-    );
   }
 }
 
@@ -1332,6 +1306,42 @@ async function runTransaction<TResult>(
   return result;
 }
 
+async function runMultiStoreTransaction<TResult>(
+  db: IDBDatabase,
+  storeNames: string[],
+  mode: IDBTransactionMode,
+  handler: (transaction: IDBTransaction) => TResult | Promise<TResult>
+): Promise<TResult> {
+  const transaction = db.transaction(storeNames, mode);
+  const completion = new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+  });
+
+  // Attach a rejection handler immediately. The handler can await IndexedDB requests while the
+  // transaction aborts independently, and leaving `completion` temporarily unobserved would
+  // otherwise surface an unhandled rejection.
+  void completion.catch(() => undefined);
+
+  try {
+    const result = await handler(transaction);
+    await completion;
+    return result;
+  } catch (error) {
+    try {
+      transaction.abort();
+    } catch {
+      // The transaction may already have committed or aborted because of a request failure.
+    }
+
+    await completion.catch(() => undefined);
+    throw error;
+  }
+}
+
 function requestToPromise<TResult>(request: IDBRequest<TResult>): Promise<TResult> {
   return new Promise<TResult>((resolve, reject) => {
     request.onsuccess = () => {
@@ -1344,8 +1354,34 @@ function requestToPromise<TResult>(request: IDBRequest<TResult>): Promise<TResul
   });
 }
 
-function deleteByCursor(request: IDBRequest<IDBCursorWithValue | null>): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+function deleteChunksBySidInTransaction(
+  store: IDBObjectStore,
+  sid: string
+): Promise<StoredChunk[]> {
+  if (!store.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
+    return requestToPromise<ChunkRow[]>(store.getAll()).then((rows) => {
+      const chunks: StoredChunk[] = [];
+
+      for (const row of rows) {
+        if (row.value.sid !== sid) {
+          continue;
+        }
+
+        chunks.push(row.value);
+        store.delete(row.key);
+      }
+
+      return chunks;
+    });
+  }
+
+  const index = store.index(CHUNKS_BY_SID_SEQ_INDEX);
+  const range = IDBKeyRange.bound([sid, 0], [sid, Number.MAX_SAFE_INTEGER]);
+  const request = index.openCursor(range);
+
+  return new Promise<StoredChunk[]>((resolve, reject) => {
+    const chunks: StoredChunk[] = [];
+
     request.onerror = () => {
       reject(request.error ?? new Error("IndexedDB cursor iteration failed"));
     };
@@ -1354,10 +1390,12 @@ function deleteByCursor(request: IDBRequest<IDBCursorWithValue | null>): Promise
       const cursor = request.result;
 
       if (!cursor) {
-        resolve();
+        resolve(chunks);
         return;
       }
 
+      const row = cursor.value as ChunkRow;
+      chunks.push(row.value);
       cursor.delete();
       cursor.continue();
     };

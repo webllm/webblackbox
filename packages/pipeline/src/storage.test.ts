@@ -277,6 +277,154 @@ describe("storage", () => {
     await expect(storage.listBlobs()).resolves.toEqual([]);
   });
 
+  it("serializes concurrent indexeddb blob refs exactly once across connections", async () => {
+    const databaseName = createDbName();
+    const first = new IndexedDbPipelineStorage(databaseName);
+    const second = new IndexedDbPipelineStorage(databaseName);
+    const sidA = "S-concurrent-blob-A";
+    const sidB = "S-concurrent-blob-B";
+    const hash = "7".repeat(64);
+    const blob = createBlob(hash, Uint8Array.from([7, 7, 7]));
+
+    await Promise.all([first.assertReady(), second.assertReady()]);
+    await Promise.all([
+      first.putSession({ ...SESSION_A, sid: sidA }),
+      second.putSession({ ...SESSION_B, sid: sidB })
+    ]);
+
+    await Promise.all(
+      Array.from({ length: 24 }, (_, index) =>
+        (index % 2 === 0 ? first : second).putBlob(blob, sidA)
+      )
+    );
+    expect((await first.getBlob(hash))?.refCount).toBe(1);
+
+    await Promise.all(
+      Array.from({ length: 24 }, (_, index) =>
+        (index % 2 === 0 ? second : first).putBlob(blob, sidB)
+      )
+    );
+    expect((await second.getBlob(hash))?.refCount).toBe(2);
+
+    await Promise.all([first.deleteSession(sidA), second.deleteSession(sidA)]);
+    expect((await first.getBlob(hash))?.refCount).toBe(1);
+
+    await second.deleteSession(sidB);
+    expect(await first.getBlob(hash)).toBeUndefined();
+  });
+
+  it("does not reattach blob refs while or after their indexeddb session is deleted", async () => {
+    const databaseName = createDbName();
+    const first = new IndexedDbPipelineStorage(databaseName);
+    const second = new IndexedDbPipelineStorage(databaseName);
+    const sid = "S-concurrent-delete";
+    const firstHash = "8".repeat(64);
+    const racingHash = "9".repeat(64);
+
+    await Promise.all([first.assertReady(), second.assertReady()]);
+    await first.putSession({ ...SESSION_A, sid });
+    await first.putBlob(createBlob(firstHash, Uint8Array.from([1])), sid);
+
+    await Promise.allSettled([
+      first.deleteSession(sid),
+      second.putBlob(createBlob(racingHash, Uint8Array.from([2])), sid)
+    ]);
+
+    expect(await first.getSession(sid)).toBeUndefined();
+    expect(await first.getBlob(firstHash)).toBeUndefined();
+    expect(await first.getBlob(racingHash)).toBeUndefined();
+    await expect(
+      second.putBlob(createBlob("a".repeat(64), Uint8Array.from([3])), sid)
+    ).rejects.toThrow(/missing session/i);
+    await expect(first.listBlobs()).resolves.toEqual([]);
+  });
+
+  it("rolls back the blob row when an indexeddb blob-ref write fails", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const sid = "S-put-rollback";
+    const hash = "4".repeat(64);
+    const blob = createBlob(hash, Uint8Array.from([4, 4]));
+    const originalPut = IDBObjectStore.prototype.put;
+
+    await storage.putSession({ ...SESSION_A, sid });
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey
+    ): IDBRequest<IDBValidKey> {
+      if (this.name === "blobRefs") {
+        throw new Error("simulated blobRefs write failure");
+      }
+
+      return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+    });
+
+    try {
+      await expect(storage.putBlob(blob, sid)).rejects.toThrow(/simulated blobRefs/i);
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    expect(await storage.getBlob(hash)).toBeUndefined();
+    await storage.putBlob(blob, sid);
+    expect((await storage.getBlob(hash))?.refCount).toBe(1);
+    await storage.deleteSession(sid);
+    expect(await storage.getBlob(hash)).toBeUndefined();
+  });
+
+  it("rolls back every indexeddb session store when atomic deletion fails", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const sid = "S-delete-rollback";
+    const hash = "5".repeat(64);
+    const chunk = createChunk(sid, "C-rollback", 1, "rollback-event");
+    const indexes = {
+      time: [chunkMeta("C-rollback", 1)],
+      request: [],
+      inverted: []
+    };
+    const integrity = {
+      manifestSha256: "6".repeat(64),
+      files: {}
+    };
+
+    await storage.putSession({ ...SESSION_A, sid });
+    await storage.putChunk(chunk);
+    await storage.putBlob(createBlob(hash, Uint8Array.from([5, 5])), sid);
+    await storage.putIndexes(sid, indexes);
+    await storage.putIntegrity(sid, integrity);
+
+    const originalDelete = IDBObjectStore.prototype.delete;
+    const deleteSpy = vi.spyOn(IDBObjectStore.prototype, "delete").mockImplementation(function (
+      this: IDBObjectStore,
+      query: IDBValidKey | IDBKeyRange
+    ): IDBRequest<undefined> {
+      if (this.name === "integrity") {
+        throw new Error("simulated integrity delete failure");
+      }
+
+      return originalDelete.call(this, query);
+    });
+
+    try {
+      await expect(storage.deleteSession(sid)).rejects.toThrow(/simulated integrity/i);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+
+    expect(await storage.getSession(sid)).toEqual(expect.objectContaining({ sid }));
+    expect(await storage.getChunk(sid, "C-rollback")).toEqual(chunk);
+    expect(await storage.getBlob(hash)).toEqual(expect.objectContaining({ refCount: 1 }));
+    expect(await storage.getIndexes(sid)).toEqual(indexes);
+    expect(await storage.getIntegrity(sid)).toEqual(integrity);
+
+    await storage.deleteSession(sid);
+    expect(await storage.getSession(sid)).toBeUndefined();
+    expect(await storage.getChunk(sid, "C-rollback")).toBeUndefined();
+    expect(await storage.getBlob(hash)).toBeUndefined();
+    expect((await storage.getIndexes(sid)).time).toEqual([]);
+    expect(await storage.getIntegrity(sid)).toBeUndefined();
+  });
+
   it("supports legacy indexeddb layouts where chunks store has no sid/seq index", async () => {
     const sid = "S-legacy-layout";
     const dbName = createDbName();
@@ -353,6 +501,44 @@ describe("storage", () => {
     warnSpy.mockRestore();
   });
 
+  it("retains quota recovery for atomic indexeddb blob writes", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const protectedSid = "S-quota-protected";
+    const hash = "3".repeat(64);
+    const originalPut = IDBObjectStore.prototype.put;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let injectQuotaFailure = true;
+
+    await storage.putSession({ ...SESSION_A, sid: "S-quota-oldest", startedAt: 1 });
+    await storage.putSession({ ...SESSION_B, sid: protectedSid, startedAt: 2 });
+
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey
+    ): IDBRequest<IDBValidKey> {
+      if (this.name === "blobs" && injectQuotaFailure) {
+        injectQuotaFailure = false;
+        throw new DOMException("simulated quota pressure", "QuotaExceededError");
+      }
+
+      return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+    });
+
+    try {
+      await storage.putBlob(createBlob(hash, Uint8Array.from([3, 3])), protectedSid);
+    } finally {
+      putSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+
+    expect(await storage.getSession("S-quota-oldest")).toBeUndefined();
+    expect(await storage.getSession(protectedSid)).toEqual(
+      expect.objectContaining({ sid: protectedSid })
+    );
+    expect(await storage.getBlob(hash)).toEqual(expect.objectContaining({ refCount: 1 }));
+  });
+
   it("fails fast when indexeddb runtime is unavailable", async () => {
     const originalIndexedDb = (globalThis as unknown as { indexedDB?: IDBFactory }).indexedDB;
 
@@ -424,6 +610,7 @@ describe("storage", () => {
     expect(firstManagedKey.created).toBe(true);
     expect(firstManagedKey.key.extractable).toBe(false);
     await firstStorage.assertReady();
+    await firstStorage.putSession({ ...SESSION_A, sid });
     await firstStorage.putChunk(createChunk(sid, "C-secret", 1, `${eventSecret}\n`));
     await firstStorage.putBlob(createBlob(hash, new TextEncoder().encode(blobSecret)), sid);
 
