@@ -62,6 +62,21 @@ describe("body-capture utils", () => {
     expect(rule.mimeAllowlist).toEqual(["application/json"]);
   });
 
+  it("disables full-mode body capture when the response MIME type is missing", () => {
+    const rule = resolveFullBodyCaptureRule(
+      {
+        sampling: {
+          bodyCaptureMaxBytes: 64 * 1024
+        },
+        sitePolicies: []
+      },
+      "https://api.example.com/v1/search",
+      undefined
+    );
+
+    expect(rule.enabled).toBe(false);
+  });
+
   it("keeps lite-mode default capture rule enabled for unmatched policies", () => {
     const rule = resolveLiteBodyCaptureRule(
       {

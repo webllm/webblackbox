@@ -170,7 +170,7 @@ export function wildcardMatch(value: string, pattern: string): boolean {
 
 export function isMimeAllowed(allowlist: string[], mimeType: string | undefined): boolean {
   if (!mimeType) {
-    return true;
+    return false;
   }
 
   const normalizedMime = mimeType.toLowerCase();
