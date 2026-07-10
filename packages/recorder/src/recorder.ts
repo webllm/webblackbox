@@ -16,6 +16,7 @@ import type { RecorderPlugin, RecorderPluginContext } from "./plugins.js";
 import { redactPayload } from "./redaction.js";
 import { EventRingBuffer } from "./ring-buffer.js";
 import type { EventNormalizer, RawRecorderEvent, RecorderIngestResult } from "./types.js";
+import { normalizeWebSocketFramePayload } from "./websocket-frame.js";
 
 const NON_TEXT_KEYBOARD_KEYS = new Set([
   "Alt",
@@ -118,15 +119,23 @@ export class WebBlackboxRecorder {
       return {};
     }
 
-    const redactedPayload = redactPayload(normalized.payload, this.config.redaction);
+    const policyBoundPayload =
+      normalized.eventType === "network.ws.frame"
+        ? normalizeWebSocketFramePayload(
+            nextRawEvent.rawType,
+            normalized.payload,
+            this.config.capturePolicy?.categories.network
+          )
+        : normalized.payload;
+    const redactedPayload = redactPayload(policyBoundPayload, this.config.redaction);
     const privacy = classifyPrivacy(
       normalized.eventType,
-      normalized.payload,
+      policyBoundPayload,
       this.config.capturePolicy
     );
     const violation = evaluateCapturePolicy(
       normalized.eventType,
-      normalized.payload,
+      policyBoundPayload,
       privacy,
       this.config.capturePolicy
     );

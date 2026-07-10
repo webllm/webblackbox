@@ -24,6 +24,7 @@ import {
 } from "@webblackbox/protocol";
 import {
   createDefaultRecorderPlugins,
+  normalizeWebSocketFramePayload,
   type RawRecorderEvent,
   WebBlackboxRecorder
 } from "@webblackbox/recorder";
@@ -2493,7 +2494,11 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
     router = createCdpRouter(createChromeDebuggerTransport());
 
     const unsubscribeEvent = router.onEvent((event) => {
-      const normalizedPayload = normalizeFullModePayload(event.method, event.params ?? {});
+      const normalizedPayload = normalizeFullModePayload(
+        event.method,
+        event.params ?? {},
+        runtime.config.capturePolicy?.categories.network
+      );
       const scopeEvaluation = evaluateCdpCaptureScopeEvent(
         runtime.cdpScope,
         event.method,
@@ -3881,7 +3886,11 @@ function normalizeMimeType(value: string | null): string | undefined {
   return normalizeMimeTypeUtil(value);
 }
 
-function normalizeFullModePayload(method: string, params: unknown): unknown {
+function normalizeFullModePayload(
+  method: string,
+  params: unknown,
+  networkPolicy: CapturePolicy["categories"]["network"] | undefined
+): unknown {
   const payload = asRecord(params);
 
   if (!payload) {
@@ -3889,19 +3898,7 @@ function normalizeFullModePayload(method: string, params: unknown): unknown {
   }
 
   if (method === "Network.webSocketFrameReceived" || method === "Network.webSocketFrameSent") {
-    const response = asRecord(payload.response);
-    const rawData = typeof response?.payloadData === "string" ? response.payloadData : "";
-
-    return {
-      ...payload,
-      direction: method.endsWith("Sent") ? "sent" : "received",
-      frame: {
-        opcode: typeof response?.opcode === "number" ? response.opcode : undefined,
-        masked: response?.mask === true,
-        payloadLength: rawData.length,
-        payloadPreview: rawData.slice(0, 512)
-      }
-    };
+    return normalizeWebSocketFramePayload(method, payload, networkPolicy);
   }
 
   return payload;

@@ -6,3 +6,4 @@ export * from "./recorder.js";
 export * from "./redaction.js";
 export * from "./ring-buffer.js";
 export * from "./types.js";
+export * from "./websocket-frame.js";
