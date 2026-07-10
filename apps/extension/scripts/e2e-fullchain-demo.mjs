@@ -2263,11 +2263,13 @@ async function stopActiveSessionFromControl(control, expectedSid) {
             ? await chromeApi.storage.local.get('webblackbox.runtime.sessions')
             : {};
         const snapshot = store['webblackbox.runtime.sessions'];
-        const sessions = Array.isArray(snapshot)
-          ? snapshot
-          : Array.isArray(snapshot?.sessions)
-            ? snapshot.sessions
-            : [];
+        const sessions = (
+          Array.isArray(snapshot)
+            ? snapshot
+            : Array.isArray(snapshot?.sessions)
+              ? snapshot.sessions
+              : []
+        ).filter((row) => row?.state !== 'stopped');
         const expectedSid = ${JSON.stringify(expectedSid)};
         const active =
           (expectedSid
@@ -2339,11 +2341,13 @@ async function stopActiveSessionFromPopup(popupClient, useUiActions, expectedSid
     (async () => {
       const store = await chrome.storage.local.get('webblackbox.runtime.sessions');
       const snapshot = store['webblackbox.runtime.sessions'];
-      const sessions = Array.isArray(snapshot)
-        ? snapshot
-        : Array.isArray(snapshot?.sessions)
-          ? snapshot.sessions
-          : [];
+      const sessions = (
+        Array.isArray(snapshot)
+          ? snapshot
+          : Array.isArray(snapshot?.sessions)
+            ? snapshot.sessions
+            : []
+      ).filter((row) => row?.state !== 'stopped');
       const expectedSid = ${JSON.stringify(expectedSid)};
       const active =
         (expectedSid
@@ -2491,11 +2495,13 @@ async function readRuntimeSessions(control) {
 
       const store = await chromeApi.storage.local.get('webblackbox.runtime.sessions');
       const snapshot = store['webblackbox.runtime.sessions'];
-      return Array.isArray(snapshot)
-        ? snapshot
-        : Array.isArray(snapshot?.sessions)
-          ? snapshot.sessions
-          : [];
+      return (
+        Array.isArray(snapshot)
+          ? snapshot
+          : Array.isArray(snapshot?.sessions)
+            ? snapshot.sessions
+            : []
+      ).filter((row) => row?.state !== 'stopped');
     })()
   `;
 
