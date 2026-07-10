@@ -12,7 +12,10 @@ export type StoredChunk = {
   sid: string;
   meta: ChunkTimeIndexEntry;
   bytes: Uint8Array;
+  /** Legacy cumulative checkpoint retained for backwards-compatible reads. */
   resumeState?: PipelineResumeState;
+  /** Constant-size changes committed atomically with this chunk. */
+  resumeDelta?: PipelineResumeDelta;
 };
 
 export type RecorderSequenceWatermark = {
@@ -23,6 +26,12 @@ export type RecorderSequenceWatermark = {
 export type ScreenRecordingChunkReference = {
   index: number;
   hash: string;
+  size?: number;
+};
+
+type ScreenRecordingChunkCheckpoint = {
+  hash: string;
+  size?: number;
 };
 
 export type ScreenRecordingResumeState = {
@@ -33,6 +42,29 @@ export type ScreenRecordingResumeState = {
 export type PipelineResumeState = {
   sequenceWatermark: RecorderSequenceWatermark;
   screenRecordings: ScreenRecordingResumeState[];
+};
+
+export type ScreenRecordingResumeChange =
+  | {
+      operation: "put";
+      recordingId: string;
+      index: number;
+      hash: string;
+      size?: number;
+    }
+  | {
+      operation: "reset";
+      recordingId: string;
+    }
+  | {
+      operation: "delete";
+      recordingId: string;
+    };
+
+export type PipelineResumeDelta = {
+  version: 1;
+  sequenceWatermark: RecorderSequenceWatermark;
+  screenRecordingChanges: ScreenRecordingResumeChange[];
 };
 
 export type StoredBlob = {
@@ -67,6 +99,12 @@ export type PipelineStorage = {
   listChunks(sid: string): Promise<StoredChunk[]>;
   getLatestChunkMeta(sid: string): Promise<ChunkTimeIndexEntry | undefined>;
   getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined>;
+  getResumeState?(sid: string, chunkSequence?: number): Promise<PipelineResumeState | undefined>;
+  initializeResumeState?(
+    sid: string,
+    chunkSequence: number,
+    state: PipelineResumeState
+  ): Promise<void>;
   putBlob(blob: StoredBlob, sidHint?: string): Promise<void>;
   getBlob(hash: string): Promise<StoredBlob | undefined>;
   listBlobs(): Promise<StoredBlob[]>;
@@ -89,6 +127,8 @@ const STORAGE_ENCRYPTION_IV_BYTES = 12;
 const STORAGE_ENCRYPTION_KDF_ITERATIONS = 120_000;
 const STORAGE_KEYRING_VERSION = 1;
 const STORAGE_KEYRING_STORE = "keys";
+const PIPELINE_RESUME_MAX_RECORDINGS = 32;
+const PIPELINE_RESUME_MAX_SCREEN_CHUNKS = 500_000;
 
 export type PipelineStorageKeyOptions = {
   salt?: Uint8Array;
@@ -136,6 +176,15 @@ export class MemoryPipelineStorage implements PipelineStorage {
 
   private readonly blobRefs = new Map<string, Set<string>>();
 
+  private readonly resumeSequences = new Map<string, RecorderSequenceWatermark>();
+
+  private readonly resumeChunkSequences = new Map<string, number>();
+
+  private readonly resumeScreenRecordings = new Map<
+    string,
+    Map<string, Map<number, ScreenRecordingChunkCheckpoint>>
+  >();
+
   private readonly indexes = new Map<string, StoredIndexes>();
 
   private readonly integrity = new Map<string, HashesManifest>();
@@ -150,6 +199,37 @@ export class MemoryPipelineStorage implements PipelineStorage {
 
   public async putChunk(chunk: StoredChunk): Promise<void> {
     const existing = this.chunks.get(chunk.sid) ?? [];
+
+    if (isPipelineResumeDelta(chunk.resumeDelta)) {
+      const checkpointSequence = this.resumeChunkSequences.get(chunk.sid) ?? 0;
+
+      if (checkpointSequence >= chunk.meta.seq) {
+        const previous = existing.find((candidate) => candidate.meta.seq === chunk.meta.seq);
+
+        if (
+          checkpointSequence === chunk.meta.seq &&
+          previous &&
+          isSameChunkCommit(previous, chunk)
+        ) {
+          return;
+        }
+
+        throw new Error("Pipeline chunk sequence would conflict with durable resume state.");
+      }
+
+      const recordings = this.resumeScreenRecordings.get(chunk.sid) ?? new Map();
+      assertPipelineResumeChangesWithinLimits(recordings, chunk.resumeDelta.screenRecordingChanges);
+      existing.push(chunk);
+      this.chunks.set(chunk.sid, existing);
+      this.applyResumeDelta(chunk.sid, chunk.resumeDelta);
+      this.resumeChunkSequences.set(chunk.sid, chunk.meta.seq);
+      return;
+    }
+
+    if (this.resumeChunkSequences.has(chunk.sid)) {
+      throw new Error("Pipeline chunk is missing a resume delta after checkpoint initialization.");
+    }
+
     existing.push(chunk);
     this.chunks.set(chunk.sid, existing);
   }
@@ -175,6 +255,44 @@ export class MemoryPipelineStorage implements PipelineStorage {
   public async getChunk(sid: string, chunkId: string): Promise<StoredChunk | undefined> {
     const chunks = this.chunks.get(sid) ?? [];
     return chunks.find((chunk) => chunk.meta.chunkId === chunkId);
+  }
+
+  public async getResumeState(
+    sid: string,
+    chunkSequence?: number
+  ): Promise<PipelineResumeState | undefined> {
+    const sequenceWatermark = this.resumeSequences.get(sid);
+
+    if (
+      !sequenceWatermark ||
+      (chunkSequence !== undefined && this.resumeChunkSequences.get(sid) !== chunkSequence)
+    ) {
+      return undefined;
+    }
+
+    return createPipelineResumeState(
+      sequenceWatermark,
+      this.resumeScreenRecordings.get(sid) ?? new Map()
+    );
+  }
+
+  public async initializeResumeState(
+    sid: string,
+    chunkSequence: number,
+    state: PipelineResumeState
+  ): Promise<void> {
+    if (this.resumeSequences.has(sid)) {
+      return;
+    }
+
+    if (!Number.isSafeInteger(chunkSequence) || chunkSequence < 1) {
+      throw new Error("Pipeline resume chunk sequence must be a positive safe integer.");
+    }
+
+    const normalized = requirePipelineResumeState(state);
+    this.resumeSequences.set(sid, { ...normalized.sequenceWatermark });
+    this.resumeChunkSequences.set(sid, chunkSequence);
+    this.resumeScreenRecordings.set(sid, screenRecordingMapFromState(normalized));
   }
 
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
@@ -228,6 +346,9 @@ export class MemoryPipelineStorage implements PipelineStorage {
     this.sessions.delete(sid);
     this.chunks.delete(sid);
     this.blobRefs.delete(sid);
+    this.resumeSequences.delete(sid);
+    this.resumeChunkSequences.delete(sid);
+    this.resumeScreenRecordings.delete(sid);
     this.indexes.delete(sid);
     this.integrity.delete(sid);
 
@@ -268,6 +389,14 @@ export class MemoryPipelineStorage implements PipelineStorage {
 
   private getTrackedBlobHashes(sid: string): string[] {
     return [...(this.blobRefs.get(sid) ?? new Set<string>())];
+  }
+
+  private applyResumeDelta(sid: string, delta: PipelineResumeDelta): void {
+    this.resumeSequences.set(sid, { ...delta.sequenceWatermark });
+    const recordings = this.resumeScreenRecordings.get(sid) ?? new Map();
+
+    applyScreenRecordingChanges(recordings, delta.screenRecordingChanges);
+    this.resumeScreenRecordings.set(sid, recordings);
   }
 }
 
@@ -473,6 +602,21 @@ export class EncryptedPipelineStorage implements PipelineStorage {
     };
   }
 
+  public async getResumeState(
+    sid: string,
+    chunkSequence?: number
+  ): Promise<PipelineResumeState | undefined> {
+    return this.storage.getResumeState?.(sid, chunkSequence);
+  }
+
+  public async initializeResumeState(
+    sid: string,
+    chunkSequence: number,
+    state: PipelineResumeState
+  ): Promise<void> {
+    await this.storage.initializeResumeState?.(sid, chunkSequence, state);
+  }
+
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     await this.storage.putBlob(
       {
@@ -600,13 +744,36 @@ type ChunkRow = {
   value: StoredChunk;
 };
 type BlobRow = DbRow<StoredBlob>;
-type BlobRefsRow = DbRow<string[]>;
+type LegacyBlobRefsRow = DbRow<string[]>;
+type BlobRefRow = {
+  key: string;
+  sid: string;
+  hash: string;
+};
 type SessionRow = DbRow<SessionMetadata>;
 type IndexRow = DbRow<StoredIndexes>;
 type IntegrityRow = DbRow<HashesManifest>;
+type ResumeMetaRow = {
+  key: string;
+  chunkSequence: number;
+  recordingIds: string[];
+  screenRecordingChunkCount: number;
+  value: RecorderSequenceWatermark;
+};
+type ResumeRefRow = {
+  key: string;
+  sid: string;
+  recordingId: string;
+  index: number;
+  hash: string;
+  size?: number;
+};
 
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const CHUNKS_BY_SID_SEQ_INDEX = "by-sid-seq";
+const BLOB_REFS_BY_SID_INDEX = "by-sid";
+const RESUME_REFS_BY_SID_INDEX = "by-sid";
+const RESUME_REFS_BY_SID_RECORDING_INDEX = "by-sid-recording";
 
 export class IndexedDbPipelineStorage implements PipelineStorage {
   public readonly [PIPELINE_STORAGE_SECURITY] = Object.freeze({
@@ -642,19 +809,12 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
   }
 
   public async putChunk(chunk: StoredChunk): Promise<void> {
-    await this.put<ChunkRow>(
-      "chunks",
-      {
-        key: this.chunkKey(chunk.sid, chunk.meta.chunkId),
-        sid: chunk.sid,
-        seq: chunk.meta.seq,
-        value: chunk
-      },
-      {
-        allowQuotaRecovery: true,
-        protectedSid: chunk.sid
-      }
-    );
+    if (isPipelineResumeDelta(chunk.resumeDelta)) {
+      await this.putChunkWithResumeDelta(chunk, chunk.resumeDelta);
+      return;
+    }
+
+    await this.putLegacyChunk(chunk);
   }
 
   public async listChunks(sid: string): Promise<StoredChunk[]> {
@@ -707,6 +867,111 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     return row?.value;
   }
 
+  public async getResumeState(
+    sid: string,
+    chunkSequence?: number
+  ): Promise<PipelineResumeState | undefined> {
+    const db = await this.db();
+
+    return runMultiStoreTransaction(
+      db,
+      ["resumeMeta", "resumeRefs"],
+      "readonly",
+      async (transaction) => {
+        const [meta, refs] = await Promise.all([
+          requestToPromise<ResumeMetaRow | undefined>(
+            transaction.objectStore("resumeMeta").get(sid)
+          ),
+          listResumeRefsBySid(transaction.objectStore("resumeRefs"), sid)
+        ]);
+
+        if (!meta || (chunkSequence !== undefined && meta.chunkSequence !== chunkSequence)) {
+          return undefined;
+        }
+
+        if (
+          !Number.isSafeInteger(meta.screenRecordingChunkCount) ||
+          meta.screenRecordingChunkCount < 0 ||
+          meta.screenRecordingChunkCount > PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
+          meta.screenRecordingChunkCount !== refs.length
+        ) {
+          throw new Error("IndexedDB pipeline resume reference count is inconsistent.");
+        }
+
+        const recordings = new Map<string, Map<number, ScreenRecordingChunkCheckpoint>>(
+          requireResumeRecordingIds(meta.recordingIds).map((recordingId) => [
+            recordingId,
+            new Map<number, ScreenRecordingChunkCheckpoint>()
+          ])
+        );
+
+        for (const ref of refs) {
+          if (!recordings.has(ref.recordingId)) {
+            throw new Error("Pipeline resume reference is missing its recording marker.");
+          }
+
+          const chunks =
+            recordings.get(ref.recordingId) ?? new Map<number, ScreenRecordingChunkCheckpoint>();
+          chunks.set(ref.index, {
+            hash: ref.hash,
+            ...(ref.size === undefined ? {} : { size: ref.size })
+          });
+          recordings.set(ref.recordingId, chunks);
+        }
+
+        return requirePipelineResumeState(createPipelineResumeState(meta.value, recordings));
+      }
+    );
+  }
+
+  public async initializeResumeState(
+    sid: string,
+    chunkSequence: number,
+    state: PipelineResumeState
+  ): Promise<void> {
+    const normalized = requirePipelineResumeState(state);
+
+    if (!Number.isSafeInteger(chunkSequence) || chunkSequence < 1) {
+      throw new Error("Pipeline resume chunk sequence must be a positive safe integer.");
+    }
+
+    const db = await this.db();
+
+    await runMultiStoreTransaction(
+      db,
+      ["resumeMeta", "resumeRefs"],
+      "readwrite",
+      async (transaction) => {
+        const metaStore = transaction.objectStore("resumeMeta");
+        const existing = await requestToPromise<ResumeMetaRow | undefined>(metaStore.get(sid));
+
+        if (existing) {
+          return;
+        }
+
+        metaStore.put({
+          key: sid,
+          chunkSequence,
+          recordingIds: normalized.screenRecordings.map((recording) => recording.recordingId),
+          screenRecordingChunkCount: normalized.screenRecordings.reduce(
+            (count, recording) => count + recording.chunks.length,
+            0
+          ),
+          value: { ...normalized.sequenceWatermark }
+        } satisfies ResumeMetaRow);
+        const refsStore = transaction.objectStore("resumeRefs");
+
+        for (const recording of normalized.screenRecordings) {
+          for (const chunk of recording.chunks) {
+            refsStore.put(
+              createResumeRefRow(sid, recording.recordingId, chunk.index, chunk.hash, chunk.size)
+            );
+          }
+        }
+      }
+    );
+  }
+
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     const trackingSid = normalizeTrackingSid(sidHint);
 
@@ -745,12 +1010,14 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
               return;
             }
 
-            const [session, existingBlob, existingRefs] = await Promise.all([
+            const blobRefKey = createBlobRefKey(trackingSid, blob.hash);
+            const [session, existingBlob, legacyRefs, existingRef] = await Promise.all([
               requestToPromise<SessionRow | undefined>(
                 transaction.objectStore("sessions").get(trackingSid)
               ),
               existingBlobRequest,
-              requestToPromise<BlobRefsRow | undefined>(blobRefsStore.get(trackingSid))
+              requestToPromise<LegacyBlobRefsRow | undefined>(blobRefsStore.get(trackingSid)),
+              requestToPromise<BlobRefRow | undefined>(blobRefsStore.get(blobRefKey))
             ]);
 
             if (!session) {
@@ -759,9 +1026,31 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
               );
             }
 
-            const trackedHashes = normalizeBlobHashes(existingRefs?.value ?? []);
+            const trackedHashes = normalizeBlobHashes(legacyRefs?.value ?? []);
 
-            if (trackedHashes.includes(blob.hash)) {
+            if (legacyRefs) {
+              for (const trackedHash of trackedHashes) {
+                blobRefsStore.put({
+                  key: createBlobRefKey(trackingSid, trackedHash),
+                  sid: trackingSid,
+                  hash: trackedHash
+                } satisfies BlobRefRow);
+              }
+
+              blobRefsStore.delete(trackingSid);
+            }
+
+            if (existingRef || trackedHashes.includes(blob.hash)) {
+              if (!existingBlob) {
+                blobsStore.put({
+                  key: blob.hash,
+                  value: {
+                    ...blob,
+                    refCount: 1
+                  }
+                } satisfies BlobRow);
+              }
+
               return;
             }
 
@@ -778,9 +1067,10 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
                   }
             } satisfies BlobRow);
             blobRefsStore.put({
-              key: trackingSid,
-              value: [...trackedHashes, blob.hash]
-            } satisfies BlobRefsRow);
+              key: blobRefKey,
+              sid: trackingSid,
+              hash: blob.hash
+            } satisfies BlobRefRow);
           }
         );
         return;
@@ -852,7 +1142,16 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
 
     await runMultiStoreTransaction(
       db,
-      ["sessions", "chunks", "blobs", "blobRefs", "indexes", "integrity"],
+      [
+        "sessions",
+        "chunks",
+        "blobs",
+        "blobRefs",
+        "indexes",
+        "integrity",
+        "resumeMeta",
+        "resumeRefs"
+      ],
       "readwrite",
       async (transaction) => {
         const sessionsStore = transaction.objectStore("sessions");
@@ -861,17 +1160,26 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
         const blobRefsStore = transaction.objectStore("blobRefs");
         const indexesStore = transaction.objectStore("indexes");
         const integrityStore = transaction.objectStore("integrity");
-        const [session, trackedRefs, chunks] = await Promise.all([
+        const resumeMetaStore = transaction.objectStore("resumeMeta");
+        const resumeRefsStore = transaction.objectStore("resumeRefs");
+        const [session, legacyRefs, normalizedRefs, chunks] = await Promise.all([
           requestToPromise<SessionRow | undefined>(sessionsStore.get(sid)),
-          requestToPromise<BlobRefsRow | undefined>(blobRefsStore.get(sid)),
-          deleteChunksBySidInTransaction(chunksStore, sid)
+          requestToPromise<LegacyBlobRefsRow | undefined>(blobRefsStore.get(sid)),
+          listBlobRefsBySid(blobRefsStore, sid),
+          deleteChunksBySidInTransaction(chunksStore, sid),
+          deleteResumeRefsBySid(resumeRefsStore, sid)
         ]);
         const inferredBlobHashes = collectBlobHashesFromChunks(chunks);
-        const ownedBlobHashes = trackedRefs
-          ? normalizeBlobHashes(trackedRefs.value)
-          : session || chunks.length > 0
-            ? mergeBlobHashes(blobHashes, [...inferredBlobHashes])
-            : [];
+        const trackedBlobHashes = mergeBlobHashes(
+          legacyRefs?.value ?? [],
+          normalizedRefs.map((row) => row.hash)
+        );
+        const ownedBlobHashes =
+          legacyRefs || normalizedRefs.length > 0
+            ? trackedBlobHashes
+            : session || chunks.length > 0
+              ? mergeBlobHashes(blobHashes, [...inferredBlobHashes])
+              : [];
 
         const storedBlobs = await Promise.all(
           ownedBlobHashes.map((hash) => requestToPromise<BlobRow | undefined>(blobsStore.get(hash)))
@@ -902,8 +1210,184 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
         indexesStore.delete(sid);
         integrityStore.delete(sid);
         blobRefsStore.delete(sid);
+        resumeMetaStore.delete(sid);
+
+        for (const ref of normalizedRefs) {
+          blobRefsStore.delete(ref.key);
+        }
       }
     );
+  }
+
+  private async putChunkWithResumeDelta(
+    chunk: StoredChunk,
+    delta: PipelineResumeDelta
+  ): Promise<void> {
+    let attempt = 0;
+
+    while (true) {
+      const db = await this.db();
+
+      try {
+        await runMultiStoreTransaction(
+          db,
+          ["chunks", "resumeMeta", "resumeRefs"],
+          "readwrite",
+          async (transaction) => {
+            const chunksStore = transaction.objectStore("chunks");
+            const metaStore = transaction.objectStore("resumeMeta");
+            const chunkKey = this.chunkKey(chunk.sid, chunk.meta.chunkId);
+            const [existingMeta, existingChunk] = await Promise.all([
+              requestToPromise<ResumeMetaRow | undefined>(metaStore.get(chunk.sid)),
+              requestToPromise<ChunkRow | undefined>(chunksStore.get(chunkKey))
+            ]);
+
+            if (
+              existingMeta &&
+              Number.isSafeInteger(existingMeta.chunkSequence) &&
+              existingMeta.chunkSequence >= chunk.meta.seq
+            ) {
+              if (
+                existingMeta.chunkSequence === chunk.meta.seq &&
+                existingChunk &&
+                isSameChunkCommit(existingChunk.value, chunk)
+              ) {
+                return;
+              }
+
+              throw new Error("Pipeline chunk sequence would conflict with durable resume state.");
+            }
+
+            if (existingChunk) {
+              throw new Error("Pipeline chunk id already exists without matching resume state.");
+            }
+
+            chunksStore.put({
+              key: chunkKey,
+              sid: chunk.sid,
+              seq: chunk.meta.seq,
+              value: chunk
+            } satisfies ChunkRow);
+
+            const refsStore = transaction.objectStore("resumeRefs");
+            const recordingIds = new Set(
+              existingMeta ? requireResumeRecordingIds(existingMeta.recordingIds) : []
+            );
+            let screenRecordingChunkCount = existingMeta
+              ? requireResumeChunkCount(existingMeta.screenRecordingChunkCount)
+              : 0;
+
+            for (const change of delta.screenRecordingChanges) {
+              if (change.operation === "put") {
+                recordingIds.add(change.recordingId);
+                const ref = createResumeRefRow(
+                  chunk.sid,
+                  change.recordingId,
+                  change.index,
+                  change.hash,
+                  change.size
+                );
+                const existingRef = await requestToPromise<ResumeRefRow | undefined>(
+                  refsStore.get(ref.key)
+                );
+                refsStore.put(ref);
+
+                if (!existingRef) {
+                  screenRecordingChunkCount += 1;
+                }
+              } else {
+                screenRecordingChunkCount -= await deleteResumeRefsByRecording(
+                  refsStore,
+                  chunk.sid,
+                  change.recordingId
+                );
+
+                if (change.operation === "reset") {
+                  recordingIds.add(change.recordingId);
+                } else {
+                  recordingIds.delete(change.recordingId);
+                }
+              }
+            }
+
+            if (recordingIds.size > PIPELINE_RESUME_MAX_RECORDINGS) {
+              throw new Error("Pipeline resume state has too many active screen recordings.");
+            }
+
+            if (
+              screenRecordingChunkCount < 0 ||
+              screenRecordingChunkCount > PIPELINE_RESUME_MAX_SCREEN_CHUNKS
+            ) {
+              throw new Error("Pipeline resume state has too many screen-recording chunks.");
+            }
+
+            metaStore.put({
+              key: chunk.sid,
+              chunkSequence: chunk.meta.seq,
+              recordingIds: [...recordingIds].sort((left, right) => left.localeCompare(right)),
+              screenRecordingChunkCount,
+              value: { ...delta.sequenceWatermark }
+            } satisfies ResumeMetaRow);
+          }
+        );
+        return;
+      } catch (error) {
+        if (!isQuotaExceededError(error) || attempt >= MAX_QUOTA_RECOVERY_ATTEMPTS) {
+          throw error;
+        }
+
+        attempt += 1;
+
+        if (!(await this.recoverQuotaPressure(chunk.sid))) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async putLegacyChunk(chunk: StoredChunk): Promise<void> {
+    let attempt = 0;
+
+    while (true) {
+      const db = await this.db();
+
+      try {
+        await runMultiStoreTransaction(
+          db,
+          ["chunks", "resumeMeta"],
+          "readwrite",
+          async (transaction) => {
+            const resumeMeta = await requestToPromise<ResumeMetaRow | undefined>(
+              transaction.objectStore("resumeMeta").get(chunk.sid)
+            );
+
+            if (resumeMeta) {
+              throw new Error(
+                "Pipeline chunk is missing a resume delta after checkpoint initialization."
+              );
+            }
+
+            transaction.objectStore("chunks").put({
+              key: this.chunkKey(chunk.sid, chunk.meta.chunkId),
+              sid: chunk.sid,
+              seq: chunk.meta.seq,
+              value: chunk
+            } satisfies ChunkRow);
+          }
+        );
+        return;
+      } catch (error) {
+        if (!isQuotaExceededError(error) || attempt >= MAX_QUOTA_RECOVERY_ATTEMPTS) {
+          throw error;
+        }
+
+        attempt += 1;
+
+        if (!(await this.recoverQuotaPressure(chunk.sid))) {
+          throw error;
+        }
+      }
+    }
   }
 
   private chunkKey(sid: string, chunkId: string): string {
@@ -1032,7 +1516,9 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
           "blobs",
           "blobRefs",
           "indexes",
-          "integrity"
+          "integrity",
+          "resumeMeta",
+          "resumeRefs"
         ]) {
           if (!db.objectStoreNames.contains(storeName)) {
             db.createObjectStore(storeName, { keyPath: "key" });
@@ -1044,6 +1530,27 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
 
         if (chunksStore && !chunksStore.indexNames.contains(CHUNKS_BY_SID_SEQ_INDEX)) {
           chunksStore.createIndex(CHUNKS_BY_SID_SEQ_INDEX, ["sid", "seq"], { unique: false });
+        }
+
+        const blobRefsStore = transaction?.objectStore("blobRefs");
+
+        if (blobRefsStore && !blobRefsStore.indexNames.contains(BLOB_REFS_BY_SID_INDEX)) {
+          blobRefsStore.createIndex(BLOB_REFS_BY_SID_INDEX, "sid", { unique: false });
+        }
+
+        const resumeRefsStore = transaction?.objectStore("resumeRefs");
+
+        if (resumeRefsStore && !resumeRefsStore.indexNames.contains(RESUME_REFS_BY_SID_INDEX)) {
+          resumeRefsStore.createIndex(RESUME_REFS_BY_SID_INDEX, "sid", { unique: false });
+        }
+
+        if (
+          resumeRefsStore &&
+          !resumeRefsStore.indexNames.contains(RESUME_REFS_BY_SID_RECORDING_INDEX)
+        ) {
+          resumeRefsStore.createIndex(RESUME_REFS_BY_SID_RECORDING_INDEX, ["sid", "recordingId"], {
+            unique: false
+          });
         }
       };
 
@@ -1059,6 +1566,456 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       };
     });
   }
+}
+
+export function isPipelineResumeDelta(value: unknown): value is PipelineResumeDelta {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  const sequence = asStorageRecord(record.sequenceWatermark);
+  const changes = record.screenRecordingChanges;
+
+  if (
+    Object.keys(record).length !== 3 ||
+    record.version !== 1 ||
+    !isRecorderSequenceWatermark(sequence) ||
+    !Array.isArray(changes) ||
+    changes.length > PIPELINE_RESUME_MAX_SCREEN_CHUNKS
+  ) {
+    return false;
+  }
+
+  return changes.every((candidate) => {
+    const change = asStorageRecord(candidate);
+
+    if (!change || !isValidRecordingId(change.recordingId)) {
+      return false;
+    }
+
+    if (change.operation === "delete" || change.operation === "reset") {
+      return Object.keys(change).length === 2;
+    }
+
+    const keys = Object.keys(change);
+    const hasValidSize =
+      change.size === undefined ||
+      (Number.isSafeInteger(change.size) && (change.size as number) >= 0);
+
+    return (
+      change.operation === "put" &&
+      (keys.length === 4 || keys.length === 5) &&
+      (keys.length !== 5 || change.size !== undefined) &&
+      hasValidSize &&
+      Number.isSafeInteger(change.index) &&
+      (change.index as number) >= 0 &&
+      (change.index as number) < PIPELINE_RESUME_MAX_SCREEN_CHUNKS &&
+      typeof change.hash === "string" &&
+      SHA256_HEX_PATTERN.test(change.hash)
+    );
+  });
+}
+
+export function assertPipelineResumeChangesWithinLimits(
+  recordings: ReadonlyMap<string, ReadonlyMap<number, unknown>>,
+  changes: readonly ScreenRecordingResumeChange[]
+): void {
+  const activeRecordingIds = new Set(recordings.keys());
+  let totalChunks = 0;
+
+  for (const chunks of recordings.values()) {
+    totalChunks += chunks.size;
+  }
+
+  if (
+    activeRecordingIds.size > PIPELINE_RESUME_MAX_RECORDINGS ||
+    totalChunks > PIPELINE_RESUME_MAX_SCREEN_CHUNKS
+  ) {
+    throw new Error("Pipeline resume state exceeds its resource limits.");
+  }
+
+  type Projection = {
+    active: boolean;
+    base: ReadonlyMap<number, unknown> | null;
+    additions: Set<number>;
+    count: number;
+  };
+  const projections = new Map<string, Projection>();
+  const resolveProjection = (recordingId: string): Projection => {
+    const existing = projections.get(recordingId);
+
+    if (existing) {
+      return existing;
+    }
+
+    const base = recordings.get(recordingId) ?? null;
+    const projection: Projection = {
+      active: base !== null,
+      base,
+      additions: new Set(),
+      count: base?.size ?? 0
+    };
+    projections.set(recordingId, projection);
+    return projection;
+  };
+
+  for (const change of changes) {
+    let projection = resolveProjection(change.recordingId);
+
+    if (change.operation === "reset") {
+      if (projection.active) {
+        totalChunks -= projection.count;
+      }
+
+      projection = {
+        active: true,
+        base: null,
+        additions: new Set(),
+        count: 0
+      };
+      projections.set(change.recordingId, projection);
+      activeRecordingIds.add(change.recordingId);
+    } else if (change.operation === "delete") {
+      if (projection.active) {
+        totalChunks -= projection.count;
+      }
+
+      projections.set(change.recordingId, {
+        active: false,
+        base: null,
+        additions: new Set(),
+        count: 0
+      });
+      activeRecordingIds.delete(change.recordingId);
+    } else {
+      if (!projection.active) {
+        projection = {
+          active: true,
+          base: null,
+          additions: new Set(),
+          count: 0
+        };
+        projections.set(change.recordingId, projection);
+        activeRecordingIds.add(change.recordingId);
+      }
+
+      if (!projection.base?.has(change.index) && !projection.additions.has(change.index)) {
+        projection.additions.add(change.index);
+        projection.count += 1;
+        totalChunks += 1;
+      }
+    }
+
+    if (activeRecordingIds.size > PIPELINE_RESUME_MAX_RECORDINGS) {
+      throw new Error("Pipeline resume state has too many active screen recordings.");
+    }
+
+    if (totalChunks > PIPELINE_RESUME_MAX_SCREEN_CHUNKS) {
+      throw new Error("Pipeline resume state has too many screen-recording chunks.");
+    }
+  }
+}
+
+export function isPipelineResumeState(value: unknown): value is PipelineResumeState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  const sequence = asStorageRecord(record.sequenceWatermark);
+
+  if (
+    Object.keys(record).length !== 2 ||
+    !isRecorderSequenceWatermark(sequence) ||
+    !Array.isArray(record.screenRecordings) ||
+    record.screenRecordings.length > PIPELINE_RESUME_MAX_RECORDINGS
+  ) {
+    return false;
+  }
+
+  const recordingIds = new Set<string>();
+  let totalChunks = 0;
+
+  for (const candidate of record.screenRecordings) {
+    const recording = asStorageRecord(candidate);
+
+    if (
+      !recording ||
+      Object.keys(recording).length !== 2 ||
+      !isValidRecordingId(recording.recordingId) ||
+      recordingIds.has(recording.recordingId as string) ||
+      !Array.isArray(recording.chunks)
+    ) {
+      return false;
+    }
+
+    recordingIds.add(recording.recordingId as string);
+    totalChunks += recording.chunks.length;
+
+    if (totalChunks > PIPELINE_RESUME_MAX_SCREEN_CHUNKS) {
+      return false;
+    }
+
+    const indexes = new Set<number>();
+
+    for (const candidateChunk of recording.chunks) {
+      const chunk = asStorageRecord(candidateChunk);
+      const chunkKeys = chunk ? Object.keys(chunk) : [];
+
+      if (
+        !chunk ||
+        (chunkKeys.length !== 2 && chunkKeys.length !== 3) ||
+        (chunkKeys.length === 3 && (!chunkKeys.includes("size") || chunk.size === undefined)) ||
+        !Number.isSafeInteger(chunk.index) ||
+        (chunk.index as number) < 0 ||
+        (chunk.index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
+        indexes.has(chunk.index as number) ||
+        typeof chunk.hash !== "string" ||
+        !SHA256_HEX_PATTERN.test(chunk.hash) ||
+        (chunk.size !== undefined &&
+          (!Number.isSafeInteger(chunk.size) || (chunk.size as number) < 0))
+      ) {
+        return false;
+      }
+
+      indexes.add(chunk.index as number);
+    }
+  }
+
+  return true;
+}
+
+function requirePipelineResumeState(state: PipelineResumeState): PipelineResumeState {
+  if (!isPipelineResumeState(state)) {
+    throw new Error("Invalid pipeline resume state.");
+  }
+
+  return state;
+}
+
+function isRecorderSequenceWatermark(
+  value: Record<string, unknown> | null
+): value is Record<"event" | "action", number> {
+  return Boolean(
+    value &&
+    Object.keys(value).length === 2 &&
+    Number.isSafeInteger(value.event) &&
+    (value.event as number) >= 0 &&
+    Number.isSafeInteger(value.action) &&
+    (value.action as number) >= 0
+  );
+}
+
+function isValidRecordingId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+function requireResumeRecordingIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > PIPELINE_RESUME_MAX_RECORDINGS) {
+    throw new Error("Invalid pipeline resume recording markers.");
+  }
+
+  const unique = new Set<string>();
+
+  for (const recordingId of value) {
+    if (!isValidRecordingId(recordingId) || unique.has(recordingId)) {
+      throw new Error("Invalid pipeline resume recording marker.");
+    }
+
+    unique.add(recordingId);
+  }
+
+  return [...unique];
+}
+
+function requireResumeChunkCount(value: unknown): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 0 ||
+    (value as number) > PIPELINE_RESUME_MAX_SCREEN_CHUNKS
+  ) {
+    throw new Error("Invalid pipeline resume screen-recording chunk count.");
+  }
+
+  return value as number;
+}
+
+function asStorageRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function screenRecordingMapFromState(
+  state: PipelineResumeState
+): Map<string, Map<number, ScreenRecordingChunkCheckpoint>> {
+  return new Map(
+    state.screenRecordings.map((recording) => [
+      recording.recordingId,
+      new Map(
+        recording.chunks.map((chunk) => [
+          chunk.index,
+          {
+            hash: chunk.hash,
+            ...(chunk.size === undefined ? {} : { size: chunk.size })
+          }
+        ])
+      )
+    ])
+  );
+}
+
+function createPipelineResumeState(
+  sequenceWatermark: RecorderSequenceWatermark,
+  recordings: Map<string, Map<number, ScreenRecordingChunkCheckpoint>>
+): PipelineResumeState {
+  return {
+    sequenceWatermark: { ...sequenceWatermark },
+    screenRecordings: [...recordings.entries()]
+      .map(([recordingId, chunks]) => ({
+        recordingId,
+        chunks: [...chunks.entries()]
+          .map(([index, checkpoint]) => ({ index, ...checkpoint }))
+          .sort((left, right) => left.index - right.index)
+      }))
+      .sort((left, right) => left.recordingId.localeCompare(right.recordingId))
+  };
+}
+
+function applyScreenRecordingChanges(
+  recordings: Map<string, Map<number, ScreenRecordingChunkCheckpoint>>,
+  changes: readonly ScreenRecordingResumeChange[]
+): void {
+  for (const change of changes) {
+    if (change.operation === "delete") {
+      recordings.delete(change.recordingId);
+      continue;
+    }
+
+    if (change.operation === "reset") {
+      recordings.set(change.recordingId, new Map());
+      continue;
+    }
+
+    const chunks =
+      recordings.get(change.recordingId) ?? new Map<number, ScreenRecordingChunkCheckpoint>();
+    chunks.set(change.index, {
+      hash: change.hash,
+      ...(change.size === undefined ? {} : { size: change.size })
+    });
+    recordings.set(change.recordingId, chunks);
+  }
+}
+
+function createBlobRefKey(sid: string, hash: string): string {
+  return JSON.stringify([sid, hash]);
+}
+
+function isSameChunkCommit(left: StoredChunk, right: StoredChunk): boolean {
+  return (
+    left.sid === right.sid &&
+    left.meta.chunkId === right.meta.chunkId &&
+    left.meta.seq === right.meta.seq &&
+    left.meta.tStart === right.meta.tStart &&
+    left.meta.tEnd === right.meta.tEnd &&
+    left.meta.monoStart === right.meta.monoStart &&
+    left.meta.monoEnd === right.meta.monoEnd &&
+    left.meta.eventCount === right.meta.eventCount &&
+    left.meta.byteLength === right.meta.byteLength &&
+    left.meta.codec === right.meta.codec &&
+    left.meta.sha256 === right.meta.sha256 &&
+    JSON.stringify(left.resumeDelta) === JSON.stringify(right.resumeDelta)
+  );
+}
+
+function createResumeRefRow(
+  sid: string,
+  recordingId: string,
+  index: number,
+  hash: string,
+  size?: number
+): ResumeRefRow {
+  return {
+    key: JSON.stringify([sid, recordingId, index]),
+    sid,
+    recordingId,
+    index,
+    hash,
+    ...(size === undefined ? {} : { size })
+  };
+}
+
+function listBlobRefsBySid(store: IDBObjectStore, sid: string): Promise<BlobRefRow[]> {
+  if (!store.indexNames.contains(BLOB_REFS_BY_SID_INDEX)) {
+    return requestToPromise<Array<BlobRefRow | LegacyBlobRefsRow>>(store.getAll()).then((rows) =>
+      rows.filter((row): row is BlobRefRow => "sid" in row && row.sid === sid)
+    );
+  }
+
+  return requestToPromise<BlobRefRow[]>(
+    store.index(BLOB_REFS_BY_SID_INDEX).getAll(IDBKeyRange.only(sid))
+  );
+}
+
+function listResumeRefsBySid(store: IDBObjectStore, sid: string): Promise<ResumeRefRow[]> {
+  if (!store.indexNames.contains(RESUME_REFS_BY_SID_INDEX)) {
+    return Promise.reject(new Error("IndexedDB resume-ref index is unavailable."));
+  }
+
+  return requestToPromise<ResumeRefRow[]>(
+    store
+      .index(RESUME_REFS_BY_SID_INDEX)
+      .getAll(IDBKeyRange.only(sid), PIPELINE_RESUME_MAX_SCREEN_CHUNKS + 1)
+  ).then((rows) => {
+    if (rows.length > PIPELINE_RESUME_MAX_SCREEN_CHUNKS) {
+      throw new Error("Pipeline resume state has too many screen-recording chunks.");
+    }
+
+    return rows;
+  });
+}
+
+function deleteResumeRefsBySid(store: IDBObjectStore, sid: string): Promise<number> {
+  const request = store.index(RESUME_REFS_BY_SID_INDEX).openCursor(IDBKeyRange.only(sid));
+
+  return deleteCursorRows(request, "IndexedDB resume-ref session deletion failed");
+}
+
+function deleteResumeRefsByRecording(
+  store: IDBObjectStore,
+  sid: string,
+  recordingId: string
+): Promise<number> {
+  const index = store.index(RESUME_REFS_BY_SID_RECORDING_INDEX);
+  const request = index.openCursor(IDBKeyRange.only([sid, recordingId]));
+
+  return deleteCursorRows(request, "IndexedDB resume-ref recording deletion failed");
+}
+
+function deleteCursorRows(
+  request: IDBRequest<IDBCursorWithValue | null>,
+  failureMessage: string
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    let deleted = 0;
+
+    request.onerror = () => {
+      reject(request.error ?? new Error(failureMessage));
+    };
+    request.onsuccess = () => {
+      const cursor = request.result;
+
+      if (!cursor) {
+        resolve(deleted);
+        return;
+      }
+
+      cursor.delete();
+      deleted += 1;
+      cursor.continue();
+    };
+  });
 }
 
 function isQuotaExceededError(error: unknown): boolean {

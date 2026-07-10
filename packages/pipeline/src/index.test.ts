@@ -9,7 +9,7 @@ import {
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { decodeChunkEvents } from "./codec.js";
+import { decodeChunkEvents, encodeChunkEvents } from "./codec.js";
 import { readWebBlackboxArchive } from "./exporter.js";
 import { FlightRecorderPipeline, type FlightRecorderPipelineOptions } from "./pipeline.js";
 import {
@@ -65,6 +65,16 @@ class FailOnceChunkStorage extends MemoryPipelineStorage {
     }
 
     await super.putChunk(chunk);
+  }
+}
+
+class CheckpointBlindStorage extends MemoryPipelineStorage {
+  public override async getResumeState(): Promise<undefined> {
+    return undefined;
+  }
+
+  public override async initializeResumeState(): Promise<void> {
+    // Simulates a compatible third-party storage implementation without normalized indexes.
   }
 }
 
@@ -287,7 +297,7 @@ describe("pipeline", () => {
 
     const chunks = await storage.listChunks(SESSION.sid);
     expect(chunks.map((chunk) => chunk.meta.seq)).toEqual([1, 2]);
-    expect(chunks[1]?.resumeState?.sequenceWatermark).toEqual({ event: 52, action: 7 });
+    expect(chunks[1]?.resumeDelta?.sequenceWatermark).toEqual({ event: 52, action: 7 });
     expect(archive.events.map((event) => event.id)).toEqual(["E-00000051", "E-00000052"]);
     expect(new Set(archive.events.map((event) => event.id)).size).toBe(archive.events.length);
   });
@@ -319,7 +329,7 @@ describe("pipeline", () => {
       screenRecordings: [
         {
           recordingId: "VR-pending",
-          chunks: [{ index: 0, hash }]
+          chunks: [{ index: 0, hash, size: 10 }]
         }
       ]
     });
@@ -361,6 +371,253 @@ describe("pipeline", () => {
         }
       ]
     });
+  });
+
+  it("stores constant-size resume deltas and prunes completed recording references", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-00000001", "screen.recording.start", 0, {
+        recordingId: "VR-bounded"
+      })
+    );
+    expect((await pipeline.getResumeState()).screenRecordings).toEqual([
+      { recordingId: "VR-bounded", chunks: [] }
+    ]);
+
+    for (let index = 0; index < 100; index += 1) {
+      await pipeline.ingest(
+        createEvent(`E-${String(index + 2).padStart(8, "0")}`, "screen.recording.chunk", index, {
+          recordingId: "VR-bounded",
+          chunkId: index.toString(16).padStart(64, "0"),
+          index
+        })
+      );
+    }
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const checkpointSizes = chunks.map((chunk) => JSON.stringify(chunk.resumeDelta).length);
+
+    expect(chunks).toHaveLength(101);
+    expect(chunks.every((chunk) => chunk.resumeState === undefined)).toBe(true);
+    expect(Math.max(...checkpointSizes)).toBeLessThan(300);
+    expect((await pipeline.getResumeState()).screenRecordings[0]?.chunks).toHaveLength(100);
+
+    await pipeline.ingest(
+      createEvent("E-00000102", "screen.recording.end", 101, {
+        recordingId: "VR-bounded"
+      })
+    );
+    expect((await pipeline.getResumeState()).screenRecordings).toEqual([]);
+    await pipeline.close();
+  });
+
+  it("rejects an over-limit live resume state before buffering the event", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 1_000_000
+    });
+
+    await pipeline.start();
+
+    for (let index = 0; index < 32; index += 1) {
+      await pipeline.ingest(
+        createEvent(`E-${String(index + 1).padStart(8, "0")}`, "screen.recording.start", index, {
+          recordingId: `VR-live-${index}`
+        })
+      );
+    }
+
+    await expect(
+      pipeline.ingest(
+        createEvent("E-00000033", "screen.recording.start", 33, {
+          recordingId: "VR-live-overflow"
+        })
+      )
+    ).rejects.toThrow(/too many active screen recordings/i);
+    expect((await pipeline.getResumeState()).screenRecordings).toHaveLength(32);
+    await pipeline.close();
+    expect((await storage.listChunks(SESSION.sid))[0]?.meta.eventCount).toBe(32);
+  });
+
+  it("rebuilds resume deltas for compatible storage without normalized indexes", async () => {
+    const storage = new CheckpointBlindStorage();
+    const first = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    const firstHash = "a".repeat(64);
+    const secondHash = "b".repeat(64);
+
+    await first.start();
+    await first.ingest(
+      createEvent("E-00000201", "screen.recording.chunk", 1, {
+        recordingId: "VR-compatible",
+        chunkId: firstHash,
+        index: 0
+      })
+    );
+    await first.ingest(
+      createEvent("E-00000202", "screen.recording.chunk", 2, {
+        recordingId: "VR-compatible",
+        chunkId: secondHash,
+        index: 1
+      })
+    );
+    await first.close();
+
+    const restored = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await restored.start();
+    expect(await restored.getResumeState()).toEqual({
+      sequenceWatermark: { event: 202, action: 0 },
+      screenRecordings: [
+        {
+          recordingId: "VR-compatible",
+          chunks: [
+            { index: 0, hash: firstHash },
+            { index: 1, hash: secondHash }
+          ]
+        }
+      ]
+    });
+    await restored.close();
+  });
+
+  it("applies recording lifecycle events while migrating a cumulative checkpoint", async () => {
+    const storage = new MemoryPipelineStorage();
+    const hash = "f".repeat(64);
+    const ended = createEvent("E-00000301", "screen.recording.end", 3, {
+      recordingId: "VR-legacy-ended"
+    });
+    const encoded = await encodeChunkEvents([ended], "none");
+
+    await storage.putSession(SESSION);
+    await storage.putChunk({
+      sid: SESSION.sid,
+      meta: {
+        chunkId: "C-00000001",
+        seq: 1,
+        tStart: ended.t,
+        tEnd: ended.t,
+        monoStart: ended.mono,
+        monoEnd: ended.mono,
+        eventCount: 1,
+        byteLength: encoded.bytes.byteLength,
+        codec: encoded.codec,
+        sha256: "0".repeat(64)
+      },
+      bytes: encoded.bytes,
+      resumeState: {
+        sequenceWatermark: { event: 301, action: 0 },
+        screenRecordings: [
+          {
+            recordingId: "VR-legacy-ended",
+            chunks: [{ index: 0, hash }]
+          }
+        ]
+      }
+    });
+
+    const restored = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await restored.start();
+    expect(await restored.getResumeState()).toEqual({
+      sequenceWatermark: { event: 301, action: 0 },
+      screenRecordings: []
+    });
+    await restored.close();
+  });
+
+  it("replays lifecycle events from legacy checkpoints before later deltas", async () => {
+    const storage = new CheckpointBlindStorage();
+    const hash = "e".repeat(64);
+    const ended = createEvent("E-00000311", "screen.recording.end", 3, {
+      recordingId: "VR-mixed-ended"
+    });
+    const encoded = await encodeChunkEvents([ended], "none");
+
+    await storage.putSession(SESSION);
+    await storage.putChunk({
+      sid: SESSION.sid,
+      meta: {
+        chunkId: "C-00000001",
+        seq: 1,
+        tStart: ended.t,
+        tEnd: ended.t,
+        monoStart: ended.mono,
+        monoEnd: ended.mono,
+        eventCount: 1,
+        byteLength: encoded.bytes.byteLength,
+        codec: encoded.codec,
+        sha256: "1".repeat(64)
+      },
+      bytes: encoded.bytes,
+      resumeState: {
+        sequenceWatermark: { event: 311, action: 0 },
+        screenRecordings: [
+          {
+            recordingId: "VR-mixed-ended",
+            chunks: [{ index: 0, hash }]
+          }
+        ]
+      }
+    });
+    await storage.putChunk({
+      sid: SESSION.sid,
+      meta: {
+        chunkId: "C-00000002",
+        seq: 2,
+        tStart: 4,
+        tEnd: 4,
+        monoStart: 4,
+        monoEnd: 4,
+        eventCount: 0,
+        byteLength: 0,
+        codec: "none",
+        sha256: "2".repeat(64)
+      },
+      bytes: new Uint8Array(),
+      resumeDelta: {
+        version: 1,
+        sequenceWatermark: { event: 312, action: 0 },
+        screenRecordingChanges: []
+      }
+    });
+
+    const restored = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await restored.start();
+    expect(await restored.getResumeState()).toEqual({
+      sequenceWatermark: { event: 312, action: 0 },
+      screenRecordings: []
+    });
+    await restored.close();
+  });
+
+  it("closes a durable recording checkpoint after a restart interruption", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+
+    await pipeline.start();
+    await pipeline.ingest(
+      createEvent("E-00000401", "screen.recording.start", 1, {
+        recordingId: "VR-interrupted"
+      })
+    );
+    await pipeline.ingest(
+      createEvent("E-00000402", "screen.recording.error", 2, {
+        recordingId: "VR-interrupted",
+        name: "OffscreenRecordingInterrupted",
+        message: "runtime restarted",
+        stage: "restart"
+      })
+    );
+    expect((await pipeline.getResumeState()).screenRecordings).toEqual([]);
+    await pipeline.close();
+
+    const restored = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await restored.start();
+    expect((await restored.getResumeState()).screenRecordings).toEqual([]);
+    await restored.close();
   });
 
   it("can retry an ingest after chunk persistence fails without a sequence gap or duplicate", async () => {

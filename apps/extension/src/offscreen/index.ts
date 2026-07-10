@@ -24,6 +24,7 @@ type OffscreenPipelineRequest = {
     | "putBlob"
     | "exportDownload"
     | "close"
+    | "getScreenRecordingStatus"
     | "startScreenRecording"
     | "stopScreenRecording";
   sid: string;
@@ -223,6 +224,23 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 
   if (message.op === "getResumeState") {
     return pipeline.getResumeState();
+  }
+
+  if (message.op === "getScreenRecordingStatus") {
+    const recording = screenRecordings.get(message.sid);
+
+    if (!recording) {
+      return { active: false };
+    }
+
+    return {
+      active: true,
+      recordingId: recording.recordingId,
+      mime: recording.mime,
+      ...(recording.width === undefined ? {} : { width: recording.width }),
+      ...(recording.height === undefined ? {} : { height: recording.height }),
+      ...(recording.frameRate === undefined ? {} : { frameRate: recording.frameRate })
+    };
   }
 
   if (message.op === "startScreenRecording") {

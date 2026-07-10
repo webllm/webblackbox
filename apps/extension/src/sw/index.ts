@@ -109,13 +109,16 @@ import {
 import {
   RuntimeCleanupScheduler,
   RuntimeStartCoordinator,
+  buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
   compactScreenRecordingChunkHashes,
   createRuntimeStateSnapshot,
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
   mergeRuntimeCountersWithSequenceWatermark,
+  normalizeOffscreenScreenRecordingStatus,
   parseRuntimeStateSnapshot,
+  reconcileScreenRecordingResumeState,
   restoreScreenRecordingChunkHashes,
   type PersistedActiveRuntime,
   type PersistedRuntime,
@@ -274,6 +277,7 @@ type OffscreenPipelineRequest = {
     | "putBlob"
     | "exportDownload"
     | "close"
+    | "getScreenRecordingStatus"
     | "startScreenRecording"
     | "stopScreenRecording";
   sid: string;
@@ -1089,6 +1093,9 @@ async function startSessionUnlocked(
   if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
     await attachCdp(runtime);
   }
+
+  // Make the owning session durable before an offscreen MediaRecorder can outlive this worker.
+  await persistRuntimeState();
 
   if (shouldStartScreenRecording(runtime)) {
     try {
@@ -4337,22 +4344,30 @@ function normalizePipelineResumeState(raw: unknown): PipelineResumeState {
       const chunk = asRecord(chunkCandidate);
       const index = chunk?.index;
       const hash = chunk?.hash;
+      const size = chunk?.size;
+      const chunkKeys = chunk ? Object.keys(chunk) : [];
 
       if (
         !chunk ||
-        Object.keys(chunk).length !== 2 ||
+        (chunkKeys.length !== 2 && chunkKeys.length !== 3) ||
+        (chunkKeys.length === 3 && (!chunkKeys.includes("size") || size === undefined)) ||
         !Number.isSafeInteger(index) ||
         (index as number) < 0 ||
         (index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
         indexes.has(index as number) ||
         typeof hash !== "string" ||
-        !/^[a-f0-9]{64}$/u.test(hash)
+        !/^[a-f0-9]{64}$/u.test(hash) ||
+        (size !== undefined && (!Number.isSafeInteger(size) || (size as number) < 0))
       ) {
         throw new Error("Invalid offscreen screen-recording chunk reference.");
       }
 
       indexes.add(index as number);
-      chunks.push({ index: index as number, hash });
+      chunks.push({
+        index: index as number,
+        hash,
+        ...(size === undefined ? {} : { size: size as number })
+      });
     }
 
     screenRecordings.push({
@@ -5789,22 +5804,82 @@ async function restoreActiveRuntime(
     persisted.counters,
     resumeState.sequenceWatermark
   );
-  const screenRecordingChunks = persisted.screenRecording
+  const screenRecordingResume = persisted.screenRecording
     ? resumeState.screenRecordings.find(
         (recording) => recording.recordingId === persisted.screenRecording?.recordingId
-      )?.chunks
+      )
     : undefined;
+  const screenRecordingStatus = normalizeOffscreenScreenRecordingStatus(
+    await requestOffscreenPipeline<unknown>({
+      op: "getScreenRecordingStatus",
+      sid: persisted.sid
+    })
+  );
 
-  if (
+  const reconciledScreenRecording = reconcileScreenRecordingResumeState(
+    persisted.screenRecording,
+    screenRecordingResume
+  );
+  const screenRecordingAllowedByCurrentPolicy =
+    persisted.mode === "full" && config.capturePolicy?.categories.screenRecordings === "allow";
+  const recorderSurvived = Boolean(
+    screenRecordingAllowedByCurrentPolicy &&
     persisted.screenRecording &&
-    persisted.screenRecording.chunkCount > 0 &&
-    !hasCompleteScreenRecordingResumePrefix(
-      persisted.screenRecording.chunkCount,
-      screenRecordingChunks ?? []
-    )
-  ) {
-    throw new Error("Screen-recording resume state is incomplete.");
+    screenRecordingStatus.active &&
+    screenRecordingStatus.recordingId === persisted.screenRecording.recordingId &&
+    reconciledScreenRecording.screenRecording
+  );
+  let policyStoppedRecordingId: string | undefined;
+
+  if (screenRecordingStatus.active && !screenRecordingAllowedByCurrentPolicy) {
+    await requestOffscreenPipeline<OffscreenScreenRecordingStopResult>({
+      op: "stopScreenRecording",
+      sid: persisted.sid,
+      recordingId: screenRecordingStatus.recordingId,
+      reason: "policy-disabled-after-restart"
+    });
+    policyStoppedRecordingId = screenRecordingStatus.recordingId;
   }
+
+  const statusResume = screenRecordingStatus.active
+    ? resumeState.screenRecordings.find(
+        (recording) => recording.recordingId === screenRecordingStatus.recordingId
+      )
+    : undefined;
+  const provisionalPersistedScreenRecording =
+    screenRecordingStatus.active && screenRecordingAllowedByCurrentPolicy && !recorderSurvived
+      ? screenRecordingStatus.recordingId === persisted.screenRecording?.recordingId
+        ? persisted.screenRecording
+        : {
+            recordingId: screenRecordingStatus.recordingId,
+            startedAt: Date.now(),
+            startedMono: monotonicTime(),
+            mime: screenRecordingStatus.mime,
+            width: screenRecordingStatus.width,
+            height: screenRecordingStatus.height,
+            frameRate: screenRecordingStatus.frameRate,
+            chunkCount: 0,
+            sizeBytes: 0
+          }
+      : undefined;
+  const provisionalScreenRecording = reconcileScreenRecordingResumeState(
+    provisionalPersistedScreenRecording,
+    statusResume
+  );
+  const screenRecording = recorderSurvived
+    ? reconciledScreenRecording.screenRecording
+    : provisionalPersistedScreenRecording
+      ? (provisionalScreenRecording.screenRecording ?? {
+          ...provisionalPersistedScreenRecording,
+          chunkCount: 0,
+          sizeBytes: 0
+        })
+      : undefined;
+  const screenRecordingChunks = recorderSurvived
+    ? reconciledScreenRecording.chunks
+    : provisionalPersistedScreenRecording
+      ? (provisionalScreenRecording.chunks ?? [])
+      : undefined;
 
   const runtime = createSessionRuntime({
     sid: persisted.sid,
@@ -5823,12 +5898,36 @@ async function restoreActiveRuntime(
     pipeline,
     performanceBudget,
     counters: restoredCounters,
-    screenRecording: persisted.screenRecording,
+    screenRecording,
     screenRecordingChunks
   });
   sessionsByTab.set(runtime.tabId, runtime);
   sessionsBySid.set(runtime.sid, runtime);
   scheduleConsentExpiry(runtime);
+
+  let recoveredRecordingId = policyStoppedRecordingId;
+
+  if (screenRecordingStatus.active && screenRecordingAllowedByCurrentPolicy && !recorderSurvived) {
+    const stopped = await requestOffscreenPipeline<OffscreenScreenRecordingStopResult>({
+      op: "stopScreenRecording",
+      sid: persisted.sid,
+      recordingId: screenRecordingStatus.recordingId,
+      reason: "resume-state-not-durable"
+    });
+    await finalizeScreenRecording(runtime, stopped);
+    await flushBufferedPipelineEvents(runtime);
+    await runtime.pipeline.flush();
+    recoveredRecordingId = screenRecordingStatus.recordingId;
+  }
+
+  const interruptedScreenRecordings = buildInterruptedScreenRecordingRecoveries({
+    persisted: persisted.screenRecording,
+    resumeState,
+    status: screenRecordingStatus,
+    claimedRecordingId:
+      recoveredRecordingId ??
+      (recorderSurvived ? persisted.screenRecording?.recordingId : undefined)
+  });
 
   if (runtime.mode === "lite") {
     installLiteWebRequestCapture();
@@ -5844,22 +5943,67 @@ async function restoreActiveRuntime(
   }
 
   await notifyAuthorizedContentFrames(runtime, true);
-  return runtime;
-}
 
-function hasCompleteScreenRecordingResumePrefix(
-  expectedChunkCount: number,
-  chunks: readonly ScreenRecordingChunkReference[]
-): boolean {
-  const indexes = new Set(chunks.map((chunk) => chunk.index));
+  if (interruptedScreenRecordings.length > 0) {
+    for (const interrupted of interruptedScreenRecordings) {
+      const hashes = [...interrupted.chunks]
+        .sort((left, right) => left.index - right.index)
+        .map((chunk) => chunk.hash);
+      const endedAt = Date.now();
 
-  for (let index = 0; index < expectedChunkCount; index += 1) {
-    if (!indexes.has(index)) {
-      return false;
+      ingestRawEvent({
+        source: "system",
+        rawType: "screen.recording.end",
+        sid: runtime.sid,
+        tabId: runtime.tabId,
+        t: endedAt,
+        mono: monotonicTime(),
+        payload: {
+          recordingId: interrupted.recordingId,
+          mime: interrupted.mime,
+          chunks: hashes,
+          chunkCount: hashes.length,
+          size: interrupted.sizeBytes,
+          durationMs: interrupted.startedAt
+            ? Math.max(0, Math.round(endedAt - interrupted.startedAt))
+            : 0,
+          width: interrupted.width,
+          height: interrupted.height,
+          reason: "offscreen-restart"
+        }
+      });
+      ingestRawEvent({
+        source: "system",
+        rawType: "screen.recording.error",
+        sid: runtime.sid,
+        tabId: runtime.tabId,
+        t: endedAt,
+        mono: monotonicTime(),
+        payload: {
+          recordingId: interrupted.recordingId,
+          name: "OffscreenRecordingInterrupted",
+          message: "Screen recording was interrupted while the extension runtime restarted.",
+          stage: "restart"
+        }
+      });
     }
+
+    await flushBufferedPipelineEvents(runtime);
+    await runtime.pipeline.flush();
   }
 
-  return true;
+  if (!runtime.screenRecording && shouldStartScreenRecording(runtime)) {
+    await startScreenRecording(runtime).catch((error) => {
+      console.warn("[WebBlackbox] failed to restart screen recording", {
+        sid: runtime.sid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    await flushBufferedPipelineEvents(runtime);
+    await runtime.pipeline.flush();
+  }
+
+  return runtime;
 }
 
 async function restoreStoppedRuntime(

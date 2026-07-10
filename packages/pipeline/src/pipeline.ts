@@ -19,10 +19,16 @@ import { sha256Hex } from "./hash.js";
 import { EventIndexer } from "./indexer.js";
 import { assertPrivacyScannerPassed, buildPrivacyManifest } from "./privacy.js";
 import {
+  assertPipelineResumeChangesWithinLimits,
+  isPipelineResumeDelta,
+  isPipelineResumeState,
   PIPELINE_STORAGE_SECURITY,
+  type PipelineResumeDelta,
   type PipelineResumeState,
   type PipelineStorage,
   type RecorderSequenceWatermark,
+  type ScreenRecordingChunkReference,
+  type ScreenRecordingResumeChange,
   type ScreenRecordingResumeState,
   type StoredBlob,
   type StoredChunk
@@ -65,6 +71,8 @@ type PreparedExportChunk = {
   events: WebBlackboxEvent[];
   blobHashes: string[];
 };
+
+type ScreenRecordingChunkCheckpoint = Omit<ScreenRecordingChunkReference, "index">;
 
 type ExportIndexes = {
   time: ReturnType<EventIndexer["snapshot"]>["time"];
@@ -112,7 +120,10 @@ export class FlightRecorderPipeline {
   private acceptingEvents = true;
   private closePromise: Promise<void> | null = null;
   private sequenceWatermark: RecorderSequenceWatermark = { event: 0, action: 0 };
-  private readonly screenRecordingChunks = new Map<string, Map<number, string>>();
+  private readonly screenRecordingChunks = new Map<
+    string,
+    Map<number, ScreenRecordingChunkCheckpoint>
+  >();
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = resolveChunkCodec(options.chunkCodec);
@@ -136,10 +147,19 @@ export class FlightRecorderPipeline {
 
     this.chunker.restoreSequence(lastSequence);
     const resumeState = latestMeta
-      ? await this.restoreResumeStateFromLatestChunk(latestMeta.chunkId)
+      ? await this.restoreResumeStateFromLatestChunk(latestMeta.chunkId, latestMeta.seq)
       : emptyPipelineResumeState();
     this.sequenceWatermark = resumeState.sequenceWatermark;
     this.restoreScreenRecordingResumeState(resumeState.screenRecordings);
+
+    if (latestMeta) {
+      await this.options.storage.initializeResumeState?.(
+        this.options.session.sid,
+        latestMeta.seq,
+        resumeState
+      );
+    }
+
     await this.options.storage.putSession(this.options.session);
   }
 
@@ -150,6 +170,7 @@ export class FlightRecorderPipeline {
     }
 
     await this.enqueueChunkOperation(async () => {
+      this.assertEventResumeStateWithinLimits(event);
       await this.chunker.append(event);
       this.applyEventToResumeState(event);
     });
@@ -170,6 +191,7 @@ export class FlightRecorderPipeline {
 
     await this.enqueueChunkOperation(async () => {
       for (const event of events) {
+        this.assertEventResumeStateWithinLimits(event);
         await this.chunker.append(event);
         this.applyEventToResumeState(event);
       }
@@ -715,13 +737,29 @@ export class FlightRecorderPipeline {
         sha256: hash
       },
       bytes,
-      resumeState: derivePipelineResumeState(this.snapshotResumeState(), events)
+      resumeDelta: derivePipelineResumeDelta(this.sequenceWatermark, events)
     };
 
     await this.options.storage.putChunk(chunk);
   }
 
-  private async restoreResumeStateFromLatestChunk(chunkId: string): Promise<PipelineResumeState> {
+  private async restoreResumeStateFromLatestChunk(
+    chunkId: string,
+    chunkSequence: number
+  ): Promise<PipelineResumeState> {
+    const normalized = await this.options.storage.getResumeState?.(
+      this.options.session.sid,
+      chunkSequence
+    );
+
+    if (normalized !== undefined) {
+      if (!isPipelineResumeState(normalized)) {
+        throw new Error("Pipeline storage returned an invalid resume state.");
+      }
+
+      return clonePipelineResumeState(normalized);
+    }
+
     const latest = await this.options.storage.getChunk(this.options.session.sid, chunkId);
 
     if (!latest) {
@@ -729,7 +767,16 @@ export class FlightRecorderPipeline {
     }
 
     if (isPipelineResumeState(latest.resumeState)) {
-      return clonePipelineResumeState(latest.resumeState);
+      const checkpoint = clonePipelineResumeState(latest.resumeState);
+      const events = await decodeChunkEvents(latest.bytes, latest.meta.codec);
+      return applyPipelineResumeDelta(
+        checkpoint,
+        derivePipelineResumeDelta(checkpoint.sequenceWatermark, events)
+      );
+    }
+
+    if (isPipelineResumeDelta(latest.resumeDelta)) {
+      return this.rebuildResumeStateFromChunkCheckpoints();
     }
 
     const events = await decodeChunkEvents(latest.bytes, latest.meta.codec);
@@ -737,7 +784,11 @@ export class FlightRecorderPipeline {
     // Legacy chunks did not persist an exact action high-water. Advancing the
     // action sequence to the durable event high-water is deterministic and
     // prevents reuse without scanning an unbounded archive history.
-    const legacy = derivePipelineResumeState(emptyPipelineResumeState(), events);
+    const empty = emptyPipelineResumeState();
+    const legacy = applyPipelineResumeDelta(
+      empty,
+      derivePipelineResumeDelta(empty.sequenceWatermark, events)
+    );
     legacy.sequenceWatermark.action = Math.max(
       legacy.sequenceWatermark.action,
       legacy.sequenceWatermark.event
@@ -745,12 +796,62 @@ export class FlightRecorderPipeline {
     return legacy;
   }
 
+  private async rebuildResumeStateFromChunkCheckpoints(): Promise<PipelineResumeState> {
+    const chunks = await this.options.storage.listChunks(this.options.session.sid);
+    let sequenceWatermark: RecorderSequenceWatermark = { event: 0, action: 0 };
+    let recordings = new Map<string, Map<number, ScreenRecordingChunkCheckpoint>>();
+
+    for (const chunk of chunks.sort((left, right) => left.meta.seq - right.meta.seq)) {
+      if (isPipelineResumeState(chunk.resumeState)) {
+        sequenceWatermark = mergeSequenceWatermarks(
+          sequenceWatermark,
+          chunk.resumeState.sequenceWatermark
+        );
+        recordings = screenRecordingCheckpointMapFromState(chunk.resumeState);
+        const events = await decodeChunkEvents(chunk.bytes, chunk.meta.codec);
+        const replay = derivePipelineResumeDelta(sequenceWatermark, events);
+        assertPipelineResumeChangesWithinLimits(recordings, replay.screenRecordingChanges);
+        sequenceWatermark = mergeSequenceWatermarks(sequenceWatermark, replay.sequenceWatermark);
+
+        for (const change of replay.screenRecordingChanges) {
+          applyScreenRecordingResumeChange(recordings, change);
+        }
+        continue;
+      }
+
+      if (isPipelineResumeDelta(chunk.resumeDelta)) {
+        assertPipelineResumeChangesWithinLimits(
+          recordings,
+          chunk.resumeDelta.screenRecordingChanges
+        );
+        sequenceWatermark = mergeSequenceWatermarks(
+          sequenceWatermark,
+          chunk.resumeDelta.sequenceWatermark
+        );
+
+        for (const change of chunk.resumeDelta.screenRecordingChanges) {
+          applyScreenRecordingResumeChange(recordings, change);
+        }
+      }
+    }
+
+    return createPipelineResumeStateFromCheckpoints(sequenceWatermark, recordings);
+  }
+
   private applyEventToResumeState(event: WebBlackboxEvent): void {
     this.sequenceWatermark = mergeSequenceWatermarks(
       this.sequenceWatermark,
       deriveRecorderSequenceWatermark([event])
     );
-    applyScreenRecordingChunkEvent(this.screenRecordingChunks, event);
+    applyScreenRecordingEvent(this.screenRecordingChunks, event);
+  }
+
+  private assertEventResumeStateWithinLimits(event: WebBlackboxEvent): void {
+    const change = readScreenRecordingResumeChange(event);
+
+    if (change) {
+      assertPipelineResumeChangesWithinLimits(this.screenRecordingChunks, [change]);
+    }
   }
 
   private snapshotResumeState(): PipelineResumeState {
@@ -760,7 +861,7 @@ export class FlightRecorderPipeline {
         .map(([recordingId, chunks]) => ({
           recordingId,
           chunks: [...chunks.entries()]
-            .map(([index, hash]) => ({ index, hash }))
+            .map(([index, checkpoint]) => ({ index, ...checkpoint }))
             .sort((left, right) => left.index - right.index)
         }))
         .sort((left, right) => left.recordingId.localeCompare(right.recordingId))
@@ -775,7 +876,15 @@ export class FlightRecorderPipeline {
     for (const recording of screenRecordings) {
       this.screenRecordingChunks.set(
         recording.recordingId,
-        new Map(recording.chunks.map((chunk) => [chunk.index, chunk.hash]))
+        new Map(
+          recording.chunks.map((chunk) => [
+            chunk.index,
+            {
+              hash: chunk.hash,
+              ...(chunk.size === undefined ? {} : { size: chunk.size })
+            }
+          ])
+        )
       );
     }
   }
@@ -1111,143 +1220,181 @@ function mergeSequenceWatermarks(
   };
 }
 
-function derivePipelineResumeState(
-  base: PipelineResumeState,
+function derivePipelineResumeDelta(
+  base: RecorderSequenceWatermark,
   events: readonly WebBlackboxEvent[]
-): PipelineResumeState {
-  const screenRecordingChunks = new Map<string, Map<number, string>>();
-
-  for (const recording of base.screenRecordings) {
-    screenRecordingChunks.set(
-      recording.recordingId,
-      new Map(recording.chunks.map((chunk) => [chunk.index, chunk.hash]))
-    );
-  }
-
-  let sequenceWatermark = { ...base.sequenceWatermark };
+): PipelineResumeDelta {
+  let sequenceWatermark = { ...base };
+  const screenRecordingChanges: ScreenRecordingResumeChange[] = [];
 
   for (const event of events) {
     sequenceWatermark = mergeSequenceWatermarks(
       sequenceWatermark,
       deriveRecorderSequenceWatermark([event])
     );
-    applyScreenRecordingChunkEvent(screenRecordingChunks, event);
+    const change = readScreenRecordingResumeChange(event);
+
+    if (change) {
+      screenRecordingChanges.push(change);
+    }
   }
 
   return {
+    version: 1,
     sequenceWatermark,
+    screenRecordingChanges
+  };
+}
+
+function applyPipelineResumeDelta(
+  base: PipelineResumeState,
+  delta: PipelineResumeDelta
+): PipelineResumeState {
+  const screenRecordingChunks = screenRecordingCheckpointMapFromState(base);
+  assertPipelineResumeChangesWithinLimits(screenRecordingChunks, delta.screenRecordingChanges);
+
+  for (const change of delta.screenRecordingChanges) {
+    applyScreenRecordingResumeChange(screenRecordingChunks, change);
+  }
+
+  return createPipelineResumeStateFromCheckpoints(delta.sequenceWatermark, screenRecordingChunks);
+}
+
+function screenRecordingCheckpointMapFromState(
+  state: PipelineResumeState
+): Map<string, Map<number, ScreenRecordingChunkCheckpoint>> {
+  return new Map(
+    state.screenRecordings.map((recording) => [
+      recording.recordingId,
+      new Map(
+        recording.chunks.map((chunk) => [
+          chunk.index,
+          {
+            hash: chunk.hash,
+            ...(chunk.size === undefined ? {} : { size: chunk.size })
+          }
+        ])
+      )
+    ])
+  );
+}
+
+function createPipelineResumeStateFromCheckpoints(
+  sequenceWatermark: RecorderSequenceWatermark,
+  screenRecordingChunks: Map<string, Map<number, ScreenRecordingChunkCheckpoint>>
+): PipelineResumeState {
+  return {
+    sequenceWatermark: { ...sequenceWatermark },
     screenRecordings: [...screenRecordingChunks.entries()]
       .map(([recordingId, chunks]) => ({
         recordingId,
         chunks: [...chunks.entries()]
-          .map(([index, hash]) => ({ index, hash }))
+          .map(([index, checkpoint]) => ({ index, ...checkpoint }))
           .sort((left, right) => left.index - right.index)
       }))
       .sort((left, right) => left.recordingId.localeCompare(right.recordingId))
   };
 }
 
-function applyScreenRecordingChunkEvent(
-  output: Map<string, Map<number, string>>,
+function applyScreenRecordingEvent(
+  output: Map<string, Map<number, ScreenRecordingChunkCheckpoint>>,
   event: WebBlackboxEvent
 ): void {
-  if (event.type !== "screen.recording.chunk") {
+  const change = readScreenRecordingResumeChange(event);
+
+  if (!change) {
     return;
+  }
+
+  applyScreenRecordingResumeChange(output, change);
+}
+
+function applyScreenRecordingResumeChange(
+  output: Map<string, Map<number, ScreenRecordingChunkCheckpoint>>,
+  change: ScreenRecordingResumeChange
+): void {
+  if (change.operation === "delete") {
+    output.delete(change.recordingId);
+    return;
+  }
+
+  if (change.operation === "reset") {
+    output.set(change.recordingId, new Map());
+    return;
+  }
+
+  const chunks =
+    output.get(change.recordingId) ?? new Map<number, ScreenRecordingChunkCheckpoint>();
+  chunks.set(change.index, {
+    hash: change.hash,
+    ...(change.size === undefined ? {} : { size: change.size })
+  });
+  output.set(change.recordingId, chunks);
+}
+
+function readScreenRecordingResumeChange(
+  event: WebBlackboxEvent
+): ScreenRecordingResumeChange | null {
+  if (
+    event.type !== "screen.recording.start" &&
+    event.type !== "screen.recording.chunk" &&
+    event.type !== "screen.recording.end" &&
+    event.type !== "screen.recording.error"
+  ) {
+    return null;
   }
 
   const data = asUnknownRecord(event.data);
   const recordingId = data?.recordingId;
+
+  if (typeof recordingId !== "string" || recordingId.length === 0 || recordingId.length > 256) {
+    return null;
+  }
+
+  if (event.type === "screen.recording.start") {
+    return {
+      operation: "reset",
+      recordingId
+    };
+  }
+
+  if (event.type === "screen.recording.end") {
+    return {
+      operation: "delete",
+      recordingId
+    };
+  }
+
+  if (event.type === "screen.recording.error") {
+    return data?.stage === "restart"
+      ? {
+          operation: "delete",
+          recordingId
+        }
+      : null;
+  }
+
   const hash = data?.chunkId;
   const index = data?.index;
+  const size = data?.size;
 
   if (
-    typeof recordingId !== "string" ||
-    recordingId.length === 0 ||
-    recordingId.length > 256 ||
     typeof hash !== "string" ||
     !BLOB_HASH_PATTERN.test(hash) ||
     !Number.isSafeInteger(index) ||
     (index as number) < 0 ||
     (index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS
   ) {
-    return;
+    return null;
   }
 
-  const chunks = output.get(recordingId) ?? new Map<number, string>();
-  chunks.set(index as number, hash);
-  output.set(recordingId, chunks);
-}
-
-function isPipelineResumeState(value: unknown): value is PipelineResumeState {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-
-  const record = value as Record<string, unknown>;
-  const sequence = asUnknownRecord(record.sequenceWatermark);
-
-  if (
-    Object.keys(record).length !== 2 ||
-    !sequence ||
-    Object.keys(sequence).length !== 2 ||
-    !Number.isSafeInteger(sequence.event) ||
-    (sequence.event as number) < 0 ||
-    !Number.isSafeInteger(sequence.action) ||
-    (sequence.action as number) < 0 ||
-    !Array.isArray(record.screenRecordings) ||
-    record.screenRecordings.length > 32
-  ) {
-    return false;
-  }
-
-  const recordingIds = new Set<string>();
-  let totalChunks = 0;
-
-  for (const candidate of record.screenRecordings) {
-    const recording = asUnknownRecord(candidate);
-
-    if (
-      !recording ||
-      Object.keys(recording).length !== 2 ||
-      typeof recording.recordingId !== "string" ||
-      recording.recordingId.length === 0 ||
-      recording.recordingId.length > 256 ||
-      recordingIds.has(recording.recordingId) ||
-      !Array.isArray(recording.chunks)
-    ) {
-      return false;
-    }
-
-    recordingIds.add(recording.recordingId);
-    totalChunks += recording.chunks.length;
-
-    if (totalChunks > PIPELINE_RESUME_MAX_SCREEN_CHUNKS) {
-      return false;
-    }
-
-    const indexes = new Set<number>();
-
-    for (const chunkCandidate of recording.chunks) {
-      const chunk = asUnknownRecord(chunkCandidate);
-
-      if (
-        !chunk ||
-        Object.keys(chunk).length !== 2 ||
-        !Number.isSafeInteger(chunk.index) ||
-        (chunk.index as number) < 0 ||
-        (chunk.index as number) >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
-        indexes.has(chunk.index as number) ||
-        typeof chunk.hash !== "string" ||
-        !BLOB_HASH_PATTERN.test(chunk.hash)
-      ) {
-        return false;
-      }
-
-      indexes.add(chunk.index as number);
-    }
-  }
-
-  return true;
+  return {
+    operation: "put",
+    recordingId,
+    index: index as number,
+    hash,
+    ...(Number.isSafeInteger(size) && (size as number) >= 0 ? { size: size as number } : {})
+  };
 }
 
 function emptyPipelineResumeState(): PipelineResumeState {

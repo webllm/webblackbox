@@ -4,6 +4,7 @@ import type { ChunkTimeIndexEntry, SessionMetadata } from "@webblackbox/protocol
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertPipelineResumeChangesWithinLimits,
   deleteIndexedDbDatabase,
   derivePipelineStorageKey,
   EncryptedPipelineStorage,
@@ -105,7 +106,60 @@ async function writeRawRows(
   });
 }
 
+async function readRawRows(
+  db: IDBDatabase,
+  storeName: string
+): Promise<Array<Record<string, unknown>>> {
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(storeName, "readonly").objectStore(storeName).getAll();
+    request.onsuccess = () => resolve(request.result as Array<Record<string, unknown>>);
+    request.onerror = () => reject(request.error ?? new Error("Raw row read failed"));
+  });
+}
+
 describe("storage", () => {
+  it("rejects projected resume states beyond recording and chunk limits", async () => {
+    const tooManyRecordings = Array.from({ length: 33 }, (_, index) => ({
+      operation: "reset" as const,
+      recordingId: `VR-${index}`
+    }));
+
+    for (const storage of [
+      new MemoryPipelineStorage(),
+      new IndexedDbPipelineStorage(createDbName())
+    ]) {
+      const sid = `S-resume-bounds-${storage.constructor.name}`;
+      await storage.putSession({ ...SESSION_A, sid });
+      await expect(
+        storage.putChunk({
+          ...createChunk(sid, "C-bounds", 1, "bounds"),
+          resumeDelta: {
+            version: 1,
+            sequenceWatermark: { event: 33, action: 0 },
+            screenRecordingChanges: tooManyRecordings
+          }
+        })
+      ).rejects.toThrow(/too many active screen recordings/i);
+      expect(await storage.listChunks(sid)).toEqual([]);
+      expect(await storage.getResumeState?.(sid)).toBeUndefined();
+    }
+
+    const atChunkLimit = {
+      size: 500_000,
+      has: () => false
+    } as unknown as ReadonlyMap<number, unknown>;
+    expect(() =>
+      assertPipelineResumeChangesWithinLimits(new Map([["VR-limit", atChunkLimit]]), [
+        {
+          operation: "put",
+          recordingId: "VR-limit",
+          index: 499_999,
+          hash: "f".repeat(64)
+        }
+      ])
+    ).toThrow(/too many screen-recording chunks/i);
+  });
+
   it("supports memory storage CRUD and session-scoped blob ref-count cleanup", async () => {
     const storage = new MemoryPipelineStorage();
     const hash = "f".repeat(64);
@@ -196,6 +250,14 @@ describe("storage", () => {
     });
     expect(await storage.getSession(sid)).toEqual(expect.objectContaining({ sid }));
     await storage.putChunk(chunk);
+    await storage.initializeResumeState(sid, 1, {
+      sequenceWatermark: { event: 1, action: 0 },
+      screenRecordings: []
+    });
+    expect(await storage.getResumeState(sid, 1)).toEqual({
+      sequenceWatermark: { event: 1, action: 0 },
+      screenRecordings: []
+    });
     await storage.putBlob(createBlob(hash, blobBytes), sid);
     await storage.putIndexes(sid, {
       time: [chunkMeta("C-enc", 1)],
@@ -231,7 +293,14 @@ describe("storage", () => {
       files: {}
     });
 
-    await baseStorage.putChunk(createChunk(sid, "C-plain", 2, '{"plain":true}\n'));
+    await baseStorage.putChunk({
+      ...createChunk(sid, "C-plain", 2, '{"plain":true}\n'),
+      resumeDelta: {
+        version: 1,
+        sequenceWatermark: { event: 2, action: 0 },
+        screenRecordingChanges: []
+      }
+    });
     await baseStorage.putBlob(createBlob("b".repeat(64), Uint8Array.from([9, 9, 9])), sid);
     await expect(storage.getChunk(sid, "C-plain")).rejects.toThrow(/refusing.*plaintext/i);
     await expect(storage.getBlob("b".repeat(64))).rejects.toThrow(/refusing.*plaintext/i);
@@ -370,6 +439,192 @@ describe("storage", () => {
     expect((await storage.getBlob(hash))?.refCount).toBe(1);
     await storage.deleteSession(sid);
     expect(await storage.getBlob(hash)).toBeUndefined();
+  });
+
+  it("stores indexeddb blob ownership as constant-size rows", async () => {
+    const databaseName = createDbName();
+    const storage = new IndexedDbPipelineStorage(databaseName);
+    const sid = "S-normalized-blob-refs";
+
+    await storage.putSession({ ...SESSION_A, sid });
+
+    for (let index = 0; index < 64; index += 1) {
+      const hash = index.toString(16).padStart(64, "0");
+      await storage.putBlob(createBlob(hash, Uint8Array.from([index])), sid);
+    }
+
+    const db = await openRawDb(databaseName, 4, () => undefined);
+    const refs = await readRawRows(db, "blobRefs");
+    db.close();
+
+    expect(refs).toHaveLength(64);
+    expect(refs.every((row) => row.sid === sid && typeof row.hash === "string")).toBe(true);
+    expect(refs.every((row) => row.value === undefined)).toBe(true);
+    expect(Math.max(...refs.map((row) => JSON.stringify(row).length))).toBeLessThan(220);
+
+    await storage.deleteSession(sid);
+    expect(await storage.listBlobs()).toEqual([]);
+  });
+
+  it("migrates a legacy cumulative blob-ref row once", async () => {
+    const databaseName = createDbName();
+    const sid = "S-legacy-blob-refs";
+    const oldHash = "1".repeat(64);
+    const newHash = "2".repeat(64);
+    const db = await openRawDb(databaseName, 3, (raw) => {
+      for (const storeName of ["sessions", "chunks", "blobs", "blobRefs", "indexes", "integrity"]) {
+        raw.createObjectStore(storeName, { keyPath: "key" });
+      }
+    });
+    await writeRawRows(db, "sessions", [{ key: sid, value: { ...SESSION_A, sid } }]);
+    await writeRawRows(db, "blobs", [
+      { key: oldHash, value: createBlob(oldHash, Uint8Array.from([1])) }
+    ]);
+    await writeRawRows(db, "blobRefs", [{ key: sid, value: [oldHash] }]);
+    db.close();
+
+    const storage = new IndexedDbPipelineStorage(databaseName);
+    await storage.putBlob(createBlob(oldHash, Uint8Array.from([1])), sid);
+    await storage.putBlob(createBlob(newHash, Uint8Array.from([2])), sid);
+
+    const upgraded = await openRawDb(databaseName, 4, () => undefined);
+    const refs = await readRawRows(upgraded, "blobRefs");
+    upgraded.close();
+
+    expect(refs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sid, hash: oldHash }),
+        expect.objectContaining({ sid, hash: newHash })
+      ])
+    );
+    expect(refs.some((row) => row.key === sid || Array.isArray(row.value))).toBe(false);
+    expect((await storage.getBlob(oldHash))?.refCount).toBe(1);
+
+    await storage.deleteSession(sid);
+    expect(await storage.listBlobs()).toEqual([]);
+  });
+
+  it("commits indexeddb chunks and normalized resume changes atomically", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const sid = "S-resume-rollback";
+    const hash = "7".repeat(64);
+    const chunk: StoredChunk = {
+      ...createChunk(sid, "C-resume", 1, "resume-event"),
+      resumeDelta: {
+        version: 1,
+        sequenceWatermark: { event: 41, action: 5 },
+        screenRecordingChanges: [
+          {
+            operation: "put",
+            recordingId: "VR-atomic",
+            index: 0,
+            hash,
+            size: 12
+          }
+        ]
+      }
+    };
+    const originalPut = IDBObjectStore.prototype.put;
+
+    await storage.putSession({ ...SESSION_A, sid });
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey
+    ): IDBRequest<IDBValidKey> {
+      if (this.name === "resumeRefs") {
+        throw new Error("simulated resumeRefs write failure");
+      }
+
+      return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+    });
+
+    try {
+      await expect(storage.putChunk(chunk)).rejects.toThrow(/simulated resumeRefs/i);
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    expect(await storage.getChunk(sid, "C-resume")).toBeUndefined();
+    expect(await storage.getResumeState(sid)).toBeUndefined();
+
+    await storage.putChunk(chunk);
+    expect(await storage.getResumeState(sid)).toEqual({
+      sequenceWatermark: { event: 41, action: 5 },
+      screenRecordings: [
+        {
+          recordingId: "VR-atomic",
+          chunks: [{ index: 0, hash, size: 12 }]
+        }
+      ]
+    });
+    await storage.putChunk(chunk);
+    expect(await storage.listChunks(sid)).toHaveLength(1);
+    await expect(
+      storage.putChunk({
+        ...chunk,
+        meta: {
+          ...chunk.meta,
+          sha256: "9".repeat(64)
+        }
+      })
+    ).rejects.toThrow(/sequence.*conflict/i);
+
+    await storage.putChunk({
+      ...createChunk(sid, "C-resume-end", 2, "resume-end"),
+      resumeDelta: {
+        version: 1,
+        sequenceWatermark: { event: 42, action: 5 },
+        screenRecordingChanges: [{ operation: "delete", recordingId: "VR-atomic" }]
+      }
+    });
+    await expect(
+      storage.putChunk({
+        ...createChunk(sid, "C-resume-stale", 1, "resume-stale"),
+        resumeDelta: {
+          version: 1,
+          sequenceWatermark: { event: 1, action: 0 },
+          screenRecordingChanges: [
+            {
+              operation: "put",
+              recordingId: "VR-atomic",
+              index: 1,
+              hash: "8".repeat(64)
+            }
+          ]
+        }
+      })
+    ).rejects.toThrow(/sequence.*conflict/i);
+    expect(await storage.getResumeState(sid, 2)).toEqual({
+      sequenceWatermark: { event: 42, action: 5 },
+      screenRecordings: []
+    });
+    expect((await storage.listChunks(sid)).map((candidate) => candidate.meta.chunkId)).toEqual([
+      "C-resume",
+      "C-resume-end"
+    ]);
+    await expect(
+      storage.putChunk(createChunk(sid, "C-missing-resume-delta", 3, "missing-delta"))
+    ).rejects.toThrow(/missing a resume delta/i);
+  });
+
+  it("initializes an indexeddb resume index from a legacy checkpoint once", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const sid = "S-resume-initialize";
+    const state = {
+      sequenceWatermark: { event: 9, action: 2 },
+      screenRecordings: [{ recordingId: "VR-initialize", chunks: [] }]
+    };
+
+    await storage.putSession({ ...SESSION_A, sid });
+    await storage.putChunk(createChunk(sid, "C-initialize", 1, "legacy"));
+    await storage.initializeResumeState(sid, 1, state);
+    await storage.initializeResumeState(sid, 1, {
+      sequenceWatermark: { event: 99, action: 99 },
+      screenRecordings: []
+    });
+
+    expect(await storage.getResumeState(sid, 1)).toEqual(state);
   });
 
   it("rolls back every indexeddb session store when atomic deletion fails", async () => {

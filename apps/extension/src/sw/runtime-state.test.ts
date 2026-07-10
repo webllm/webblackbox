@@ -5,13 +5,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   RuntimeCleanupScheduler,
   RuntimeStartCoordinator,
+  buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
   createRuntimeCleanupAlarmName,
   createRuntimeStateSnapshot,
   compactScreenRecordingChunkHashes,
+  deriveDurableScreenRecordingChunkCount,
   evaluateActiveRuntimeRestoration,
   mergeRuntimeCountersWithSequenceWatermark,
+  normalizeOffscreenScreenRecordingStatus,
   parseRuntimeStateSnapshot,
+  reconcileScreenRecordingResumeState,
   restoreScreenRecordingChunkHashes,
   type PersistedActiveRuntime,
   type PersistedRuntime
@@ -206,6 +210,120 @@ describe("runtime state checkpoint", () => {
     expect(serialized).not.toContain(hashBeforeRestart);
     expect(serialized).not.toContain(hashAfterRestart);
     expect(serialized).not.toContain('"chunks"');
+  });
+
+  it("reconciles an ahead-of-pipeline MV3 chunk count to durable references", () => {
+    expect(
+      deriveDurableScreenRecordingChunkCount([
+        { index: 0, hash: "a".repeat(64) },
+        { index: 2, hash: "b".repeat(64) }
+      ])
+    ).toBe(3);
+    expect(deriveDurableScreenRecordingChunkCount([])).toBe(0);
+    expect(() =>
+      deriveDurableScreenRecordingChunkCount([{ index: -1, hash: "c".repeat(64) }])
+    ).toThrow(/durable.*range/i);
+
+    const persisted = {
+      recordingId: "VR-reconcile",
+      startedAt: 1,
+      startedMono: 1,
+      mime: "video/webm",
+      chunkCount: 4,
+      sizeBytes: 100
+    };
+    const reconciled = reconcileScreenRecordingResumeState(persisted, {
+      recordingId: persisted.recordingId,
+      chunks: [{ index: 0, hash: "d".repeat(64), size: 10 }]
+    }).screenRecording;
+    expect(reconciled?.chunkCount).toBe(1);
+    expect(reconciled?.sizeBytes).toBe(10);
+    expect(reconcileScreenRecordingResumeState(persisted, undefined)).toEqual({
+      screenRecording: undefined,
+      chunks: undefined
+    });
+  });
+
+  it("validates the offscreen recorder liveness handshake", () => {
+    expect(normalizeOffscreenScreenRecordingStatus({ active: false })).toEqual({
+      active: false
+    });
+    expect(
+      normalizeOffscreenScreenRecordingStatus({
+        active: true,
+        recordingId: "VR-live",
+        mime: "video/webm"
+      })
+    ).toEqual({ active: true, recordingId: "VR-live", mime: "video/webm" });
+    expect(() =>
+      normalizeOffscreenScreenRecordingStatus({ active: true, recordingId: "", extra: true })
+    ).toThrow(/invalid offscreen/i);
+  });
+
+  it("preserves durable partial video segments when recorder liveness is lost", () => {
+    const persisted = {
+      recordingId: "VR-partial",
+      startedAt: 10,
+      startedMono: 10,
+      mime: "video/webm",
+      chunkCount: 2,
+      sizeBytes: 99
+    };
+    const resumeState = {
+      sequenceWatermark: { event: 2, action: 0 },
+      screenRecordings: [
+        {
+          recordingId: persisted.recordingId,
+          chunks: [
+            { index: 0, hash: "a".repeat(64), size: 11 },
+            { index: 1, hash: "b".repeat(64), size: 13 }
+          ]
+        }
+      ]
+    };
+
+    expect(
+      buildInterruptedScreenRecordingRecoveries({
+        persisted,
+        resumeState,
+        status: { active: false },
+        claimedRecordingId: undefined
+      })
+    ).toEqual([
+      expect.objectContaining({
+        recordingId: persisted.recordingId,
+        mime: "video/webm",
+        sizeBytes: 24,
+        chunks: resumeState.screenRecordings[0]?.chunks
+      })
+    ]);
+    expect(
+      buildInterruptedScreenRecordingRecoveries({
+        persisted,
+        resumeState,
+        status: {
+          active: true,
+          recordingId: persisted.recordingId,
+          mime: "video/webm"
+        },
+        claimedRecordingId: persisted.recordingId
+      })
+    ).toEqual([]);
+    expect(
+      buildInterruptedScreenRecordingRecoveries({
+        persisted: undefined,
+        resumeState: { sequenceWatermark: { event: 0, action: 0 }, screenRecordings: [] },
+        status: { active: true, recordingId: "VR-unclaimed", mime: "video/webm" },
+        claimedRecordingId: undefined
+      })
+    ).toEqual([
+      expect.objectContaining({
+        recordingId: "VR-unclaimed",
+        mime: "video/webm",
+        chunks: [],
+        sizeBytes: 0
+      })
+    ]);
   });
 });
 

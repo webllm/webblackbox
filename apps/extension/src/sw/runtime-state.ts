@@ -1,3 +1,4 @@
+import type { PipelineResumeState } from "@webblackbox/pipeline";
 import {
   evaluateCaptureScope,
   recorderConfigSchema,
@@ -94,6 +95,29 @@ export type RuntimeSequenceWatermark = {
 export type RuntimeScreenRecordingChunkReference = {
   index: number;
   hash: string;
+  size?: number;
+};
+
+export type RuntimeOffscreenScreenRecordingStatus =
+  | { active: false }
+  | {
+      active: true;
+      recordingId: string;
+      mime: string;
+      width?: number;
+      height?: number;
+      frameRate?: number;
+    };
+
+export type InterruptedScreenRecordingRecovery = {
+  recordingId: string;
+  mime: string;
+  chunks: readonly RuntimeScreenRecordingChunkReference[];
+  sizeBytes: number;
+  startedAt?: number;
+  width?: number;
+  height?: number;
+  frameRate?: number;
 };
 
 export type RuntimeCleanupSchedulerOptions = {
@@ -297,6 +321,172 @@ export function restoreScreenRecordingChunkHashes(
   }
 
   return chunks;
+}
+
+/** Pipeline references are the durable source of truth when a debounced MV3 snapshot is ahead. */
+export function deriveDurableScreenRecordingChunkCount(
+  references: readonly RuntimeScreenRecordingChunkReference[]
+): number {
+  if (
+    references.some(
+      (reference) =>
+        !Number.isSafeInteger(reference.index) ||
+        reference.index < 0 ||
+        reference.index >= MAX_SCREEN_RECORDING_CHUNKS
+    )
+  ) {
+    throw new Error("Invalid durable screen-recording chunk range.");
+  }
+
+  return references.reduce((count, reference) => Math.max(count, reference.index + 1), 0);
+}
+
+export function reconcileScreenRecordingResumeState(
+  persisted: PersistedScreenRecording | undefined,
+  durable:
+    | {
+        recordingId: string;
+        chunks: readonly RuntimeScreenRecordingChunkReference[];
+      }
+    | undefined
+): {
+  screenRecording: PersistedScreenRecording | undefined;
+  chunks: readonly RuntimeScreenRecordingChunkReference[] | undefined;
+} {
+  if (!persisted || !durable || durable.recordingId !== persisted.recordingId) {
+    return {
+      screenRecording: undefined,
+      chunks: undefined
+    };
+  }
+
+  return {
+    screenRecording: {
+      ...persisted,
+      chunkCount: deriveDurableScreenRecordingChunkCount(durable.chunks),
+      sizeBytes: deriveDurableScreenRecordingSize(persisted, durable.chunks)
+    },
+    chunks: durable.chunks
+  };
+}
+
+export function normalizeOffscreenScreenRecordingStatus(
+  raw: unknown
+): RuntimeOffscreenScreenRecordingStatus {
+  const row = asRecord(raw);
+
+  if (!row || typeof row.active !== "boolean") {
+    throw new Error("Invalid offscreen screen-recording status.");
+  }
+
+  if (!row.active && Object.keys(row).length === 1) {
+    return { active: false };
+  }
+
+  if (
+    row.active &&
+    Object.keys(row).every((key) =>
+      ["active", "recordingId", "mime", "width", "height", "frameRate"].includes(key)
+    ) &&
+    typeof row.recordingId === "string" &&
+    row.recordingId.length > 0 &&
+    row.recordingId.length <= 256 &&
+    typeof row.mime === "string" &&
+    row.mime.length > 0 &&
+    row.mime.length <= 256 &&
+    isOptionalPositiveNumber(row.width) &&
+    isOptionalPositiveNumber(row.height) &&
+    isOptionalPositiveNumber(row.frameRate)
+  ) {
+    return {
+      active: true,
+      recordingId: row.recordingId,
+      mime: row.mime,
+      ...(row.width === undefined ? {} : { width: row.width as number }),
+      ...(row.height === undefined ? {} : { height: row.height as number }),
+      ...(row.frameRate === undefined ? {} : { frameRate: row.frameRate as number })
+    };
+  }
+
+  throw new Error("Invalid offscreen screen-recording status.");
+}
+
+export function buildInterruptedScreenRecordingRecoveries(input: {
+  persisted: PersistedScreenRecording | undefined;
+  resumeState: PipelineResumeState;
+  status: RuntimeOffscreenScreenRecordingStatus;
+  claimedRecordingId: string | undefined;
+}): InterruptedScreenRecordingRecovery[] {
+  const recordingIds = new Set(
+    input.resumeState.screenRecordings
+      .map((recording) => recording.recordingId)
+      .filter((recordingId) => recordingId !== input.claimedRecordingId)
+  );
+
+  if (input.persisted && input.persisted.recordingId !== input.claimedRecordingId) {
+    recordingIds.add(input.persisted.recordingId);
+  }
+
+  if (input.status.active && input.status.recordingId !== input.claimedRecordingId) {
+    recordingIds.add(input.status.recordingId);
+  }
+
+  return [...recordingIds]
+    .sort((left, right) => left.localeCompare(right))
+    .map((recordingId) => {
+      const durable = input.resumeState.screenRecordings.find(
+        (recording) => recording.recordingId === recordingId
+      );
+      const persisted = input.persisted?.recordingId === recordingId ? input.persisted : undefined;
+      const status =
+        input.status.active && input.status.recordingId === recordingId ? input.status : undefined;
+      const reconciled = reconcileScreenRecordingResumeState(persisted, durable);
+      const chunks = durable?.chunks ?? [];
+      const knownSize = chunks.reduce(
+        (total, chunk) => Math.min(Number.MAX_SAFE_INTEGER, total + (chunk.size ?? 0)),
+        0
+      );
+
+      return {
+        recordingId,
+        mime: persisted?.mime ?? status?.mime ?? "video/webm",
+        chunks,
+        sizeBytes: reconciled.screenRecording?.sizeBytes ?? knownSize,
+        ...(persisted ? { startedAt: persisted.startedAt } : {}),
+        ...((persisted?.width ?? status?.width)
+          ? { width: persisted?.width ?? status?.width }
+          : {}),
+        ...((persisted?.height ?? status?.height)
+          ? { height: persisted?.height ?? status?.height }
+          : {}),
+        ...((persisted?.frameRate ?? status?.frameRate)
+          ? { frameRate: persisted?.frameRate ?? status?.frameRate }
+          : {})
+      };
+    });
+}
+
+function deriveDurableScreenRecordingSize(
+  persisted: PersistedScreenRecording,
+  references: readonly RuntimeScreenRecordingChunkReference[]
+): number {
+  const knownSize = references.reduce(
+    (total, reference) => Math.min(Number.MAX_SAFE_INTEGER, total + (reference.size ?? 0)),
+    0
+  );
+
+  if (references.every((reference) => reference.size !== undefined)) {
+    return knownSize;
+  }
+
+  const indexes = new Set(references.map((reference) => reference.index));
+  let snapshotMatchesDurablePrefix = references.length === persisted.chunkCount;
+
+  for (let index = 0; snapshotMatchesDurablePrefix && index < persisted.chunkCount; index += 1) {
+    snapshotMatchesDurablePrefix = indexes.has(index);
+  }
+
+  return snapshotMatchesDurablePrefix ? persisted.sizeBytes : knownSize;
 }
 
 export function compactScreenRecordingChunkHashes(chunks: readonly string[]): string[] {
