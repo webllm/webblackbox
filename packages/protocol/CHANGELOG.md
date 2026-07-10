@@ -8,6 +8,11 @@
 - Added `screenRecordings` capture policy and `includeScreenRecordings` export policy fields.
 - Added WebM and MP4 blob MIME/extension inference for screen-recording chunks.
 
+### Patch Changes
+
+- Rejected archive chunks whose wall-clock events regress and time indexes whose wall-clock or
+  monotonic ranges move backwards between adjacent chunks.
+
 ## 0.5.0
 
 ### Minor Changes

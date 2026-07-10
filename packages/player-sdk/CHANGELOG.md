@@ -8,6 +8,7 @@
 
 ### Patch Changes
 
+- Rejected archives whose time-index ranges move backwards across chunk boundaries.
 - Updated dependencies
   - @webblackbox/protocol@0.6.0
 

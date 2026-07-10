@@ -630,6 +630,27 @@ describe("WebBlackboxPlayer", () => {
     );
   });
 
+  it("rejects independently valid chunk ranges that regress across a chunk boundary", async () => {
+    const zip = await JSZip.loadAsync(await createTwoChunkFixtureArchive());
+    const timeIndex = JSON.parse(
+      await zip.file("index/time.json")!.async("string")
+    ) as ChunkTimeIndexEntry[];
+    const second = timeIndex[1];
+
+    if (!second) {
+      throw new Error("Missing second time-index fixture entry");
+    }
+
+    second.monoStart = 5;
+    zip.file("index/time.json", JSON.stringify(timeIndex));
+    await writeIntegrityHashes(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(
+      /monotonic ranges move backwards between chunks/i
+    );
+  });
+
   it("rejects schema-invalid privacy manifests", async () => {
     const zip = await JSZip.loadAsync(await createFixtureArchive());
     zip.file("privacy/manifest.json", JSON.stringify({ schemaVersion: 999 }));

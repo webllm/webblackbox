@@ -171,11 +171,16 @@ export function assertArchiveChunk(input: ArchiveChunkValidationInput): void {
   }
 
   const eventIds = new Set<string>();
+  let previousTime = Number.NEGATIVE_INFINITY;
   let previousMono = Number.NEGATIVE_INFINITY;
 
   for (const event of events) {
     if (eventIds.has(event.id)) {
       throw archiveError(`chunk '${input.path}' contains duplicate event ids`);
+    }
+
+    if (event.t < previousTime) {
+      throw archiveError(`chunk '${input.path}' events are not in wall-clock order`);
     }
 
     if (event.mono < previousMono) {
@@ -192,6 +197,7 @@ export function assertArchiveChunk(input: ArchiveChunkValidationInput): void {
     }
 
     eventIds.add(event.id);
+    previousTime = event.t;
     previousMono = event.mono;
   }
 }
@@ -282,6 +288,8 @@ function assertTimeIndexLayout(
   const chunkIds = new Set<string>();
   const sequences = new Set<number>();
   let previousSequence = 0;
+  let previousTimeEnd = Number.NEGATIVE_INFINITY;
+  let previousMonoEnd = Number.NEGATIVE_INFINITY;
   let indexedEventCount = 0;
 
   for (const entry of timeIndex) {
@@ -299,10 +307,20 @@ function assertTimeIndexLayout(
       throw archiveError("time index sequences are not strictly increasing");
     }
 
+    if (entry.tStart < previousTimeEnd) {
+      throw archiveError("time index wall-clock ranges move backwards between chunks");
+    }
+
+    if (entry.monoStart < previousMonoEnd) {
+      throw archiveError("time index monotonic ranges move backwards between chunks");
+    }
+
     chunkIds.add(entry.chunkId);
     sequences.add(entry.seq);
     indexedPaths.add(path);
     previousSequence = entry.seq;
+    previousTimeEnd = entry.tEnd;
+    previousMonoEnd = entry.monoEnd;
     indexedEventCount += entry.eventCount;
   }
 
