@@ -81,6 +81,7 @@ jobs:
           pnpm format:check
           pnpm lint
           pnpm typecheck
+          pnpm docs:api:check
           pnpm test
 
       - name: Build workspace

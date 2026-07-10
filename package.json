@@ -43,6 +43,7 @@
     "bench:pipeline": "pnpm --filter @webblackbox/pipeline bench",
     "bundle:size": "node scripts/check-bundle-size.mjs",
     "docs:api": "pnpm --filter @webblackbox/player-sdk docs:api",
+    "docs:api:check": "node scripts/check-api-docs.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "changeset": "changeset",

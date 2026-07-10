@@ -438,7 +438,8 @@ type BlobRef = {
   mime: string;
 };
 
-type PlayerBlob = {
+/** Decrypted or plaintext blob content resolved from an archive hash. */
+export type PlayerBlob = {
   mime: string;
   bytes: Uint8Array;
 };

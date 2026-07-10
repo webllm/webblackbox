@@ -42,6 +42,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: API Documentation Drift Check
+        run: pnpm docs:api:check
+
       - name: Test
         run: pnpm test
 

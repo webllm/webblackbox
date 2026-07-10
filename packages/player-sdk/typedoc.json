@@ -8,6 +8,7 @@
   "excludeInternal": true,
   "readme": "README.md",
   "name": "@webblackbox/player-sdk API",
+  "gitRevision": "main",
   "plugin": [],
   "sort": ["source-order"]
 }
