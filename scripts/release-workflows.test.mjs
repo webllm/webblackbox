@@ -13,6 +13,11 @@ test("serializes stable package publishing across release tags", async () => {
     /concurrency:\n[ ]{2}group: release-stable-publish\n[ ]{2}cancel-in-progress: false/
   );
   assert.doesNotMatch(workflow, /group: release-\$\{\{/);
+  assert.match(
+    workflow,
+    /- name: Verify publish artifacts\n[ ]{8}run: pnpm release:verify-artifacts/
+  );
+  assert.doesNotMatch(workflow, /npm pack --dry-run/);
 });
 
 test("serializes release assets and Pages deployments across tags", async () => {

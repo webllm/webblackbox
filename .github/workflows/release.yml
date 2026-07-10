@@ -91,16 +91,7 @@ jobs:
         run: pnpm bundle:size
 
       - name: Verify publish artifacts
-        run: >
-          pnpm
-          --filter @webblackbox/mcp-server
-          --filter @webblackbox/cdp-router
-          --filter @webblackbox/pipeline
-          --filter @webblackbox/player-sdk
-          --filter @webblackbox/protocol
-          --filter @webblackbox/recorder
-          --filter webblackbox
-          exec npm pack --dry-run --json
+        run: pnpm release:verify-artifacts
 
       - name: Publish packages to npm
         env:

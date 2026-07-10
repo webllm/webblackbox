@@ -58,6 +58,7 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
+    "release:verify-artifacts": "node scripts/verify-publish-artifacts.mjs",
     "release:verify-ref:test": "node --test scripts/verify-release-ref.test.mjs",
     "commit": "cz",
     "prepare": "husky"
