@@ -56,6 +56,32 @@ describe("archive resource limits", () => {
     );
   });
 
+  it("rejects duplicate or normalization-ambiguous physical ZIP entry names", async () => {
+    const duplicateZip = new JSZip();
+    duplicateZip.file("entry-one.json", "first");
+    duplicateZip.file("entry-two.json", "second");
+    const duplicateBytes = await duplicateZip.generateAsync({
+      type: "uint8array",
+      compression: "STORE"
+    });
+    expect(replaceAsciiInPlace(duplicateBytes, "entry-two.json", "entry-one.json")).toBe(2);
+
+    expect(() =>
+      assertArchiveInputResourceLimits(duplicateBytes, resolveArchiveResourceLimits())
+    ).toThrow(/duplicate ZIP entry 'entry-one\.json'/i);
+
+    const ambiguousZip = new JSZip();
+    ambiguousZip.file("safe/../manifest.json", "{}");
+    const ambiguousBytes = await ambiguousZip.generateAsync({
+      type: "uint8array",
+      compression: "STORE"
+    });
+
+    expect(() =>
+      assertArchiveInputResourceLimits(ambiguousBytes, resolveArchiveResourceLimits())
+    ).toThrow(/non-canonical ZIP entry name/i);
+  });
+
   it("rejects high compression ratios without inflating an entry", async () => {
     const zip = new JSZip();
     zip.file("repetitive.txt", "a".repeat(512 * 1024));
@@ -136,3 +162,31 @@ describe("archive resource limits", () => {
     expect(() => resolveArchiveResourceLimits({ maxCompressionRatio: 0.5 })).toThrow(/at least 1/i);
   });
 });
+
+function replaceAsciiInPlace(bytes: Uint8Array, search: string, replacement: string): number {
+  const searchBytes = new TextEncoder().encode(search);
+  const replacementBytes = new TextEncoder().encode(replacement);
+  if (searchBytes.byteLength !== replacementBytes.byteLength) {
+    throw new Error("ZIP test replacement names must have the same byte length.");
+  }
+
+  let replacements = 0;
+  for (let offset = 0; offset <= bytes.byteLength - searchBytes.byteLength; offset += 1) {
+    let matches = true;
+    for (let index = 0; index < searchBytes.byteLength; index += 1) {
+      if (bytes[offset + index] !== searchBytes[index]) {
+        matches = false;
+        break;
+      }
+    }
+    if (!matches) {
+      continue;
+    }
+
+    bytes.set(replacementBytes, offset);
+    replacements += 1;
+    offset += searchBytes.byteLength - 1;
+  }
+
+  return replacements;
+}

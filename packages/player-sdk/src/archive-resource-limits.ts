@@ -342,6 +342,7 @@ function countPhysicalCentralDirectoryEntries(
 
   let count = 0;
   let offset = centralDirectoryOffset;
+  const names = new Set<string>();
 
   while (offset < centralDirectoryEnd) {
     if (offset + 4 > centralDirectoryEnd) {
@@ -363,11 +364,59 @@ function countPhysicalCentralDirectoryEntries(
     const fileNameBytes = view.getUint16(offset + 28, true);
     const extraBytes = view.getUint16(offset + 30, true);
     const commentBytes = view.getUint16(offset + 32, true);
-    offset += 46 + fileNameBytes + extraBytes + commentBytes;
+    const fileNameOffset = offset + 46;
+    const nextOffset = fileNameOffset + fileNameBytes + extraBytes + commentBytes;
+    if (nextOffset > centralDirectoryEnd) {
+      return null;
+    }
+
+    const fileName = readCanonicalArchiveEntryName(view, fileNameOffset, fileNameBytes);
+    if (names.has(fileName)) {
+      throw new Error(`Invalid WebBlackbox archive: duplicate ZIP entry '${fileName}'.`);
+    }
+    names.add(fileName);
+
+    offset = nextOffset;
     count += 1;
   }
 
   return offset === centralDirectoryEnd ? count : null;
+}
+
+function readCanonicalArchiveEntryName(
+  view: DataView,
+  fileNameOffset: number,
+  fileNameBytes: number
+): string {
+  if (fileNameBytes === 0) {
+    throw new Error("Invalid WebBlackbox archive: ZIP entries must have a name.");
+  }
+
+  let name = "";
+  for (let index = 0; index < fileNameBytes; index += 1) {
+    const byte = view.getUint8(fileNameOffset + index);
+    if (byte < 0x20 || byte > 0x7e) {
+      throw new Error(
+        "Invalid WebBlackbox archive: ZIP entry names must use canonical printable ASCII."
+      );
+    }
+    name += String.fromCharCode(byte);
+  }
+
+  if (name.includes("\\") || name.startsWith("/") || name.includes("//")) {
+    throw new Error(`Invalid WebBlackbox archive: non-canonical ZIP entry name '${name}'.`);
+  }
+
+  const path = name.endsWith("/") ? name.slice(0, -1) : name;
+  const segments = path.split("/");
+  if (
+    path.length === 0 ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new Error(`Invalid WebBlackbox archive: non-canonical ZIP entry name '${name}'.`);
+  }
+
+  return name;
 }
 
 function readZip64CentralDirectory(
