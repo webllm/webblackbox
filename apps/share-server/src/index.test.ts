@@ -1770,6 +1770,37 @@ describe("share-server", () => {
     expect(events.at(-1)?.clientHash).not.toBe(spoofedHash);
   });
 
+  it.each([
+    ["expanded IPv6", "2001:0db8:0:0:0:0:0:1", "2001:db8::1"],
+    ["IPv4-mapped IPv6", "0:0:0:0:0:ffff:c000:0201", "192.0.2.1"]
+  ])(
+    "canonicalizes %s trusted proxy addresses across equivalent spellings",
+    async (_label, configuredProxy, forwardedProxy) => {
+      const server = await startShareServer({
+        WEBBLACKBOX_TRUST_X_FORWARDED_FOR: "true",
+        WEBBLACKBOX_TRUSTED_PROXY_IPS: configuredProxy
+      });
+      const clientAddress = "198.51.100.99";
+      const response = await fetch(`${server.baseUrl}/api/share/list`, {
+        headers: {
+          "x-webblackbox-api-key": apiKey,
+          "x-forwarded-for": `${clientAddress}, ${forwardedProxy}`
+        }
+      });
+      expect(response.status).toBe(200);
+
+      const auditLog = await readFile(resolve(server.dataDir, "audit/share-access.jsonl"), "utf8");
+      const events = auditLog
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { action: string; clientHash: string });
+      const expectedHash = createHash("sha256")
+        .update(`webblackbox-share-audit:ip:${clientAddress}`)
+        .digest("hex");
+      expect(events.at(-1)).toMatchObject({ action: "list", clientHash: expectedHash });
+    }
+  );
+
   it("supports opt-in query API key bootstrap without propagating the key", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY: "true"

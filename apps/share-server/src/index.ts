@@ -12,7 +12,7 @@ import {
   type FileHandle
 } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isIP } from "node:net";
+import { isIP, SocketAddress } from "node:net";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -3777,8 +3777,19 @@ function resolvePeerAddress(request: IncomingMessage): string | null {
 
 function normalizeIpAddress(value: string): string | null {
   const trimmed = value.trim().toLowerCase();
-  const ipv4Mapped = trimmed.startsWith("::ffff:") ? trimmed.slice("::ffff:".length) : trimmed;
-  return isIP(ipv4Mapped) > 0 ? ipv4Mapped : null;
+  const family = isIP(trimmed);
+  if (family === 0) {
+    return null;
+  }
+
+  const socketAddress = SocketAddress.parse(family === 6 ? `[${trimmed}]:0` : `${trimmed}:0`);
+  if (!socketAddress) {
+    return null;
+  }
+
+  const canonical = socketAddress.address.toLowerCase();
+  const mappedIpv4 = canonical.startsWith("::ffff:") ? canonical.slice("::ffff:".length) : null;
+  return mappedIpv4 && isIP(mappedIpv4) === 4 ? mappedIpv4 : canonical;
 }
 
 function isTrustedProxyAddress(address: string): boolean {
