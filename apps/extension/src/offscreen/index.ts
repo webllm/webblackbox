@@ -11,6 +11,11 @@ import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES } from "../shared/messages.js";
 import { getExtensionPipelineStorage } from "./pipeline-storage.js";
+import { ResilientRuntimePort } from "./runtime-port.js";
+import {
+  pauseScreenRecordingForPortDisconnect,
+  resumeScreenRecordingAfterPortReconnect
+} from "./screen-recording-port.js";
 
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
@@ -98,6 +103,7 @@ type OffscreenScreenRecordingState = {
   sizeBytes: number;
   pendingChunks: Set<Promise<void>>;
   stopping: boolean;
+  pausedForPortDisconnect: boolean;
   stopPromise: Promise<OffscreenScreenRecordingStopResult> | null;
 };
 
@@ -105,7 +111,6 @@ const chromeApi = getChromeApi();
 createExtensionI18n({
   pageTitleKey: "pageTitleOffscreen"
 });
-const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.offscreen });
 const pipelines = new Map<string, FlightRecorderPipeline>();
 const screenRecordings = new Map<string, OffscreenScreenRecordingState>();
 const EXPORT_OBJECT_URL_TTL_MS = 90_000;
@@ -114,6 +119,9 @@ const SCREEN_RECORDING_TIMESLICE_MS = 1_000;
 const SCREEN_RECORDING_STOP_TIMEOUT_MS = 10_000;
 const SCREEN_RECORDING_MAX_FRAME_RATE = 30;
 const SCREEN_RECORDING_VIDEO_BITS_PER_SECOND = 3_500_000;
+const OFFSCREEN_PORT_RECONNECT_INITIAL_MS = 250;
+const OFFSCREEN_PORT_RECONNECT_MAX_MS = 2_000;
+const OFFSCREEN_PORT_DISCONNECT_DEADLINE_MS = 5_000;
 const SCREEN_RECORDING_MIME_CANDIDATES = [
   "video/webm;codecs=vp9",
   "video/webm;codecs=vp8",
@@ -127,10 +135,11 @@ const state: OffscreenState = {
 };
 
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+let runtimePort: ResilientRuntimePort | null = null;
 
 console.info("[WebBlackbox] offscreen pipeline initialized");
 
-port?.onMessage.addListener((message) => {
+function handleRuntimePortMessage(message: unknown): void {
   if (message && typeof message === "object") {
     const kind = (message as { kind?: unknown }).kind;
 
@@ -162,16 +171,65 @@ port?.onMessage.addListener((message) => {
       void handlePipelineRequest(message as OffscreenPipelineRequest);
     }
   }
-});
+}
 
-port?.onDisconnect?.addListener(() => {
+function handleRuntimePortDisconnect(): void {
   stopServiceWorkerKeepalive();
-});
+  for (const recording of screenRecordings.values()) {
+    if (!pauseScreenRecordingForPortDisconnect(recording)) {
+      void stopOffscreenScreenRecording(
+        recording.sid,
+        recording.recordingId,
+        "service-worker-disconnected",
+        false
+      );
+    }
+  }
+}
 
-postToSw({
-  kind: "offscreen.ready",
-  t: Date.now()
-});
+function handleRuntimePortReconnect(): void {
+  for (const recording of screenRecordings.values()) {
+    if (!resumeScreenRecordingAfterPortReconnect(recording)) {
+      void stopOffscreenScreenRecording(
+        recording.sid,
+        recording.recordingId,
+        "service-worker-reconnect-failed",
+        true
+      );
+    }
+  }
+
+  postToSw({
+    kind: "offscreen.ready",
+    t: Date.now()
+  });
+  syncServiceWorkerKeepalive();
+}
+
+function handleRuntimePortDisconnectDeadline(): void {
+  for (const recording of screenRecordings.values()) {
+    void stopOffscreenScreenRecording(
+      recording.sid,
+      recording.recordingId,
+      "service-worker-reconnect-timeout",
+      true
+    );
+  }
+}
+
+if (chromeApi?.runtime) {
+  runtimePort = new ResilientRuntimePort({
+    connect: () => chromeApi.runtime!.connect({ name: PORT_NAMES.offscreen }),
+    onMessage: handleRuntimePortMessage,
+    onConnected: handleRuntimePortReconnect,
+    onDisconnected: handleRuntimePortDisconnect,
+    onDisconnectDeadline: handleRuntimePortDisconnectDeadline,
+    reconnectInitialMs: OFFSCREEN_PORT_RECONNECT_INITIAL_MS,
+    reconnectMaxMs: OFFSCREEN_PORT_RECONNECT_MAX_MS,
+    disconnectDeadlineMs: OFFSCREEN_PORT_DISCONNECT_DEADLINE_MS
+  });
+  runtimePort.start();
+}
 
 async function handlePipelineRequest(message: OffscreenPipelineRequest): Promise<void> {
   try {
@@ -332,12 +390,8 @@ function postPipelineResponse(message: OffscreenPipelineResponse): void {
   postToSw(message);
 }
 
-function postToSw(message: unknown): void {
-  try {
-    port?.postMessage(message);
-  } catch {
-    void 0;
-  }
+function postToSw(message: unknown): boolean {
+  return runtimePort?.post(message) ?? false;
 }
 
 function syncServiceWorkerKeepalive(): void {
@@ -425,6 +479,7 @@ async function startOffscreenScreenRecording(
       sizeBytes: 0,
       pendingChunks: new Set(),
       stopping: false,
+      pausedForPortDisconnect: false,
       stopPromise: null
     };
 
@@ -567,10 +622,7 @@ function handleScreenRecordingData(
   const task = (async () => {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const endOffsetMs = Math.max(0, Math.round(performance.now() - recording.startedAt));
-    recording.postedChunkCount += 1;
-    recording.sizeBytes += bytes.byteLength;
-
-    postToSw({
+    const posted = postToSw({
       kind: "offscreen.screen-recording-chunk",
       sid: recording.sid,
       recordingId: recording.recordingId,
@@ -582,6 +634,11 @@ function handleScreenRecordingData(
       endOffsetMs,
       durationMs: Math.max(0, endOffsetMs - startOffsetMs)
     });
+    if (!posted) {
+      throw new Error("Offscreen screen-recording chunk could not reach the service worker.");
+    }
+    recording.postedChunkCount += 1;
+    recording.sizeBytes += bytes.byteLength;
   })();
 
   recording.pendingChunks.add(task);
