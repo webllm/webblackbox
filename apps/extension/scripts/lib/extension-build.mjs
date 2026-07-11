@@ -69,6 +69,7 @@ const DEV_PERMISSIONS = [
   "storage",
   "tabCapture",
   "tabs",
+  "webNavigation",
   "webRequest"
 ];
 const STORE_SAFE_PERMISSIONS = [
@@ -78,7 +79,8 @@ const STORE_SAFE_PERMISSIONS = [
   "offscreen",
   "scripting",
   "storage",
-  "tabCapture"
+  "tabCapture",
+  "webNavigation"
 ];
 const URL_MATCHES = ["<all_urls>"];
 const ARCHIVE_FIXED_DATE = new Date("1980-01-01T00:00:00.000Z");

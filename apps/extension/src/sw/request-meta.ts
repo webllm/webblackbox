@@ -5,6 +5,7 @@ export type RequestMetaEntry = {
   mimeType?: string;
   status?: number;
   resourceType?: string;
+  liteNavigationAuthorized?: boolean;
   updatedAt: number;
 };
 

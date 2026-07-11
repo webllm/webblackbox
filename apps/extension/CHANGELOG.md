@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Bound dynamically navigated subframes to exact Chrome document identities before injection or
+  Lite network capture, keeping replacement documents pending until an authenticated content
+  sender is ready and preventing stale frame reuse from crossing capture scope.
 - Made service-worker-to-offscreen event ingestion idempotent across response loss, reconnect
   retries, and offscreen recreation by retaining stable batch operation ids and reconciling each
   replay against the durable pipeline sequence watermark.

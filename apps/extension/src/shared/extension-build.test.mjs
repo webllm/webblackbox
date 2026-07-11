@@ -51,6 +51,7 @@ describe("extension build manifest", () => {
     expect(manifest.permissions).not.toContain("cookies");
     expect(manifest.permissions).toContain("alarms");
     expect(manifest.permissions).toContain("tabCapture");
+    expect(manifest.permissions).toContain("webNavigation");
     expect(manifest).not.toHaveProperty("content_scripts");
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
     expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
@@ -68,6 +69,7 @@ describe("extension build manifest", () => {
     expect(manifest.permissions).toContain("activeTab");
     expect(manifest.permissions).toContain("alarms");
     expect(manifest.permissions).toContain("tabCapture");
+    expect(manifest.permissions).toContain("webNavigation");
     expect(manifest.permissions).not.toContain("debugger");
     expect(manifest.permissions).not.toContain("tabs");
     expect(manifest.permissions).not.toContain("webRequest");
@@ -129,6 +131,26 @@ describe("extension build manifest", () => {
       })
     ).toContain("Store-safe manifest must include 'alarms' permission.");
   });
+
+  it.each(["dev", "store-safe"])(
+    "requires webNavigation permission in the %s profile",
+    (profile) => {
+      const release = profile === "store-safe";
+      const manifest = createExtensionManifest({ version: "1.2.3", release, profile });
+      manifest.permissions = manifest.permissions.filter(
+        (permission) => permission !== "webNavigation"
+      );
+
+      const label = profile === "store-safe" ? "Store-safe" : "Dev";
+      expect(
+        validateExtensionManifest(manifest, {
+          version: "1.2.3",
+          release,
+          profile
+        })
+      ).toContain(`${label} manifest must include 'webNavigation' permission.`);
+    }
+  );
 
   it("rejects always-on content scripts in the development profile", () => {
     const manifest = createExtensionManifest({ version: "1.2.3", profile: "dev" });
@@ -215,6 +237,7 @@ describe("extension build manifest", () => {
 
       expect(packagedManifest).not.toHaveProperty("key");
       expect(packagedManifest.permissions).toContain("tabCapture");
+      expect(packagedManifest.permissions).toContain("webNavigation");
       expect(packagedManifest.permissions).not.toContain("debugger");
       expect(packagedManifest.permissions).not.toContain("tabs");
       expect(packagedManifest.permissions).not.toContain("webRequest");

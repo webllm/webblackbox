@@ -2,7 +2,22 @@ export type PortMessageHandler = (message: unknown) => void;
 
 export type PortDisconnectHandler = () => void;
 
+export type InjectionResult<TResult = unknown> = {
+  documentId?: string;
+  error?: string;
+  frameId: number;
+  result?: TResult;
+};
+
+export type ScriptInjectionTarget = {
+  allFrames?: boolean;
+  documentIds?: string[];
+  frameIds?: number[];
+  tabId: number;
+};
+
 export type MessageSenderLike = {
+  documentId?: string;
   frameId?: number;
   url?: string;
   origin?: string;
@@ -121,14 +136,38 @@ export type ChromeApi = {
     };
     sendMessage(message: unknown): Promise<unknown>;
   };
+  webNavigation?: {
+    onCommitted: {
+      addListener(
+        callback: (details: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
+      removeListener(
+        callback: (details: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
+    };
+  };
   webRequest?: {
     onBeforeRequest: {
       addListener(
         callback: (details: {
           requestId: string;
           tabId: number;
+          documentId?: string;
           frameId?: number;
           method?: string;
+          type?: string;
           url: string;
           timeStamp?: number;
         }) => void,
@@ -138,8 +177,10 @@ export type ChromeApi = {
         callback: (details: {
           requestId: string;
           tabId: number;
+          documentId?: string;
           frameId?: number;
           method?: string;
+          type?: string;
           url: string;
           timeStamp?: number;
         }) => void
@@ -150,8 +191,10 @@ export type ChromeApi = {
         callback: (details: {
           requestId: string;
           tabId: number;
+          documentId?: string;
           frameId?: number;
           method?: string;
+          type?: string;
           url: string;
           statusCode?: number;
           statusLine?: string;
@@ -163,8 +206,10 @@ export type ChromeApi = {
         callback: (details: {
           requestId: string;
           tabId: number;
+          documentId?: string;
           frameId?: number;
           method?: string;
+          type?: string;
           url: string;
           statusCode?: number;
           statusLine?: string;
@@ -177,8 +222,10 @@ export type ChromeApi = {
         callback: (details: {
           requestId: string;
           tabId: number;
+          documentId?: string;
           frameId?: number;
           method?: string;
+          type?: string;
           url: string;
           error?: string;
           timeStamp?: number;
@@ -189,8 +236,10 @@ export type ChromeApi = {
         callback: (details: {
           requestId: string;
           tabId: number;
+          documentId?: string;
           frameId?: number;
           method?: string;
+          type?: string;
           url: string;
           error?: string;
           timeStamp?: number;
@@ -199,11 +248,11 @@ export type ChromeApi = {
     };
   };
   scripting?: {
-    executeScript(options: {
-      target: { tabId: number; allFrames?: boolean; frameIds?: number[] };
+    executeScript<TResult = unknown>(options: {
+      target: ScriptInjectionTarget;
       world?: "MAIN" | "ISOLATED";
       files?: string[];
-    }): Promise<void>;
+    }): Promise<InjectionResult<TResult>[]>;
   };
   storage?: {
     local: {

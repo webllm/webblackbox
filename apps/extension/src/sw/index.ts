@@ -88,11 +88,14 @@ import {
   type CdpCaptureScopeState
 } from "./cdp-capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
+import { ContentDocumentAuthorization } from "./content-document-authorization.js";
+import { injectPendingContentDocument } from "./dynamic-content-injection.js";
 import {
   buildLiteNetworkFailureRawEvent,
   buildLiteNetworkRequestRawEvent,
   buildLiteNetworkResponseRawEvent
 } from "./lite-network-baseline.js";
+import { authorizeLiteWebRequest } from "./lite-web-request-authorization.js";
 import { shouldUpdateSessionMetadataFromNavigation } from "./navigation-metadata.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 import {
@@ -109,6 +112,7 @@ import {
   upsertRequestMeta,
   type RequestMetaEntry
 } from "./request-meta.js";
+import { injectMainWorldHook } from "./script-injection.js";
 import {
   FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS,
   buildLocalStorageSnapshotExpression,
@@ -176,6 +180,7 @@ type SessionRuntime = {
   cdpRouter: CdpRouter | null;
   enabledCdpSessions: Set<string>;
   cdpScope: CdpCaptureScopeState;
+  contentDocuments: ContentDocumentAuthorization;
   authorizedContentFrames: Set<number>;
   requestMeta: Map<string, RequestMetaEntry>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
@@ -617,6 +622,15 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   const onDisconnect = () => {
     connectedPorts.delete(port);
 
+    if (port.name === PORT_NAMES.content) {
+      const tabId = port.sender?.tab?.id;
+      const runtime = typeof tabId === "number" ? sessionsByTab.get(tabId) : undefined;
+
+      if (runtime) {
+        revokeContentSender(runtime, port.sender);
+      }
+    }
+
     if (offscreenPort === port) {
       offscreenPort = null;
       rejectPendingOffscreenRequests("Offscreen pipeline disconnected.");
@@ -656,20 +670,16 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
     return;
   }
 
-  if (!authorizeContentSender(runtime, port.sender)) {
+  if (!(await authorizeContentSenderForReady(runtime, port.sender))) {
     sendContentPortRecordingState(port, runtime, false);
 
     if (normalizeSenderFrameId(port.sender) === 0) {
       await stopSession(tabId);
     } else {
-      runtime.authorizedContentFrames.delete(normalizeSenderFrameId(port.sender));
+      failContentSender(runtime, port.sender);
     }
 
     return;
-  }
-
-  if (shouldInjectHooksForMode(runtime.mode)) {
-    await ensureInjectedHooks(tabId, normalizeSenderFrameId(port.sender));
   }
 
   syncContentPortRecordingState(port);
@@ -697,7 +707,7 @@ function syncContentPortRecordingState(port: PortLike): void {
 
   if (!authorizeContentSender(runtime, port.sender)) {
     sendContentPortRecordingState(port, runtime, false);
-    runtime.authorizedContentFrames.delete(normalizeSenderFrameId(port.sender));
+    failContentSender(runtime, port.sender);
     return;
   }
 
@@ -811,6 +821,17 @@ chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
 
 chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
   void stopSession(tabId);
+});
+
+chromeApi?.webNavigation?.onCommitted.addListener((details) => {
+  void handleCommittedChildDocument(details).catch((error) => {
+    console.warn("[WebBlackbox] committed child document handling failed closed", {
+      tabId: details.tabId,
+      frameId: details.frameId,
+      documentId: details.documentId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 });
 
 async function handleInboundMessage(
@@ -933,7 +954,7 @@ async function handleInboundMessage(
       };
     }
 
-    if (!authorizeContentSender(runtime, sender, message.documentUrl)) {
+    if (!(await authorizeContentSenderForReady(runtime, sender, message.documentUrl))) {
       if (normalizeSenderFrameId(sender) === 0) {
         await stopSession(tabId);
       } else {
@@ -948,10 +969,6 @@ async function handleInboundMessage(
         mode: runtime.mode,
         capturePolicy: runtime.config.capturePolicy
       };
-    }
-
-    if (shouldInjectHooksForMode(runtime.mode)) {
-      await ensureInjectedHooks(tabId, normalizeSenderFrameId(sender));
     }
 
     const sampling = toStatusSampling(runtime);
@@ -1298,6 +1315,11 @@ function createSessionRuntime(input: {
         input.screenRecordingChunks ?? []
       )
     : null;
+  const contentDocuments = new ContentDocumentAuthorization(input.tabId);
+
+  if (!input.stoppedAt) {
+    contentDocuments.reset({ url: input.captureUrl });
+  }
 
   const runtime: SessionRuntime = {
     sid: input.sid,
@@ -1317,7 +1339,8 @@ function createSessionRuntime(input: {
     cdpRouter: null,
     enabledCdpSessions: new Set<string>(),
     cdpScope: createCdpCaptureScopeState(input.config.capturePolicy, input.tabId, input.captureUrl),
-    authorizedContentFrames: new Set<number>(input.stoppedAt ? [] : [0]),
+    contentDocuments,
+    authorizedContentFrames: new Set<number>(),
     requestMeta: new Map(),
     screenshotInterval: null,
     screenRecording: input.screenRecording
@@ -1412,11 +1435,69 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
   await notifyAuthorizedContentFrames(runtime, true);
 }
 
+async function handleCommittedChildDocument(details: {
+  tabId: number;
+  frameId: number;
+  documentId?: string;
+  url: string;
+}): Promise<void> {
+  const runtime = sessionsByTab.get(details.tabId);
+
+  if (
+    !runtime ||
+    details.frameId <= 0 ||
+    runtime.config.capturePolicy?.scope.includeSubframes !== true ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
+    runtime.stopping ||
+    runtime.stoppedAt
+  ) {
+    return;
+  }
+
+  const preparation = await runtime.contentDocuments
+    .prepareCommittedNavigation(details, ({ url, frameId }) =>
+      evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+        url,
+        tabId: runtime.tabId,
+        frameId
+      })
+    )
+    .finally(() => {
+      syncAuthorizedContentFrames(runtime);
+    });
+
+  if (!preparation.prepared) {
+    return;
+  }
+
+  const result = await injectPendingContentDocument({
+    chromeApi,
+    authorization: runtime.contentDocuments,
+    document: preparation.document,
+    isRuntimeActive: () =>
+      isVolatileCaptureOpen(runtime.captureFence) &&
+      !runtime.stopping &&
+      !runtime.stoppedAt &&
+      sessionsByTab.get(runtime.tabId) === runtime
+  });
+  syncAuthorizedContentFrames(runtime);
+
+  if (result.status === "failed") {
+    console.warn("[WebBlackbox] dynamic child injection failed closed", {
+      tabId: runtime.tabId,
+      frameId: preparation.document.frameId,
+      documentId: preparation.document.documentId,
+      error: result.error instanceof Error ? result.error.message : String(result.error)
+    });
+  }
+}
+
 function stopSession(tabId: number): Promise<void> {
   const runtime = sessionsByTab.get(tabId);
 
   if (runtime) {
     blockVolatileCapture(runtime.captureFence);
+    runtime.contentDocuments.cancelPendingNavigations();
     notifyOffscreenPipelineStatus();
   }
 
@@ -1479,6 +1560,7 @@ async function stopSessionOnce(tabId: number): Promise<void> {
         },
         async () => {
           sessionsByTab.delete(runtime.tabId);
+          resetAuthorizedContentFrames(runtime);
           uninstallLiteWebRequestCaptureIfUnused();
           runtime.stoppedAt = stopRequestedAt;
           runtime.stopRequestedAt = undefined;
@@ -4385,6 +4467,12 @@ function authorizeContentSender(
     return false;
   }
 
+  const documentId = sender?.documentId;
+
+  if (typeof documentId !== "string" || documentId.length === 0) {
+    return false;
+  }
+
   const senderUrl =
     typeof documentUrl === "string" && documentUrl.length > 0
       ? documentUrl
@@ -4403,15 +4491,122 @@ function authorizeContentSender(
     return false;
   }
 
-  if (frameId === 0 && senderUrl && senderUrl !== runtime.captureUrl) {
-    runtime.captureUrl = senderUrl;
-    runtime.cdpScope.captureUrl = senderUrl;
-    runtime.url = sanitizeUrlForPrivacy(senderUrl);
-    resetAuthorizedContentFrames(runtime);
+  if (frameId === 0 && senderUrl) {
+    const currentTopDocument = runtime.contentDocuments.get(0);
+
+    if (currentTopDocument && currentTopDocument.documentId !== documentId) {
+      resetAuthorizedContentFrames(runtime, senderUrl);
+    } else if (!currentTopDocument && runtime.captureUrl !== senderUrl) {
+      resetAuthorizedContentFrames(runtime, senderUrl);
+    }
+
+    if (senderUrl !== runtime.captureUrl) {
+      runtime.captureUrl = senderUrl;
+      runtime.cdpScope.captureUrl = senderUrl;
+      runtime.url = sanitizeUrlForPrivacy(senderUrl);
+    }
   }
 
-  runtime.authorizedContentFrames.add(frameId);
+  if (!senderUrl) {
+    return false;
+  }
+
+  const authorized = runtime.contentDocuments.authorize({
+    tabId,
+    frameId,
+    documentId,
+    url: senderUrl
+  });
+
+  if (!authorized) {
+    return false;
+  }
+
+  syncAuthorizedContentFrames(runtime);
   return true;
+}
+
+async function authorizeContentSenderForReady(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined,
+  documentUrl?: string
+): Promise<boolean> {
+  if (!authorizeContentSender(runtime, sender, documentUrl)) {
+    return false;
+  }
+
+  if (!shouldInjectHooksForMode(runtime.mode)) {
+    return true;
+  }
+
+  const frameId = normalizeSenderFrameId(sender);
+
+  if (frameId === 0) {
+    await ensureInjectedHooks(runtime.tabId, 0);
+    return true;
+  }
+
+  const documentId = sender?.documentId;
+
+  if (frameId < 0 || typeof documentId !== "string" || documentId.length === 0) {
+    failContentSender(runtime, sender);
+    return false;
+  }
+
+  try {
+    await injectMainWorldHook(chromeApi, {
+      tabId: runtime.tabId,
+      frameId,
+      documentId
+    });
+    return true;
+  } catch (error) {
+    failContentSender(runtime, sender);
+    console.warn("[WebBlackbox] child main-world hook injection failed closed", {
+      tabId: runtime.tabId,
+      frameId,
+      documentId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return false;
+  }
+}
+
+function revokeContentSender(runtime: SessionRuntime, sender: MessageSenderLike | undefined): void {
+  const frameId = normalizeSenderFrameId(sender);
+  const documentId = sender?.documentId;
+
+  if (frameId < 0 || typeof documentId !== "string" || documentId.length === 0) {
+    return;
+  }
+
+  runtime.contentDocuments.revoke(frameId, documentId);
+  syncAuthorizedContentFrames(runtime);
+}
+
+function failContentSender(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined
+): boolean {
+  const frameId = normalizeSenderFrameId(sender);
+  const documentId = sender?.documentId;
+
+  if (frameId < 0 || typeof documentId !== "string" || documentId.length === 0) {
+    return false;
+  }
+
+  const navigationFailed = runtime.contentDocuments.failNavigation(frameId, documentId);
+  const activeRevoked = runtime.contentDocuments.revoke(frameId, documentId);
+  syncAuthorizedContentFrames(runtime);
+  return navigationFailed || activeRevoked;
+}
+
+function syncAuthorizedContentFrames(runtime: SessionRuntime): void {
+  runtime.authorizedContentFrames.clear();
+
+  for (const frameId of runtime.contentDocuments.activeFrameIds()) {
+    runtime.authorizedContentFrames.add(frameId);
+  }
 }
 
 async function deactivateDeniedContentFrame(
@@ -4425,9 +4620,11 @@ async function deactivateDeniedContentFrame(
     return;
   }
 
+  const deactivated = failContentSender(runtime, sender);
+
   if (port?.name === PORT_NAMES.content) {
     sendContentPortRecordingState(port, runtime, false);
-  } else {
+  } else if (deactivated) {
     await notifyTabStatus(
       runtime.tabId,
       false,
@@ -4438,13 +4635,14 @@ async function deactivateDeniedContentFrame(
       frameId
     );
   }
-
-  runtime.authorizedContentFrames.delete(frameId);
 }
 
-function resetAuthorizedContentFrames(runtime: SessionRuntime): void {
-  runtime.authorizedContentFrames.clear();
-  runtime.authorizedContentFrames.add(0);
+function resetAuthorizedContentFrames(
+  runtime: SessionRuntime,
+  topDocumentUrl = runtime.captureUrl
+): void {
+  runtime.contentDocuments.reset({ url: topDocumentUrl });
+  syncAuthorizedContentFrames(runtime);
 }
 
 function asString(value: unknown): string | null {
@@ -4945,14 +5143,38 @@ function installLiteWebRequestCapture(): void {
   const onBeforeRequest = (details: {
     requestId: string;
     tabId: number;
+    documentId?: string;
     frameId?: number;
     method?: string;
+    type?: string;
     url: string;
     timeStamp?: number;
   }) => {
-    const runtime = resolveLiteRuntimeForWebRequest(details.tabId, details.frameId);
+    const runtime = resolveActiveLiteRuntime(details.tabId);
 
     if (!runtime) {
+      return;
+    }
+
+    const authorization = authorizeLiteWebRequest({
+      authorization: runtime.contentDocuments,
+      details,
+      phase: "before",
+      topDocumentUrl: runtime.captureUrl,
+      evaluateScope: (documentUrl, frameId) =>
+        evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+          url: documentUrl,
+          tabId: runtime.tabId,
+          frameId
+        }).allowed
+    });
+
+    if (authorization.kind === "subframe-navigation") {
+      syncAuthorizedContentFrames(runtime);
+    }
+
+    if (!authorization.allowed) {
+      deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
       return;
     }
 
@@ -4960,7 +5182,12 @@ function installLiteWebRequestCapture(): void {
     upsertRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId), {
       url: details.url,
       method: details.method,
-      startedAt
+      startedAt,
+      resourceType: details.type,
+      liteNavigationAuthorized:
+        authorization.kind === "subframe-navigation" || authorization.kind === "top-navigation"
+          ? true
+          : undefined
     });
 
     ingestRawEvent(
@@ -4984,20 +5211,45 @@ function installLiteWebRequestCapture(): void {
   const onCompleted = (details: {
     requestId: string;
     tabId: number;
+    documentId?: string;
     frameId?: number;
     method?: string;
+    type?: string;
     url: string;
     statusCode?: number;
     statusLine?: string;
     timeStamp?: number;
   }) => {
-    const runtime = resolveLiteRuntimeForWebRequest(details.tabId, details.frameId);
+    const runtime = resolveActiveLiteRuntime(details.tabId);
 
     if (!runtime) {
       return;
     }
 
-    const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
+    const requestMetaKey = buildRequestMetaKey(details.requestId);
+    const metadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
+    const authorization = authorizeLiteWebRequest({
+      authorization: runtime.contentDocuments,
+      details: {
+        ...details,
+        type: details.type ?? metadata?.resourceType
+      },
+      phase: "completion",
+      topDocumentUrl: runtime.captureUrl,
+      navigationStartedAllowed: metadata?.liteNavigationAuthorized,
+      evaluateScope: (documentUrl, frameId) =>
+        evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+          url: documentUrl,
+          tabId: runtime.tabId,
+          frameId
+        }).allowed
+    });
+
+    if (!authorization.allowed) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+
     const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
 
     ingestRawEvent(
@@ -5023,25 +5275,50 @@ function installLiteWebRequestCapture(): void {
       )
     );
 
-    deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
+    deleteRequestMeta(runtime.requestMeta, requestMetaKey);
   };
 
   const onErrorOccurred = (details: {
     requestId: string;
     tabId: number;
+    documentId?: string;
     frameId?: number;
     method?: string;
+    type?: string;
     url: string;
     error?: string;
     timeStamp?: number;
   }) => {
-    const runtime = resolveLiteRuntimeForWebRequest(details.tabId, details.frameId);
+    const runtime = resolveActiveLiteRuntime(details.tabId);
 
     if (!runtime) {
       return;
     }
 
-    const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
+    const requestMetaKey = buildRequestMetaKey(details.requestId);
+    const metadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
+    const authorization = authorizeLiteWebRequest({
+      authorization: runtime.contentDocuments,
+      details: {
+        ...details,
+        type: details.type ?? metadata?.resourceType
+      },
+      phase: "completion",
+      topDocumentUrl: runtime.captureUrl,
+      navigationStartedAllowed: metadata?.liteNavigationAuthorized,
+      evaluateScope: (documentUrl, frameId) =>
+        evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+          url: documentUrl,
+          tabId: runtime.tabId,
+          frameId
+        }).allowed
+    });
+
+    if (!authorization.allowed) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+
     const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
 
     ingestRawEvent(
@@ -5066,7 +5343,7 @@ function installLiteWebRequestCapture(): void {
       )
     );
 
-    deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
+    deleteRequestMeta(runtime.requestMeta, requestMetaKey);
   };
 
   chromeApi.webRequest.onBeforeRequest.addListener(onBeforeRequest, filter);
@@ -5104,10 +5381,7 @@ function hasActiveLiteRuntime(): boolean {
   return false;
 }
 
-function resolveLiteRuntimeForWebRequest(
-  tabId: number,
-  frameIdCandidate?: number
-): SessionRuntime | undefined {
+function resolveActiveLiteRuntime(tabId: number): SessionRuntime | undefined {
   if (!Number.isFinite(tabId) || tabId < 0) {
     return undefined;
   }
@@ -5118,26 +5392,8 @@ function resolveLiteRuntimeForWebRequest(
     !runtime ||
     runtime.mode !== "lite" ||
     !isVolatileCaptureOpen(runtime.captureFence) ||
-    runtime.stopping
-  ) {
-    return undefined;
-  }
-
-  const frameId =
-    typeof frameIdCandidate === "number" && Number.isFinite(frameIdCandidate)
-      ? Math.max(0, Math.floor(frameIdCandidate))
-      : 0;
-
-  if (frameId > 0 && !runtime.authorizedContentFrames.has(frameId)) {
-    return undefined;
-  }
-
-  if (
-    !evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
-      url: runtime.captureUrl,
-      tabId,
-      frameId: 0
-    }).allowed
+    runtime.stopping ||
+    runtime.stoppedAt
   ) {
     return undefined;
   }
@@ -6258,6 +6514,8 @@ async function failClosedRuntimeRestoration(): Promise<void> {
       await notifyAuthorizedContentFrames(runtime, false).catch(() => undefined);
       await teardownCaptureInstrumentation(runtime).catch(() => undefined);
     }
+
+    resetAuthorizedContentFrames(runtime);
 
     await runtime.pipeline.close({ purge: true }).catch(() => undefined);
   }
