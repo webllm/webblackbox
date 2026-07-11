@@ -145,7 +145,12 @@ describe("options page rendering", () => {
 
     await importOptionsModule();
 
-    expect(document.querySelector("[data-mode-profile='lite']")).not.toBeNull();
+    const liteProfile = document.querySelector("[data-mode-profile='lite']");
+    expect(liteProfile).not.toBeNull();
+    expect(liteProfile?.textContent).toContain(
+      "Page-side lightweight signals with browser-side network metadata."
+    );
+    expect(liteProfile?.textContent).toContain("browser-side network baseline");
     expect(document.querySelector("[data-mode-profile='full']")).not.toBeNull();
     expect(document.querySelector("#screenshotIdleMs")).not.toBeNull();
     expect(document.querySelector("#bodyCaptureMaxBytes")).not.toBeNull();
@@ -172,7 +177,16 @@ describe("options page rendering", () => {
 
     await importOptionsModule();
 
-    expect(document.querySelector("[data-mode-profile='lite']")).not.toBeNull();
+    const liteProfile = document.querySelector("[data-mode-profile='lite']");
+    expect(liteProfile).not.toBeNull();
+    expect(liteProfile?.textContent).toContain(
+      "This runtime provides no Chrome webRequest coverage."
+    );
+    expect(liteProfile?.textContent).toContain("mutation summary (page-side only)");
+    expect(liteProfile?.textContent).not.toContain(
+      "Page-side lightweight signals with browser-side network metadata."
+    );
+    expect(liteProfile?.textContent).not.toContain("browser-side network baseline");
     expect(document.querySelector("[data-mode-profile='full']")).toBeNull();
     expect(document.querySelector("#screenshotIdleMs")).toBeNull();
     expect(document.querySelector("#bodyCaptureMaxBytes")).toBeNull();
@@ -184,6 +198,12 @@ describe("options page rendering", () => {
     expect(document.querySelector("#blockedSelectors")).not.toBeNull();
     expect(document.querySelector("#redactBodyPatterns")).not.toBeNull();
     expect(document.querySelector("#hashSensitiveValues")).not.toBeNull();
+    expect(document.body.textContent).toContain(
+      "Available capture profiles are shown according to the capabilities provided by this extension runtime."
+    );
+    expect(document.body.textContent).toContain(
+      "Controls periodic summary-only DOM snapshots. It does not capture page images or schedule screenshots."
+    );
   });
 
   it("preserves loaded values for hidden store-safe fields when saving", async () => {

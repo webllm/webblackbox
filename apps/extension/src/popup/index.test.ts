@@ -76,7 +76,8 @@ function installChromeStub(
     runtimeFixture === "store-safe" ? "activeTab" : undefined,
     "scripting",
     hasCdp ? "debugger" : undefined,
-    hasTabCapture ? "tabCapture" : undefined
+    hasTabCapture ? "tabCapture" : undefined,
+    runtimeFixture === "dev" ? "webRequest" : undefined
   ].filter((permission): permission is string => typeof permission === "string");
   const runtimeEvent = {
     addListener: vi.fn(),
@@ -287,6 +288,16 @@ function getLiteStartCancelButton(): HTMLButtonElement {
   }
 
   return button;
+}
+
+function getLiteReloadBody(): HTMLElement {
+  const body = document.querySelector<HTMLElement>(".wb-confirm-body");
+
+  if (!body) {
+    throw new Error("missing lite reload body");
+  }
+
+  return body;
 }
 
 function getSessionsButton(): HTMLButtonElement {
@@ -961,6 +972,8 @@ describe("popup export policy form", () => {
 
     expect(document.querySelector(".wb-confirm-overlay")).not.toBeNull();
     expect(getLiteReloadStartButton().textContent).toBe("Reload and Start Lite");
+    expect(getLiteReloadBody().textContent).toContain("first network requests");
+    expect(getLiteReloadBody().textContent).not.toContain("no Chrome webRequest");
     expect(port.postMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "ui.start",
@@ -978,6 +991,25 @@ describe("popup export policy form", () => {
       reloadPage: true
     });
     expect(document.querySelector(".wb-confirm-overlay")).toBeNull();
+  });
+
+  it("describes page-side-only Lite coverage when browser network capture is unavailable", async () => {
+    const port = new FakePort();
+    installChromeStub(port, { runtimeFixture: "store-safe" });
+
+    await importPopupModule();
+
+    getStartLiteButton().click();
+    await flushPopup();
+
+    expect(getLiteReloadBody().textContent).toContain("records page-side signals only");
+    expect(getLiteReloadBody().textContent).toContain(
+      "no Chrome webRequest or browser-network coverage"
+    );
+    expect(getLiteReloadBody().textContent).not.toContain("first network requests");
+
+    getLiteStartCancelButton().click();
+    await flushPopup();
   });
 
   it("can start lite without reloading when the user chooses the non-refresh path", async () => {

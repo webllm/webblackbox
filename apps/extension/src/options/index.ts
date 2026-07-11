@@ -105,6 +105,7 @@ function render(container: HTMLElement, options: OptionsState): void {
       { min: 500, max: 120_000 }
     )
   );
+  section.append(createHelpText([t("optionsSnapshotIntervalHelp")]));
   if (hasFullCapture) {
     section.append(
       ...createNumberField(
@@ -457,6 +458,8 @@ function createRuntimeProfilesSection(): HTMLElement {
 }
 
 function createModeProfileCards(): HTMLElement[] {
+  const liteHasBrowserNetwork = runtimeCapabilities.browserNetwork === "webRequest";
+
   return Object.keys(MODE_PRODUCT_PROFILES)
     .filter((mode) =>
       mode === "full" ? runtimeCapabilities.fullMode : runtimeCapabilities.pageInjection
@@ -472,12 +475,25 @@ function createModeProfileCards(): HTMLElement[] {
       const summary = document.createElement("span");
       summary.className = "wb-options-profile-summary";
       summary.textContent =
-        mode === "full" ? t("optionsFullProfileSummary") : t("optionsLiteProfileSummary");
+        mode === "full"
+          ? t("optionsFullProfileSummary")
+          : t(
+              liteHasBrowserNetwork
+                ? "optionsLiteProfileSummary"
+                : "optionsLiteProfileSummaryNoBrowserNetwork"
+            );
 
       const signals = document.createElement("span");
       signals.className = "wb-options-profile-meta";
       signals.textContent = t("optionsProfileSignals", {
-        value: mode === "full" ? t("optionsFullProfileSignals") : t("optionsLiteProfileSignals")
+        value:
+          mode === "full"
+            ? t("optionsFullProfileSignals")
+            : t(
+                liteHasBrowserNetwork
+                  ? "optionsLiteProfileSignals"
+                  : "optionsLiteProfileSignalsNoBrowserNetwork"
+              )
       });
 
       const heavyCapture = document.createElement("span");

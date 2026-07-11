@@ -76,4 +76,14 @@ describe("mode-profile", () => {
   it("documents only the shipped runtime profiles", () => {
     expect(Object.keys(MODE_PRODUCT_PROFILES).sort()).toEqual(["full", "lite"]);
   });
+
+  it("keeps static Lite profile copy neutral about optional browser capabilities", () => {
+    const liteCopy = MODE_PRODUCT_PROFILES.lite;
+
+    expect(liteCopy.summary).toContain("runtime-dependent browser integration");
+    expect(liteCopy.signals).toContain("depend on runtime capabilities");
+    expect(`${liteCopy.summary} ${liteCopy.signals}`).not.toContain(
+      "browser-side network baseline"
+    );
+  });
 });

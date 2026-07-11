@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Made Lite coverage copy reflect installed runtime capabilities: store-safe UI now states that it
+  records page-side signals without Chrome webRequest/browser-network metadata, while capable dev
+  installs retain the browser-network baseline description and DOM snapshots are labeled nonvisual.
 - Bound Lite navigation and browser-network capture to exact active Chrome documents and parent
   chains, closing the previous page synchronously, keeping committed replacements pending until
   exact dual-world injection and content readiness, and rejecting superseded completions, errors,

@@ -72,6 +72,8 @@ const EXTENSION_MESSAGES = {
     popupLiteReloadTitle: "Reload Before Lite Capture?",
     popupLiteReloadBody:
       "Reloading the current page lets Lite capture the page startup, first network requests, and early console/errors. Unsaved page changes may be lost.",
+    popupLiteReloadBodyNoBrowserNetwork:
+      "Reloading the current page lets Lite capture page startup and early console/errors. This runtime records page-side signals only and provides no Chrome webRequest or browser-network coverage. Unsaved page changes may be lost.",
     popupLiteReloadStart: "Reload and Start Lite",
     popupLiteStartWithoutReload: "Start Without Reload",
     popupRingBuffer: "Ring buffer",
@@ -87,6 +89,8 @@ const EXTENSION_MESSAGES = {
     optionsScrollHz: "Scroll Sampling (Hz)",
     optionsDomFlushMs: "DOM Flush Interval (ms)",
     optionsSnapshotIntervalMs: "DOM Snapshot Interval (ms)",
+    optionsSnapshotIntervalHelp:
+      "Controls periodic summary-only DOM snapshots. It does not capture page images or schedule screenshots.",
     optionsScreenshotIdleMs: "Screenshot Idle Interval (ms)",
     optionsScreenshotIdleHelp:
       "Lite screenshots are disabled by default. Set a positive interval only when screenshots are explicitly allowed. Full mode uses this for browser-side screenshot cadence.",
@@ -106,7 +110,7 @@ const EXTENSION_MESSAGES = {
     optionsTitle: "Capture Settings",
     optionsRuntimeProfilesTitle: "Runtime Profiles",
     optionsRuntimeProfilesSummary:
-      "WebBlackbox currently exposes two runtime profiles only: lite and full. There is no balanced mode in the shipped extension build.",
+      "Available capture profiles are shown according to the capabilities provided by this extension runtime.",
     optionsProfileSignals: "Signals: {value}",
     optionsProfileHeavyCapture: "Heavy capture: {value}",
     optionsPerformanceBudgetTitle: "Performance Budget Alerts",
@@ -117,6 +121,10 @@ const EXTENSION_MESSAGES = {
     optionsLiteProfileSummary: "Page-side lightweight signals with browser-side network metadata.",
     optionsLiteProfileSignals:
       "click / input / scroll / pointer samples / mutation summary / browser-side network baseline",
+    optionsLiteProfileSummaryNoBrowserNetwork:
+      "Page-side lightweight signals only. This runtime provides no Chrome webRequest coverage.",
+    optionsLiteProfileSignalsNoBrowserNetwork:
+      "click / input / scroll / pointer samples / mutation summary (page-side only)",
     optionsLiteProfileHeavyCapture:
       "idle screenshots disabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled",
     optionsFullProfileSummary:
@@ -218,6 +226,8 @@ const EXTENSION_MESSAGES = {
     popupLiteReloadTitle: "启动轻量模式前刷新页面？",
     popupLiteReloadBody:
       "刷新当前页面可让轻量模式采集页面启动、首轮网络请求和早期 console/error。未保存的页面内容可能会丢失。",
+    popupLiteReloadBodyNoBrowserNetwork:
+      "刷新当前页面可让轻量模式采集页面启动和早期 console/error。当前运行时仅记录页面侧信号，不提供 Chrome webRequest 或浏览器网络覆盖。未保存的页面内容可能会丢失。",
     popupLiteReloadStart: "刷新并开始轻量模式",
     popupLiteStartWithoutReload: "不刷新，直接开始",
     popupRingBuffer: "环形缓冲区",
@@ -233,6 +243,8 @@ const EXTENSION_MESSAGES = {
     optionsScrollHz: "滚动采样率（Hz）",
     optionsDomFlushMs: "DOM 刷新间隔（毫秒）",
     optionsSnapshotIntervalMs: "DOM 快照间隔（毫秒）",
+    optionsSnapshotIntervalHelp:
+      "控制仅含摘要的周期性 DOM 快照；它不会采集页面图像，也不会触发截图。",
     optionsScreenshotIdleMs: "空闲截图间隔（毫秒）",
     optionsScreenshotIdleHelp:
       "轻量模式默认关闭空闲截图。仅在明确允许截图时设置为正数。完整模式会将其用于浏览器侧截图节奏。",
@@ -250,8 +262,7 @@ const EXTENSION_MESSAGES = {
     optionsSavedAt: "已保存于 {time}",
     optionsTitle: "采集设置",
     optionsRuntimeProfilesTitle: "运行时配置",
-    optionsRuntimeProfilesSummary:
-      "当前扩展仅提供两种运行时配置：lite 与 full。正式构建中不包含 balanced 模式。",
+    optionsRuntimeProfilesSummary: "下方仅显示当前扩展运行时能力所支持的采集配置。",
     optionsProfileSignals: "信号：{value}",
     optionsProfileHeavyCapture: "重采集能力：{value}",
     optionsPerformanceBudgetTitle: "性能预算告警",
@@ -261,6 +272,10 @@ const EXTENSION_MESSAGES = {
     optionsAutoFreezeOnBreach: "预算超限时自动冻结",
     optionsLiteProfileSummary: "页面侧轻量信号，结合浏览器侧网络元数据。",
     optionsLiteProfileSignals: "点击 / 输入 / 滚动 / 指针采样 / 变更摘要 / 浏览器侧网络基线",
+    optionsLiteProfileSummaryNoBrowserNetwork:
+      "仅采集页面侧轻量信号；当前运行时不提供 Chrome webRequest 覆盖。",
+    optionsLiteProfileSignalsNoBrowserNetwork:
+      "点击 / 输入 / 滚动 / 指针采样 / 变更摘要（仅页面侧）",
     optionsLiteProfileHeavyCapture:
       "默认关闭空闲截图，运行时 DOM 快照保持摘要模式，页面侧响应体采集关闭",
     optionsFullProfileSummary: "浏览器辅助采集，提供 CDP 截图、导航与更丰富的诊断信息。",

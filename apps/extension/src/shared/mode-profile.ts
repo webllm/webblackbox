@@ -15,9 +15,9 @@ export type ModeProductProfile = {
 export const MODE_PRODUCT_PROFILES: Record<CaptureMode, ModeProductProfile> = {
   lite: {
     label: "Lite",
-    summary: "Page-side lightweight signals with browser-side network metadata.",
+    summary: "Page-side lightweight signals with runtime-dependent browser integration.",
     signals:
-      "click / input / scroll / pointer samples / mutation summary / browser-side network baseline",
+      "click / input / scroll / pointer samples / mutation summary; browser-side signals depend on runtime capabilities",
     heavyCapture:
       "idle screenshots disabled by default, runtime DOM snapshots stay summary-only, page-side response-body capture disabled"
   },

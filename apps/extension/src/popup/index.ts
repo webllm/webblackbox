@@ -440,7 +440,11 @@ function openLiteReloadDialog(): Promise<"reload" | "direct" | null> {
 
     const body = document.createElement("p");
     body.className = "wb-confirm-body";
-    body.textContent = t("popupLiteReloadBody");
+    body.textContent = t(
+      runtimeCapabilities.browserNetwork === "webRequest"
+        ? "popupLiteReloadBody"
+        : "popupLiteReloadBodyNoBrowserNetwork"
+    );
 
     const actions = document.createElement("div");
     actions.className = "wb-confirm-actions";
