@@ -7,6 +7,7 @@ import {
 import {
   canOperateOnExpectedNavigationResource,
   didGuardedNavigationOperationRun,
+  launchDetachedNavigationTask,
   reconcileAmbiguousNavigationResourceStart,
   resolveCdpNavigationPrimeOutcome,
   resolveTabNavigationSignal,
@@ -110,6 +111,33 @@ describe("runtime navigation operations", () => {
     expect(didGuardedNavigationOperationRun({ status: "skipped" })).toBe(false);
     expect(didGuardedNavigationOperationRun({ status: "current", value: "started" })).toBe(true);
     expect(didGuardedNavigationOperationRun({ status: "stale", value: "started" })).toBe(true);
+  });
+
+  it("does not let a hung detached restore hold the general runtime queue", async () => {
+    const hungRestore = new Promise<void>(() => undefined);
+    const oldRestoreStarted = vi.fn();
+    const replacementRestore = vi.fn(async () => undefined);
+    let runtimeQueue = Promise.resolve();
+
+    runtimeQueue = runtimeQueue.then(() => {
+      launchDetachedNavigationTask({
+        run: async () => {
+          oldRestoreStarted();
+          await hungRestore;
+        },
+        onFailure: () => undefined
+      });
+    });
+    runtimeQueue = runtimeQueue.then(() => {
+      launchDetachedNavigationTask({
+        run: replacementRestore,
+        onFailure: () => undefined
+      });
+    });
+
+    await runtimeQueue;
+    await vi.waitFor(() => expect(replacementRestore).toHaveBeenCalledOnce());
+    expect(oldRestoreStarted).toHaveBeenCalledOnce();
   });
 
   it("separates an invalid root from child-only global blocking", () => {

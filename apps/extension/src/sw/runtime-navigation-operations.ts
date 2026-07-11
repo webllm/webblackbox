@@ -23,6 +23,13 @@ export type AmbiguousNavigationResourceStartResult =
   | Readonly<{ kind: "stopped" }>
   | Readonly<{ kind: "retained"; error: unknown }>;
 
+export type DetachedNavigationTask = Readonly<{
+  run: () => void | Promise<void>;
+  onFailure: (error: unknown) => void | Promise<void>;
+  onSettled?: () => void;
+  onUnhandledFailure?: (error: unknown) => void;
+}>;
+
 /** Normalizes one tabs.onUpdated callback into at most one navigation claim. */
 export function resolveTabNavigationSignal(input: {
   url?: string;
@@ -83,6 +90,27 @@ export async function runRuntimeNavigationTask(
     await stopCurrent();
     return { kind: "failed-closed", error };
   }
+}
+
+/**
+ * Starts a guarded navigation continuation without returning its promise to a
+ * caller's general-purpose queue. This keeps a hung old restore from holding
+ * the queue tail while the restore lane applies its own generation ordering.
+ */
+export function launchDetachedNavigationTask(task: DetachedNavigationTask): void {
+  const running = (async () => {
+    try {
+      await task.run();
+    } catch (error) {
+      await task.onFailure(error);
+    } finally {
+      task.onSettled?.();
+    }
+  })();
+
+  void running.catch((error) => {
+    task.onUnhandledFailure?.(error);
+  });
 }
 
 /** Keeps a valid root usable while distinguishing child-only global blocking. */

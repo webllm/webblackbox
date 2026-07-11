@@ -8,6 +8,7 @@ export type RuntimeNavigationSource =
   | "tabs-url-complete"
   | "cdp-frame-navigated"
   | "cdp-within-document"
+  | "web-navigation-commit"
   | "content-navigation"
   | "cdp-child-mutation";
 
