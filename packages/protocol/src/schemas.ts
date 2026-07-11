@@ -1,4 +1,17 @@
-import { z } from "zod";
+import {
+  array as zArray,
+  boolean as zBoolean,
+  enum as zEnum,
+  literal as zLiteral,
+  null as zNull,
+  number as zNumber,
+  object as zObject,
+  record as zRecord,
+  string as zString,
+  union as zUnion,
+  unknown as zUnknown
+} from "zod";
+import type { infer as ZodInfer, ZodType } from "zod";
 
 import {
   ARCHIVE_PBKDF2_MAX_ITERATIONS,
@@ -11,6 +24,20 @@ import {
   WEBBLACKBOX_EVENT_TYPES,
   WEBBLACKBOX_PROTOCOL_VERSION
 } from "./constants.js";
+
+const z = {
+  array: zArray,
+  boolean: zBoolean,
+  enum: zEnum,
+  literal: zLiteral,
+  null: zNull,
+  number: zNumber,
+  object: zObject,
+  record: zRecord,
+  string: zString,
+  union: zUnion,
+  unknown: zUnknown
+};
 
 const recordStringUnknown = z.record(z.string(), z.unknown());
 
@@ -730,14 +757,14 @@ const specializedDataSchemas = {
   "perf.vitals": perfVitalsDataSchema
 } as const;
 
-export function getEventPayloadSchema(type: z.infer<typeof webBlackboxEventTypeSchema>): z.ZodType {
+export function getEventPayloadSchema(type: ZodInfer<typeof webBlackboxEventTypeSchema>): ZodType {
   const knownSchema = specializedDataSchemas[type as keyof typeof specializedDataSchemas];
 
   return knownSchema ?? genericStrictDataSchema;
 }
 
 export function validateEventData(
-  type: z.infer<typeof webBlackboxEventTypeSchema>,
+  type: ZodInfer<typeof webBlackboxEventTypeSchema>,
   payload: unknown
 ) {
   return getEventPayloadSchema(type).safeParse(payload);

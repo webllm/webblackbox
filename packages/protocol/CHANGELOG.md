@@ -15,6 +15,8 @@
   metadata for consumers that distinguish complete from partial analysis.
 - Rejected archive chunks whose wall-clock events regress and time indexes whose wall-clock or
   monotonic ranges move backwards between adjacent chunks.
+- Made the public schema implementation tree-shakeable so browser consumers do not bundle unused
+  Zod locale and conversion modules.
 
 ## 0.5.0
 

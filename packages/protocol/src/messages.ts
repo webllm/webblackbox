@@ -1,4 +1,13 @@
-import { z } from "zod";
+import {
+  array as zArray,
+  custom as zCustom,
+  discriminatedUnion as zDiscriminatedUnion,
+  enum as zEnum,
+  literal as zLiteral,
+  number as zNumber,
+  object as zObject,
+  string as zString
+} from "zod";
 
 import {
   chunkCodecSchema,
@@ -6,6 +15,17 @@ import {
   recorderConfigSchema,
   webBlackboxEventSchema
 } from "./schemas.js";
+
+const z = {
+  array: zArray,
+  custom: zCustom,
+  discriminatedUnion: zDiscriminatedUnion,
+  enum: zEnum,
+  literal: zLiteral,
+  number: zNumber,
+  object: zObject,
+  string: zString
+};
 
 const arrayBufferSchema = z.custom<ArrayBuffer>((value) => value instanceof ArrayBuffer, {
   message: "Expected ArrayBuffer"
