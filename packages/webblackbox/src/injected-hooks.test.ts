@@ -225,6 +225,107 @@ describe("injected-hooks", () => {
     expect((event?.payload as { args?: unknown }).args).toBeUndefined();
   });
 
+  it("keeps the installed state when a duplicate bootstrap supplies different options", async () => {
+    const flag = "__WB_TEST_INJECTED_DUPLICATE_BOOTSTRAP__";
+    const configEvents = vi.fn();
+    window.fetch = vi.fn(async () => {
+      return new Response('{"ok":true}', {
+        status: 200,
+        headers: {
+          "content-type": "application/json"
+        }
+      });
+    }) as typeof fetch;
+    window.addEventListener(INJECTED_CAPTURE_CONFIG_EVENT, configEvents);
+
+    try {
+      installInjectedLiteCaptureHooks({
+        flag,
+        active: true,
+        bodyCaptureMaxBytes: 64 * 1024,
+        capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+      });
+      const installedFetch = window.fetch;
+      const installedConsoleInfo = console.info;
+
+      installInjectedLiteCaptureHooks({
+        flag,
+        active: false,
+        bodyCaptureMaxBytes: 0,
+        capturePolicy: DEFAULT_CAPTURE_POLICY,
+        captureNetwork: false
+      });
+
+      expect(window.fetch).toBe(installedFetch);
+      expect(console.info).toBe(installedConsoleInfo);
+      expect(configEvents).not.toHaveBeenCalled();
+
+      console.info("still-active-after-duplicate-bootstrap");
+      await window.fetch("https://example.test/api/duplicate-bootstrap");
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (captured.some((message) => message.rawType === "networkBody")) {
+          break;
+        }
+
+        await delay(5);
+      }
+
+      expect(
+        captured.filter(
+          (message) =>
+            message.rawType === "notice" &&
+            (message.payload as { message?: unknown }).message === "injected-ready"
+        )
+      ).toHaveLength(1);
+      expect(captured.some((message) => message.rawType === "console")).toBe(true);
+      expect(captured.some((message) => message.rawType === "networkBody")).toBe(true);
+
+      const consoleCountBeforeInactive = captured.filter(
+        (message) => message.rawType === "console"
+      ).length;
+      const bodyCountBeforeInactive = captured.filter(
+        (message) => message.rawType === "networkBody"
+      ).length;
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: {
+            active: false,
+            bodyCaptureMaxBytes: 0
+          }
+        })
+      );
+      console.info("inactive-after-dynamic-config");
+      await window.fetch("https://example.test/api/inactive-after-config");
+      await delay(10);
+
+      expect(captured.filter((message) => message.rawType === "console")).toHaveLength(
+        consoleCountBeforeInactive
+      );
+      expect(captured.filter((message) => message.rawType === "networkBody")).toHaveLength(
+        bodyCountBeforeInactive
+      );
+
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: {
+            active: true,
+            bodyCaptureMaxBytes: 64 * 1024
+          }
+        })
+      );
+      console.info("active-after-dynamic-config");
+      await delay(10);
+
+      expect(captured.filter((message) => message.rawType === "console")).toHaveLength(
+        consoleCountBeforeInactive + 1
+      );
+      expect(configEvents).toHaveBeenCalledTimes(2);
+    } finally {
+      window.removeEventListener(INJECTED_CAPTURE_CONFIG_EVENT, configEvents);
+    }
+  });
+
   it("captures fetch start/end and sampled response body", async () => {
     const flag = "__WB_TEST_INJECTED_FETCH__";
 

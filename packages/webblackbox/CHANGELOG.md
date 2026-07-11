@@ -8,6 +8,8 @@
 
 ### Patch Changes
 
+- Made repeated injected-hook bootstrap calls side-effect free so a later default inactive install
+  cannot disable an already configured Lite capture or reset its response-body budget.
 - Emitted one final Lite DOM, local-storage, and screenshot stop artifact even when an earlier
   background capture had already run, and normalized count-only storage metadata to the archive
   schema so hosts can drain a complete terminal state safely.

@@ -248,6 +248,14 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
 
   const flag = options.flag ?? DEFAULT_FLAG;
   const windowFlags = window as unknown as Record<string, unknown>;
+
+  // Bootstrap options are installation-only. Runtime changes must use the config event.
+  if (windowFlags[flag]) {
+    return;
+  }
+
+  windowFlags[flag] = true;
+
   let networkRequestSeq = 0;
   let bodyWindowStartedAt = Date.now();
   let bodyWindowCount = 0;
@@ -266,34 +274,6 @@ export function installInjectedLiteCaptureHooks(options: InjectedHooksOptions = 
   );
   let networkBodyCaptureMaxBytes = resolveNetworkBodyCaptureMaxBytes();
   const captureNetwork = options.captureNetwork !== false;
-
-  if (windowFlags[flag]) {
-    const detail: InjectedCaptureConfig = {};
-
-    if (Object.prototype.hasOwnProperty.call(options, "active")) {
-      detail.active = options.active;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(options, "bodyCaptureMaxBytes")) {
-      detail.bodyCaptureMaxBytes = options.bodyCaptureMaxBytes;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(options, "capturePolicy")) {
-      detail.capturePolicy = options.capturePolicy;
-    }
-
-    if (Object.keys(detail).length > 0) {
-      window.dispatchEvent(
-        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
-          detail
-        })
-      );
-    }
-
-    return;
-  }
-
-  windowFlags[flag] = true;
 
   window.addEventListener(INJECTED_CAPTURE_CONFIG_EVENT, (event: Event) => {
     const detail = (event as CustomEvent<InjectedCaptureConfig>).detail;
