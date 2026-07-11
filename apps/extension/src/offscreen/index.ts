@@ -22,6 +22,7 @@ import {
   pauseScreenRecordingForPortDisconnect,
   reconcileScreenRecordingsWithWorkerSessions
 } from "./screen-recording-port.js";
+import { ScreenRecordingTerminalResultRegistry } from "./screen-recording-terminal-results.js";
 
 type OffscreenPipelineRequest = {
   kind: "sw.pipeline-request";
@@ -121,6 +122,8 @@ createExtensionI18n({
 const pipelines = new Map<string, FlightRecorderPipeline>();
 const ingestIdempotencyRegistry = new IngestIdempotencyRegistry();
 const screenRecordings = new Map<string, OffscreenScreenRecordingState>();
+const screenRecordingTerminalResults =
+  new ScreenRecordingTerminalResultRegistry<OffscreenScreenRecordingStopResult>();
 const EXPORT_OBJECT_URL_TTL_MS = 90_000;
 const SERVICE_WORKER_KEEPALIVE_INTERVAL_MS = 20_000;
 const SCREEN_RECORDING_TIMESLICE_MS = 1_000;
@@ -439,6 +442,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     });
     pipelines.delete(message.sid);
     ingestIdempotencyRegistry.clearSession(message.sid);
+    screenRecordingTerminalResults.clearSession(message.sid);
     return null;
   }
 
@@ -493,11 +497,16 @@ async function startOffscreenScreenRecording(
 ): Promise<OffscreenScreenRecordingStartResult> {
   const recordingId = normalizeRequiredString(message.recordingId, "recording id");
   const streamId = normalizeRequiredString(message.streamId, "tab capture stream id");
+  screenRecordingTerminalResults.assertStartAllowed(message.sid, recordingId);
   const existing = screenRecordings.get(message.sid);
 
   if (existing) {
     if (existing.recordingId !== recordingId) {
       throw new Error(`Screen recording already active for session: ${message.sid}`);
+    }
+
+    if (existing.stopping) {
+      throw new Error(`Screen recording is already stopping for session: ${message.sid}`);
     }
 
     return toScreenRecordingStartResult(existing);
@@ -582,21 +591,18 @@ async function stopOffscreenScreenRecording(
   reason: string,
   notifyEnded: boolean
 ): Promise<OffscreenScreenRecordingStopResult> {
+  if (recordingId) {
+    const terminalResult = screenRecordingTerminalResults.get(sid, recordingId);
+
+    if (terminalResult) {
+      return terminalResult;
+    }
+  }
+
   const recording = screenRecordings.get(sid);
 
   if (!recording) {
-    if (!recordingId) {
-      throw new Error(`Screen recording not found for session: ${sid}`);
-    }
-
-    return {
-      recordingId,
-      mime: "video/webm",
-      chunkCount: 0,
-      size: 0,
-      durationMs: 0,
-      reason
-    };
+    throw new Error(`Screen recording not found for session: ${sid}`);
   }
 
   if (recordingId && recording.recordingId !== recordingId) {
@@ -640,8 +646,10 @@ async function stopActiveOffscreenScreenRecording(
       finished = true;
       clearTimeout(timeout);
       await waitForOffscreenScreenRecordingChunks(recording);
+      const result = toScreenRecordingStopResult(recording, reason);
       cleanupOffscreenScreenRecording(recording);
-      resolve(toScreenRecordingStopResult(recording, reason));
+      screenRecordingTerminalResults.remember(recording.sid, recording.recordingId, result);
+      resolve(result);
     };
 
     recording.recorder.addEventListener(

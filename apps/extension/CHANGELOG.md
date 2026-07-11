@@ -11,6 +11,8 @@
 
 ### Patch Changes
 
+- Preserved successful screen-recording stop results for bounded retries so a lost offscreen
+  response cannot replace the real chunk count, size, duration, or reason with fabricated zeros.
 - Bound dynamically navigated subframes to exact Chrome document identities before injection or
   Lite network capture, keeping replacement documents pending until an authenticated content
   sender is ready and preventing stale frame reuse from crossing capture scope.
