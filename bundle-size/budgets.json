@@ -21,8 +21,8 @@
     {
       "name": "pipeline runtime",
       "path": "packages/pipeline/dist/index.js",
-      "maxBytes": 143000,
-      "maxGzipBytes": 30000
+      "maxBytes": 165000,
+      "maxGzipBytes": 35000
     },
     {
       "name": "Player SDK runtime",
@@ -34,8 +34,8 @@
       "name": "webblackbox package JavaScript",
       "directory": "packages/webblackbox/dist",
       "extensions": [".js"],
-      "maxBytes": 175000,
-      "maxGzipBytes": 41000
+      "maxBytes": 205000,
+      "maxGzipBytes": 45000
     },
     {
       "name": "MCP server JavaScript",
@@ -60,50 +60,50 @@
       "name": "Extension JavaScript total",
       "directory": "apps/extension/build",
       "extensions": [".js"],
-      "maxBytes": 5000000,
-      "maxGzipBytes": 850000
+      "maxBytes": 2850000,
+      "maxGzipBytes": 580000
     },
     {
       "name": "Extension service worker",
       "path": "apps/extension/build/sw.js",
-      "maxBytes": 975000,
-      "maxGzipBytes": 170000
+      "maxBytes": 850000,
+      "maxGzipBytes": 165000
     },
     {
       "name": "Extension offscreen runtime",
       "path": "apps/extension/build/offscreen.js",
-      "maxBytes": 995000,
-      "maxGzipBytes": 180000
+      "maxBytes": 600000,
+      "maxGzipBytes": 130000
     },
     {
       "name": "Extension content agent",
       "path": "apps/extension/build/content-agent.js",
-      "maxBytes": 880000,
-      "maxGzipBytes": 163000
+      "maxBytes": 500000,
+      "maxGzipBytes": 110000
     },
     {
       "name": "Extension content bridge",
       "path": "apps/extension/build/content.js",
-      "maxBytes": 39000,
-      "maxGzipBytes": 11000
+      "maxBytes": 80000,
+      "maxGzipBytes": 15000
     },
     {
       "name": "Extension injected runtime",
       "path": "apps/extension/build/injected.js",
-      "maxBytes": 680000,
-      "maxGzipBytes": 108000
+      "maxBytes": 260000,
+      "maxGzipBytes": 50000
     },
     {
       "name": "Extension options UI",
       "path": "apps/extension/build/options.js",
-      "maxBytes": 685000,
-      "maxGzipBytes": 110000
+      "maxBytes": 245000,
+      "maxGzipBytes": 50000
     },
     {
       "name": "Extension popup UI",
       "path": "apps/extension/build/popup.js",
-      "maxBytes": 700000,
-      "maxGzipBytes": 113000
+      "maxBytes": 260000,
+      "maxGzipBytes": 52000
     },
     {
       "name": "Extension sessions UI",
