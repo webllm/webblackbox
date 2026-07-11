@@ -177,6 +177,25 @@ function createNoisyPayload(size: number, seed: number): string {
 }
 
 describe("pipeline", () => {
+  it("rebinds mutable session metadata without accepting a different recording identity", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage });
+    await pipeline.start();
+    const rebound: SessionMetadata = {
+      ...SESSION,
+      url: "https://example.com/after-navigation",
+      title: "Updated title",
+      tags: ["triaged"],
+      endedAt: SESSION.startedAt + 1_000
+    };
+
+    await pipeline.rebindSessionMetadata(rebound);
+    await expect(storage.getSession(SESSION.sid)).resolves.toEqual(rebound);
+    await expect(pipeline.rebindSessionMetadata({ ...rebound, mode: "full" })).rejects.toThrow(
+      /immutable recording identity/
+    );
+  });
+
   it("rejects plaintext persistent storage when local-at-rest encryption is required", async () => {
     const pipeline = createTestPipeline({
       session: {

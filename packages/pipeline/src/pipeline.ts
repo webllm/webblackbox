@@ -176,6 +176,28 @@ export class FlightRecorderPipeline {
     await this.options.storage.putSession(this.options.session);
   }
 
+  /** Updates mutable archive metadata while preserving the pipeline's exact recording identity. */
+  public async rebindSessionMetadata(session: SessionMetadata): Promise<void> {
+    if (
+      session.sid !== this.options.session.sid ||
+      session.tabId !== this.options.session.tabId ||
+      session.startedAt !== this.options.session.startedAt ||
+      session.mode !== this.options.session.mode
+    ) {
+      throw new Error("Pipeline session metadata changed immutable recording identity.");
+    }
+
+    const rebound: SessionMetadata = {
+      ...session,
+      tags: [...session.tags]
+    };
+    await this.enqueueChunkOperation(async () => {
+      await this.ensureStorageReady();
+      await this.options.storage.putSession(rebound);
+      this.options.session = rebound;
+    });
+  }
+
   public async ingest(event: WebBlackboxEvent): Promise<void> {
     assertPrivacyClassifiedEvent(event);
     if (!this.acceptingEvents) {
