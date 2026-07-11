@@ -47,6 +47,24 @@ describe("script-injection", () => {
     });
   });
 
+  it("keeps an all-frames root injection successful when only a child result failed", async () => {
+    const results: InjectionResult[] = [
+      { frameId: 0, documentId: "root-document" },
+      {
+        frameId: 4,
+        documentId: "child-document",
+        error: "The child document was replaced."
+      }
+    ];
+
+    await expect(
+      injectContentScript(chromeWithExecuteScript(vi.fn().mockResolvedValue(results)), {
+        tabId: 7,
+        allFrames: true
+      })
+    ).resolves.toBe(results);
+  });
+
   it("allows an all-frames request to succeed with only the main-frame result", async () => {
     const results: InjectionResult[] = [{ frameId: 0, documentId: "root-document" }];
 
@@ -251,5 +269,98 @@ describe("script-injection", () => {
       world: "MAIN",
       files: ["injected.js"]
     });
+  });
+
+  it("fails Lite after an isolated injection failure without attempting MAIN", async () => {
+    const isolatedFailure = new Error("isolated injection failed");
+    const executeScript = vi.fn().mockRejectedValue(isolatedFailure);
+
+    await expect(
+      injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+        mode: "lite",
+        contentTarget: { tabId: 7, allFrames: false },
+        mainWorldTarget: { tabId: 7, frameId: 0 }
+      })
+    ).rejects.toBe(isolatedFailure);
+    expect(executeScript).toHaveBeenCalledTimes(1);
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: false },
+      world: "ISOLATED",
+      files: ["content.js"]
+    });
+  });
+
+  it("propagates a Lite MAIN failure after isolated injection succeeded", async () => {
+    const mainFailure = new Error("main injection failed");
+    const executeScript = vi
+      .fn()
+      .mockResolvedValueOnce([{ frameId: 0 }])
+      .mockRejectedValueOnce(mainFailure);
+
+    await expect(
+      injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+        mode: "lite",
+        contentTarget: { tabId: 7, allFrames: false },
+        mainWorldTarget: { tabId: 7, frameId: 0 }
+      })
+    ).rejects.toBe(mainFailure);
+    expect(executeScript).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates a Full isolated failure and never attempts MAIN", async () => {
+    const isolatedFailure = new Error("full isolated injection failed");
+    const executeScript = vi.fn().mockRejectedValue(isolatedFailure);
+
+    await expect(
+      injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+        mode: "full",
+        contentTarget: { tabId: 7, allFrames: true },
+        mainWorldTarget: { tabId: 7, frameId: 0 }
+      })
+    ).rejects.toBe(isolatedFailure);
+    expect(executeScript).toHaveBeenCalledTimes(1);
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: true },
+      world: "ISOLATED",
+      files: ["content.js"]
+    });
+  });
+
+  it("checks cancellation after ISOLATED and before entering Lite MAIN", async () => {
+    const cancellation = new Error("start cancelled");
+    const executeScript = vi.fn().mockResolvedValue([{ frameId: 0 }]);
+    const assertCurrent = vi.fn(() => {
+      if (executeScript.mock.calls.length > 0) {
+        throw cancellation;
+      }
+    });
+
+    await expect(
+      injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+        mode: "lite",
+        contentTarget: { tabId: 7, allFrames: false },
+        mainWorldTarget: { tabId: 7, frameId: 0 },
+        assertCurrent
+      })
+    ).rejects.toBe(cancellation);
+    expect(executeScript).toHaveBeenCalledTimes(1);
+    expect(assertCurrent).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs the async beforeEach hook before each guarded injection", async () => {
+    const executeScript = vi.fn(async () => [{ frameId: 0 }]);
+    const steps: string[] = [];
+
+    await injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+      mode: "lite",
+      contentTarget: { tabId: 7, allFrames: false },
+      mainWorldTarget: { tabId: 7, frameId: 0 },
+      beforeEach: async (step) => {
+        await Promise.resolve();
+        steps.push(step);
+      }
+    });
+
+    expect(steps).toEqual(["isolated-content", "main-world-hook"]);
   });
 });

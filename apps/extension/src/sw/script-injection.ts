@@ -34,7 +34,11 @@ export type MainWorldHookInjectionTarget = {
   tabId: number;
 };
 
+export type RootPageAgentInjectionStep = "isolated-content" | "main-world-hook";
+
 export type RootPageAgentInjectionOptions = {
+  assertCurrent?: () => void;
+  beforeEach?: (step: RootPageAgentInjectionStep) => Promise<void> | void;
   contentTarget: ContentScriptInjectionTarget;
   mainWorldTarget: MainWorldHookInjectionTarget;
   mode: CaptureMode;
@@ -50,12 +54,27 @@ export async function injectRootPageAgentsForMode(
   options: RootPageAgentInjectionOptions
 ): Promise<void> {
   if (shouldInjectIsolatedContentForMode(options.mode)) {
-    await injectContentScript(chromeApi, options.contentTarget);
+    await runGuardedRootInjection(options, "isolated-content", () =>
+      injectContentScript(chromeApi, options.contentTarget)
+    );
   }
 
   if (shouldInjectMainWorldHooksForMode(options.mode)) {
-    await injectMainWorldHook(chromeApi, options.mainWorldTarget);
+    await runGuardedRootInjection(options, "main-world-hook", () =>
+      injectMainWorldHook(chromeApi, options.mainWorldTarget)
+    );
   }
+}
+
+async function runGuardedRootInjection(
+  options: RootPageAgentInjectionOptions,
+  step: RootPageAgentInjectionStep,
+  inject: () => Promise<unknown>
+): Promise<void> {
+  await options.beforeEach?.(step);
+  options.assertCurrent?.();
+  await inject();
+  options.assertCurrent?.();
 }
 
 export async function injectContentScript(

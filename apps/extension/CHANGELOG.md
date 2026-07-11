@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Made required root-page script injection strict across atomic start, runtime restore, and
+  post-navigation recovery: isolated and Lite MAIN-world failures now roll back or stop only the
+  current runtime, cancellation is fenced between worlds, and stale tasks cannot instrument or
+  terminate a replacement session.
 - Kept exact top and child document authorization alive across transient content-port disconnects,
   limiting disconnect cleanup to transport state while navigation, tab removal, and capture stop
   remain responsible for document-lifecycle revocation.

@@ -111,6 +111,7 @@ import {
   resolveCurrentTabUrlPolicyDecision,
   shouldUpdateSessionMetadataFromNavigation
 } from "./navigation-metadata.js";
+import { runRootNavigationInstrumentationTransaction } from "./root-navigation-instrumentation.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 import {
   acknowledgePipelineBatch,
@@ -839,15 +840,30 @@ chromeApi?.commands?.onCommand.addListener((command) => {
 chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (typeof changeInfo.url !== "string" || changeInfo.url.length === 0) {
     if (changeInfo.status === "complete") {
-      void restoreTabInstrumentationAfterNavigation(tabId);
+      void restoreTabInstrumentationAfterNavigation(tabId).catch((error) => {
+        console.warn("[WebBlackbox] failed to restore tab instrumentation", {
+          tabId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
     }
     return;
   }
 
-  void handleTabUrlChanged(tabId, changeInfo.url);
+  void handleTabUrlChanged(tabId, changeInfo.url).catch((error) => {
+    console.warn("[WebBlackbox] failed to apply tab URL change", {
+      tabId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 
   if (changeInfo.status === "complete") {
-    void restoreTabInstrumentationAfterNavigation(tabId);
+    void restoreTabInstrumentationAfterNavigation(tabId).catch((error) => {
+      console.warn("[WebBlackbox] failed to restore tab instrumentation", {
+        tabId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
   }
 });
 
@@ -1297,7 +1313,9 @@ async function startSessionUnlocked(
 
       if (shouldInjectIsolatedContentForMode(mode)) {
         startToken.assertActive();
-        await ensureRootPageAgentsInjected(candidate);
+        await ensureRootPageAgentsInjected(candidate, {
+          assertCurrent: () => startToken.assertActive()
+        });
       }
 
       if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
@@ -1674,6 +1692,10 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
 
   const tabMetadata = await resolveTabSessionMetadata(tabId);
 
+  if (!isRuntimeCurrentCaptureOpen(runtime)) {
+    return;
+  }
+
   if (exactLiteTopDocument) {
     const decision = await resolveCurrentTabUrlPolicyDecision({
       candidateUrl: tabMetadata.captureUrl,
@@ -1702,8 +1724,14 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
     return;
   }
 
-  if (!(await isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl))) {
-    await stopSession(tabId);
+  const allowed = await isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl);
+
+  if (!isRuntimeCurrentCaptureOpen(runtime)) {
+    return;
+  }
+
+  if (!allowed) {
+    await stopRuntimeIfCurrent(runtime);
     return;
   }
 
@@ -1713,14 +1741,34 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
 
   resetAuthorizedContentFrames(runtime);
 
-  await ensureRootPageAgentsInjected(runtime);
+  const instrumentation = await runRootNavigationInstrumentationTransaction({
+    isCurrent: () => isRuntimeCurrentCaptureOpen(runtime),
+    inject: (assertCurrent) => ensureRootPageAgentsInjected(runtime, { assertCurrent }),
+    stopCurrent: () => stopRuntimeIfCurrent(runtime),
+    continueAfterInjection: async (assertCurrent) => {
+      assertCurrent();
 
-  if (runtime.mode === "full" && runtime.cdpRouter) {
-    await restoreCdpGlobalCaptureAfterNavigation(runtime, tabMetadata.captureUrl, true);
-  }
+      if (runtime.mode === "full" && runtime.cdpRouter) {
+        await restoreCdpGlobalCaptureAfterNavigation(runtime, tabMetadata.captureUrl, true);
+        assertCurrent();
+      }
 
-  if (runtime.activationState === "active") {
-    await notifyAuthorizedContentFrames(runtime, true);
+      if (runtime.activationState === "active") {
+        await notifyAuthorizedContentFrames(runtime, true);
+        assertCurrent();
+      }
+    }
+  });
+
+  if (instrumentation.kind === "failed-closed") {
+    console.warn("[WebBlackbox] root navigation injection failed closed", {
+      tabId: runtime.tabId,
+      sid: runtime.sid,
+      error:
+        instrumentation.error instanceof Error
+          ? instrumentation.error.message
+          : String(instrumentation.error)
+    });
   }
 }
 
@@ -5158,6 +5206,32 @@ function authorizeContentSender(
   return true;
 }
 
+function matchesAuthorizedContentSender(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined,
+  documentUrl?: string
+): boolean {
+  const tabId = sender?.tab?.id;
+  const frameId = normalizeSenderFrameId(sender);
+  const documentId = sender?.documentId;
+  const url =
+    typeof documentUrl === "string" && documentUrl.length > 0
+      ? documentUrl
+      : typeof sender?.url === "string" && sender.url.length > 0
+        ? sender.url
+        : null;
+
+  return (
+    typeof tabId === "number" &&
+    tabId === runtime.tabId &&
+    frameId >= 0 &&
+    typeof documentId === "string" &&
+    documentId.length > 0 &&
+    url !== null &&
+    runtime.contentDocuments.matchesSender({ tabId, frameId, documentId, url })
+  );
+}
+
 function shouldStopRuntimeForDeniedContentSender(
   runtime: SessionRuntime,
   sender: MessageSenderLike | undefined
@@ -5217,11 +5291,32 @@ async function authorizeContentSenderForReady(
       return true;
     }
 
-    await injectMainWorldHook(chromeApi, {
-      tabId: runtime.tabId,
-      frameId: 0
-    }).catch(() => undefined);
-    return true;
+    try {
+      await injectMainWorldHook(chromeApi, {
+        tabId: runtime.tabId,
+        frameId: 0
+      });
+    } catch (error) {
+      if (
+        isRuntimeCurrentCaptureOpen(runtime) &&
+        matchesAuthorizedContentSender(runtime, sender, documentUrl)
+      ) {
+        failContentSender(runtime, sender);
+        await stopRuntimeIfCurrent(runtime);
+      }
+
+      console.warn("[WebBlackbox] top main-world hook injection failed closed", {
+        tabId: runtime.tabId,
+        documentId: sender?.documentId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+
+    return (
+      isRuntimeCurrentCaptureOpen(runtime) &&
+      matchesAuthorizedContentSender(runtime, sender, documentUrl)
+    );
   }
 
   const documentId = sender?.documentId;
@@ -5792,12 +5887,19 @@ function normalizeHashesManifest(value: unknown): HashesManifest {
   };
 }
 
-async function ensureRootPageAgentsInjected(runtime: SessionRuntime): Promise<void> {
+async function ensureRootPageAgentsInjected(
+  runtime: SessionRuntime,
+  guards: {
+    assertCurrent?: () => void;
+    beforeEach?: (step: "isolated-content" | "main-world-hook") => Promise<void> | void;
+  } = {}
+): Promise<void> {
   await injectRootPageAgentsForMode(chromeApi, {
     mode: runtime.mode,
     contentTarget: resolveContentScriptInjectionTarget(runtime.config.capturePolicy, runtime.tabId),
-    mainWorldTarget: { tabId: runtime.tabId, frameId: 0 }
-  }).catch(() => undefined);
+    mainWorldTarget: { tabId: runtime.tabId, frameId: 0 },
+    ...guards
+  });
 }
 
 function installLiteWebRequestCapture(): void {
@@ -6590,9 +6692,17 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
       await stopRuntimeIfCurrent(runtime);
       return;
     }
-  } else if (!(await isRuntimeTopDocumentAllowed(runtime, rawUrl))) {
-    await stopSession(tabId);
-    return;
+  } else {
+    const allowed = await isRuntimeTopDocumentAllowed(runtime, rawUrl);
+
+    if (!isRuntimeCurrentCaptureOpen(runtime)) {
+      return;
+    }
+
+    if (!allowed) {
+      await stopRuntimeIfCurrent(runtime);
+      return;
+    }
   }
 
   const nextUrl = sanitizeUrlForPrivacy(rawUrl);
@@ -7569,7 +7679,13 @@ async function restoreActiveRuntime(
       }
 
       if (shouldInjectIsolatedContentForMode(runtime.mode)) {
-        await ensureRootPageAgentsInjected(runtime);
+        await ensureRootPageAgentsInjected(runtime, {
+          assertCurrent: () => {
+            if (!isRuntimeCurrentCaptureOpen(runtime)) {
+              throw new Error("The restoring runtime changed during root script injection.");
+            }
+          }
+        });
       }
 
       if (runtime.mode === "full" && runtime.config.capturePolicy?.categories.cdp !== "off") {
