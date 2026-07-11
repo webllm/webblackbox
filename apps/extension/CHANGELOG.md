@@ -24,6 +24,13 @@
   explicitly requested full Performance metrics now fail startup or restoration closed, while
   DOMStorage remains best effort, child-only scope blocks suspend global artifacts without rejecting
   the root baseline, and initial Full artifacts run only after activation commits.
+- Bound Full-CDP child and OOPIF readiness to exact attach tokens and document revisions: visual
+  targets now block global artifacts until the four child baseline domains, recursive auto-attach,
+  and a current validated child frame tree succeed; failed or denied children remain fail-closed,
+  stale promises, Runtime contexts, request metadata, and delayed response-body follow-ups cannot
+  affect reused session ids, malformed visual targets stop capture, child commands and startup settle
+  waits are bounded, and detach or readiness recovery re-primes the current root before screen
+  recording can restart.
 - Made required root-page script injection strict across atomic start, runtime restore, and
   post-navigation recovery: isolated and Lite MAIN-world failures now roll back or stop only the
   current runtime, cancellation is fenced between worlds, and stale tasks cannot instrument or

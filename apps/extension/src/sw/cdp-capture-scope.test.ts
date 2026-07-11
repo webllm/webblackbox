@@ -4,13 +4,17 @@ import { describe, expect, it } from "vitest";
 import {
   canCaptureGlobalCdpArtifacts,
   canCaptureGlobalCdpArtifactsForRoot,
+  completeCdpChildFrameTreePrime,
   createCdpCaptureScopeState,
   evaluateCdpCaptureScopeEvent,
+  failCdpChildSessionAttachment,
   filterCdpSnapshotDocuments,
   hasDisallowedCdpFrames,
+  isCdpChildSessionClaimCurrent,
   invalidateCdpCaptureFrameTree,
   isCdpCaptureFrameTreePrimedForRoot,
   isCdpSessionWithinScope,
+  markCdpChildSessionBaselineReady,
   primeCdpCaptureFrameTree,
   refreshCdpCaptureFrameTree
 } from "./cdp-capture-scope.js";
@@ -173,6 +177,32 @@ describe("CDP capture scope", () => {
     expect(scope.generation).toBe(pendingGeneration + 1);
     expect(scope.primed).toBe(false);
     expect(scope.rootFrameId).toBeUndefined();
+  });
+
+  it("rejects a root prime that resolves after a new visual child attaches", async () => {
+    const scope = state(policy({ includeSubframes: true }));
+    let resolveFrameTree: ((value: unknown) => void) | undefined;
+    const pending = refreshCdpCaptureFrameTree(
+      scope,
+      () =>
+        new Promise((resolve) => {
+          resolveFrameTree = resolve;
+        })
+    );
+    const primeGeneration = scope.generation;
+    const childRevision = scope.childMutationRevision;
+
+    evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "late-child",
+      targetInfo: { type: "iframe", url: "https://app.example/embed" }
+    });
+    resolveFrameTree?.({ frame: { id: "root", url: "https://app.example/home" } });
+
+    await expect(pending).resolves.toBe(false);
+    expect(scope.generation).toBeGreaterThan(primeGeneration);
+    expect(scope.childMutationRevision).toBeGreaterThan(childRevision);
+    expect(scope.childSessions.get("late-child")?.status).toBe("pending");
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
   });
 
   it("keeps a newer successful prime current when an older refresh resolves last", async () => {
@@ -560,7 +590,7 @@ describe("CDP capture scope", () => {
     });
 
     expect(attached.globalFrameTreeMutation).toBe(true);
-    expect(scope.pendingGlobalTargetSessions.has("oopif-session")).toBe(true);
+    expect(scope.childSessions.get("oopif-session")?.status).toBe("pending");
     expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
 
     primeCdpCaptureFrameTree(scope, {
@@ -571,7 +601,7 @@ describe("CDP capture scope", () => {
       isCdpCaptureFrameTreePrimedForRoot(scope, "https://app.example/home", scope.generation)
     ).toBe(true);
 
-    evaluateCdpCaptureScopeEvent(
+    const navigated = evaluateCdpCaptureScopeEvent(
       scope,
       "Page.frameNavigated",
       {
@@ -583,7 +613,17 @@ describe("CDP capture scope", () => {
       },
       "oopif-session"
     );
-    expect(scope.pendingGlobalTargetSessions.has("oopif-session")).toBe(false);
+    expect(navigated.childSessionClaim).toBeDefined();
+    expect(scope.childSessions.get("oopif-session")?.status).toBe("pending");
+    expect(markCdpChildSessionBaselineReady(scope, attached.childSessionClaim!)).toBe(true);
+    expect(
+      completeCdpChildFrameTreePrime(scope, navigated.childSessionClaim!, {
+        frame: { id: "oopif-frame", url: "https://blocked.example/embed" }
+      })
+    ).toBe("denied");
+    expect(scope.childSessions.get("oopif-session")?.status).toBe("denied");
+    expect(scope.childSessions.get("oopif-session")?.frameScopes.get("oopif-frame")).toBe(false);
+    expect(scope.frameScopes.has("oopif-frame")).toBe(false);
     expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
 
     evaluateCdpCaptureScopeEvent(scope, "Target.detachedFromTarget", {
@@ -592,6 +632,8 @@ describe("CDP capture scope", () => {
     primeCdpCaptureFrameTree(scope, {
       frame: { id: "root", url: "https://app.example/home" }
     });
+    expect(scope.childSessions.has("oopif-session")).toBe(false);
+    expect(scope.frameScopes.has("oopif-frame")).toBe(false);
     expect(canCaptureGlobalCdpArtifacts(scope)).toBe(true);
   });
 
@@ -606,7 +648,7 @@ describe("CDP capture scope", () => {
       frame: { id: "root", url: "https://app.example/home" }
     });
 
-    evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+    const attached = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
       sessionId: "oopif-session",
       targetInfo: { type: "iframe", url: "" }
     });
@@ -615,7 +657,7 @@ describe("CDP capture scope", () => {
     });
     expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
 
-    evaluateCdpCaptureScopeEvent(
+    const navigated = evaluateCdpCaptureScopeEvent(
       scope,
       "Page.frameNavigated",
       {
@@ -627,12 +669,324 @@ describe("CDP capture scope", () => {
       },
       "oopif-session"
     );
-    expect(scope.globalTargetScopes.get("oopif-session")).toBe(true);
+    expect(markCdpChildSessionBaselineReady(scope, attached.childSessionClaim!)).toBe(true);
+    expect(
+      completeCdpChildFrameTreePrime(scope, navigated.childSessionClaim!, {
+        frame: { id: "oopif-frame", url: "https://widgets.example/embed" }
+      })
+    ).toBe("ready");
+    expect(scope.childSessions.get("oopif-session")?.status).toBe("ready");
     expect(scope.primed).toBe(false);
 
     primeCdpCaptureFrameTree(scope, {
       frame: { id: "root", url: "https://app.example/home" },
       childFrames: [{ frame: { id: "oopif-frame", url: "https://widgets.example/embed" } }]
+    });
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(true);
+  });
+
+  it("invalidates an older root prime when a visual child becomes ready", () => {
+    const scope = state(
+      policy({
+        includeSubframes: true,
+        allowedOrigins: ["https://app.example", "https://widgets.example"]
+      })
+    );
+    const attached = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "oopif-session",
+      targetInfo: {
+        targetId: "oopif-frame",
+        type: "iframe",
+        url: "https://widgets.example/embed"
+      }
+    });
+
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "oopif-frame", url: "https://widgets.example/embed" } }]
+    });
+    expect(scope.primed).toBe(true);
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
+
+    expect(markCdpChildSessionBaselineReady(scope, attached.childSessionClaim!)).toBe(true);
+    expect(
+      completeCdpChildFrameTreePrime(scope, attached.childSessionClaim!, {
+        frame: { id: "oopif-frame", url: "https://widgets.example/embed" }
+      })
+    ).toBe("ready");
+    expect(scope.primed).toBe(false);
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
+
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "oopif-frame", url: "https://widgets.example/embed" } }]
+    });
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(true);
+  });
+
+  it("does not let a page event wash a failed visual child back to readiness", () => {
+    const scope = state(
+      policy({
+        includeSubframes: true,
+        allowedOrigins: ["https://app.example", "https://widgets.example"]
+      })
+    );
+    const attached = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "failed-child",
+      targetInfo: { type: "iframe", url: "https://widgets.example/embed" }
+    });
+
+    expect(failCdpChildSessionAttachment(scope, attached.childSessionClaim!)).toBe(true);
+    const navigated = evaluateCdpCaptureScopeEvent(
+      scope,
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "failed-frame",
+          parentId: "root",
+          url: "https://widgets.example/next"
+        }
+      },
+      "failed-child"
+    );
+
+    expect(scope.childSessions.get("failed-child")?.status).toBe("failed");
+    expect(navigated.childSessionClaim).toBeDefined();
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "failed-frame", url: "https://widgets.example/next" } }]
+    });
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
+  });
+
+  it("rejects stale navigation primes and lets a denied child recover through a new prime", () => {
+    const scope = state(
+      policy({
+        includeSubframes: true,
+        allowedOrigins: ["https://app.example", "https://widgets.example"],
+        deniedOrigins: ["https://blocked.example"]
+      })
+    );
+    const attached = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "moving-child",
+      targetInfo: { type: "iframe", url: "https://blocked.example/embed" }
+    });
+    expect(markCdpChildSessionBaselineReady(scope, attached.childSessionClaim!)).toBe(true);
+    expect(
+      completeCdpChildFrameTreePrime(scope, attached.childSessionClaim!, {
+        frame: { id: "moving-frame", url: "https://blocked.example/embed" }
+      })
+    ).toBe("denied");
+
+    const allowedNavigation = evaluateCdpCaptureScopeEvent(
+      scope,
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "moving-frame",
+          parentId: "root",
+          url: "https://widgets.example/embed"
+        }
+      },
+      "moving-child"
+    );
+
+    expect(isCdpChildSessionClaimCurrent(scope, attached.childSessionClaim!)).toBe(false);
+    expect(
+      completeCdpChildFrameTreePrime(scope, attached.childSessionClaim!, {
+        frame: { id: "moving-frame", url: "https://blocked.example/stale" }
+      })
+    ).toBe("stale");
+    expect(
+      completeCdpChildFrameTreePrime(scope, allowedNavigation.childSessionClaim!, {
+        frame: { id: "moving-frame", url: "https://widgets.example/embed" }
+      })
+    ).toBe("ready");
+  });
+
+  it("does not let a detached child claim mutate a reused session id", () => {
+    const scope = state(policy({ includeSubframes: true }));
+    const first = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "reused",
+      targetInfo: { targetId: "target-a", type: "iframe", url: "https://app.example/a" }
+    });
+    evaluateCdpCaptureScopeEvent(scope, "Target.detachedFromTarget", { sessionId: "reused" });
+    const replacement = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "reused",
+      targetInfo: { targetId: "target-b", type: "iframe", url: "https://app.example/b" }
+    });
+
+    expect(markCdpChildSessionBaselineReady(scope, first.childSessionClaim!)).toBe(false);
+    expect(failCdpChildSessionAttachment(scope, first.childSessionClaim!)).toBe(false);
+    expect(scope.childSessions.get("reused")?.token).toBe(replacement.childSessionClaim?.token);
+    expect(scope.childSessions.get("reused")?.status).toBe("pending");
+
+    const replacementRevision = scope.childSessions.get("reused")?.navigationRevision;
+    const stalePageEvent = evaluateCdpCaptureScopeEvent(
+      scope,
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "target-a",
+          parentId: "root",
+          url: "https://app.example/stale-a"
+        }
+      },
+      "reused"
+    );
+    expect(stalePageEvent.allowed).toBe(false);
+    expect(stalePageEvent.globalFrameTreeMutation).toBeUndefined();
+    expect(scope.childSessions.get("reused")?.navigationRevision).toBe(replacementRevision);
+    expect(scope.childSessions.get("reused")?.targetId).toBe("target-b");
+
+    evaluateCdpCaptureScopeEvent(scope, "Target.detachedFromTarget", {
+      sessionId: "reused",
+      targetId: "target-a"
+    });
+    expect(scope.childSessions.get("reused")?.targetId).toBe("target-b");
+  });
+
+  it("retains root re-prime ownership when a visual session id becomes nonvisual", () => {
+    const scope = state(policy({ includeSubframes: true }));
+    evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "reused",
+      targetInfo: {
+        targetId: "visual-frame",
+        type: "iframe",
+        url: "https://app.example/frame"
+      }
+    });
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+
+    const replacement = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "reused",
+      targetInfo: {
+        targetId: "worker-target",
+        type: "worker",
+        url: "https://app.example/worker.js"
+      }
+    });
+    expect(replacement.globalFrameTreeMutation).toBe(true);
+    expect(scope.childSessions.get("reused")).toMatchObject({
+      visual: false,
+      rootReprimeRequired: true
+    });
+
+    evaluateCdpCaptureScopeEvent(
+      scope,
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "worker-target",
+          url: "https://app.example/worker.js"
+        }
+      },
+      "reused"
+    );
+    expect(scope.childSessions.get("reused")?.rootReprimeRequired).toBe(true);
+
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+    expect(scope.childSessions.get("reused")?.rootReprimeRequired).toBe(false);
+  });
+
+  it("fails closed for an unknown child Page session until its Target detach", () => {
+    const scope = state(policy({ includeSubframes: true }));
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+
+    const unknown = evaluateCdpCaptureScopeEvent(
+      scope,
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "unknown-frame",
+          parentId: "root",
+          url: "https://app.example/allowed-but-unowned"
+        }
+      },
+      "unknown-session"
+    );
+
+    expect(unknown.allowed).toBe(false);
+    expect(unknown.globalFrameTreeMutation).toBe(true);
+    expect(scope.childSessions.get("unknown-session")).toMatchObject({
+      visual: true,
+      status: "failed",
+      sessionAllowed: false
+    });
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
+
+    evaluateCdpCaptureScopeEvent(scope, "Target.detachedFromTarget", {
+      sessionId: "unknown-session"
+    });
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(true);
+  });
+
+  it("marks a visual target without a child session as a fatal scope violation", () => {
+    const scope = state(policy({ includeSubframes: true }));
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+
+    const malformed = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      targetInfo: {
+        targetId: "unbound-frame",
+        type: "iframe",
+        url: "https://app.example/embed"
+      }
+    });
+
+    expect(malformed).toMatchObject({
+      allowed: false,
+      globalFrameTreeMutation: true,
+      fatalScopeViolation: true
+    });
+    expect(scope.primed).toBe(false);
+  });
+
+  it("requires every live visual child to be ready but ignores a failed worker", () => {
+    const scope = state(policy({ includeSubframes: true }));
+    const readyChild = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "ready",
+      targetInfo: { type: "iframe", url: "https://app.example/ready" }
+    });
+    const pendingChild = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "pending",
+      targetInfo: { type: "iframe", url: "https://app.example/pending" }
+    });
+    const worker = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "worker",
+      targetInfo: { type: "worker", url: "https://app.example/worker.js" }
+    });
+    markCdpChildSessionBaselineReady(scope, readyChild.childSessionClaim!);
+    completeCdpChildFrameTreePrime(scope, readyChild.childSessionClaim!, {
+      frame: { id: "ready-frame", url: "https://app.example/ready" }
+    });
+    failCdpChildSessionAttachment(scope, worker.childSessionClaim!);
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "ready-frame", url: "https://app.example/ready" } }]
+    });
+
+    expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
+    expect(scope.childSessions.get("pending")?.status).toBe("pending");
+    evaluateCdpCaptureScopeEvent(scope, "Target.detachedFromTarget", {
+      sessionId: pendingChild.childSessionClaim?.sessionId
+    });
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "ready-frame", url: "https://app.example/ready" } }]
     });
     expect(canCaptureGlobalCdpArtifacts(scope)).toBe(true);
   });
@@ -677,6 +1031,89 @@ describe("CDP capture scope", () => {
     ).toBe(true);
   });
 
+  it("does not reuse child request scope across attachment or navigation revisions", () => {
+    const scope = state(
+      policy({
+        includeSubframes: true,
+        allowedOrigins: ["https://app.example", "https://widgets.example"]
+      })
+    );
+    evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "reused",
+      targetInfo: {
+        targetId: "child-a",
+        type: "iframe",
+        url: "https://widgets.example/a"
+      }
+    });
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.requestWillBeSent",
+        {
+          requestId: "request-1",
+          frameId: "child-a",
+          documentURL: "https://widgets.example/a"
+        },
+        "reused"
+      ).allowed
+    ).toBe(true);
+
+    evaluateCdpCaptureScopeEvent(scope, "Target.detachedFromTarget", {
+      sessionId: "reused",
+      targetId: "child-a"
+    });
+    evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "reused",
+      targetInfo: {
+        targetId: "child-b",
+        type: "iframe",
+        url: "https://widgets.example/b"
+      }
+    });
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.responseReceived",
+        { requestId: "request-1" },
+        "reused"
+      ).allowed
+    ).toBe(false);
+
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.requestWillBeSent",
+        {
+          requestId: "request-2",
+          frameId: "child-b",
+          documentURL: "https://widgets.example/b"
+        },
+        "reused"
+      ).allowed
+    ).toBe(true);
+    evaluateCdpCaptureScopeEvent(
+      scope,
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "child-b",
+          parentId: "root",
+          url: "https://widgets.example/b-next"
+        }
+      },
+      "reused"
+    );
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.responseReceived",
+        { requestId: "request-2" },
+        "reused"
+      ).allowed
+    ).toBe(false);
+  });
+
   it("carries frame scope through Runtime execution contexts", () => {
     const scope = state();
     primeCdpCaptureFrameTree(scope, {
@@ -693,6 +1130,121 @@ describe("CDP capture scope", () => {
       evaluateCdpCaptureScopeEvent(scope, "Runtime.consoleAPICalled", {
         executionContextId: 11
       }).allowed
+    ).toBe(false);
+  });
+
+  it("isolates Runtime execution contexts by child session and refreshes them from its tree", () => {
+    const scope = state(
+      policy({
+        includeSubframes: true,
+        allowedOrigins: ["https://app.example", "https://widgets.example"],
+        deniedOrigins: ["https://blocked.example"]
+      })
+    );
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "root-denied", url: "https://blocked.example/root" } }]
+    });
+    expect(
+      evaluateCdpCaptureScopeEvent(scope, "Runtime.executionContextCreated", {
+        context: {
+          id: 11,
+          origin: "https://blocked.example",
+          auxData: { frameId: "root-denied" }
+        }
+      }).allowed
+    ).toBe(false);
+
+    const attached = evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "child",
+      targetInfo: {
+        targetId: "child-frame",
+        type: "iframe",
+        url: "https://widgets.example/embed"
+      }
+    });
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Runtime.executionContextCreated",
+        {
+          context: {
+            id: 11,
+            origin: "https://widgets.example",
+            auxData: { frameId: "child-frame" }
+          }
+        },
+        "child"
+      ).allowed
+    ).toBe(true);
+    expect(
+      evaluateCdpCaptureScopeEvent(scope, "Runtime.consoleAPICalled", {
+        executionContextId: 11
+      }).allowed
+    ).toBe(false);
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Runtime.consoleAPICalled",
+        { executionContextId: 11 },
+        "child"
+      ).allowed
+    ).toBe(true);
+
+    expect(markCdpChildSessionBaselineReady(scope, attached.childSessionClaim!)).toBe(true);
+    expect(
+      completeCdpChildFrameTreePrime(scope, attached.childSessionClaim!, {
+        frame: { id: "child-frame", url: "https://blocked.example/now-denied" }
+      })
+    ).toBe("denied");
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Runtime.consoleAPICalled",
+        { executionContextId: 11 },
+        "child"
+      ).allowed
+    ).toBe(false);
+  });
+
+  it("uses a child context origin instead of its allowed target fallback", () => {
+    const scope = state(
+      policy({
+        includeSubframes: true,
+        allowedOrigins: ["https://app.example", "https://widgets.example"],
+        deniedOrigins: ["https://blocked.example"]
+      })
+    );
+    evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
+      sessionId: "child",
+      targetInfo: {
+        targetId: "child-frame",
+        type: "iframe",
+        url: "https://widgets.example/embed"
+      }
+    });
+
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Runtime.executionContextCreated",
+        {
+          context: {
+            id: 12,
+            origin: "https://blocked.example",
+            auxData: { frameId: "unknown-frame" }
+          }
+        },
+        "child"
+      ).allowed
+    ).toBe(false);
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Runtime.consoleAPICalled",
+        { executionContextId: 12 },
+        "child"
+      ).allowed
     ).toBe(false);
   });
 

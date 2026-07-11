@@ -89,14 +89,21 @@ import {
   evaluateCdpCaptureScopeEvent,
   filterCdpSnapshotDocuments,
   forgetCdpRequestScope,
-  forgetCdpSessionScope,
+  getCdpChildSessionClaim,
   invalidateCdpCaptureFrameTree,
   isCdpCaptureFrameTreePrimedForRoot,
-  isCdpSessionWithinScope,
+  isCdpChildSessionClaimCurrent,
   refreshCdpCaptureFrameTree,
-  type CdpCaptureScopeState
+  type CdpCaptureScopeState,
+  type CdpChildSessionClaim
 } from "./cdp-capture-scope.js";
+import { bootstrapCdpChildSession } from "./cdp-child-bootstrap.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
+import {
+  buildCdpFollowupRequestMetaKey,
+  evaluateCdpTargetControlScopeEvent,
+  isCdpFollowupClaimCurrent
+} from "./cdp-event-followup.js";
 import {
   bootstrapCdpRoot,
   cleanupAndRethrowCdpRootBootstrapFailure,
@@ -227,7 +234,6 @@ type SessionRuntime = {
   recorder: WebBlackboxRecorder;
   pipeline: SessionPipelineClient;
   cdpRouter: CdpRouter | null;
-  enabledCdpSessions: Set<string>;
   cdpScope: CdpCaptureScopeState;
   contentDocuments: ContentDocumentAuthorization;
   authorizedContentFrames: Set<number>;
@@ -595,6 +601,7 @@ const OFFSCREEN_PORT_READY_WAIT_MS = 25;
 const STOP_DRAIN_ACK_TIMEOUT_MS = 6_000;
 const CDP_ARTIFACT_TIMEOUT_MS = 5_000;
 const CDP_HEAP_SNAPSHOT_TIMEOUT_MS = 8_000;
+const CDP_CHILD_SETTLE_TIMEOUT_MS = 15_000;
 const SCREEN_RECORDING_OFFSCREEN_SOURCE = "tab";
 const PIPELINE_RESUME_MAX_SCREEN_CHUNKS = 500_000;
 
@@ -1643,7 +1650,6 @@ function createSessionRuntime(input: {
     recorder,
     pipeline: input.pipeline,
     cdpRouter: null,
-    enabledCdpSessions: new Set<string>(),
     cdpScope: createCdpCaptureScopeState(input.config.capturePolicy, input.tabId, input.captureUrl),
     contentDocuments,
     authorizedContentFrames: new Set<number>(),
@@ -2118,6 +2124,154 @@ function suspendFullCaptureForNavigation(
   ).catch(() => {
     requestStopRuntimeIfNavigationClaimCurrent(claim, "navigation-screen-stop");
   });
+}
+
+function isCdpChildRuntimeCurrent(runtime: SessionRuntime, router: CdpRouter): boolean {
+  return (
+    isMapEntrySame(sessionsByTab, runtime.tabId, runtime) &&
+    isMapEntrySame(sessionsBySid, runtime.sid, runtime) &&
+    runtime.cdpRouter === router &&
+    isVolatileCaptureOpen(runtime.captureFence) &&
+    !runtime.stopping &&
+    !runtime.stoppedAt
+  );
+}
+
+function enqueueCdpChildSessionControl(
+  runtime: SessionRuntime,
+  router: CdpRouter,
+  childClaim: CdpChildSessionClaim
+): void {
+  const accepted = enqueue(runtime, async () => {
+    const isRuntimeCurrent = () => isCdpChildRuntimeCurrent(runtime, router);
+    const outcome = await bootstrapCdpChildSession({
+      state: runtime.cdpScope,
+      claim: childClaim,
+      commands: {
+        send: (method) =>
+          requireCdpCommand(
+            router.send({ tabId: runtime.tabId, sessionId: childClaim.sessionId }, method),
+            `child ${method}`
+          ),
+        enableAutoAttach: () =>
+          requireCdpCommand(
+            router.enableAutoAttach(runtime.tabId, undefined, childClaim.sessionId),
+            "child Target.setAutoAttach"
+          )
+      },
+      isRuntimeCurrent
+    });
+
+    if (
+      outcome === "stale" ||
+      !isRuntimeCurrent() ||
+      !isCdpChildSessionClaimCurrent(runtime.cdpScope, childClaim)
+    ) {
+      return;
+    }
+
+    const child = runtime.cdpScope.childSessions.get(childClaim.sessionId);
+
+    if (!child?.rootReprimeRequired || !isRuntimeCaptureAdmitted(runtime.activationState)) {
+      return;
+    }
+
+    const navigationClaim = snapshotCurrentRuntimeNavigation(
+      runtime,
+      "cdp-child-mutation",
+      runtime.captureUrl
+    );
+
+    if (!navigationClaim) {
+      return;
+    }
+
+    await restoreCdpGlobalCaptureAfterNavigation(navigationClaim, true, {
+      expectedChildMutationRevision: runtime.cdpScope.childMutationRevision
+    });
+  });
+
+  if (!accepted && isRuntimeCaptureAdmitted(runtime.activationState)) {
+    requestStopRuntimeIfCurrent(runtime, "cdp-child-control-queue-closed");
+  }
+}
+
+async function drainCurrentRuntimeQueue(
+  runtime: SessionRuntime,
+  deadline: number
+): Promise<boolean> {
+  if (!isRuntimeCurrentCaptureOpen(runtime)) {
+    return false;
+  }
+
+  const currentTail = runtime.queue;
+  const remainingMs = deadline - Date.now();
+
+  if (remainingMs <= 0) {
+    throw new Error("Child CDP controls exceeded their settle deadline.");
+  }
+
+  const outcome = await withCdpCommandTimeout(currentTail, remainingMs);
+
+  if (!outcome.ok) {
+    throw new Error("Child CDP controls did not drain before their settle deadline.");
+  }
+
+  return runtime.queue === currentTail;
+}
+
+async function primeCdpRootAfterChildControls(
+  runtime: SessionRuntime,
+  router: CdpRouter
+): Promise<CdpRootFrameTreePrime> {
+  const deadline = Date.now() + CDP_CHILD_SETTLE_TIMEOUT_MS;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (!(await drainCurrentRuntimeQueue(runtime, deadline))) {
+      continue;
+    }
+
+    if (!isCdpChildRuntimeCurrent(runtime, router)) {
+      throw new Error("The runtime changed while child CDP sessions were becoming ready.");
+    }
+
+    const expectedChildMutationRevision = runtime.cdpScope.childMutationRevision;
+    const settledQueue = runtime.queue;
+    const remainingMs = deadline - Date.now();
+
+    if (remainingMs <= 0) {
+      throw new Error("Child CDP controls exceeded their settle deadline.");
+    }
+
+    const result = await primeCdpFrameTreeScopes(
+      runtime,
+      router,
+      Math.min(CDP_ARTIFACT_TIMEOUT_MS, remainingMs)
+    );
+
+    if (
+      expectedChildMutationRevision === runtime.cdpScope.childMutationRevision &&
+      settledQueue === runtime.queue
+    ) {
+      return result;
+    }
+  }
+
+  throw new Error("Child CDP sessions did not settle during root frame-tree priming.");
+}
+
+async function requireCdpCommand<TResult>(
+  task: Promise<TResult>,
+  label: string,
+  timeoutMs = CDP_ARTIFACT_TIMEOUT_MS
+): Promise<TResult> {
+  const outcome = await withCdpCommandTimeout(task, timeoutMs);
+
+  if (!outcome.ok) {
+    throw new Error(`${label} failed or timed out.`);
+  }
+
+  return outcome.value;
 }
 
 function requestStopRuntimeIfCurrent(runtime: SessionRuntime, reason: string): void {
@@ -3541,12 +3695,41 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         event.params ?? {},
         runtime.config.capturePolicy?.categories.network
       );
-      const scopeEvaluation = evaluateCdpCaptureScopeEvent(
-        runtime.cdpScope,
-        event.method,
-        event.params ?? {},
-        event.sessionId
-      );
+      const targetControlMethod =
+        event.method === "Target.attachedToTarget" || event.method === "Target.detachedFromTarget"
+          ? event.method
+          : null;
+      const scopeEvaluation = targetControlMethod
+        ? evaluateCdpTargetControlScopeEvent(
+            runtime.cdpScope,
+            targetControlMethod,
+            event.params ?? {},
+            event.sessionId
+          )
+        : evaluateCdpCaptureScopeEvent(
+            runtime.cdpScope,
+            event.method,
+            event.params ?? {},
+            event.sessionId
+          );
+
+      if (!scopeEvaluation) {
+        return;
+      }
+
+      if (scopeEvaluation.fatalScopeViolation) {
+        requestStopRuntimeIfCurrent(runtime, "cdp-malformed-visual-target");
+        return;
+      }
+
+      const childSessionClaim = scopeEvaluation.childSessionClaim;
+      const eventChildClaim = event.sessionId
+        ? getCdpChildSessionClaim(runtime.cdpScope, event.sessionId)
+        : null;
+
+      if (childSessionClaim) {
+        enqueueCdpChildSessionControl(runtime, candidateRouter, childSessionClaim);
+      }
 
       // Bootstrap events may prime the provisional CDP scope, but they must
       // not enter navigation ownership, capture, or follow-up queues until the
@@ -3589,6 +3772,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         }
       } else if (cdpFrameTreeMutated) {
         const mutationGeneration = runtime.cdpScope.generation;
+        const childMutationRevision = runtime.cdpScope.childMutationRevision;
         const claim = snapshotCurrentRuntimeNavigation(
           runtime,
           "cdp-child-mutation",
@@ -3613,13 +3797,15 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
           ).catch(() => undefined);
         }
 
-        if (claim) {
+        if (claim && !childSessionClaim) {
           enqueueNavigationClaim(claim, async () => {
             if (runtime.cdpScope.generation !== mutationGeneration) {
               return;
             }
 
-            await restoreCdpGlobalCaptureAfterNavigation(claim, true);
+            await restoreCdpGlobalCaptureAfterNavigation(claim, true, {
+              expectedChildMutationRevision: childMutationRevision
+            });
           });
         }
       }
@@ -3670,6 +3856,13 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         return;
       }
 
+      if (
+        event.method === "Target.attachedToTarget" ||
+        event.method === "Target.detachedFromTarget"
+      ) {
+        return;
+      }
+
       enqueue(
         runtime,
         async () => {
@@ -3680,7 +3873,17 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
             return;
           }
 
-          await processFullModeEvent(runtime, event.method, event.params ?? {}, event.sessionId);
+          if (!isCdpFollowupClaimCurrent(runtime.cdpScope, event.sessionId, eventChildClaim)) {
+            return;
+          }
+
+          await processFullModeEvent(
+            runtime,
+            event.method,
+            event.params ?? {},
+            event.sessionId,
+            eventChildClaim
+          );
         },
         { bestEffort: true }
       );
@@ -3694,7 +3897,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
     runtime.removeCdpListeners.push(unsubscribeEvent, unsubscribeDetach);
 
-    const bootstrapResult = await bootstrapCdpRoot({
+    await bootstrapCdpRoot({
       cdpLevel: runtime.config.capturePolicy?.categories.cdp ?? "off",
       commands: {
         attach: async () => {
@@ -3705,7 +3908,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
           }
 
           runtime.cdpRouter = candidateRouter;
-          runtime.enabledCdpSessions.clear();
+          clearCdpCaptureScopeState(runtime.cdpScope);
         },
         clearExecutionContextScopes: () => {
           runtime.cdpScope.executionContextScopes.clear();
@@ -3716,11 +3919,14 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       },
       includeSubframes: runtime.config.capturePolicy?.scope.includeSubframes === true
     });
+    const settledFrameTreePrime = await primeCdpRootAfterChildControls(runtime, candidateRouter);
 
-    runtime.enabledCdpSessions.add("root");
+    if (!settledFrameTreePrime.rootValid) {
+      throw new Error("The root frame tree became invalid while child CDP sessions settled.");
+    }
 
     if (runtime.screenRecording) {
-      if (bootstrapResult.globalCaptureReady) {
+      if (settledFrameTreePrime.globalCaptureReady) {
         runtime.screenRecording.cdpScopeGeneration = runtime.cdpScope.generation;
       } else {
         await stopScreenRecording(runtime, "capture-scope");
@@ -3776,7 +3982,8 @@ function scheduleFullModeSessionStartArtifacts(runtime: SessionRuntime): void {
 
 async function primeCdpFrameTreeScopes(
   runtime: SessionRuntime,
-  router: CdpRouter | null = runtime.cdpRouter
+  router: CdpRouter | null = runtime.cdpRouter,
+  timeoutMs = CDP_ARTIFACT_TIMEOUT_MS
 ): Promise<CdpRootFrameTreePrime> {
   if (!router) {
     invalidateCdpCaptureFrameTree(runtime.cdpScope);
@@ -3787,9 +3994,10 @@ async function primeCdpFrameTreeScopes(
   }
 
   await refreshCdpCaptureFrameTree(runtime.cdpScope, async () => {
-    const response = await router.send<{ frameTree?: unknown }>(
-      { tabId: runtime.tabId },
-      "Page.getFrameTree"
+    const response = await requireCdpCommand(
+      router.send<{ frameTree?: unknown }>({ tabId: runtime.tabId }, "Page.getFrameTree"),
+      "root Page.getFrameTree",
+      timeoutMs
     );
     return response?.frameTree;
   });
@@ -3815,13 +4023,23 @@ async function primeCdpFrameTreeScopes(
 
 async function restoreCdpGlobalCaptureAfterNavigation(
   claim: SessionNavigationClaim,
-  forceRefresh = false
+  forceRefresh = false,
+  options: { expectedChildMutationRevision?: number } = {}
 ): Promise<void> {
   const runtime = claim.runtime;
   const expectedUrl = claim.candidateUrl ?? runtime.captureUrl;
+  const isRestoreCurrent = () =>
+    isSessionNavigationClaimCurrent(claim) &&
+    (options.expectedChildMutationRevision === undefined ||
+      runtime.cdpScope.childMutationRevision === options.expectedChildMutationRevision);
+  const stopRuntimeIfRestoreCurrent = async () => {
+    if (isRestoreCurrent()) {
+      await stopRuntimeIfNavigationClaimCurrent(claim);
+    }
+  };
 
   if (
-    !isSessionNavigationClaimCurrent(claim) ||
+    !isRestoreCurrent() ||
     runtime.mode !== "full" ||
     !runtime.cdpRouter ||
     !isRuntimeCaptureScopeActive(runtime) ||
@@ -3841,25 +4059,24 @@ async function restoreCdpGlobalCaptureAfterNavigation(
   ) {
     try {
       await stopScreenRecording(runtime, "navigation-scope", initialRecording, () =>
-        isSessionNavigationClaimCurrent(claim)
+        isRestoreCurrent()
       );
     } catch {
-      await stopRuntimeIfNavigationClaimCurrent(claim);
+      await stopRuntimeIfRestoreCurrent();
       return;
     }
 
-    if (!isSessionNavigationClaimCurrent(claim)) {
+    if (!isRestoreCurrent()) {
       return;
     }
   }
 
   if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime) === null) {
-    const prime = await runGuardedNavigationStep(
-      () => isSessionNavigationClaimCurrent(claim),
-      () => primeCdpFrameTreeScopes(runtime)
+    const prime = await runGuardedNavigationStep(isRestoreCurrent, () =>
+      primeCdpFrameTreeScopes(runtime)
     );
 
-    if (prime.status !== "current" || runtime.captureUrl !== expectedUrl) {
+    if (prime.status !== "current" || !isRestoreCurrent() || runtime.captureUrl !== expectedUrl) {
       return;
     }
 
@@ -3870,9 +4087,9 @@ async function restoreCdpGlobalCaptureAfterNavigation(
       const invalidRootRecording = runtime.screenRecording;
 
       await stopScreenRecording(runtime, "capture-scope", invalidRootRecording, () =>
-        isSessionNavigationClaimCurrent(claim)
+        isRestoreCurrent()
       ).catch(() => undefined);
-      await stopRuntimeIfNavigationClaimCurrent(claim);
+      await stopRuntimeIfRestoreCurrent();
       return;
     }
 
@@ -3881,10 +4098,10 @@ async function restoreCdpGlobalCaptureAfterNavigation(
 
       try {
         await stopScreenRecording(runtime, "capture-scope", childBlockedRecording, () =>
-          isSessionNavigationClaimCurrent(claim)
+          isRestoreCurrent()
         );
       } catch {
-        await stopRuntimeIfNavigationClaimCurrent(claim);
+        await stopRuntimeIfRestoreCurrent();
       }
 
       return;
@@ -3900,14 +4117,14 @@ async function restoreCdpGlobalCaptureAfterNavigation(
   ) {
     try {
       await stopScreenRecording(runtime, "navigation-scope", activeRecording, () =>
-        isSessionNavigationClaimCurrent(claim)
+        isRestoreCurrent()
       );
     } catch {
-      await stopRuntimeIfNavigationClaimCurrent(claim);
+      await stopRuntimeIfRestoreCurrent();
       return;
     }
 
-    if (!isSessionNavigationClaimCurrent(claim)) {
+    if (!isRestoreCurrent()) {
       return;
     }
   }
@@ -3917,18 +4134,18 @@ async function restoreCdpGlobalCaptureAfterNavigation(
 
   if (!runtime.screenRecording && screenRecordingRequested) {
     try {
-      await startScreenRecording(runtime, false, claim);
+      await startScreenRecording(runtime, false, claim, isRestoreCurrent);
     } catch (error) {
       console.warn("[WebBlackbox] failed to restart screen recording after navigation", {
         sid: runtime.sid,
         error: error instanceof Error ? error.message : String(error)
       });
 
-      await stopRuntimeIfNavigationClaimCurrent(claim);
+      await stopRuntimeIfRestoreCurrent();
       return;
     }
 
-    if (!isSessionNavigationClaimCurrent(claim)) {
+    if (!isRestoreCurrent()) {
       return;
     }
 
@@ -3941,7 +4158,7 @@ async function restoreCdpGlobalCaptureAfterNavigation(
         return;
       }
 
-      await stopRuntimeIfNavigationClaimCurrent(claim);
+      await stopRuntimeIfRestoreCurrent();
     }
   }
 }
@@ -4024,34 +4241,18 @@ async function processFullModeEvent(
   runtime: SessionRuntime,
   method: string,
   params: unknown,
-  sessionId?: string
+  sessionId: string | undefined,
+  childClaim: CdpChildSessionClaim | null
 ): Promise<void> {
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  const isEventCurrent = () =>
+    isRuntimeCaptureScopeActive(runtime) &&
+    isCdpFollowupClaimCurrent(runtime.cdpScope, sessionId, childClaim);
+
+  if (!isEventCurrent()) {
     return;
   }
 
   const payload = asRecord(params);
-
-  if (method === "Target.attachedToTarget") {
-    const childSessionId = typeof payload?.sessionId === "string" ? payload.sessionId : undefined;
-
-    if (childSessionId && isCdpSessionWithinScope(runtime.cdpScope, childSessionId)) {
-      await primeChildCdpSession(runtime, childSessionId);
-    }
-
-    return;
-  }
-
-  if (method === "Target.detachedFromTarget") {
-    const childSessionId = typeof payload?.sessionId === "string" ? payload.sessionId : undefined;
-
-    if (childSessionId) {
-      runtime.enabledCdpSessions.delete(childSessionId);
-      forgetCdpSessionScope(runtime.cdpScope, childSessionId);
-    }
-
-    return;
-  }
 
   if (method === "Network.responseReceived") {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
@@ -4059,12 +4260,16 @@ async function processFullModeEvent(
     const resourceType = typeof payload?.type === "string" ? payload.type : undefined;
 
     if (requestId) {
-      upsertRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId), {
-        url: typeof response?.url === "string" ? response.url : undefined,
-        mimeType: typeof response?.mimeType === "string" ? response.mimeType : undefined,
-        status: typeof response?.status === "number" ? response.status : undefined,
-        resourceType
-      });
+      upsertRequestMeta(
+        runtime.requestMeta,
+        buildCdpFollowupRequestMetaKey(requestId, sessionId, childClaim),
+        {
+          url: typeof response?.url === "string" ? response.url : undefined,
+          mimeType: typeof response?.mimeType === "string" ? response.mimeType : undefined,
+          status: typeof response?.status === "number" ? response.status : undefined,
+          resourceType
+        }
+      );
     }
 
     return;
@@ -4072,14 +4277,24 @@ async function processFullModeEvent(
 
   if (method === "Network.loadingFinished") {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
+    const requestMetaKey = requestId
+      ? buildCdpFollowupRequestMetaKey(requestId, sessionId, childClaim)
+      : null;
 
-    if (requestId && shouldCaptureResponseBody(runtime, requestId, payload, sessionId)) {
-      await captureResponseBody(runtime, requestId, sessionId);
+    if (
+      requestId &&
+      requestMetaKey &&
+      shouldCaptureResponseBody(runtime, requestMetaKey, payload)
+    ) {
+      await captureResponseBody(runtime, requestId, requestMetaKey, sessionId, isEventCurrent);
     }
 
-    if (requestId) {
-      deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
-      forgetCdpRequestScope(runtime.cdpScope, requestId, sessionId);
+    if (requestId && requestMetaKey) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+
+      if (isEventCurrent()) {
+        forgetCdpRequestScope(runtime.cdpScope, requestId, sessionId);
+      }
     }
 
     return;
@@ -4090,13 +4305,19 @@ async function processFullModeEvent(
       const requestId = typeof payload?.requestId === "string" ? payload.requestId : undefined;
 
       if (requestId) {
-        deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
-        forgetCdpRequestScope(runtime.cdpScope, requestId, sessionId);
+        deleteRequestMeta(
+          runtime.requestMeta,
+          buildCdpFollowupRequestMetaKey(requestId, sessionId, childClaim)
+        );
+
+        if (isEventCurrent()) {
+          forgetCdpRequestScope(runtime.cdpScope, requestId, sessionId);
+        }
       }
     }
 
-    if (shouldCaptureIncidentArtifacts(runtime)) {
-      await captureIncidentArtifacts(runtime, method);
+    if (isEventCurrent() && shouldCaptureIncidentArtifacts(runtime)) {
+      await captureIncidentArtifacts(runtime, method, isEventCurrent);
     }
 
     return;
@@ -4117,33 +4338,14 @@ async function processFullModeEvent(
   }
 }
 
-async function primeChildCdpSession(
-  runtime: SessionRuntime,
-  childSessionId: string
-): Promise<void> {
-  if (!runtime.cdpRouter || runtime.enabledCdpSessions.has(childSessionId)) {
-    return;
-  }
-
-  runtime.enabledCdpSessions.add(childSessionId);
-
-  try {
-    await runtime.cdpRouter.enableBaseline(runtime.tabId, childSessionId);
-    await runtime.cdpRouter.enableAutoAttach(runtime.tabId, undefined, childSessionId);
-    await runtime.cdpRouter
-      .send({ tabId: runtime.tabId, sessionId: childSessionId }, "DOMStorage.enable")
-      .catch(() => undefined);
-  } catch {
-    runtime.enabledCdpSessions.delete(childSessionId);
-  }
-}
-
 async function captureResponseBody(
   runtime: SessionRuntime,
   requestId: string,
-  sessionId?: string
+  requestMetaKey: string,
+  sessionId: string | undefined,
+  isEventCurrent: () => boolean
 ): Promise<void> {
-  if (!runtime.cdpRouter || !isRuntimeCaptureScopeActive(runtime)) {
+  if (!runtime.cdpRouter || !isEventCurrent()) {
     return;
   }
 
@@ -4153,15 +4355,11 @@ async function captureResponseBody(
     base64Encoded?: boolean;
   }>(runtime, target, "Network.getResponseBody", { requestId });
 
-  if (!response?.body) {
+  if (!response?.body || !isEventCurrent()) {
     return;
   }
 
-  if (!isRuntimeCaptureScopeActive(runtime)) {
-    return;
-  }
-
-  const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
+  const metadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
   const normalizedMime = normalizeMimeType(metadata?.mimeType ?? null);
   const captureRule = resolveFullBodyCaptureRule(runtime, metadata?.url ?? "", normalizedMime);
 
@@ -4183,13 +4381,17 @@ async function captureResponseBody(
     return;
   }
 
+  if (!isEventCurrent()) {
+    return;
+  }
+
   const hash = await putRuntimeCaptureBlob(
     runtime,
     metadata?.mimeType ?? "application/octet-stream",
     transformed.sampledBytes
   );
 
-  if (!hash) {
+  if (!hash || !isEventCurrent()) {
     return;
   }
 
@@ -4216,9 +4418,8 @@ async function captureResponseBody(
 
 function shouldCaptureResponseBody(
   runtime: SessionRuntime,
-  requestId: string,
-  loadingFinishedPayload: Record<string, unknown> | null,
-  sessionId?: string
+  requestMetaKey: string,
+  loadingFinishedPayload: Record<string, unknown> | null
 ): boolean {
   if (runtime.mode !== "full" || !isRuntimeCaptureScopeActive(runtime)) {
     return false;
@@ -4232,7 +4433,7 @@ function shouldCaptureResponseBody(
     return false;
   }
 
-  const metadata = getRequestMeta(runtime.requestMeta, buildRequestMetaKey(requestId, sessionId));
+  const metadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
 
   if (!metadata) {
     return false;
@@ -4311,10 +4512,18 @@ function shouldCaptureIncidentArtifacts(runtime: SessionRuntime): boolean {
   return true;
 }
 
-async function captureIncidentArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
+async function captureIncidentArtifacts(
+  runtime: SessionRuntime,
+  reason: string,
+  additionalCurrent: () => boolean = () => true
+): Promise<void> {
+  if (!additionalCurrent()) {
+    return;
+  }
+
   await Promise.allSettled([
-    captureScreenshot(runtime, reason),
-    captureTraceMetrics(runtime, reason)
+    captureScreenshot(runtime, reason, additionalCurrent),
+    captureTraceMetrics(runtime, reason, additionalCurrent)
   ]);
 }
 
@@ -4380,10 +4589,14 @@ async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string)
   await Promise.allSettled(tasks);
 }
 
-async function captureScreenshot(runtime: SessionRuntime, reason: string): Promise<void> {
+async function captureScreenshot(
+  runtime: SessionRuntime,
+  reason: string,
+  additionalCurrent: () => boolean = () => true
+): Promise<void> {
   const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
-  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
+  if (!additionalCurrent() || !runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -4402,14 +4615,22 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
     }
   );
 
-  if (!screenshot?.data || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+  if (
+    !screenshot?.data ||
+    !additionalCurrent() ||
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+  ) {
     return;
   }
 
   const bytes = decodeBase64(screenshot.data);
   const hash = await putRuntimeCaptureBlob(runtime, "image/webp", bytes);
 
-  if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+  if (
+    !hash ||
+    !additionalCurrent() ||
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+  ) {
     return;
   }
 
@@ -4464,10 +4685,12 @@ function shouldStartScreenRecording(runtime: SessionRuntime, allowStarting = fal
 async function startScreenRecording(
   runtime: SessionRuntime,
   provisional = false,
-  navigationClaim?: SessionNavigationClaim
+  navigationClaim?: SessionNavigationClaim,
+  additionalCurrent: () => boolean = () => true
 ): Promise<void> {
   const isCurrentNavigation = () =>
-    navigationClaim === undefined || isSessionNavigationClaimCurrent(navigationClaim);
+    additionalCurrent() &&
+    (navigationClaim === undefined || isSessionNavigationClaimCurrent(navigationClaim));
   const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime, provisional);
 
   if (!isCurrentNavigation() || runtime.screenRecording || cdpScopeGeneration === null) {
@@ -5048,10 +5271,14 @@ function resolveLocalStorageSnapshotMode(
   return null;
 }
 
-async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Promise<void> {
+async function captureTraceMetrics(
+  runtime: SessionRuntime,
+  reason: string,
+  additionalCurrent: () => boolean = () => true
+): Promise<void> {
   const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
-  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
+  if (!additionalCurrent() || !runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -5065,14 +5292,22 @@ async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Pro
     "Performance.getMetrics"
   );
 
-  if (!metrics || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+  if (
+    !metrics ||
+    !additionalCurrent() ||
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+  ) {
     return;
   }
 
   const bytes = new TextEncoder().encode(JSON.stringify(metrics));
   const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-  if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+  if (
+    !hash ||
+    !additionalCurrent() ||
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+  ) {
     return;
   }
 
@@ -6715,7 +6950,6 @@ async function cleanupCdpInstrumentation(
     runtime.cdpRouter = null;
   }
 
-  runtime.enabledCdpSessions.clear();
   clearCdpCaptureScopeState(runtime.cdpScope);
   runtime.requestMeta.clear();
   runtime.responseBodyCaptureTimestamps.length = 0;

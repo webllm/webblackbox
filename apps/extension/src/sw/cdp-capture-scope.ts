@@ -14,17 +14,49 @@ export type CdpCaptureScopeState = {
   generation: number;
   rootFrameId: string | undefined;
   rootUrl: string | undefined;
-  sessionScopes: Map<string, boolean>;
-  globalTargetScopes: Map<string, boolean>;
-  pendingGlobalTargetSessions: Set<string>;
+  childSessionSequence: number;
+  childMutationRevision: number;
+  childSessions: Map<string, CdpChildSessionState>;
   frameScopes: Map<string, boolean>;
   executionContextScopes: Map<number, boolean>;
   requestScopes: Map<string, boolean>;
 };
 
+export type CdpChildSessionStatus = "pending" | "ready" | "failed" | "denied" | "detached";
+
+export type CdpChildSessionState = {
+  token: number;
+  sessionId: string;
+  targetId: string | undefined;
+  parentSessionId: string | undefined;
+  parentToken: number | undefined;
+  visual: boolean;
+  status: CdpChildSessionStatus;
+  baselineReady: boolean;
+  navigationRevision: number;
+  sessionAllowed: boolean;
+  rootReprimeRequired: boolean;
+  frameScopes: Map<string, boolean>;
+  executionContextScopes: Map<number, CdpExecutionContextScope>;
+};
+
+type CdpExecutionContextScope = {
+  allowed: boolean;
+  frameId: string | undefined;
+  origin: string | undefined;
+};
+
+export type CdpChildSessionClaim = Readonly<{
+  sessionId: string;
+  token: number;
+  navigationRevision: number;
+}>;
+
 export type CdpCaptureScopeEvaluation = {
   allowed: boolean;
   globalFrameTreeMutation?: boolean;
+  childSessionClaim?: CdpChildSessionClaim;
+  fatalScopeViolation?: boolean;
   topNavigation?: {
     url: string;
     decision: CaptureScopeDecision;
@@ -44,9 +76,9 @@ export function createCdpCaptureScopeState(
     generation: 0,
     rootFrameId: undefined,
     rootUrl: undefined,
-    sessionScopes: new Map(),
-    globalTargetScopes: new Map(),
-    pendingGlobalTargetSessions: new Set(),
+    childSessionSequence: 0,
+    childMutationRevision: 0,
+    childSessions: new Map(),
     frameScopes: new Map(),
     executionContextScopes: new Map(),
     requestScopes: new Map()
@@ -65,118 +97,123 @@ export function evaluateCdpCaptureScopeEvent(
     const childSessionId = asString(payload?.sessionId);
     const targetInfo = asRecord(payload?.targetInfo);
     const allowed = evaluateFrameDocument(state, asString(targetInfo?.url), false).allowed;
-    const globalFrameTreeMutation = isPotentiallyVisualTarget(asString(targetInfo?.type));
+    const visual = isPotentiallyVisualTarget(asString(targetInfo?.type));
+    const replaced = childSessionId ? state.childSessions.get(childSessionId) : undefined;
+    const replacementInvalidatedGlobal = replaced
+      ? detachCdpChildSessionSubtree(state, replaced)
+      : false;
+    const globalFrameTreeMutation = visual || replacementInvalidatedGlobal;
+    let childSessionClaim: CdpChildSessionClaim | undefined;
 
     if (globalFrameTreeMutation) {
       invalidateCdpCaptureFrameTree(state);
+      state.childMutationRevision += 1;
+    }
+
+    if (visual && !childSessionId) {
+      return {
+        allowed: false,
+        globalFrameTreeMutation: true,
+        fatalScopeViolation: true
+      };
     }
 
     if (childSessionId) {
-      state.sessionScopes.set(childSessionId, allowed);
+      const parent = sessionId ? state.childSessions.get(sessionId) : undefined;
 
-      if (globalFrameTreeMutation) {
-        state.globalTargetScopes.set(childSessionId, allowed);
-        state.pendingGlobalTargetSessions.add(childSessionId);
-      }
+      const child: CdpChildSessionState = {
+        token: (state.childSessionSequence += 1),
+        sessionId: childSessionId,
+        targetId: asString(targetInfo?.targetId) ?? undefined,
+        parentSessionId: sessionId,
+        parentToken: parent?.token,
+        visual,
+        status: "pending",
+        baselineReady: false,
+        navigationRevision: 0,
+        sessionAllowed: allowed,
+        rootReprimeRequired: globalFrameTreeMutation,
+        frameScopes: new Map(),
+        executionContextScopes: new Map()
+      };
+      state.childSessions.set(childSessionId, child);
+      childSessionClaim = claimCdpChildSession(child);
     }
 
-    return { allowed, globalFrameTreeMutation };
+    return { allowed, globalFrameTreeMutation, childSessionClaim };
   }
 
   if (method === "Target.detachedFromTarget") {
     const childSessionId = asString(payload?.sessionId);
-    const globalFrameTreeMutation = childSessionId
-      ? state.globalTargetScopes.has(childSessionId)
-      : false;
+    const detachedTargetId = asString(payload?.targetId);
+    const candidate = childSessionId ? state.childSessions.get(childSessionId) : undefined;
+    const parent = sessionId ? state.childSessions.get(sessionId) : undefined;
+    const child =
+      candidate &&
+      candidate.parentSessionId === sessionId &&
+      candidate.parentToken === parent?.token &&
+      (!detachedTargetId || !candidate.targetId || candidate.targetId === detachedTargetId)
+        ? candidate
+        : undefined;
+    const globalFrameTreeMutation = child ? detachCdpChildSessionSubtree(state, child) : false;
 
-    if (childSessionId) {
-      state.sessionScopes.delete(childSessionId);
-      state.globalTargetScopes.delete(childSessionId);
-      state.pendingGlobalTargetSessions.delete(childSessionId);
-
-      if (globalFrameTreeMutation) {
-        invalidateCdpCaptureFrameTree(state);
-      }
+    if (globalFrameTreeMutation) {
+      invalidateCdpCaptureFrameTree(state);
+      state.childMutationRevision += 1;
     }
 
-    return { allowed: false, globalFrameTreeMutation };
+    return {
+      allowed: false,
+      globalFrameTreeMutation
+    };
   }
 
   if (method === "Page.frameNavigated") {
     const frame = asRecord(payload?.frame);
     const frameId = asString(frame?.id);
     const frameUrl = asString(frame?.url);
+    const parentFrameId = asString(frame?.parentId) ?? asString(frame?.parentFrameId);
     const topLevel =
       !sessionId && typeof frame?.parentId !== "string" && typeof frame?.parentFrameId !== "string";
 
-    invalidateCdpCaptureFrameTree(state);
+    const child = sessionId ? state.childSessions.get(sessionId) : undefined;
+
+    if (sessionId && !child) {
+      registerUnknownVisualCdpChildSession(state, sessionId);
+      return { allowed: false, globalFrameTreeMutation: true };
+    }
+
+    if (child && !isCdpChildFrameEventOwned(child, frameId, parentFrameId)) {
+      return { allowed: false };
+    }
+
+    const globalFrameTreeMutation = !sessionId || child?.visual !== false;
+
+    if (globalFrameTreeMutation) {
+      invalidateCdpCaptureFrameTree(state);
+
+      if (!topLevel) {
+        state.childMutationRevision += 1;
+      }
+
+      if (child) {
+        child.rootReprimeRequired = true;
+      }
+    }
 
     const decision = evaluateFrameDocument(state, frameUrl, topLevel);
 
+    const childSessionClaim = child
+      ? advanceCdpChildSessionNavigation(child, decision.allowed)
+      : undefined;
+
     if (frameId) {
-      state.frameScopes.set(frameId, decision.allowed);
+      (child?.frameScopes ?? state.frameScopes).set(frameId, decision.allowed);
 
       if (topLevel) {
         state.rootFrameId = frameId;
         state.rootUrl = frameUrl ?? undefined;
       }
-    }
-
-    if (sessionId) {
-      state.sessionScopes.set(sessionId, decision.allowed);
-
-      if (state.globalTargetScopes.has(sessionId)) {
-        state.globalTargetScopes.set(sessionId, decision.allowed);
-      }
-
-      state.pendingGlobalTargetSessions.delete(sessionId);
-    }
-
-    if (topLevel && frameUrl) {
-      if (decision.allowed) {
-        state.captureUrl = frameUrl;
-      }
-
-      return {
-        allowed: decision.allowed,
-        globalFrameTreeMutation: true,
-        topNavigation: {
-          url: frameUrl,
-          decision
-        }
-      };
-    }
-
-    return { allowed: decision.allowed, globalFrameTreeMutation: true };
-  }
-
-  if (method === "Page.navigatedWithinDocument") {
-    const frameId = asString(payload?.frameId);
-    const frameUrl = asString(payload?.url);
-    const topLevel = !sessionId && frameId !== null && frameId === state.rootFrameId;
-
-    if (frameId) {
-      invalidateCdpCaptureFrameTree(state);
-    }
-
-    const decision = evaluateFrameDocument(state, frameUrl, topLevel);
-
-    if (frameId) {
-      state.frameScopes.set(frameId, decision.allowed);
-
-      if (topLevel) {
-        state.rootUrl = frameUrl ?? undefined;
-      }
-    }
-
-    if (sessionId) {
-      state.sessionScopes.set(sessionId, decision.allowed);
-
-      if (state.globalTargetScopes.has(sessionId)) {
-        state.globalTargetScopes.set(sessionId, decision.allowed);
-      }
-
-      state.pendingGlobalTargetSessions.delete(sessionId);
     }
 
     if (topLevel && frameUrl) {
@@ -196,14 +233,104 @@ export function evaluateCdpCaptureScopeEvent(
 
     return {
       allowed: decision.allowed,
-      ...(frameId ? { globalFrameTreeMutation: true } : {})
+      globalFrameTreeMutation,
+      childSessionClaim
+    };
+  }
+
+  if (method === "Page.navigatedWithinDocument") {
+    const frameId = asString(payload?.frameId);
+    const frameUrl = asString(payload?.url);
+    const topLevel = !sessionId && frameId !== null && frameId === state.rootFrameId;
+
+    const child = sessionId ? state.childSessions.get(sessionId) : undefined;
+
+    if (sessionId && !child) {
+      registerUnknownVisualCdpChildSession(state, sessionId);
+      return { allowed: false, globalFrameTreeMutation: true };
+    }
+
+    if (child && !isCdpChildFrameEventOwned(child, frameId, null)) {
+      return { allowed: false };
+    }
+
+    const globalFrameTreeMutation = Boolean(frameId) && (!sessionId || child?.visual !== false);
+
+    if (globalFrameTreeMutation) {
+      invalidateCdpCaptureFrameTree(state);
+
+      if (!topLevel) {
+        state.childMutationRevision += 1;
+      }
+
+      if (child) {
+        child.rootReprimeRequired = true;
+      }
+    }
+
+    const decision = evaluateFrameDocument(state, frameUrl, topLevel);
+
+    const childSessionClaim = child
+      ? advanceCdpChildSessionNavigation(child, decision.allowed)
+      : undefined;
+
+    if (frameId) {
+      (child?.frameScopes ?? state.frameScopes).set(frameId, decision.allowed);
+
+      if (topLevel) {
+        state.rootUrl = frameUrl ?? undefined;
+      }
+    }
+
+    if (topLevel && frameUrl) {
+      if (decision.allowed) {
+        state.captureUrl = frameUrl;
+      }
+
+      return {
+        allowed: decision.allowed,
+        globalFrameTreeMutation: true,
+        topNavigation: {
+          url: frameUrl,
+          decision
+        }
+      };
+    }
+
+    return {
+      allowed: decision.allowed,
+      ...(globalFrameTreeMutation ? { globalFrameTreeMutation: true } : {}),
+      ...(childSessionClaim ? { childSessionClaim } : {})
     };
   }
 
   if (method === "Page.frameDetached") {
     const frameId = asString(payload?.frameId);
+    const child = sessionId ? state.childSessions.get(sessionId) : undefined;
 
-    if (frameId) {
+    if (sessionId && !child) {
+      registerUnknownVisualCdpChildSession(state, sessionId);
+      return { allowed: false, globalFrameTreeMutation: true };
+    }
+
+    if (child && !isCdpChildFrameEventOwned(child, frameId, null)) {
+      return { allowed: false };
+    }
+
+    const globalFrameTreeMutation = Boolean(frameId) && (!sessionId || child?.visual !== false);
+    const childSessionClaim = child
+      ? advanceCdpChildSessionNavigation(child, child.sessionAllowed)
+      : undefined;
+
+    if (frameId && child) {
+      child.frameScopes.delete(frameId);
+    }
+
+    if (frameId && globalFrameTreeMutation) {
+      if (sessionId || frameId !== state.rootFrameId) {
+        state.childMutationRevision += 1;
+      }
+
       if (frameId === state.rootFrameId) {
         invalidateCdpCaptureFrameTree(state);
         state.rootFrameId = undefined;
@@ -211,13 +338,25 @@ export function evaluateCdpCaptureScopeEvent(
       } else {
         invalidateCdpCaptureFrameTree(state);
       }
+
+      if (child) {
+        child.rootReprimeRequired = true;
+      }
     }
 
-    return { allowed: false, ...(frameId ? { globalFrameTreeMutation: true } : {}) };
+    return {
+      allowed: false,
+      ...(globalFrameTreeMutation ? { globalFrameTreeMutation: true } : {}),
+      ...(childSessionClaim ? { childSessionClaim } : {})
+    };
   }
 
   if (method === "Runtime.executionContextsCleared") {
-    state.executionContextScopes.clear();
+    if (sessionId) {
+      state.childSessions.get(sessionId)?.executionContextScopes.clear();
+    } else {
+      state.executionContextScopes.clear();
+    }
     return { allowed: false };
   }
 
@@ -225,24 +364,33 @@ export function evaluateCdpCaptureScopeEvent(
     const executionContextId = asFiniteNumber(payload?.executionContextId);
 
     if (executionContextId !== null) {
-      state.executionContextScopes.delete(executionContextId);
+      if (sessionId) {
+        state.childSessions.get(sessionId)?.executionContextScopes.delete(executionContextId);
+      } else {
+        state.executionContextScopes.delete(executionContextId);
+      }
     }
 
     return { allowed: false };
   }
 
-  if (sessionId && state.sessionScopes.get(sessionId) !== true) {
+  if (sessionId && state.childSessions.get(sessionId)?.sessionAllowed !== true) {
     return { allowed: false };
   }
 
   if (method === "Runtime.executionContextCreated") {
+    const child = sessionId ? state.childSessions.get(sessionId) : undefined;
     const context = asRecord(payload?.context);
     const contextId = asFiniteNumber(context?.id);
     const auxData = asRecord(context?.auxData);
     const frameId = asString(auxData?.frameId);
     const contextOrigin = asString(context?.origin);
     const allowed = sessionId
-      ? state.sessionScopes.get(sessionId) === true
+      ? frameId && child?.frameScopes.has(frameId)
+        ? child.frameScopes.get(frameId) === true
+        : contextOrigin !== null
+          ? evaluateFrameDocument(state, contextOrigin, false).allowed
+          : false
       : frameId && state.frameScopes.has(frameId)
         ? state.frameScopes.get(frameId) === true
         : evaluateFrameDocument(
@@ -252,7 +400,15 @@ export function evaluateCdpCaptureScopeEvent(
           ).allowed;
 
     if (contextId !== null) {
-      state.executionContextScopes.set(contextId, allowed);
+      if (child) {
+        child.executionContextScopes.set(contextId, {
+          allowed,
+          frameId: frameId ?? undefined,
+          origin: contextOrigin ?? undefined
+        });
+      } else if (!sessionId) {
+        state.executionContextScopes.set(contextId, allowed);
+      }
     }
 
     return { allowed };
@@ -261,7 +417,9 @@ export function evaluateCdpCaptureScopeEvent(
   const executionContextId = resolveExecutionContextId(method, payload);
 
   if (executionContextId !== null) {
-    const contextScope = state.executionContextScopes.get(executionContextId);
+    const contextScope = sessionId
+      ? state.childSessions.get(sessionId)?.executionContextScopes.get(executionContextId)?.allowed
+      : state.executionContextScopes.get(executionContextId);
 
     if (contextScope !== undefined) {
       return { allowed: contextScope };
@@ -273,7 +431,7 @@ export function evaluateCdpCaptureScopeEvent(
   }
 
   const requestId = asString(payload?.requestId);
-  const requestScopeKey = requestId ? buildRequestScopeKey(requestId, sessionId) : null;
+  const requestScopeKey = requestId ? buildRequestScopeKey(state, requestId, sessionId) : null;
 
   if (requestScopeKey && method !== "Network.requestWillBeSent") {
     const requestScope = state.requestScopes.get(requestScopeKey);
@@ -290,7 +448,9 @@ export function evaluateCdpCaptureScopeEvent(
   const frameId = resolveFrameId(payload);
 
   if (frameId) {
-    const knownScope = state.frameScopes.get(frameId);
+    const knownScope = sessionId
+      ? state.childSessions.get(sessionId)?.frameScopes.get(frameId)
+      : state.frameScopes.get(frameId);
 
     if (knownScope !== undefined) {
       return {
@@ -302,7 +462,11 @@ export function evaluateCdpCaptureScopeEvent(
 
     if (!documentUrl) {
       const allowed = frameId === state.rootFrameId;
-      state.frameScopes.set(frameId, allowed);
+      if (sessionId) {
+        state.childSessions.get(sessionId)?.frameScopes.set(frameId, allowed);
+      } else {
+        state.frameScopes.set(frameId, allowed);
+      }
       return {
         allowed: rememberRequestScope(state, method, requestScopeKey, allowed)
       };
@@ -313,7 +477,11 @@ export function evaluateCdpCaptureScopeEvent(
       documentUrl,
       frameId === state.rootFrameId
     ).allowed;
-    state.frameScopes.set(frameId, allowed);
+    if (sessionId) {
+      state.childSessions.get(sessionId)?.frameScopes.set(frameId, allowed);
+    } else {
+      state.frameScopes.set(frameId, allowed);
+    }
     return {
       allowed: rememberRequestScope(state, method, requestScopeKey, allowed)
     };
@@ -420,15 +588,168 @@ function completeCdpCaptureFrameTreePrime(
   }
 
   state.primed = rootAllowed;
+
+  for (const child of state.childSessions.values()) {
+    child.rootReprimeRequired = false;
+  }
+
   return canCaptureGlobalCdpArtifacts(state, generation);
 }
 
-export function isCdpSessionWithinScope(state: CdpCaptureScopeState, sessionId: string): boolean {
-  return state.sessionScopes.get(sessionId) === true;
+export function isCdpChildSessionAttachmentCurrent(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): boolean {
+  const child = state.childSessions.get(claim.sessionId);
+  return child?.token === claim.token && child.status !== "detached";
 }
 
-export function forgetCdpSessionScope(state: CdpCaptureScopeState, sessionId: string): void {
-  state.sessionScopes.delete(sessionId);
+export function getCdpChildSessionClaim(
+  state: CdpCaptureScopeState,
+  sessionId: string
+): CdpChildSessionClaim | null {
+  const child = state.childSessions.get(sessionId);
+  return child ? claimCdpChildSession(child) : null;
+}
+
+export function isCdpChildSessionClaimCurrent(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): boolean {
+  const child = state.childSessions.get(claim.sessionId);
+  return (
+    child?.token === claim.token &&
+    child.navigationRevision === claim.navigationRevision &&
+    child.status !== "detached"
+  );
+}
+
+export function isCdpChildSessionBaselineReady(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): boolean {
+  const child = state.childSessions.get(claim.sessionId);
+  return child?.token === claim.token && child.baselineReady;
+}
+
+export function markCdpChildSessionBaselineReady(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): boolean {
+  const child = state.childSessions.get(claim.sessionId);
+
+  if (!child || child.token !== claim.token || child.status === "detached") {
+    return false;
+  }
+
+  child.baselineReady = true;
+  return true;
+}
+
+export function failCdpChildSessionAttachment(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): boolean {
+  const child = state.childSessions.get(claim.sessionId);
+
+  if (!child || child.token !== claim.token || child.status === "detached") {
+    return false;
+  }
+
+  setCdpChildSessionStatus(state, child, "failed");
+  return true;
+}
+
+export function failCdpChildSessionClaim(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): boolean {
+  const child = state.childSessions.get(claim.sessionId);
+
+  if (!isCdpChildSessionClaimCurrent(state, claim) || !child) {
+    return false;
+  }
+
+  setCdpChildSessionStatus(state, child, "failed");
+  return true;
+}
+
+export type CdpChildFrameTreePrimeOutcome = "ready" | "denied" | "failed" | "stale";
+
+export function completeCdpChildFrameTreePrime(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim,
+  value: unknown
+): CdpChildFrameTreePrimeOutcome {
+  const child = state.childSessions.get(claim.sessionId);
+
+  if (!child || !isCdpChildSessionClaimCurrent(state, claim)) {
+    return "stale";
+  }
+
+  if (child.status === "failed") {
+    return "failed";
+  }
+
+  if (!child.baselineReady) {
+    setCdpChildSessionStatus(state, child, "failed");
+    return "failed";
+  }
+
+  const frameScopes = new Map<string, boolean>();
+  const frameIds = new Set<string>();
+  let rootAllowed: boolean | undefined;
+  let allAllowed = true;
+
+  function visit(candidate: unknown, root: boolean): boolean {
+    const tree = asRecord(candidate);
+    const frame = asRecord(tree?.frame);
+    const frameId = asString(frame?.id);
+    const frameUrl = asString(frame?.url);
+
+    if (!tree || !frame || !frameId || frameUrl === null || frameIds.has(frameId)) {
+      return false;
+    }
+
+    frameIds.add(frameId);
+    const allowed = evaluateFrameDocument(state, frameUrl, false).allowed;
+    frameScopes.set(frameId, allowed);
+    allAllowed &&= allowed;
+
+    if (root) {
+      rootAllowed = allowed;
+    }
+
+    if (tree.childFrames !== undefined && !Array.isArray(tree.childFrames)) {
+      return false;
+    }
+
+    for (const nested of Array.isArray(tree.childFrames) ? tree.childFrames : []) {
+      if (!visit(nested, false)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  if (!visit(value, true) || rootAllowed === undefined) {
+    setCdpChildSessionStatus(state, child, "failed");
+    return "failed";
+  }
+
+  child.frameScopes = frameScopes;
+  refreshCdpChildExecutionContextScopes(state, child);
+
+  child.sessionAllowed = rootAllowed;
+  const nextStatus = allAllowed ? "ready" : "denied";
+
+  setCdpChildSessionStatus(state, child, nextStatus);
+  return nextStatus;
+}
+
+export function isCdpSessionWithinScope(state: CdpCaptureScopeState, sessionId: string): boolean {
+  return state.childSessions.get(sessionId)?.sessionAllowed === true;
 }
 
 export function forgetCdpRequestScope(
@@ -436,16 +757,24 @@ export function forgetCdpRequestScope(
   requestId: string,
   sessionId?: string
 ): void {
-  state.requestScopes.delete(buildRequestScopeKey(requestId, sessionId));
+  const key = buildRequestScopeKey(state, requestId, sessionId);
+
+  if (key) {
+    state.requestScopes.delete(key);
+  }
 }
 
 export function clearCdpCaptureScopeState(state: CdpCaptureScopeState): void {
   invalidateCdpCaptureFrameTree(state);
   state.rootFrameId = undefined;
   state.rootUrl = undefined;
-  state.sessionScopes.clear();
-  state.globalTargetScopes.clear();
-  state.pendingGlobalTargetSessions.clear();
+
+  for (const child of state.childSessions.values()) {
+    child.status = "detached";
+  }
+
+  state.childMutationRevision += 1;
+  state.childSessions.clear();
   state.executionContextScopes.clear();
   state.requestScopes.clear();
 }
@@ -457,8 +786,12 @@ export function hasDisallowedCdpFrames(state: CdpCaptureScopeState): boolean {
     }
   }
 
-  for (const allowed of state.globalTargetScopes.values()) {
-    if (!allowed) {
+  return false;
+}
+
+export function hasBlockingVisualCdpChildSessions(state: CdpCaptureScopeState): boolean {
+  for (const child of state.childSessions.values()) {
+    if (child.visual && child.status !== "ready") {
       return true;
     }
   }
@@ -482,7 +815,7 @@ export function canCaptureGlobalCdpArtifacts(
   return (
     state.primed &&
     (expectedGeneration === undefined || state.generation === expectedGeneration) &&
-    state.pendingGlobalTargetSessions.size === 0 &&
+    !hasBlockingVisualCdpChildSessions(state) &&
     !hasDisallowedCdpFrames(state)
   );
 }
@@ -547,6 +880,140 @@ export function filterCdpSnapshotDocuments(
   });
 }
 
+function claimCdpChildSession(child: CdpChildSessionState): CdpChildSessionClaim {
+  return {
+    sessionId: child.sessionId,
+    token: child.token,
+    navigationRevision: child.navigationRevision
+  };
+}
+
+function registerUnknownVisualCdpChildSession(
+  state: CdpCaptureScopeState,
+  sessionId: string
+): void {
+  invalidateCdpCaptureFrameTree(state);
+  state.childMutationRevision += 1;
+  state.childSessions.set(sessionId, {
+    token: (state.childSessionSequence += 1),
+    sessionId,
+    targetId: undefined,
+    parentSessionId: undefined,
+    parentToken: undefined,
+    visual: true,
+    status: "failed",
+    baselineReady: false,
+    navigationRevision: 0,
+    sessionAllowed: false,
+    rootReprimeRequired: true,
+    frameScopes: new Map(),
+    executionContextScopes: new Map()
+  });
+}
+
+function detachCdpChildSessionSubtree(
+  state: CdpCaptureScopeState,
+  root: CdpChildSessionState
+): boolean {
+  const pending = [root];
+  const visited = new Set<string>();
+  let invalidatedGlobal = false;
+
+  while (pending.length > 0) {
+    const child = pending.pop()!;
+
+    if (visited.has(child.sessionId) || state.childSessions.get(child.sessionId) !== child) {
+      continue;
+    }
+
+    visited.add(child.sessionId);
+
+    for (const candidate of state.childSessions.values()) {
+      if (candidate.parentSessionId === child.sessionId && candidate.parentToken === child.token) {
+        pending.push(candidate);
+      }
+    }
+
+    invalidatedGlobal ||= child.visual || child.rootReprimeRequired;
+    child.status = "detached";
+    state.childSessions.delete(child.sessionId);
+  }
+
+  return invalidatedGlobal;
+}
+
+function refreshCdpChildExecutionContextScopes(
+  state: CdpCaptureScopeState,
+  child: CdpChildSessionState
+): void {
+  for (const context of child.executionContextScopes.values()) {
+    context.allowed =
+      context.frameId && child.frameScopes.has(context.frameId)
+        ? child.frameScopes.get(context.frameId) === true
+        : context.origin !== undefined
+          ? evaluateFrameDocument(state, context.origin, false).allowed
+          : false;
+  }
+}
+
+function isCdpChildFrameEventOwned(
+  child: CdpChildSessionState,
+  frameId: string | null,
+  parentFrameId: string | null
+): boolean {
+  if (!frameId) {
+    return false;
+  }
+
+  if (!child.targetId && child.frameScopes.size === 0) {
+    return true;
+  }
+
+  return (
+    frameId === child.targetId ||
+    child.frameScopes.has(frameId) ||
+    (parentFrameId !== null && child.frameScopes.has(parentFrameId))
+  );
+}
+
+function setCdpChildSessionStatus(
+  state: CdpCaptureScopeState,
+  child: CdpChildSessionState,
+  status: CdpChildSessionStatus
+): void {
+  if (child.status === status) {
+    return;
+  }
+
+  child.status = status;
+
+  if (child.visual) {
+    child.rootReprimeRequired = true;
+    invalidateCdpCaptureFrameTree(state);
+    state.childMutationRevision += 1;
+  }
+}
+
+function advanceCdpChildSessionNavigation(
+  child: CdpChildSessionState,
+  allowed: boolean
+): CdpChildSessionClaim | undefined {
+  if (child.status === "detached") {
+    return undefined;
+  }
+
+  child.navigationRevision += 1;
+  child.sessionAllowed = allowed;
+  child.frameScopes.clear();
+  child.executionContextScopes.clear();
+
+  if (child.status !== "failed") {
+    child.status = "pending";
+  }
+
+  return claimCdpChildSession(child);
+}
+
 function evaluateFrameDocument(
   state: CdpCaptureScopeState,
   url: string | null | undefined,
@@ -600,8 +1067,18 @@ function rememberRequestScope(
   return allowed;
 }
 
-function buildRequestScopeKey(requestId: string, sessionId?: string): string {
-  return sessionId ? `cdp:${sessionId}:${requestId}` : requestId;
+function buildRequestScopeKey(
+  state: CdpCaptureScopeState,
+  requestId: string,
+  sessionId?: string
+): string | null {
+  if (!sessionId) {
+    return requestId;
+  }
+
+  const child = state.childSessions.get(sessionId);
+
+  return child ? `cdp:${sessionId}:${child.token}:${child.navigationRevision}:${requestId}` : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
