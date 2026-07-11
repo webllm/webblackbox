@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Fenced Full and non-exact top-navigation work with runtime-bound monotonic revisions, so delayed
+  policy, injection, CDP frame-tree, queued, and screen-recording work cannot revive an earlier
+  same-URL navigation or operate on a same-tab replacement runtime; invalid roots now stop only the
+  current navigation, while child-only global blocking keeps the valid root suspended for retry.
 - Made the root Full-CDP bootstrap transactional and strict: debugger attach, the four baseline
   domains, requested subframe auto-attach, validated frame-tree priming, Runtime context reset, and
   explicitly requested full Performance metrics now fail startup or restoration closed, while

@@ -118,6 +118,22 @@ import {
   shouldUpdateSessionMetadataFromNavigation
 } from "./navigation-metadata.js";
 import { runRootNavigationInstrumentationTransaction } from "./root-navigation-instrumentation.js";
+import {
+  claimRuntimeNavigation,
+  isRuntimeNavigationClaimCurrent as isNavigationClaimCurrent,
+  snapshotRuntimeNavigation,
+  type RuntimeNavigationClaim,
+  type RuntimeNavigationSource
+} from "./runtime-navigation-claim.js";
+import {
+  canOperateOnExpectedNavigationResource,
+  didGuardedNavigationOperationRun,
+  reconcileAmbiguousNavigationResourceStart,
+  resolveCdpNavigationPrimeOutcome,
+  resolveTabNavigationSignal,
+  runGuardedNavigationStep,
+  runRuntimeNavigationTask
+} from "./runtime-navigation-operations.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 import {
   acknowledgePipelineBatch,
@@ -221,6 +237,7 @@ type SessionRuntime = {
   lastActionScreenshotMono: number;
   lastIncidentCaptureAt: number;
   lastNavigationSnapshotAt: number;
+  navigationRevision: number;
   queueDepth: number;
   droppedBestEffortTasks: number;
   pipelineEventBuffer: WebBlackboxEvent[];
@@ -250,6 +267,8 @@ type SessionRuntime = {
   cleanupDeadline?: number;
   consentExpiryTimer: ReturnType<typeof setTimeout> | null;
 };
+
+type SessionNavigationClaim = RuntimeNavigationClaim<SessionRuntime>;
 
 type ScreenRecordingRuntime = {
   recordingId: string;
@@ -844,10 +863,26 @@ chromeApi?.commands?.onCommand.addListener((command) => {
 });
 
 chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
-  if (typeof changeInfo.url !== "string" || changeInfo.url.length === 0) {
-    if (changeInfo.status === "complete") {
-      void restoreTabInstrumentationAfterNavigation(tabId).catch((error) => {
-        console.warn("[WebBlackbox] failed to restore tab instrumentation", {
+  const runtime = sessionsByTab.get(tabId);
+  const signal = resolveTabNavigationSignal(changeInfo);
+
+  if (!runtime || !signal) {
+    return;
+  }
+
+  if (usesExactLiteTopDocumentAuthorization(runtime)) {
+    if (signal.candidateUrl) {
+      void handleExactLiteTabUrlChanged(runtime, signal.candidateUrl).catch((error) => {
+        console.warn("[WebBlackbox] failed to apply exact Lite tab URL change", {
+          tabId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
+
+    if (signal.completed) {
+      void restoreExactLiteTabMetadataAfterNavigation(runtime).catch((error) => {
+        console.warn("[WebBlackbox] failed to restore exact Lite tab metadata", {
           tabId,
           error: error instanceof Error ? error.message : String(error)
         });
@@ -856,21 +891,22 @@ chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     return;
   }
 
-  void handleTabUrlChanged(tabId, changeInfo.url).catch((error) => {
-    console.warn("[WebBlackbox] failed to apply tab URL change", {
-      tabId,
-      error: error instanceof Error ? error.message : String(error)
-    });
-  });
+  const claim = claimCurrentRuntimeNavigation(runtime, signal.source, signal.candidateUrl);
 
-  if (changeInfo.status === "complete") {
-    void restoreTabInstrumentationAfterNavigation(tabId).catch((error) => {
-      console.warn("[WebBlackbox] failed to restore tab instrumentation", {
-        tabId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    });
+  if (!claim) {
+    return;
   }
+
+  suspendFullCaptureForNavigation(claim);
+  enqueueNavigationClaim(claim, async () => {
+    if (signal.candidateUrl && !(await handleTabUrlChanged(claim, signal.candidateUrl))) {
+      return;
+    }
+
+    if (signal.completed) {
+      await restoreTabInstrumentationAfterNavigation(claim);
+    }
+  });
 });
 
 chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
@@ -1635,6 +1671,7 @@ function createSessionRuntime(input: {
     lastActionScreenshotMono: Number.NEGATIVE_INFINITY,
     lastIncidentCaptureAt: Number.NEGATIVE_INFINITY,
     lastNavigationSnapshotAt: Number.NEGATIVE_INFINITY,
+    navigationRevision: 0,
     queueDepth: 0,
     droppedBestEffortTasks: counters.droppedBestEffortTasks,
     pipelineEventBuffer: [],
@@ -1677,67 +1714,28 @@ async function reloadRecordingTab(tabId: number): Promise<void> {
   await chromeApi.tabs.reload(tabId);
 }
 
-async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<void> {
-  const runtime = sessionsByTab.get(tabId);
-
-  if (
-    !runtime ||
-    !isVolatileCaptureOpen(runtime.captureFence) ||
-    runtime.stopping ||
-    runtime.stoppedAt ||
-    !shouldInjectIsolatedContentForMode(runtime.mode)
-  ) {
+async function restoreExactLiteTabMetadataAfterNavigation(runtime: SessionRuntime): Promise<void> {
+  if (!isRuntimeCurrentCaptureOpen(runtime) || !usesExactLiteTopDocumentAuthorization(runtime)) {
     return;
   }
 
-  const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
-
-  if (runtime.mode === "full" && runtime.cdpRouter) {
-    invalidateCdpCaptureFrameTree(runtime.cdpScope);
-    void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
-  }
-
-  const tabMetadata = await resolveTabSessionMetadata(tabId);
+  const tabMetadata = await resolveTabSessionMetadata(runtime.tabId);
 
   if (!isRuntimeCurrentCaptureOpen(runtime)) {
     return;
   }
 
-  if (exactLiteTopDocument) {
-    const decision = await resolveCurrentTabUrlPolicyDecision({
-      candidateUrl: tabMetadata.captureUrl,
-      evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl),
-      resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(tabId)
-    });
+  const decision = await resolveCurrentTabUrlPolicyDecision({
+    candidateUrl: tabMetadata.captureUrl,
+    evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl),
+    resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(runtime.tabId)
+  });
 
-    if (!isRuntimeCurrentCaptureOpen(runtime)) {
-      return;
-    }
-
-    if (decision === "stale") {
-      return;
-    }
-
-    if (decision === "denied") {
-      await stopRuntimeIfCurrent(runtime);
-      return;
-    }
-
-    runtime.captureUrl = tabMetadata.captureUrl;
-    runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
-    runtime.url = tabMetadata.url;
-    pushSessionList();
-    scheduleRuntimeStatePersist();
+  if (!isRuntimeCurrentCaptureOpen(runtime) || decision === "stale") {
     return;
   }
 
-  const allowed = await isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl);
-
-  if (!isRuntimeCurrentCaptureOpen(runtime)) {
-    return;
-  }
-
-  if (!allowed) {
+  if (decision === "denied") {
     await stopRuntimeIfCurrent(runtime);
     return;
   }
@@ -1745,25 +1743,65 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
   runtime.captureUrl = tabMetadata.captureUrl;
   runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
   runtime.url = tabMetadata.url;
+  pushSessionList();
+  scheduleRuntimeStatePersist();
+}
 
+async function restoreTabInstrumentationAfterNavigation(
+  claim: SessionNavigationClaim
+): Promise<void> {
+  const runtime = claim.runtime;
+
+  if (
+    !isSessionNavigationClaimCurrent(claim) ||
+    !shouldInjectIsolatedContentForMode(runtime.mode) ||
+    usesExactLiteTopDocumentAuthorization(runtime)
+  ) {
+    return;
+  }
+
+  const tabMetadata = await resolveTabSessionMetadata(runtime.tabId);
+
+  if (
+    !isSessionNavigationClaimCurrent(claim) ||
+    (claim.candidateUrl !== undefined && claim.candidateUrl !== tabMetadata.captureUrl)
+  ) {
+    return;
+  }
+
+  const policy = await runGuardedNavigationStep(
+    () => isSessionNavigationClaimCurrent(claim),
+    () => isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl)
+  );
+
+  if (policy.status !== "current") {
+    return;
+  }
+
+  if (!policy.value) {
+    await stopRuntimeIfNavigationClaimCurrent(claim);
+    return;
+  }
+
+  runtime.captureUrl = tabMetadata.captureUrl;
+  runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
+  runtime.url = tabMetadata.url;
   resetAuthorizedContentFrames(runtime);
 
   const instrumentation = await runRootNavigationInstrumentationTransaction({
-    isCurrent: () => isRuntimeCurrentCaptureOpen(runtime),
+    isCurrent: () => isSessionNavigationClaimCurrent(claim),
     inject: (assertCurrent) => ensureRootPageAgentsInjected(runtime, { assertCurrent }),
-    stopCurrent: () => stopRuntimeIfCurrent(runtime),
+    stopCurrent: () => stopRuntimeIfNavigationClaimCurrent(claim),
     continueAfterInjection: async (assertCurrent) => {
       assertCurrent();
 
       if (runtime.mode === "full" && runtime.cdpRouter) {
-        await restoreCdpGlobalCaptureAfterNavigation(runtime, tabMetadata.captureUrl, true);
+        await restoreCdpGlobalCaptureAfterNavigation(claim, true);
         assertCurrent();
       }
 
-      if (runtime.activationState === "active") {
-        await notifyAuthorizedContentFrames(runtime, true);
-        assertCurrent();
-      }
+      await notifyAuthorizedContentFrames(runtime, true);
+      assertCurrent();
     }
   });
 
@@ -1969,9 +2007,120 @@ function isRuntimeCurrentCaptureOpen(runtime: SessionRuntime): boolean {
   );
 }
 
+function isRuntimeNavigationOpen(runtime: SessionRuntime): boolean {
+  return (
+    isRuntimeCurrentCaptureOpen(runtime) &&
+    sessionsBySid.get(runtime.sid) === runtime &&
+    isRuntimeCaptureAdmitted(runtime.activationState)
+  );
+}
+
+function claimCurrentRuntimeNavigation(
+  runtime: SessionRuntime,
+  source: RuntimeNavigationSource,
+  candidateUrl?: string
+): SessionNavigationClaim | null {
+  if (!isRuntimeNavigationOpen(runtime)) {
+    return null;
+  }
+
+  return claimRuntimeNavigation(runtime, source, candidateUrl);
+}
+
+function snapshotCurrentRuntimeNavigation(
+  runtime: SessionRuntime,
+  source: RuntimeNavigationSource,
+  candidateUrl?: string
+): SessionNavigationClaim | null {
+  if (!isRuntimeNavigationOpen(runtime)) {
+    return null;
+  }
+
+  return snapshotRuntimeNavigation(runtime, source, candidateUrl);
+}
+
+function isSessionNavigationClaimCurrent(claim: SessionNavigationClaim): boolean {
+  return isNavigationClaimCurrent(
+    claim,
+    sessionsByTab.get(claim.runtime.tabId),
+    isRuntimeNavigationOpen
+  );
+}
+
+async function stopRuntimeIfNavigationClaimCurrent(claim: SessionNavigationClaim): Promise<void> {
+  if (!isSessionNavigationClaimCurrent(claim)) {
+    return;
+  }
+
+  await stopRuntimeIfCurrent(claim.runtime);
+}
+
+function requestStopRuntimeIfNavigationClaimCurrent(
+  claim: SessionNavigationClaim,
+  reason: string
+): void {
+  void stopRuntimeIfNavigationClaimCurrent(claim).catch((error) => {
+    console.warn("[WebBlackbox] failed to stop current navigation", {
+      tabId: claim.runtime.tabId,
+      sid: claim.runtime.sid,
+      revision: claim.revision,
+      reason,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+}
+
+function enqueueNavigationClaim(claim: SessionNavigationClaim, task: () => Promise<void>): boolean {
+  const accepted = enqueue(claim.runtime, async () => {
+    const result = await runRuntimeNavigationTask(
+      () => isSessionNavigationClaimCurrent(claim),
+      task,
+      () => stopRuntimeIfNavigationClaimCurrent(claim)
+    );
+
+    if (result.kind === "failed-closed") {
+      console.warn("[WebBlackbox] current navigation task failed closed", {
+        tabId: claim.runtime.tabId,
+        sid: claim.runtime.sid,
+        revision: claim.revision,
+        source: claim.source,
+        error: result.error instanceof Error ? result.error.message : String(result.error)
+      });
+    }
+  });
+
+  if (!accepted) {
+    requestStopRuntimeIfNavigationClaimCurrent(claim, "navigation-queue-closed");
+  }
+
+  return accepted;
+}
+
+function suspendFullCaptureForNavigation(
+  claim: SessionNavigationClaim,
+  options: { cdpScopeAlreadyInvalidated?: boolean } = {}
+): void {
+  const runtime = claim.runtime;
+
+  if (!isSessionNavigationClaimCurrent(claim) || runtime.mode !== "full" || !runtime.cdpRouter) {
+    return;
+  }
+
+  if (options.cdpScopeAlreadyInvalidated !== true) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
+  }
+
+  const recording = runtime.screenRecording;
+  void stopScreenRecording(runtime, "navigation-scope", recording, () =>
+    isSessionNavigationClaimCurrent(claim)
+  ).catch(() => {
+    requestStopRuntimeIfNavigationClaimCurrent(claim, "navigation-screen-stop");
+  });
+}
+
 function requestStopRuntimeIfCurrent(runtime: SessionRuntime, reason: string): void {
   void stopRuntimeIfCurrent(runtime).catch((error) => {
-    console.warn("[WebBlackbox] failed to stop current Lite navigation", {
+    console.warn("[WebBlackbox] failed to stop current runtime", {
       tabId: runtime.tabId,
       sid: runtime.sid,
       reason,
@@ -3402,27 +3551,45 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         isRuntimeCaptureAdmitted(runtime.activationState) &&
         isVolatileCaptureOpen(runtime.captureFence);
       const cdpFrameTreeMutated = scopeEvaluation.globalFrameTreeMutation === true;
+      let frameTreeNavigationClaim: SessionNavigationClaim | null = null;
 
       if (scopeEvaluation.topNavigation) {
         const { url, decision } = scopeEvaluation.topNavigation;
+        const source: RuntimeNavigationSource =
+          event.method === "Page.navigatedWithinDocument"
+            ? "cdp-within-document"
+            : "cdp-frame-navigated";
+        const claim = claimCurrentRuntimeNavigation(runtime, source, url);
+        frameTreeNavigationClaim = claim;
 
-        if (!decision.allowed) {
-          void stopSession(runtime.tabId);
+        if (!claim) {
+          // Root bootstrap has its own atomic transaction and is intentionally
+          // not folded into active-runtime navigation ownership.
+        } else if (!decision.allowed) {
+          requestStopRuntimeIfNavigationClaimCurrent(claim, "cdp-navigation-denied");
         } else {
-          void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
-          runtime.captureUrl = url;
-          runtime.url = sanitizeUrlForPrivacy(url);
-          resetAuthorizedContentFrames(runtime);
-          enqueue(runtime, async () => {
-            await handleTabUrlChanged(runtime.tabId, url);
-            await restoreCdpGlobalCaptureAfterNavigation(runtime, url, true);
+          suspendFullCaptureForNavigation(claim, { cdpScopeAlreadyInvalidated: true });
+          enqueueNavigationClaim(claim, async () => {
+            if (!(await handleTabUrlChanged(claim, url))) {
+              return;
+            }
+
+            await restoreCdpGlobalCaptureAfterNavigation(claim, true);
           });
         }
       } else if (cdpFrameTreeMutated) {
+        const mutationGeneration = runtime.cdpScope.generation;
+        const claim = snapshotCurrentRuntimeNavigation(
+          runtime,
+          "cdp-child-mutation",
+          runtime.captureUrl
+        );
+        frameTreeNavigationClaim = claim;
         const activeRecording = runtime.screenRecording;
         const recordingGeneration = activeRecording?.cdpScopeGeneration;
 
         if (
+          claim &&
           recordingGeneration !== undefined &&
           (recordingGeneration === null ||
             !isRuntimeGlobalCdpCaptureClaimValid(
@@ -3431,13 +3598,20 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
               activeRecording?.provisional === true
             ))
         ) {
-          void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+          void stopScreenRecording(runtime, "navigation-scope", activeRecording, () =>
+            isSessionNavigationClaimCurrent(claim)
+          ).catch(() => undefined);
         }
 
-        const expectedUrl = runtime.captureUrl;
-        enqueue(runtime, async () => {
-          await restoreCdpGlobalCaptureAfterNavigation(runtime, expectedUrl, true);
-        });
+        if (claim) {
+          enqueueNavigationClaim(claim, async () => {
+            if (runtime.cdpScope.generation !== mutationGeneration) {
+              return;
+            }
+
+            await restoreCdpGlobalCaptureAfterNavigation(claim, true);
+          });
+        }
       }
 
       if (captureAllowed && event.method === "HeapProfiler.addHeapSnapshotChunk") {
@@ -3489,6 +3663,13 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       enqueue(
         runtime,
         async () => {
+          if (
+            frameTreeNavigationClaim &&
+            !isSessionNavigationClaimCurrent(frameTreeNavigationClaim)
+          ) {
+            return;
+          }
+
           await processFullModeEvent(runtime, event.method, event.params ?? {}, event.sessionId);
         },
         { bestEffort: true }
@@ -3497,7 +3678,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
     const unsubscribeDetach = candidateRouter.onDetach((event) => {
       if (event.tabId === runtime.tabId && isMapEntrySame(sessionsByTab, runtime.tabId, runtime)) {
-        void stopSession(runtime.tabId);
+        requestStopRuntimeIfCurrent(runtime, "cdp-detach");
       }
     });
 
@@ -3623,11 +3804,14 @@ async function primeCdpFrameTreeScopes(
 }
 
 async function restoreCdpGlobalCaptureAfterNavigation(
-  runtime: SessionRuntime,
-  expectedUrl: string,
+  claim: SessionNavigationClaim,
   forceRefresh = false
 ): Promise<void> {
+  const runtime = claim.runtime;
+  const expectedUrl = claim.candidateUrl ?? runtime.captureUrl;
+
   if (
+    !isSessionNavigationClaimCurrent(claim) ||
     runtime.mode !== "full" ||
     !runtime.cdpRouter ||
     !isRuntimeCaptureScopeActive(runtime) ||
@@ -3636,61 +3820,119 @@ async function restoreCdpGlobalCaptureAfterNavigation(
     return;
   }
 
-  const recording = runtime.screenRecording;
-  const allowStarting = recording?.provisional === true;
-  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime, allowStarting);
+  const initialRecording = runtime.screenRecording;
+  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
   if (
-    recording &&
+    initialRecording &&
     (forceRefresh ||
       currentGeneration === null ||
-      recording.cdpScopeGeneration !== currentGeneration)
+      initialRecording.cdpScopeGeneration !== currentGeneration)
   ) {
-    await stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+    try {
+      await stopScreenRecording(runtime, "navigation-scope", initialRecording, () =>
+        isSessionNavigationClaimCurrent(claim)
+      );
+    } catch {
+      await stopRuntimeIfNavigationClaimCurrent(claim);
+      return;
+    }
+
+    if (!isSessionNavigationClaimCurrent(claim)) {
+      return;
+    }
   }
 
-  if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime, allowStarting) === null) {
-    const frameTreePrime = await primeCdpFrameTreeScopes(runtime);
+  if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime) === null) {
+    const prime = await runGuardedNavigationStep(
+      () => isSessionNavigationClaimCurrent(claim),
+      () => primeCdpFrameTreeScopes(runtime)
+    );
 
-    if (
-      !frameTreePrime.globalCaptureReady ||
-      !isRuntimeCaptureScopeActive(runtime) ||
-      runtime.captureUrl !== expectedUrl
-    ) {
-      if (
-        recording &&
-        runtime.screenRecording === recording &&
-        (recording.cdpScopeGeneration === null ||
-          !isRuntimeGlobalCdpCaptureClaimValid(
-            runtime,
-            recording.cdpScopeGeneration,
-            allowStarting
-          ))
-      ) {
-        await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
+    if (prime.status !== "current" || runtime.captureUrl !== expectedUrl) {
+      return;
+    }
+
+    const frameTreePrime = prime.value;
+    const primeOutcome = resolveCdpNavigationPrimeOutcome(frameTreePrime);
+
+    if (primeOutcome === "root-invalid") {
+      const invalidRootRecording = runtime.screenRecording;
+
+      await stopScreenRecording(runtime, "capture-scope", invalidRootRecording, () =>
+        isSessionNavigationClaimCurrent(claim)
+      ).catch(() => undefined);
+      await stopRuntimeIfNavigationClaimCurrent(claim);
+      return;
+    }
+
+    if (primeOutcome === "global-blocked") {
+      const childBlockedRecording = runtime.screenRecording;
+
+      try {
+        await stopScreenRecording(runtime, "capture-scope", childBlockedRecording, () =>
+          isSessionNavigationClaimCurrent(claim)
+        );
+      } catch {
+        await stopRuntimeIfNavigationClaimCurrent(claim);
       }
 
       return;
     }
   }
 
-  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime, allowStarting);
+  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime);
   const activeRecording = runtime.screenRecording;
 
   if (
     activeRecording &&
     (finalGeneration === null || activeRecording.cdpScopeGeneration !== finalGeneration)
   ) {
-    await stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+    try {
+      await stopScreenRecording(runtime, "navigation-scope", activeRecording, () =>
+        isSessionNavigationClaimCurrent(claim)
+      );
+    } catch {
+      await stopRuntimeIfNavigationClaimCurrent(claim);
+      return;
+    }
+
+    if (!isSessionNavigationClaimCurrent(claim)) {
+      return;
+    }
   }
 
-  if (!runtime.screenRecording && shouldStartScreenRecording(runtime)) {
-    await startScreenRecording(runtime).catch((error) => {
+  const screenRecordingRequested =
+    runtime.config.capturePolicy?.categories.screenRecordings === "allow";
+
+  if (!runtime.screenRecording && screenRecordingRequested) {
+    try {
+      await startScreenRecording(runtime, false, claim);
+    } catch (error) {
       console.warn("[WebBlackbox] failed to restart screen recording after navigation", {
         sid: runtime.sid,
         error: error instanceof Error ? error.message : String(error)
       });
-    });
+
+      await stopRuntimeIfNavigationClaimCurrent(claim);
+      return;
+    }
+
+    if (!isSessionNavigationClaimCurrent(claim)) {
+      return;
+    }
+
+    if (!runtime.screenRecording) {
+      // A child-target mutation can invalidate global capture while the
+      // requested start is in flight without superseding the top navigation.
+      // Its queued snapshot owns the next prime and decides whether the valid
+      // root is merely global-blocked or actually invalid.
+      if (claimRuntimeGlobalCdpCapture(runtime) === null) {
+        return;
+      }
+
+      await stopRuntimeIfNavigationClaimCurrent(claim);
+    }
   }
 }
 
@@ -4199,10 +4441,16 @@ function shouldStartScreenRecording(runtime: SessionRuntime, allowStarting = fal
   );
 }
 
-async function startScreenRecording(runtime: SessionRuntime, provisional = false): Promise<void> {
+async function startScreenRecording(
+  runtime: SessionRuntime,
+  provisional = false,
+  navigationClaim?: SessionNavigationClaim
+): Promise<void> {
+  const isCurrentNavigation = () =>
+    navigationClaim === undefined || isSessionNavigationClaimCurrent(navigationClaim);
   const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime, provisional);
 
-  if (runtime.screenRecording || cdpScopeGeneration === null) {
+  if (!isCurrentNavigation() || runtime.screenRecording || cdpScopeGeneration === null) {
     return;
   }
 
@@ -4213,13 +4461,21 @@ async function startScreenRecording(runtime: SessionRuntime, provisional = false
   const recordingId = createScreenRecordingId(runtime.sid);
   const startedAt = Date.now();
   const startedMono = monotonicTime();
-  const streamId = await chromeApi.tabCapture.getMediaStreamId({
-    targetTabId: runtime.tabId
-  });
+  const stream = await runGuardedNavigationStep(isCurrentNavigation, () =>
+    chromeApi.tabCapture!.getMediaStreamId!({
+      targetTabId: runtime.tabId
+    })
+  );
 
-  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)) {
+  if (
+    stream.status !== "current" ||
+    runtime.screenRecording !== null ||
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)
+  ) {
     return;
   }
+
+  const streamId = stream.value;
 
   if (!streamId) {
     throw new Error("Chrome did not grant a tab capture stream.");
@@ -4242,18 +4498,30 @@ async function startScreenRecording(runtime: SessionRuntime, provisional = false
   runtime.screenRecording = recording;
 
   try {
-    const result = await requestOffscreenPipeline<OffscreenScreenRecordingStartResult>({
-      op: "startScreenRecording",
-      sid: runtime.sid,
-      recordingId,
-      streamId,
-      source: SCREEN_RECORDING_OFFSCREEN_SOURCE
-    });
+    const offscreenStart = await runGuardedNavigationStep(isCurrentNavigation, () =>
+      requestOffscreenPipeline<OffscreenScreenRecordingStartResult>({
+        op: "startScreenRecording",
+        sid: runtime.sid,
+        recordingId,
+        streamId,
+        source: SCREEN_RECORDING_OFFSCREEN_SOURCE
+      })
+    );
 
-    if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)) {
-      await stopScreenRecording(runtime, "capture-fence").catch(() => undefined);
+    if (
+      offscreenStart.status !== "current" ||
+      runtime.screenRecording !== recording ||
+      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)
+    ) {
+      if (didGuardedNavigationOperationRun(offscreenStart)) {
+        await stopScreenRecording(runtime, "capture-fence", recording);
+      } else if (runtime.screenRecording === recording) {
+        runtime.screenRecording = null;
+      }
       return;
     }
+
+    const result = offscreenStart.value;
 
     recording.mime = result.mime;
     recording.width = result.width;
@@ -4278,16 +4546,40 @@ async function startScreenRecording(runtime: SessionRuntime, provisional = false
       }
     });
   } catch (error) {
-    ingestScreenRecordingError(runtime, recording, error, "start");
-    runtime.screenRecording = null;
+    if (runtime.screenRecording === recording) {
+      ingestScreenRecordingError(runtime, recording, error, "start");
+      const reconciliation = await reconcileAmbiguousNavigationResourceStart({
+        current: () => runtime.screenRecording,
+        expected: recording,
+        stop: (expected) => stopScreenRecording(runtime, "start-failed", expected)
+      });
+
+      if (reconciliation.kind === "retained") {
+        // Keep the exact local identity so the surrounding start/restore
+        // transaction can retry cleanup after an ambiguous offscreen result.
+        console.warn("[WebBlackbox] failed to reconcile ambiguous screen start", {
+          sid: runtime.sid,
+          recordingId: recording.recordingId,
+          error:
+            reconciliation.error instanceof Error
+              ? reconciliation.error.message
+              : String(reconciliation.error)
+        });
+      }
+    }
     throw error;
   }
 }
 
-async function stopScreenRecording(runtime: SessionRuntime, reason: string): Promise<void> {
-  const recording = runtime.screenRecording;
+async function stopScreenRecording(
+  runtime: SessionRuntime,
+  reason: string,
+  expectedRecording: ScreenRecordingRuntime | null = runtime.screenRecording,
+  isCurrent: () => boolean = () => true
+): Promise<void> {
+  const recording = expectedRecording;
 
-  if (!recording) {
+  if (!canOperateOnExpectedNavigationResource(isCurrent, runtime.screenRecording, recording)) {
     return;
   }
 
@@ -6565,6 +6857,36 @@ async function resolveTabSessionMetadata(
 }
 
 function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
+  if (
+    event.type !== "nav.commit" &&
+    event.type !== "nav.history.push" &&
+    event.type !== "nav.history.replace" &&
+    event.type !== "nav.hash"
+  ) {
+    return;
+  }
+
+  const payload = asRecord(event.data);
+
+  if (!shouldUpdateSessionMetadataFromNavigation(event, payload)) {
+    return;
+  }
+
+  const frame = asRecord(payload?.frame);
+  const nextUrl = asString(payload?.url) ?? asString(frame?.url);
+
+  if (nextUrl && !usesExactLiteTopDocumentAuthorization(runtime)) {
+    const claim = claimCurrentRuntimeNavigation(runtime, "content-navigation", nextUrl);
+
+    if (!claim) {
+      return;
+    }
+
+    suspendFullCaptureForNavigation(claim);
+    enqueueNavigationClaim(claim, () => updateSessionMetadataFromEventAsync(runtime, event, claim));
+    return;
+  }
+
   void updateSessionMetadataFromEventAsync(runtime, event).catch((error) => {
     console.warn("[WebBlackbox] failed to update session navigation metadata", error);
   });
@@ -6572,7 +6894,8 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
 
 async function updateSessionMetadataFromEventAsync(
   runtime: SessionRuntime,
-  event: WebBlackboxEvent
+  event: WebBlackboxEvent,
+  navigationClaim?: SessionNavigationClaim
 ): Promise<void> {
   if (
     event.type !== "nav.commit" &&
@@ -6597,11 +6920,6 @@ async function updateSessionMetadataFromEventAsync(
   );
   let changed = false;
 
-  if (globalCdpNavigationChanged) {
-    invalidateCdpCaptureFrameTree(runtime.cdpScope);
-    void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
-  }
-
   if (nextUrl) {
     const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
     const exactDocument = exactLiteTopDocument ? runtime.contentDocuments.get(0) : null;
@@ -6610,9 +6928,20 @@ async function updateSessionMetadataFromEventAsync(
       return;
     }
 
-    const allowed = await isRuntimeTopDocumentAllowed(runtime, nextUrl);
+    const policy = navigationClaim
+      ? await runGuardedNavigationStep(
+          () => isSessionNavigationClaimCurrent(navigationClaim),
+          () => isRuntimeTopDocumentAllowed(runtime, nextUrl)
+        )
+      : ({
+          status: "current",
+          value: await isRuntimeTopDocumentAllowed(runtime, nextUrl)
+        } as const);
 
-    if (!isRuntimeCurrentCaptureOpen(runtime)) {
+    if (
+      policy.status !== "current" ||
+      (!navigationClaim && !isRuntimeCurrentCaptureOpen(runtime))
+    ) {
       return;
     }
 
@@ -6628,11 +6957,11 @@ async function updateSessionMetadataFromEventAsync(
       return;
     }
 
-    if (!allowed) {
+    if (!policy.value) {
       if (exactLiteTopDocument) {
         await stopRuntimeIfCurrent(runtime);
-      } else {
-        await stopSession(runtime.tabId);
+      } else if (navigationClaim) {
+        await stopRuntimeIfNavigationClaimCurrent(navigationClaim);
       }
       return;
     }
@@ -6651,6 +6980,14 @@ async function updateSessionMetadataFromEventAsync(
   }
 
   if (nextTitle && nextTitle.trim().length > 0 && nextTitle !== runtime.title) {
+    if (
+      navigationClaim
+        ? !isSessionNavigationClaimCurrent(navigationClaim)
+        : !isRuntimeCurrentCaptureOpen(runtime)
+    ) {
+      return;
+    }
+
     runtime.title = nextTitle.trim();
     changed = true;
   }
@@ -6660,10 +6997,8 @@ async function updateSessionMetadataFromEventAsync(
     scheduleRuntimeStatePersist();
   }
 
-  if (globalCdpNavigationChanged && nextUrl) {
-    enqueue(runtime, async () => {
-      await restoreCdpGlobalCaptureAfterNavigation(runtime, nextUrl, true);
-    });
+  if (globalCdpNavigationChanged && nextUrl && navigationClaim) {
+    await restoreCdpGlobalCaptureAfterNavigation(navigationClaim, true);
   }
 }
 
@@ -6691,55 +7026,27 @@ function buildSessionListMessage(): SessionListMessage {
   };
 }
 
-async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void> {
-  const runtime = sessionsByTab.get(tabId);
-
-  if (
-    !runtime ||
-    !isVolatileCaptureOpen(runtime.captureFence) ||
-    runtime.stopping ||
-    runtime.stoppedAt
-  ) {
+async function handleExactLiteTabUrlChanged(
+  runtime: SessionRuntime,
+  rawUrl: string
+): Promise<void> {
+  if (!isRuntimeCurrentCaptureOpen(runtime) || !usesExactLiteTopDocumentAuthorization(runtime)) {
     return;
   }
 
-  const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
+  const decision = await resolveCurrentTabUrlPolicyDecision({
+    candidateUrl: rawUrl,
+    evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, rawUrl),
+    resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(runtime.tabId)
+  });
 
-  if (runtime.mode === "full" && runtime.cdpRouter && rawUrl !== runtime.captureUrl) {
-    invalidateCdpCaptureFrameTree(runtime.cdpScope);
-    void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+  if (!isRuntimeCurrentCaptureOpen(runtime) || decision === "stale") {
+    return;
   }
 
-  if (exactLiteTopDocument) {
-    const decision = await resolveCurrentTabUrlPolicyDecision({
-      candidateUrl: rawUrl,
-      evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, rawUrl),
-      resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(tabId)
-    });
-
-    if (!isRuntimeCurrentCaptureOpen(runtime)) {
-      return;
-    }
-
-    if (decision === "stale") {
-      return;
-    }
-
-    if (decision === "denied") {
-      await stopRuntimeIfCurrent(runtime);
-      return;
-    }
-  } else {
-    const allowed = await isRuntimeTopDocumentAllowed(runtime, rawUrl);
-
-    if (!isRuntimeCurrentCaptureOpen(runtime)) {
-      return;
-    }
-
-    if (!allowed) {
-      await stopRuntimeIfCurrent(runtime);
-      return;
-    }
+  if (decision === "denied") {
+    await stopRuntimeIfCurrent(runtime);
+    return;
   }
 
   const nextUrl = sanitizeUrlForPrivacy(rawUrl);
@@ -6748,12 +7055,47 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     runtime.url = nextUrl;
     runtime.captureUrl = rawUrl;
     runtime.cdpScope.captureUrl = rawUrl;
-    if (!exactLiteTopDocument) {
-      resetAuthorizedContentFrames(runtime);
-    }
     pushSessionList();
     scheduleRuntimeStatePersist();
   }
+}
+
+async function handleTabUrlChanged(
+  claim: SessionNavigationClaim,
+  rawUrl: string
+): Promise<boolean> {
+  const runtime = claim.runtime;
+
+  if (!isSessionNavigationClaimCurrent(claim) || usesExactLiteTopDocumentAuthorization(runtime)) {
+    return false;
+  }
+
+  const policy = await runGuardedNavigationStep(
+    () => isSessionNavigationClaimCurrent(claim),
+    () => isRuntimeTopDocumentAllowed(runtime, rawUrl)
+  );
+
+  if (policy.status !== "current") {
+    return false;
+  }
+
+  if (!policy.value) {
+    await stopRuntimeIfNavigationClaimCurrent(claim);
+    return false;
+  }
+
+  const nextUrl = sanitizeUrlForPrivacy(rawUrl);
+
+  if (nextUrl !== runtime.url || rawUrl !== runtime.captureUrl) {
+    runtime.url = nextUrl;
+    runtime.captureUrl = rawUrl;
+    runtime.cdpScope.captureUrl = rawUrl;
+    resetAuthorizedContentFrames(runtime);
+    pushSessionList();
+    scheduleRuntimeStatePersist();
+  }
+
+  return isSessionNavigationClaimCurrent(claim);
 }
 
 async function resolveCurrentTabCaptureUrl(tabId: number): Promise<string | null> {

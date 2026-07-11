@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { runRootNavigationInstrumentationTransaction } from "./root-navigation-instrumentation.js";
+import {
+  claimRuntimeNavigation,
+  isRuntimeNavigationClaimCurrent
+} from "./runtime-navigation-claim.js";
 
 describe("root navigation instrumentation transaction", () => {
   it("stops the current runtime after injection fails and skips all continuation", async () => {
@@ -60,6 +64,30 @@ describe("root navigation instrumentation transaction", () => {
     ).resolves.toEqual({ kind: "stale" });
     expect(stopCurrent).not.toHaveBeenCalled();
     expect(continueAfterInjection).not.toHaveBeenCalled();
+  });
+
+  it("does not stop a newer navigation in the same runtime after stale injection rejects", async () => {
+    const runtime = { navigationRevision: 0, open: true };
+    const oldNavigation = claimRuntimeNavigation(
+      runtime,
+      "tabs-url-complete",
+      "https://example.test/a"
+    );
+    const stopCurrent = vi.fn(async () => undefined);
+
+    await expect(
+      runRootNavigationInstrumentationTransaction({
+        isCurrent: () =>
+          isRuntimeNavigationClaimCurrent(oldNavigation, runtime, (candidate) => candidate.open),
+        inject: async () => {
+          claimRuntimeNavigation(runtime, "tabs-url", "https://example.test/b");
+          throw new Error("old document disappeared");
+        },
+        stopCurrent,
+        continueAfterInjection: async () => undefined
+      })
+    ).resolves.toEqual({ kind: "stale" });
+    expect(stopCurrent).not.toHaveBeenCalled();
   });
 
   it("continues only after successful current injection", async () => {
