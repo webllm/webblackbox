@@ -11,6 +11,11 @@ import {
   getOrCreateIndexedDbPipelineStorageKey,
   IndexedDbPipelineStorage,
   MemoryPipelineStorage,
+  PIPELINE_DELIVERY_MAX_INDEXES,
+  PIPELINE_DELIVERY_MAX_STREAMS,
+  type PipelineDeliveryChange,
+  type PipelineDeliveryNoOutputChange,
+  type PipelineStorage,
   type StoredBlob,
   type StoredChunk
 } from "./storage.js";
@@ -65,6 +70,32 @@ function createBlob(hash: string, bytes: Uint8Array): StoredBlob {
     createdAt: Date.now(),
     refCount: 1
   };
+}
+
+function deliveryChange(
+  eventIndex: number,
+  options: {
+    batchId?: string;
+    documentId?: string;
+    eventCount?: number;
+    eventId?: string;
+    fingerprint?: string;
+    frameId?: number;
+  } = {}
+): PipelineDeliveryChange {
+  const base = {
+    tabId: 1,
+    frameId: options.frameId ?? 0,
+    documentId: options.documentId ?? "document-1",
+    batchId: options.batchId ?? "batch-1",
+    fingerprint: options.fingerprint ?? "d".repeat(64),
+    eventCount: options.eventCount ?? 2,
+    eventIndex
+  };
+
+  return options.eventId
+    ? { ...base, outcome: "event", eventId: options.eventId }
+    : { ...base, outcome: "no-output" };
 }
 
 function createDbName(): string {
@@ -158,6 +189,184 @@ describe("storage", () => {
         }
       ])
     ).toThrow(/too many screen-recording chunks/i);
+  });
+
+  it("keeps one fail-closed durable delivery batch per document stream", async () => {
+    for (const storage of [
+      new MemoryPipelineStorage(),
+      new IndexedDbPipelineStorage(createDbName())
+    ]) {
+      const sid = `S-delivery-single-flight-${storage.constructor.name}`;
+      const query = {
+        tabId: 1,
+        frameId: 0,
+        documentId: "document-1",
+        batchId: "batch-1"
+      };
+      const first = deliveryChange(0) as PipelineDeliveryNoOutputChange;
+
+      await storage.putSession({ ...SESSION_A, sid });
+      await storage.commitDeliveryProgress?.(sid, [first]);
+      expect(await storage.getDeliveryReceipt?.(sid, query)).toEqual({
+        tabId: 1,
+        frameId: 0,
+        documentId: "document-1",
+        batchId: "batch-1",
+        fingerprint: "d".repeat(64),
+        eventCount: 2,
+        indexes: [{ eventIndex: 0, outcome: "no-output" }],
+        complete: false
+      });
+
+      await expect(
+        storage.commitDeliveryProgress?.(sid, [
+          deliveryChange(1, { fingerprint: "f".repeat(64) }) as PipelineDeliveryNoOutputChange
+        ])
+      ).rejects.toThrow(/reused with different content/i);
+
+      await expect(
+        storage.commitDeliveryProgress?.(sid, [
+          deliveryChange(0, {
+            batchId: "batch-2",
+            fingerprint: "e".repeat(64),
+            eventCount: 1
+          }) as PipelineDeliveryNoOutputChange
+        ])
+      ).rejects.toThrow(/incomplete batch/i);
+
+      await storage.commitDeliveryProgress?.(sid, [
+        deliveryChange(1) as PipelineDeliveryNoOutputChange
+      ]);
+      expect((await storage.getDeliveryReceipt?.(sid, query))?.complete).toBe(true);
+
+      await storage.commitDeliveryProgress?.(sid, [
+        deliveryChange(0, {
+          batchId: "batch-2",
+          fingerprint: "e".repeat(64),
+          eventCount: 1
+        }) as PipelineDeliveryNoOutputChange
+      ]);
+      expect(await storage.getDeliveryReceipt?.(sid, query)).toBeUndefined();
+      expect(
+        await storage.getDeliveryReceipt?.(sid, {
+          ...query,
+          batchId: "batch-2"
+        })
+      ).toEqual(expect.objectContaining({ batchId: "batch-2", complete: true }));
+    }
+  });
+
+  it("persists all-no-output delivery completion at chunk sequence zero across restart", async () => {
+    const databaseName = createDbName();
+    const sid = "S-delivery-no-output";
+    const storage = new IndexedDbPipelineStorage(databaseName);
+    const changes = [0, 1].map(
+      (eventIndex) => deliveryChange(eventIndex) as PipelineDeliveryNoOutputChange
+    );
+
+    await storage.putSession({ ...SESSION_A, sid });
+    await storage.commitDeliveryProgress(sid, changes);
+
+    const restarted = new IndexedDbPipelineStorage(databaseName);
+    const receipt = await restarted.getDeliveryReceipt(sid, {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-1",
+      batchId: "batch-1"
+    });
+    expect(receipt).toEqual(expect.objectContaining({ complete: true }));
+    expect(receipt?.indexes).toHaveLength(2);
+    expect(await restarted.listChunks(sid)).toEqual([]);
+    expect(await restarted.getResumeState(sid)).toBeUndefined();
+  });
+
+  it("rolls back metadata-only delivery progress when its indexeddb transaction aborts asynchronously", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const sid = "S-delivery-metadata-rollback";
+    const change = deliveryChange(0, {
+      documentId: "document-metadata-rollback",
+      batchId: "batch-metadata-rollback",
+      eventCount: 1
+    }) as PipelineDeliveryNoOutputChange;
+    const query = {
+      tabId: change.tabId,
+      frameId: change.frameId,
+      documentId: change.documentId,
+      batchId: change.batchId
+    };
+    const originalPut = IDBObjectStore.prototype.put;
+
+    await storage.putSession({ ...SESSION_A, sid });
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey
+    ): IDBRequest<IDBValidKey> {
+      const request =
+        key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+
+      if (this.name === "deliveryReceipts") {
+        const transaction = this.transaction;
+        queueMicrotask(() => {
+          try {
+            transaction.abort();
+          } catch {
+            // A completion here would make the assertion below fail rather than masking the race.
+          }
+        });
+      }
+
+      return request;
+    });
+
+    try {
+      await expect(storage.commitDeliveryProgress(sid, [change])).rejects.toThrow(
+        /transaction (?:failed|aborted)/i
+      );
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    expect(await storage.getSession(sid)).toEqual(expect.objectContaining({ sid }));
+    expect(await storage.getDeliveryReceipt(sid, query)).toBeUndefined();
+
+    await storage.commitDeliveryProgress(sid, [change]);
+    expect(await storage.getDeliveryReceipt(sid, query)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
+  });
+
+  it("bounds delivery streams and per-batch indexes without evicting incomplete receipts", async () => {
+    const storage = new MemoryPipelineStorage();
+    const sid = "S-delivery-bounds";
+    const changes = Array.from({ length: PIPELINE_DELIVERY_MAX_STREAMS }, (_, index) =>
+      deliveryChange(0, {
+        batchId: `batch-${index}`,
+        documentId: `document-${index}`,
+        eventCount: 1
+      })
+    ) as PipelineDeliveryNoOutputChange[];
+
+    await storage.putSession({ ...SESSION_A, sid });
+    await storage.commitDeliveryProgress(sid, changes);
+    await expect(
+      storage.commitDeliveryProgress(sid, [
+        deliveryChange(0, {
+          batchId: "batch-overflow",
+          documentId: "document-overflow",
+          eventCount: 1
+        }) as PipelineDeliveryNoOutputChange
+      ])
+    ).rejects.toThrow(/too many document streams/i);
+    await expect(
+      storage.commitDeliveryProgress(sid, [
+        deliveryChange(0, {
+          batchId: "batch-index-overflow",
+          documentId: "document-index-overflow",
+          eventCount: PIPELINE_DELIVERY_MAX_INDEXES + 1
+        }) as PipelineDeliveryNoOutputChange
+      ])
+    ).rejects.toThrow(/metadata-only delivery progress/i);
   });
 
   it("supports memory storage CRUD and session-scoped blob ref-count cleanup", async () => {
@@ -310,6 +519,59 @@ describe("storage", () => {
     await storage.deleteSession(sid, [hash, "b".repeat(64)]);
   });
 
+  it("exposes delivery capabilities only when the inner storage supports the complete pair", async () => {
+    const key = await derivePipelineStorageKey("delivery-capability-passphrase", {
+      salt: Uint8Array.from([1, 3, 5, 7, 9, 11, 13, 15, 2, 4, 6, 8, 10, 12, 14, 16])
+    });
+    const createInner = (capabilities: "none" | "read-only" | "commit-only"): PipelineStorage => {
+      const inner = new MemoryPipelineStorage();
+
+      if (capabilities === "none" || capabilities === "commit-only") {
+        Object.defineProperty(inner, "getDeliveryReceipt", { value: undefined });
+      }
+      if (capabilities === "none" || capabilities === "read-only") {
+        Object.defineProperty(inner, "commitDeliveryProgress", { value: undefined });
+      }
+
+      return inner;
+    };
+
+    for (const capabilities of ["none", "read-only", "commit-only"] as const) {
+      const storage = new EncryptedPipelineStorage(createInner(capabilities), { key: key.key });
+
+      expect(storage.getDeliveryReceipt).toBeUndefined();
+      expect(storage.commitDeliveryProgress).toBeUndefined();
+    }
+  });
+
+  it("delegates the complete delivery capability pair through encrypted storage", async () => {
+    const inner = new MemoryPipelineStorage();
+    const key = await derivePipelineStorageKey("delivery-delegation-passphrase", {
+      salt: Uint8Array.from([16, 14, 12, 10, 8, 6, 4, 2, 15, 13, 11, 9, 7, 5, 3, 1])
+    });
+    const storage = new EncryptedPipelineStorage(inner, { key: key.key });
+    const sid = "S-encrypted-delivery-delegation";
+    const change = deliveryChange(0, { eventCount: 1 }) as PipelineDeliveryNoOutputChange;
+
+    await storage.putSession({ ...SESSION_A, sid });
+    await storage.commitDeliveryProgress?.(sid, [change]);
+
+    expect(
+      await storage.getDeliveryReceipt?.(sid, {
+        tabId: change.tabId,
+        frameId: change.frameId,
+        documentId: change.documentId,
+        batchId: change.batchId
+      })
+    ).toEqual(
+      expect.objectContaining({
+        batchId: change.batchId,
+        complete: true,
+        indexes: [{ eventIndex: 0, outcome: "no-output" }]
+      })
+    );
+  });
+
   it("removes sid-tracked blob refs on indexeddb deleteSession without explicit blobHashes", async () => {
     const storage = new IndexedDbPipelineStorage(createDbName());
     const sharedHash = "d".repeat(64);
@@ -453,7 +715,7 @@ describe("storage", () => {
       await storage.putBlob(createBlob(hash, Uint8Array.from([index])), sid);
     }
 
-    const db = await openRawDb(databaseName, 4, () => undefined);
+    const db = await openRawDb(databaseName, 5, () => undefined);
     const refs = await readRawRows(db, "blobRefs");
     db.close();
 
@@ -487,7 +749,7 @@ describe("storage", () => {
     await storage.putBlob(createBlob(oldHash, Uint8Array.from([1])), sid);
     await storage.putBlob(createBlob(newHash, Uint8Array.from([2])), sid);
 
-    const upgraded = await openRawDb(databaseName, 4, () => undefined);
+    const upgraded = await openRawDb(databaseName, 5, () => undefined);
     const refs = await readRawRows(upgraded, "blobRefs");
     upgraded.close();
 
@@ -608,6 +870,147 @@ describe("storage", () => {
     ).rejects.toThrow(/missing a resume delta/i);
   });
 
+  it("atomically commits an output event chunk with its delivery journal index", async () => {
+    const storage = new IndexedDbPipelineStorage(createDbName());
+    const sid = "S-delivery-atomic";
+    const change = deliveryChange(0, {
+      eventCount: 1,
+      eventId: "E-1"
+    });
+    const chunk: StoredChunk = {
+      ...createChunk(sid, "C-delivery", 1, "delivery-event"),
+      resumeDelta: {
+        version: 2,
+        sequenceWatermark: { event: 1, action: 0 },
+        screenRecordingChanges: [],
+        deliveryChanges: [change]
+      }
+    };
+    const originalPut = IDBObjectStore.prototype.put;
+
+    await storage.putSession({ ...SESSION_A, sid });
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey
+    ): IDBRequest<IDBValidKey> {
+      if (this.name === "deliveryReceipts") {
+        throw new Error("simulated delivery receipt write failure");
+      }
+
+      return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+    });
+
+    try {
+      await expect(storage.putChunk(chunk)).rejects.toThrow(/delivery receipt write failure/i);
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    const query = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-1",
+      batchId: "batch-1"
+    };
+    expect(await storage.getChunk(sid, "C-delivery")).toBeUndefined();
+    expect(await storage.getResumeState(sid)).toBeUndefined();
+    expect(await storage.getDeliveryReceipt(sid, query)).toBeUndefined();
+
+    await storage.putChunk(chunk);
+    expect(await storage.getChunk(sid, "C-delivery")).toBeDefined();
+    expect(await storage.getDeliveryReceipt(sid, query)).toEqual(
+      expect.objectContaining({
+        complete: true,
+        indexes: [{ eventIndex: 0, outcome: "event", eventId: "E-1" }]
+      })
+    );
+  });
+
+  it("upgrades indexeddb v4 with v1 chunks and continues with v2 delivery receipts", async () => {
+    const databaseName = createDbName();
+    const sid = "S-delivery-v4-upgrade";
+    const legacyChunk: StoredChunk = {
+      ...createChunk(sid, "C-v1", 1, "legacy-v1-event"),
+      resumeDelta: {
+        version: 1,
+        sequenceWatermark: { event: 1, action: 0 },
+        screenRecordingChanges: []
+      }
+    };
+    const db = await openRawDb(databaseName, 4, (raw) => {
+      const sessions = raw.createObjectStore("sessions", { keyPath: "key" });
+      const chunks = raw.createObjectStore("chunks", { keyPath: "key" });
+      raw.createObjectStore("blobs", { keyPath: "key" });
+      const blobRefs = raw.createObjectStore("blobRefs", { keyPath: "key" });
+      raw.createObjectStore("indexes", { keyPath: "key" });
+      raw.createObjectStore("integrity", { keyPath: "key" });
+      raw.createObjectStore("resumeMeta", { keyPath: "key" });
+      const resumeRefs = raw.createObjectStore("resumeRefs", { keyPath: "key" });
+
+      void sessions;
+      chunks.createIndex("by-sid-seq", ["sid", "seq"], { unique: false });
+      blobRefs.createIndex("by-sid", "sid", { unique: false });
+      resumeRefs.createIndex("by-sid", "sid", { unique: false });
+      resumeRefs.createIndex("by-sid-recording", ["sid", "recordingId"], { unique: false });
+    });
+    await writeRawRows(db, "sessions", [{ key: sid, value: { ...SESSION_A, sid } }]);
+    await writeRawRows(db, "chunks", [
+      {
+        key: `${sid}:C-v1`,
+        sid,
+        seq: 1,
+        value: legacyChunk
+      }
+    ]);
+    await writeRawRows(db, "resumeMeta", [
+      {
+        key: sid,
+        chunkSequence: 1,
+        recordingIds: [],
+        screenRecordingChunkCount: 0,
+        value: { event: 1, action: 0 }
+      }
+    ]);
+    db.close();
+
+    const storage = new IndexedDbPipelineStorage(databaseName);
+    expect((await storage.getChunk(sid, "C-v1"))?.resumeDelta?.version).toBe(1);
+    expect(await storage.getResumeState(sid, 1)).toEqual({
+      sequenceWatermark: { event: 1, action: 0 },
+      screenRecordings: []
+    });
+
+    const change = deliveryChange(0, { eventCount: 1, eventId: "E-2" });
+    await storage.putChunk({
+      ...createChunk(sid, "C-v2", 2, "delivery-v2-event"),
+      resumeDelta: {
+        version: 2,
+        sequenceWatermark: { event: 2, action: 0 },
+        screenRecordingChanges: [],
+        deliveryChanges: [change]
+      }
+    });
+
+    expect((await storage.listChunks(sid)).map((chunk) => chunk.meta.chunkId)).toEqual([
+      "C-v1",
+      "C-v2"
+    ]);
+    expect(
+      await storage.getDeliveryReceipt(sid, {
+        tabId: change.tabId,
+        frameId: change.frameId,
+        documentId: change.documentId,
+        batchId: change.batchId
+      })
+    ).toEqual(
+      expect.objectContaining({
+        complete: true,
+        indexes: [{ eventIndex: 0, outcome: "event", eventId: "E-2" }]
+      })
+    );
+  });
+
   it("initializes an indexeddb resume index from a legacy checkpoint once", async () => {
     const storage = new IndexedDbPipelineStorage(createDbName());
     const sid = "S-resume-initialize";
@@ -641,12 +1044,24 @@ describe("storage", () => {
       manifestSha256: "6".repeat(64),
       files: {}
     };
+    const delivery = deliveryChange(0, {
+      documentId: "document-delete-rollback",
+      batchId: "batch-delete-rollback",
+      eventCount: 1
+    }) as PipelineDeliveryNoOutputChange;
+    const deliveryQuery = {
+      tabId: delivery.tabId,
+      frameId: delivery.frameId,
+      documentId: delivery.documentId,
+      batchId: delivery.batchId
+    };
 
     await storage.putSession({ ...SESSION_A, sid });
     await storage.putChunk(chunk);
     await storage.putBlob(createBlob(hash, Uint8Array.from([5, 5])), sid);
     await storage.putIndexes(sid, indexes);
     await storage.putIntegrity(sid, integrity);
+    await storage.commitDeliveryProgress(sid, [delivery]);
 
     const originalDelete = IDBObjectStore.prototype.delete;
     const deleteSpy = vi.spyOn(IDBObjectStore.prototype, "delete").mockImplementation(function (
@@ -671,6 +1086,9 @@ describe("storage", () => {
     expect(await storage.getBlob(hash)).toEqual(expect.objectContaining({ refCount: 1 }));
     expect(await storage.getIndexes(sid)).toEqual(indexes);
     expect(await storage.getIntegrity(sid)).toEqual(integrity);
+    expect(await storage.getDeliveryReceipt(sid, deliveryQuery)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
 
     await storage.deleteSession(sid);
     expect(await storage.getSession(sid)).toBeUndefined();
@@ -678,6 +1096,7 @@ describe("storage", () => {
     expect(await storage.getBlob(hash)).toBeUndefined();
     expect((await storage.getIndexes(sid)).time).toEqual([]);
     expect(await storage.getIntegrity(sid)).toBeUndefined();
+    expect(await storage.getDeliveryReceipt(sid, deliveryQuery)).toBeUndefined();
   });
 
   it("supports legacy indexeddb layouts where chunks store has no sid/seq index", async () => {
@@ -733,6 +1152,17 @@ describe("storage", () => {
       }
     ).recoverQuotaPressure.bind(storage);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const oldestDelivery = deliveryChange(0, {
+      documentId: "document-quota-oldest",
+      batchId: "batch-quota-oldest",
+      eventCount: 1
+    }) as PipelineDeliveryNoOutputChange;
+    const oldestDeliveryQuery = {
+      tabId: oldestDelivery.tabId,
+      frameId: oldestDelivery.frameId,
+      documentId: oldestDelivery.documentId,
+      batchId: oldestDelivery.batchId
+    };
 
     await expect(quotaRecovery("S-protected")).resolves.toBe(false);
 
@@ -746,9 +1176,11 @@ describe("storage", () => {
       sid: "S-newest",
       startedAt: 2
     });
+    await storage.commitDeliveryProgress("S-oldest", [oldestDelivery]);
 
     await expect(quotaRecovery("S-newest")).resolves.toBe(true);
     expect(await storage.getSession("S-oldest")).toBeUndefined();
+    expect(await storage.getDeliveryReceipt("S-oldest", oldestDeliveryQuery)).toBeUndefined();
     expect(await storage.getSession("S-newest")).toEqual(
       expect.objectContaining({ sid: "S-newest" })
     );
@@ -930,5 +1362,34 @@ describe("storage", () => {
     const reopened = await openRawDb(databaseName, 1, () => undefined);
     expect(reopened.objectStoreNames.contains("legacy")).toBe(false);
     reopened.close();
+  });
+
+  it("purges durable delivery receipts with the indexeddb database", async () => {
+    const databaseName = createDbName();
+    const sid = "S-delivery-database-purge";
+    const storage = new IndexedDbPipelineStorage(databaseName);
+    const change = deliveryChange(0, {
+      documentId: "document-database-purge",
+      batchId: "batch-database-purge",
+      eventCount: 1
+    }) as PipelineDeliveryNoOutputChange;
+    const query = {
+      tabId: change.tabId,
+      frameId: change.frameId,
+      documentId: change.documentId,
+      batchId: change.batchId
+    };
+
+    await storage.putSession({ ...SESSION_A, sid });
+    await storage.commitDeliveryProgress(sid, [change]);
+    expect(await storage.getDeliveryReceipt(sid, query)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
+
+    await deleteIndexedDbDatabase(databaseName);
+
+    const reopened = new IndexedDbPipelineStorage(databaseName);
+    expect(await reopened.getDeliveryReceipt(sid, query)).toBeUndefined();
+    expect(await reopened.getSession(sid)).toBeUndefined();
   });
 });

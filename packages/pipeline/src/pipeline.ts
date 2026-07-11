@@ -20,9 +20,15 @@ import { EventIndexer } from "./indexer.js";
 import { assertPrivacyScannerPassed, buildPrivacyManifest } from "./privacy.js";
 import {
   assertPipelineResumeChangesWithinLimits,
+  isPipelineDeliveryEventProvenance,
   isPipelineResumeDelta,
   isPipelineResumeState,
   PIPELINE_STORAGE_SECURITY,
+  type PipelineDeliveryEventChange,
+  type PipelineDeliveryEventProvenance,
+  type PipelineDeliveryNoOutputChange,
+  type PipelineDeliveryReceipt,
+  type PipelineDeliveryReceiptQuery,
   type PipelineResumeDelta,
   type PipelineResumeState,
   type PipelineStorage,
@@ -43,6 +49,8 @@ export type FlightRecorderPipelineOptions = {
   capturePolicy?: CapturePolicy;
   trustedPlaintextExemptionEvidenceRefs?: readonly string[];
 };
+
+export type PipelineDeliverySidecar = ReadonlyMap<string, PipelineDeliveryEventProvenance>;
 
 export type ExportResult = {
   fileName: string;
@@ -124,6 +132,8 @@ export class FlightRecorderPipeline {
     string,
     Map<number, ScreenRecordingChunkCheckpoint>
   >();
+  private readonly pendingEventIds = new Set<string>();
+  private readonly pendingDeliveryByEventId = new Map<string, PipelineDeliveryEventChange>();
 
   public constructor(private readonly options: FlightRecorderPipelineOptions) {
     const codec = resolveChunkCodec(options.chunkCodec);
@@ -174,7 +184,15 @@ export class FlightRecorderPipeline {
 
     await this.enqueueChunkOperation(async () => {
       this.assertEventResumeStateWithinLimits(event);
-      await this.chunker.append(event);
+      this.assertEventIdIsNotPending(event.id);
+      this.pendingEventIds.add(event.id);
+
+      try {
+        await this.chunker.append(event);
+      } catch (error) {
+        this.pendingEventIds.delete(event.id);
+        throw error;
+      }
       this.applyEventToResumeState(event);
     });
   }
@@ -195,10 +213,178 @@ export class FlightRecorderPipeline {
     await this.enqueueChunkOperation(async () => {
       for (const event of events) {
         this.assertEventResumeStateWithinLimits(event);
-        await this.chunker.append(event);
+        this.assertEventIdIsNotPending(event.id);
+        this.pendingEventIds.add(event.id);
+
+        try {
+          await this.chunker.append(event);
+        } catch (error) {
+          this.pendingEventIds.delete(event.id);
+          throw error;
+        }
         this.applyEventToResumeState(event);
       }
     });
+  }
+
+  public async ingestBatchWithDelivery(
+    events: WebBlackboxEvent[],
+    deliveryByEventId: PipelineDeliverySidecar
+  ): Promise<void> {
+    if (events.length === 0) {
+      if (deliveryByEventId.size > 0) {
+        throw new Error("Pipeline delivery sidecar references an empty event batch.");
+      }
+      return;
+    }
+
+    this.requireDeliveryStorage();
+    const changes = normalizePipelineDeliverySidecar(
+      this.options.session.sid,
+      events,
+      deliveryByEventId
+    );
+
+    for (const event of events) {
+      assertPrivacyClassifiedEvent(event);
+    }
+
+    if (!this.acceptingEvents) {
+      throw new Error("FlightRecorderPipeline cannot ingest events after close() has started.");
+    }
+
+    await this.enqueueChunkOperation(async () => {
+      await this.ensureStorageReady();
+      const durableReceipts = new Map<string, PipelineDeliveryReceipt | undefined>();
+
+      for (const change of changes.values()) {
+        const key = createPipelineDeliveryBatchKey(change);
+
+        if (!durableReceipts.has(key)) {
+          durableReceipts.set(
+            key,
+            await this.options.storage.getDeliveryReceipt!(this.options.session.sid, {
+              tabId: change.tabId,
+              frameId: change.frameId,
+              documentId: change.documentId,
+              batchId: change.batchId
+            })
+          );
+        }
+      }
+
+      for (const event of events) {
+        this.assertEventResumeStateWithinLimits(event);
+        const change = changes.get(event.id);
+        const pendingForEventId = this.pendingDeliveryByEventId.get(event.id);
+
+        if (!change) {
+          this.assertEventIdIsNotPending(event.id);
+
+          this.pendingEventIds.add(event.id);
+
+          try {
+            await this.chunker.append(event);
+          } catch (error) {
+            this.pendingEventIds.delete(event.id);
+            throw error;
+          }
+          this.applyEventToResumeState(event);
+          continue;
+        }
+
+        if (pendingForEventId) {
+          if (isSamePipelineDeliveryEventChange(pendingForEventId, change)) {
+            continue;
+          }
+
+          throw new Error("Pipeline event id was reused with different delivery provenance.");
+        }
+
+        if (this.pendingEventIds.has(event.id)) {
+          throw new Error("Pipeline event id is already pending without delivery provenance.");
+        }
+
+        const pendingForIndex = [...this.pendingDeliveryByEventId.values()].find((pending) =>
+          isSamePipelineDeliveryBatchIndex(pending, change)
+        );
+
+        if (pendingForIndex) {
+          throw new Error("Pipeline delivery batch index already has a different pending event.");
+        }
+
+        const durableReceipt = durableReceipts.get(createPipelineDeliveryBatchKey(change));
+        const durableIndex = durableReceipt?.indexes.find(
+          (index) => index.eventIndex === change.eventIndex
+        );
+
+        if (durableReceipt) {
+          if (
+            durableReceipt.fingerprint !== change.fingerprint ||
+            durableReceipt.eventCount !== change.eventCount
+          ) {
+            throw new Error("Pipeline delivery batch identity was reused with different content.");
+          }
+
+          if (durableIndex) {
+            if (durableIndex.outcome === "event" && durableIndex.eventId === event.id) {
+              continue;
+            }
+
+            throw new Error("Pipeline delivery batch index already has a different outcome.");
+          }
+        }
+
+        this.pendingDeliveryByEventId.set(event.id, change);
+        this.pendingEventIds.add(event.id);
+
+        try {
+          await this.chunker.append(event);
+        } catch (error) {
+          this.pendingEventIds.delete(event.id);
+          if (this.pendingDeliveryByEventId.get(event.id) === change) {
+            this.pendingDeliveryByEventId.delete(event.id);
+          }
+          throw error;
+        }
+        this.applyEventToResumeState(event);
+      }
+    });
+  }
+
+  public async commitDeliveryProgress(
+    changes: readonly PipelineDeliveryNoOutputChange[]
+  ): Promise<void> {
+    if (changes.length === 0) {
+      return;
+    }
+
+    this.requireDeliveryStorage();
+    await this.enqueueChunkOperation(async () => {
+      await this.ensureStorageReady();
+      const pendingConflicts = this.findPendingDeliveryOutcomeConflicts(changes);
+
+      // Output provenance is only durable once its containing chunk is committed. Flush before
+      // metadata-only progress so a completed receipt can never acknowledge an in-memory output.
+      await this.chunker.flush();
+
+      if (pendingConflicts.length > 0) {
+        throw new Error(
+          "Pipeline delivery progress conflicts with pending output provenance for the same batch index."
+        );
+      }
+
+      await this.options.storage.commitDeliveryProgress!(this.options.session.sid, changes);
+    });
+  }
+
+  public async getDeliveryReceipt(
+    query: PipelineDeliveryReceiptQuery
+  ): Promise<PipelineDeliveryReceipt | undefined> {
+    this.requireDeliveryStorage();
+    await this.enqueueChunkOperation(async () => undefined);
+    await this.ensureStorageReady();
+    return this.options.storage.getDeliveryReceipt!(this.options.session.sid, query);
   }
 
   public async getSequenceWatermark(): Promise<RecorderSequenceWatermark> {
@@ -237,6 +423,26 @@ export class FlightRecorderPipeline {
 
     this.closePromise = tracked;
     return tracked;
+  }
+
+  private requireDeliveryStorage(): void {
+    if (!this.options.storage.getDeliveryReceipt || !this.options.storage.commitDeliveryProgress) {
+      throw new Error("Pipeline storage does not support durable delivery receipts.");
+    }
+  }
+
+  private assertEventIdIsNotPending(eventId: string): void {
+    if (this.pendingEventIds.has(eventId)) {
+      throw new Error("Pipeline event id is already pending in the current chunk.");
+    }
+  }
+
+  private findPendingDeliveryOutcomeConflicts(
+    changes: readonly PipelineDeliveryNoOutputChange[]
+  ): PipelineDeliveryEventChange[] {
+    return [...this.pendingDeliveryByEventId.values()].filter((pending) =>
+      changes.some((change) => isSamePipelineDeliveryBatchIndex(change, pending))
+    );
   }
 
   public async putBlob(mime: string, bytes: Uint8Array): Promise<string> {
@@ -724,6 +930,10 @@ export class FlightRecorderPipeline {
     const first = events[0];
     const last = events[events.length - 1];
     const hash = await sha256Hex(bytes);
+    const deliveryChanges = events.flatMap((event) => {
+      const change = this.pendingDeliveryByEventId.get(event.id);
+      return change ? [change] : [];
+    });
 
     const chunk: StoredChunk = {
       sid: this.options.session.sid,
@@ -740,10 +950,20 @@ export class FlightRecorderPipeline {
         sha256: hash
       },
       bytes,
-      resumeDelta: derivePipelineResumeDelta(this.sequenceWatermark, events)
+      resumeDelta: derivePipelineResumeDelta(this.sequenceWatermark, events, deliveryChanges)
     };
 
     await this.options.storage.putChunk(chunk);
+
+    for (const event of events) {
+      this.pendingEventIds.delete(event.id);
+    }
+
+    for (const change of deliveryChanges) {
+      if (this.pendingDeliveryByEventId.get(change.eventId) === change) {
+        this.pendingDeliveryByEventId.delete(change.eventId);
+      }
+    }
   }
 
   private async restoreResumeStateFromLatestChunk(
@@ -1223,9 +1443,88 @@ function mergeSequenceWatermarks(
   };
 }
 
+function createPipelineDeliveryBatchKey(delivery: PipelineDeliveryEventProvenance): string {
+  return JSON.stringify([delivery.tabId, delivery.frameId, delivery.documentId, delivery.batchId]);
+}
+
+function isSamePipelineDeliveryBatchIndex(
+  left: PipelineDeliveryEventProvenance,
+  right: PipelineDeliveryEventProvenance
+): boolean {
+  return (
+    left.tabId === right.tabId &&
+    left.frameId === right.frameId &&
+    left.documentId === right.documentId &&
+    left.batchId === right.batchId &&
+    left.eventIndex === right.eventIndex
+  );
+}
+
+function isSamePipelineDeliveryEventChange(
+  left: PipelineDeliveryEventChange,
+  right: PipelineDeliveryEventChange
+): boolean {
+  return (
+    isSamePipelineDeliveryBatchIndex(left, right) &&
+    left.fingerprint === right.fingerprint &&
+    left.eventCount === right.eventCount &&
+    left.eventId === right.eventId
+  );
+}
+
+function normalizePipelineDeliverySidecar(
+  sid: string,
+  events: readonly WebBlackboxEvent[],
+  deliveryByEventId: PipelineDeliverySidecar
+): Map<string, PipelineDeliveryEventChange> {
+  const eventIds = new Set<string>();
+  const changes = new Map<string, PipelineDeliveryEventChange>();
+  const indexesByBatch = new Map<string, Set<number>>();
+
+  for (const event of events) {
+    if (event.sid !== sid) {
+      throw new Error("Pipeline delivered event belongs to another session.");
+    }
+    if (eventIds.has(event.id)) {
+      throw new Error("Pipeline delivered event batch contains duplicate event ids.");
+    }
+    eventIds.add(event.id);
+
+    if (!deliveryByEventId.has(event.id)) {
+      continue;
+    }
+    const provenance = deliveryByEventId.get(event.id);
+    if (!isPipelineDeliveryEventProvenance(provenance)) {
+      throw new Error("Invalid pipeline delivery event provenance.");
+    }
+
+    const batchKey = createPipelineDeliveryBatchKey(provenance);
+    const indexes = indexesByBatch.get(batchKey) ?? new Set<number>();
+    if (indexes.has(provenance.eventIndex)) {
+      throw new Error("Pipeline delivery sidecar repeats a batch event index.");
+    }
+    indexes.add(provenance.eventIndex);
+    indexesByBatch.set(batchKey, indexes);
+    changes.set(event.id, {
+      ...provenance,
+      outcome: "event",
+      eventId: event.id
+    });
+  }
+
+  for (const eventId of deliveryByEventId.keys()) {
+    if (!eventIds.has(eventId)) {
+      throw new Error("Pipeline delivery sidecar references an event outside its batch.");
+    }
+  }
+
+  return changes;
+}
+
 function derivePipelineResumeDelta(
   base: RecorderSequenceWatermark,
-  events: readonly WebBlackboxEvent[]
+  events: readonly WebBlackboxEvent[],
+  deliveryChanges: readonly PipelineDeliveryEventChange[] = []
 ): PipelineResumeDelta {
   let sequenceWatermark = { ...base };
   const screenRecordingChanges: ScreenRecordingResumeChange[] = [];
@@ -1242,11 +1541,18 @@ function derivePipelineResumeDelta(
     }
   }
 
-  return {
-    version: 1,
-    sequenceWatermark,
-    screenRecordingChanges
-  };
+  return deliveryChanges.length > 0
+    ? {
+        version: 2,
+        sequenceWatermark,
+        screenRecordingChanges,
+        deliveryChanges: deliveryChanges.map((change) => ({ ...change }))
+      }
+    : {
+        version: 1,
+        sequenceWatermark,
+        screenRecordingChanges
+      };
 }
 
 function applyPipelineResumeDelta(

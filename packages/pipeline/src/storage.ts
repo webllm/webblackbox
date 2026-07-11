@@ -61,11 +61,71 @@ export type ScreenRecordingResumeChange =
       recordingId: string;
     };
 
-export type PipelineResumeDelta = {
+export const PIPELINE_DELIVERY_MAX_STREAMS = 4_096;
+export const PIPELINE_DELIVERY_MAX_INDEXES = 1_024;
+export const PIPELINE_DELIVERY_MAX_CHANGES_PER_COMMIT = 4_096;
+
+export type PipelineDeliveryStream = {
+  tabId: number;
+  frameId: number;
+  documentId: string;
+};
+
+export type PipelineDeliveryBatch = PipelineDeliveryStream & {
+  batchId: string;
+  fingerprint: string;
+  eventCount: number;
+};
+
+export type PipelineDeliveryEventProvenance = PipelineDeliveryBatch & {
+  eventIndex: number;
+};
+
+export type PipelineDeliveryEventChange = PipelineDeliveryEventProvenance & {
+  outcome: "event";
+  eventId: string;
+};
+
+export type PipelineDeliveryNoOutputChange = PipelineDeliveryEventProvenance & {
+  outcome: "no-output";
+};
+
+export type PipelineDeliveryChange = PipelineDeliveryEventChange | PipelineDeliveryNoOutputChange;
+
+export type PipelineDeliveryReceiptIndex =
+  | {
+      eventIndex: number;
+      outcome: "event";
+      eventId: string;
+    }
+  | {
+      eventIndex: number;
+      outcome: "no-output";
+    };
+
+export type PipelineDeliveryReceipt = PipelineDeliveryBatch & {
+  indexes: PipelineDeliveryReceiptIndex[];
+  complete: boolean;
+};
+
+export type PipelineDeliveryReceiptQuery = PipelineDeliveryStream & {
+  batchId: string;
+};
+
+export type PipelineResumeDeltaV1 = {
   version: 1;
   sequenceWatermark: RecorderSequenceWatermark;
   screenRecordingChanges: ScreenRecordingResumeChange[];
 };
+
+export type PipelineResumeDeltaV2 = {
+  version: 2;
+  sequenceWatermark: RecorderSequenceWatermark;
+  screenRecordingChanges: ScreenRecordingResumeChange[];
+  deliveryChanges: PipelineDeliveryChange[];
+};
+
+export type PipelineResumeDelta = PipelineResumeDeltaV1 | PipelineResumeDeltaV2;
 
 export type StoredBlob = {
   hash: string;
@@ -104,6 +164,14 @@ export type PipelineStorage = {
     sid: string,
     chunkSequence: number,
     state: PipelineResumeState
+  ): Promise<void>;
+  getDeliveryReceipt?(
+    sid: string,
+    query: PipelineDeliveryReceiptQuery
+  ): Promise<PipelineDeliveryReceipt | undefined>;
+  commitDeliveryProgress?(
+    sid: string,
+    changes: readonly PipelineDeliveryNoOutputChange[]
   ): Promise<void>;
   putBlob(blob: StoredBlob, sidHint?: string): Promise<void>;
   getBlob(hash: string): Promise<StoredBlob | undefined>;
@@ -185,6 +253,8 @@ export class MemoryPipelineStorage implements PipelineStorage {
     Map<string, Map<number, ScreenRecordingChunkCheckpoint>>
   >();
 
+  private readonly deliveryReceipts = new Map<string, Map<string, PipelineDeliveryReceipt>>();
+
   private readonly indexes = new Map<string, StoredIndexes>();
 
   private readonly integrity = new Map<string, HashesManifest>();
@@ -219,9 +289,14 @@ export class MemoryPipelineStorage implements PipelineStorage {
 
       const recordings = this.resumeScreenRecordings.get(chunk.sid) ?? new Map();
       assertPipelineResumeChangesWithinLimits(recordings, chunk.resumeDelta.screenRecordingChanges);
+      const deliveryReceipts = projectPipelineDeliveryReceipts(
+        this.deliveryReceipts.get(chunk.sid) ?? new Map(),
+        readPipelineDeliveryChanges(chunk.resumeDelta)
+      );
       existing.push(chunk);
       this.chunks.set(chunk.sid, existing);
       this.applyResumeDelta(chunk.sid, chunk.resumeDelta);
+      this.deliveryReceipts.set(chunk.sid, deliveryReceipts);
       this.resumeChunkSequences.set(chunk.sid, chunk.meta.seq);
       return;
     }
@@ -295,6 +370,32 @@ export class MemoryPipelineStorage implements PipelineStorage {
     this.resumeScreenRecordings.set(sid, screenRecordingMapFromState(normalized));
   }
 
+  public async getDeliveryReceipt(
+    sid: string,
+    query: PipelineDeliveryReceiptQuery
+  ): Promise<PipelineDeliveryReceipt | undefined> {
+    requirePipelineDeliveryReceiptQuery(query);
+    const receipt = this.deliveryReceipts.get(sid)?.get(createPipelineDeliveryStreamKey(query));
+
+    return receipt?.batchId === query.batchId ? clonePipelineDeliveryReceipt(receipt) : undefined;
+  }
+
+  public async commitDeliveryProgress(
+    sid: string,
+    changes: readonly PipelineDeliveryNoOutputChange[]
+  ): Promise<void> {
+    if (!this.sessions.has(sid)) {
+      throw new Error("Cannot commit delivery progress for a missing pipeline session.");
+    }
+
+    requirePipelineDeliveryNoOutputChanges(changes);
+    const projected = projectPipelineDeliveryReceipts(
+      this.deliveryReceipts.get(sid) ?? new Map(),
+      changes
+    );
+    this.deliveryReceipts.set(sid, projected);
+  }
+
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     const trackingSid = normalizeTrackingSid(sidHint);
 
@@ -349,6 +450,7 @@ export class MemoryPipelineStorage implements PipelineStorage {
     this.resumeSequences.delete(sid);
     this.resumeChunkSequences.delete(sid);
     this.resumeScreenRecordings.delete(sid);
+    this.deliveryReceipts.delete(sid);
     this.indexes.delete(sid);
     this.integrity.delete(sid);
 
@@ -539,6 +641,10 @@ export async function deleteIndexedDbDatabase(databaseName: string): Promise<voi
 export class EncryptedPipelineStorage implements PipelineStorage {
   public readonly [PIPELINE_STORAGE_SECURITY]: PipelineStorageSecurityCapability;
 
+  public readonly getDeliveryReceipt?: NonNullable<PipelineStorage["getDeliveryReceipt"]>;
+
+  public readonly commitDeliveryProgress?: NonNullable<PipelineStorage["commitDeliveryProgress"]>;
+
   private readonly keyPromise: Promise<CryptoKey>;
 
   public constructor(
@@ -551,6 +657,11 @@ export class EncryptedPipelineStorage implements PipelineStorage {
       payloadProtection: "authenticated-encryption",
       algorithm: "AES-GCM"
     });
+
+    if (storage.getDeliveryReceipt && storage.commitDeliveryProgress) {
+      this.getDeliveryReceipt = (sid, query) => storage.getDeliveryReceipt!(sid, query);
+      this.commitDeliveryProgress = (sid, changes) => storage.commitDeliveryProgress!(sid, changes);
+    }
   }
 
   public async assertReady(): Promise<void> {
@@ -769,11 +880,19 @@ type ResumeRefRow = {
   size?: number;
 };
 
-const DB_VERSION = 4;
+type DeliveryReceiptRow = {
+  key: string;
+  sid: string;
+  streamKey: string;
+  value: PipelineDeliveryReceipt;
+};
+
+const DB_VERSION = 5;
 const CHUNKS_BY_SID_SEQ_INDEX = "by-sid-seq";
 const BLOB_REFS_BY_SID_INDEX = "by-sid";
 const RESUME_REFS_BY_SID_INDEX = "by-sid";
 const RESUME_REFS_BY_SID_RECORDING_INDEX = "by-sid-recording";
+const DELIVERY_RECEIPTS_BY_SID_INDEX = "by-sid";
 
 export class IndexedDbPipelineStorage implements PipelineStorage {
   public readonly [PIPELINE_STORAGE_SECURITY] = Object.freeze({
@@ -972,6 +1091,52 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
     );
   }
 
+  public async getDeliveryReceipt(
+    sid: string,
+    query: PipelineDeliveryReceiptQuery
+  ): Promise<PipelineDeliveryReceipt | undefined> {
+    requirePipelineDeliveryReceiptQuery(query);
+    const row = await this.get<DeliveryReceiptRow>(
+      "deliveryReceipts",
+      createPipelineDeliveryReceiptKey(sid, query)
+    );
+
+    if (!row || row.value.batchId !== query.batchId) {
+      return undefined;
+    }
+
+    return requirePipelineDeliveryReceipt(row.value);
+  }
+
+  public async commitDeliveryProgress(
+    sid: string,
+    changes: readonly PipelineDeliveryNoOutputChange[]
+  ): Promise<void> {
+    requirePipelineDeliveryNoOutputChanges(changes);
+    const db = await this.db();
+
+    await runMultiStoreTransaction(
+      db,
+      ["sessions", "deliveryReceipts"],
+      "readwrite",
+      async (transaction) => {
+        const session = await requestToPromise<SessionRow | undefined>(
+          transaction.objectStore("sessions").get(sid)
+        );
+
+        if (!session) {
+          throw new Error("Cannot commit delivery progress for a missing pipeline session.");
+        }
+
+        await applyIndexedDbPipelineDeliveryChanges(
+          transaction.objectStore("deliveryReceipts"),
+          sid,
+          changes
+        );
+      }
+    );
+  }
+
   public async putBlob(blob: StoredBlob, sidHint?: string): Promise<void> {
     const trackingSid = normalizeTrackingSid(sidHint);
 
@@ -1150,7 +1315,8 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
         "indexes",
         "integrity",
         "resumeMeta",
-        "resumeRefs"
+        "resumeRefs",
+        "deliveryReceipts"
       ],
       "readwrite",
       async (transaction) => {
@@ -1162,12 +1328,14 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
         const integrityStore = transaction.objectStore("integrity");
         const resumeMetaStore = transaction.objectStore("resumeMeta");
         const resumeRefsStore = transaction.objectStore("resumeRefs");
+        const deliveryReceiptsStore = transaction.objectStore("deliveryReceipts");
         const [session, legacyRefs, normalizedRefs, chunks] = await Promise.all([
           requestToPromise<SessionRow | undefined>(sessionsStore.get(sid)),
           requestToPromise<LegacyBlobRefsRow | undefined>(blobRefsStore.get(sid)),
           listBlobRefsBySid(blobRefsStore, sid),
           deleteChunksBySidInTransaction(chunksStore, sid),
-          deleteResumeRefsBySid(resumeRefsStore, sid)
+          deleteResumeRefsBySid(resumeRefsStore, sid),
+          deleteDeliveryReceiptsBySid(deliveryReceiptsStore, sid)
         ]);
         const inferredBlobHashes = collectBlobHashesFromChunks(chunks);
         const trackedBlobHashes = mergeBlobHashes(
@@ -1231,7 +1399,7 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
       try {
         await runMultiStoreTransaction(
           db,
-          ["chunks", "resumeMeta", "resumeRefs"],
+          ["chunks", "resumeMeta", "resumeRefs", "deliveryReceipts"],
           "readwrite",
           async (transaction) => {
             const chunksStore = transaction.objectStore("chunks");
@@ -1328,6 +1496,12 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
               screenRecordingChunkCount,
               value: { ...delta.sequenceWatermark }
             } satisfies ResumeMetaRow);
+
+            await applyIndexedDbPipelineDeliveryChanges(
+              transaction.objectStore("deliveryReceipts"),
+              chunk.sid,
+              readPipelineDeliveryChanges(delta)
+            );
           }
         );
         return;
@@ -1518,7 +1692,8 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
           "indexes",
           "integrity",
           "resumeMeta",
-          "resumeRefs"
+          "resumeRefs",
+          "deliveryReceipts"
         ]) {
           if (!db.objectStoreNames.contains(storeName)) {
             db.createObjectStore(storeName, { keyPath: "key" });
@@ -1552,6 +1727,17 @@ export class IndexedDbPipelineStorage implements PipelineStorage {
             unique: false
           });
         }
+
+        const deliveryReceiptsStore = transaction?.objectStore("deliveryReceipts");
+
+        if (
+          deliveryReceiptsStore &&
+          !deliveryReceiptsStore.indexNames.contains(DELIVERY_RECEIPTS_BY_SID_INDEX)
+        ) {
+          deliveryReceiptsStore.createIndex(DELIVERY_RECEIPTS_BY_SID_INDEX, "sid", {
+            unique: false
+          });
+        }
       };
 
       request.onsuccess = () => {
@@ -1576,45 +1762,315 @@ export function isPipelineResumeDelta(value: unknown): value is PipelineResumeDe
   const record = value as Record<string, unknown>;
   const sequence = asStorageRecord(record.sequenceWatermark);
   const changes = record.screenRecordingChanges;
+  const deliveryChanges = record.deliveryChanges;
+  const expectedKeys = record.version === 1 ? 3 : record.version === 2 ? 4 : 0;
 
   if (
-    Object.keys(record).length !== 3 ||
-    record.version !== 1 ||
+    Object.keys(record).length !== expectedKeys ||
+    expectedKeys === 0 ||
     !isRecorderSequenceWatermark(sequence) ||
     !Array.isArray(changes) ||
-    changes.length > PIPELINE_RESUME_MAX_SCREEN_CHUNKS
+    changes.length > PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
+    (record.version === 2 &&
+      (!Array.isArray(deliveryChanges) ||
+        deliveryChanges.length === 0 ||
+        deliveryChanges.length > PIPELINE_DELIVERY_MAX_CHANGES_PER_COMMIT))
   ) {
     return false;
   }
 
-  return changes.every((candidate) => {
-    const change = asStorageRecord(candidate);
+  return (
+    changes.every(isScreenRecordingResumeChange) &&
+    (record.version === 1 ||
+      (deliveryChanges as unknown[]).every((candidate) => isPipelineDeliveryChange(candidate)))
+  );
+}
 
-    if (!change || !isValidRecordingId(change.recordingId)) {
+export function isPipelineDeliveryEventProvenance(
+  value: unknown
+): value is PipelineDeliveryEventProvenance {
+  const record = asStorageRecord(value);
+
+  return Boolean(
+    record &&
+    Object.keys(record).length === 7 &&
+    isPipelineDeliveryBatch(record) &&
+    Number.isSafeInteger(record.eventIndex) &&
+    (record.eventIndex as number) >= 0 &&
+    (record.eventIndex as number) < (record.eventCount as number)
+  );
+}
+
+export function isPipelineDeliveryChange(value: unknown): value is PipelineDeliveryChange {
+  const record = asStorageRecord(value);
+
+  if (!record || !isPipelineDeliveryBatch(record)) {
+    return false;
+  }
+
+  if (
+    !Number.isSafeInteger(record.eventIndex) ||
+    (record.eventIndex as number) < 0 ||
+    (record.eventIndex as number) >= (record.eventCount as number)
+  ) {
+    return false;
+  }
+
+  if (record.outcome === "no-output") {
+    return Object.keys(record).length === 8;
+  }
+
+  return (
+    record.outcome === "event" &&
+    Object.keys(record).length === 9 &&
+    isBoundedIdentifier(record.eventId, 128)
+  );
+}
+
+function isPipelineDeliveryBatch(record: Record<string, unknown>): boolean {
+  return (
+    Number.isSafeInteger(record.tabId) &&
+    (record.tabId as number) >= 0 &&
+    Number.isSafeInteger(record.frameId) &&
+    (record.frameId as number) >= 0 &&
+    isBoundedIdentifier(record.documentId, 512) &&
+    isBoundedIdentifier(record.batchId, 128) &&
+    typeof record.fingerprint === "string" &&
+    SHA256_HEX_PATTERN.test(record.fingerprint) &&
+    Number.isSafeInteger(record.eventCount) &&
+    (record.eventCount as number) > 0 &&
+    (record.eventCount as number) <= PIPELINE_DELIVERY_MAX_INDEXES
+  );
+}
+
+function isPipelineDeliveryReceipt(value: unknown): value is PipelineDeliveryReceipt {
+  const record = asStorageRecord(value);
+
+  if (
+    !record ||
+    Object.keys(record).length !== 8 ||
+    !isPipelineDeliveryBatch(record) ||
+    typeof record.complete !== "boolean" ||
+    !Array.isArray(record.indexes) ||
+    record.indexes.length > (record.eventCount as number)
+  ) {
+    return false;
+  }
+
+  const seen = new Set<number>();
+  let previous = -1;
+
+  for (const candidate of record.indexes) {
+    const index = asStorageRecord(candidate);
+
+    if (
+      !index ||
+      !Number.isSafeInteger(index.eventIndex) ||
+      (index.eventIndex as number) < 0 ||
+      (index.eventIndex as number) >= (record.eventCount as number) ||
+      (index.eventIndex as number) <= previous ||
+      seen.has(index.eventIndex as number)
+    ) {
       return false;
     }
 
-    if (change.operation === "delete" || change.operation === "reset") {
-      return Object.keys(change).length === 2;
+    if (index.outcome === "no-output") {
+      if (Object.keys(index).length !== 2) {
+        return false;
+      }
+    } else if (
+      index.outcome !== "event" ||
+      Object.keys(index).length !== 3 ||
+      !isBoundedIdentifier(index.eventId, 128)
+    ) {
+      return false;
     }
 
-    const keys = Object.keys(change);
-    const hasValidSize =
-      change.size === undefined ||
-      (Number.isSafeInteger(change.size) && (change.size as number) >= 0);
+    previous = index.eventIndex as number;
+    seen.add(previous);
+  }
 
-    return (
-      change.operation === "put" &&
-      (keys.length === 4 || keys.length === 5) &&
-      (keys.length !== 5 || change.size !== undefined) &&
-      hasValidSize &&
-      Number.isSafeInteger(change.index) &&
-      (change.index as number) >= 0 &&
-      (change.index as number) < PIPELINE_RESUME_MAX_SCREEN_CHUNKS &&
-      typeof change.hash === "string" &&
-      SHA256_HEX_PATTERN.test(change.hash)
+  return record.complete === (record.indexes.length === record.eventCount);
+}
+
+function requirePipelineDeliveryReceipt(value: unknown): PipelineDeliveryReceipt {
+  if (!isPipelineDeliveryReceipt(value)) {
+    throw new Error("Invalid pipeline delivery receipt.");
+  }
+
+  return clonePipelineDeliveryReceipt(value);
+}
+
+function requirePipelineDeliveryReceiptQuery(query: PipelineDeliveryReceiptQuery): void {
+  const record = asStorageRecord(query);
+
+  if (
+    !record ||
+    Object.keys(record).length !== 4 ||
+    !Number.isSafeInteger(record.tabId) ||
+    (record.tabId as number) < 0 ||
+    !Number.isSafeInteger(record.frameId) ||
+    (record.frameId as number) < 0 ||
+    !isBoundedIdentifier(record.documentId, 512) ||
+    !isBoundedIdentifier(record.batchId, 128)
+  ) {
+    throw new Error("Invalid pipeline delivery receipt query.");
+  }
+}
+
+function requirePipelineDeliveryNoOutputChanges(
+  changes: readonly PipelineDeliveryNoOutputChange[]
+): void {
+  if (changes.length > PIPELINE_DELIVERY_MAX_CHANGES_PER_COMMIT) {
+    throw new Error("Pipeline delivery progress has too many changes.");
+  }
+
+  for (const change of changes) {
+    if (!isPipelineDeliveryChange(change) || change.outcome !== "no-output") {
+      throw new Error("Metadata-only delivery progress may contain only no-output changes.");
+    }
+  }
+}
+
+function readPipelineDeliveryChanges(
+  delta: PipelineResumeDelta
+): readonly PipelineDeliveryChange[] {
+  return delta.version === 2 ? delta.deliveryChanges : [];
+}
+
+function projectPipelineDeliveryReceipts(
+  current: ReadonlyMap<string, PipelineDeliveryReceipt>,
+  changes: readonly PipelineDeliveryChange[]
+): Map<string, PipelineDeliveryReceipt> {
+  if (current.size > PIPELINE_DELIVERY_MAX_STREAMS) {
+    throw new Error("Pipeline delivery journal exceeds its stream limit.");
+  }
+  if (changes.length > PIPELINE_DELIVERY_MAX_CHANGES_PER_COMMIT) {
+    throw new Error("Pipeline delivery journal change set is too large.");
+  }
+
+  const projected = new Map(current);
+
+  for (const change of changes) {
+    if (!isPipelineDeliveryChange(change)) {
+      throw new Error("Invalid pipeline delivery change.");
+    }
+
+    const streamKey = createPipelineDeliveryStreamKey(change);
+    const existingValue = projected.get(streamKey);
+    const existing = existingValue ? requirePipelineDeliveryReceipt(existingValue) : undefined;
+    let receipt: PipelineDeliveryReceipt;
+
+    if (!existing || existing.batchId !== change.batchId) {
+      if (existing && !existing.complete) {
+        throw new Error("Pipeline delivery stream cannot replace an incomplete batch receipt.");
+      }
+
+      receipt = {
+        tabId: change.tabId,
+        frameId: change.frameId,
+        documentId: change.documentId,
+        batchId: change.batchId,
+        fingerprint: change.fingerprint,
+        eventCount: change.eventCount,
+        indexes: [],
+        complete: false
+      };
+    } else {
+      if (
+        existing.fingerprint !== change.fingerprint ||
+        existing.eventCount !== change.eventCount
+      ) {
+        throw new Error("Pipeline delivery batch identity was reused with different content.");
+      }
+
+      receipt = existing;
+    }
+
+    const priorIndex = receipt.indexes.find(
+      (candidate) => candidate.eventIndex === change.eventIndex
     );
-  });
+    const nextIndex: PipelineDeliveryReceiptIndex =
+      change.outcome === "event"
+        ? { eventIndex: change.eventIndex, outcome: "event", eventId: change.eventId }
+        : { eventIndex: change.eventIndex, outcome: "no-output" };
+
+    if (priorIndex) {
+      if (
+        priorIndex.outcome !== nextIndex.outcome ||
+        (priorIndex.outcome === "event" &&
+          (nextIndex.outcome !== "event" || priorIndex.eventId !== nextIndex.eventId))
+      ) {
+        throw new Error("Pipeline delivery event index was reused with a different outcome.");
+      }
+    } else {
+      receipt.indexes.push(nextIndex);
+      receipt.indexes.sort((left, right) => left.eventIndex - right.eventIndex);
+      receipt.complete = receipt.indexes.length === receipt.eventCount;
+    }
+
+    projected.set(streamKey, receipt);
+
+    if (projected.size > PIPELINE_DELIVERY_MAX_STREAMS) {
+      throw new Error("Pipeline delivery journal has too many document streams.");
+    }
+  }
+
+  return projected;
+}
+
+function clonePipelineDeliveryReceipt(receipt: PipelineDeliveryReceipt): PipelineDeliveryReceipt {
+  return {
+    tabId: receipt.tabId,
+    frameId: receipt.frameId,
+    documentId: receipt.documentId,
+    batchId: receipt.batchId,
+    fingerprint: receipt.fingerprint,
+    eventCount: receipt.eventCount,
+    indexes: receipt.indexes.map((index) => ({ ...index })),
+    complete: receipt.complete
+  };
+}
+
+function createPipelineDeliveryStreamKey(stream: PipelineDeliveryStream): string {
+  return JSON.stringify([stream.tabId, stream.frameId, stream.documentId]);
+}
+
+function createPipelineDeliveryReceiptKey(sid: string, stream: PipelineDeliveryStream): string {
+  return JSON.stringify([sid, stream.tabId, stream.frameId, stream.documentId]);
+}
+
+function isBoundedIdentifier(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+function isScreenRecordingResumeChange(candidate: unknown): boolean {
+  const change = asStorageRecord(candidate);
+
+  if (!change || !isValidRecordingId(change.recordingId)) {
+    return false;
+  }
+
+  if (change.operation === "delete" || change.operation === "reset") {
+    return Object.keys(change).length === 2;
+  }
+
+  const keys = Object.keys(change);
+  const hasValidSize =
+    change.size === undefined ||
+    (Number.isSafeInteger(change.size) && (change.size as number) >= 0);
+
+  return (
+    change.operation === "put" &&
+    (keys.length === 4 || keys.length === 5) &&
+    (keys.length !== 5 || change.size !== undefined) &&
+    hasValidSize &&
+    Number.isSafeInteger(change.index) &&
+    (change.index as number) >= 0 &&
+    (change.index as number) < PIPELINE_RESUME_MAX_SCREEN_CHUNKS &&
+    typeof change.hash === "string" &&
+    SHA256_HEX_PATTERN.test(change.hash)
+  );
 }
 
 export function assertPipelineResumeChangesWithinLimits(
@@ -1980,6 +2436,88 @@ function deleteResumeRefsBySid(store: IDBObjectStore, sid: string): Promise<numb
   const request = store.index(RESUME_REFS_BY_SID_INDEX).openCursor(IDBKeyRange.only(sid));
 
   return deleteCursorRows(request, "IndexedDB resume-ref session deletion failed");
+}
+
+async function applyIndexedDbPipelineDeliveryChanges(
+  store: IDBObjectStore,
+  sid: string,
+  changes: readonly PipelineDeliveryChange[]
+): Promise<void> {
+  if (changes.length === 0) {
+    return;
+  }
+  if (!store.indexNames.contains(DELIVERY_RECEIPTS_BY_SID_INDEX)) {
+    throw new Error("IndexedDB delivery-receipt index is unavailable.");
+  }
+
+  const grouped = new Map<string, PipelineDeliveryChange[]>();
+
+  for (const change of changes) {
+    if (!isPipelineDeliveryChange(change)) {
+      throw new Error("Invalid pipeline delivery change.");
+    }
+
+    const streamKey = createPipelineDeliveryStreamKey(change);
+    const group = grouped.get(streamKey) ?? [];
+    group.push(change);
+    grouped.set(streamKey, group);
+  }
+
+  const existingCount = await requestToPromise<number>(
+    store.index(DELIVERY_RECEIPTS_BY_SID_INDEX).count(IDBKeyRange.only(sid))
+  );
+  if (existingCount > PIPELINE_DELIVERY_MAX_STREAMS) {
+    throw new Error("Pipeline delivery journal exceeds its stream limit.");
+  }
+
+  const groups = [...grouped.entries()];
+  const existingRows = await Promise.all(
+    groups.map(([, group]) => {
+      const first = group[0]!;
+      return requestToPromise<DeliveryReceiptRow | undefined>(
+        store.get(createPipelineDeliveryReceiptKey(sid, first))
+      );
+    })
+  );
+  let projectedCount = existingCount;
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const [streamKey, group] = groups[index]!;
+    const existingRow = existingRows[index];
+    const current = existingRow
+      ? new Map([[streamKey, requirePipelineDeliveryReceipt(existingRow.value)]])
+      : new Map<string, PipelineDeliveryReceipt>();
+    const projected = projectPipelineDeliveryReceipts(current, group);
+    const receipt = projected.get(streamKey);
+
+    if (!receipt) {
+      throw new Error("Pipeline delivery receipt projection failed.");
+    }
+
+    if (!existingRow) {
+      projectedCount += 1;
+      if (projectedCount > PIPELINE_DELIVERY_MAX_STREAMS) {
+        throw new Error("Pipeline delivery journal has too many document streams.");
+      }
+    }
+
+    const first = group[0]!;
+    store.put({
+      key: createPipelineDeliveryReceiptKey(sid, first),
+      sid,
+      streamKey,
+      value: receipt
+    } satisfies DeliveryReceiptRow);
+  }
+}
+
+function deleteDeliveryReceiptsBySid(store: IDBObjectStore, sid: string): Promise<number> {
+  if (!store.indexNames.contains(DELIVERY_RECEIPTS_BY_SID_INDEX)) {
+    return Promise.reject(new Error("IndexedDB delivery-receipt index is unavailable."));
+  }
+
+  const request = store.index(DELIVERY_RECEIPTS_BY_SID_INDEX).openCursor(IDBKeyRange.only(sid));
+  return deleteCursorRows(request, "IndexedDB delivery-receipt session deletion failed");
 }
 
 function deleteResumeRefsByRecording(

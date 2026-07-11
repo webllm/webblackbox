@@ -1,3 +1,5 @@
+import "fake-indexeddb/auto";
+
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 
@@ -11,8 +13,13 @@ import {
 
 import { decodeChunkEvents, encodeChunkEvents } from "./codec.js";
 import { readWebBlackboxArchive } from "./exporter.js";
-import { FlightRecorderPipeline, type FlightRecorderPipelineOptions } from "./pipeline.js";
 import {
+  FlightRecorderPipeline,
+  type FlightRecorderPipelineOptions,
+  type PipelineDeliverySidecar
+} from "./pipeline.js";
+import {
+  deleteIndexedDbDatabase,
   derivePipelineStorageKey,
   EncryptedPipelineStorage,
   IndexedDbPipelineStorage,
@@ -235,6 +242,458 @@ describe("pipeline", () => {
 
     expect(chunks.length).toBeGreaterThan(0);
     expect(indexes.request.some((entry) => entry.reqId === "R-1")).toBe(true);
+  });
+
+  it("resumes a partially committed delivery batch across multiple chunks and pipeline restart", async () => {
+    const storage = new MemoryPipelineStorage();
+    const events = Array.from({ length: 4 }, (_, index) =>
+      createEvent(`E-${index + 1}`, "user.marker", index + 1, {
+        message: createNoisyPayload(64, index)
+      })
+    );
+    const provenance = (eventIndex: number) => ({
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-delivery",
+      batchId: "batch-delivery",
+      fingerprint: "a".repeat(64),
+      eventCount: events.length,
+      eventIndex
+    });
+    const query = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-delivery",
+      batchId: "batch-delivery"
+    };
+    const first = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+
+    await first.start();
+    await first.ingestBatchWithDelivery(
+      events.slice(0, 2),
+      new Map(events.slice(0, 2).map((event, index) => [event.id, provenance(index)]))
+    );
+    await first.flush();
+    expect(await first.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({
+        complete: false,
+        indexes: [
+          { eventIndex: 0, outcome: "event", eventId: "E-1" },
+          { eventIndex: 1, outcome: "event", eventId: "E-2" }
+        ]
+      })
+    );
+
+    const restarted = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    await restarted.start();
+    await restarted.ingestBatchWithDelivery(
+      events.slice(2),
+      new Map(events.slice(2).map((event, index) => [event.id, provenance(index + 2)]))
+    );
+    await restarted.flush();
+
+    const completedReceipt = await restarted.getDeliveryReceipt(query);
+    expect(completedReceipt).toEqual(expect.objectContaining({ complete: true }));
+    expect(completedReceipt?.indexes).toHaveLength(4);
+    const persistedIds = (
+      await Promise.all(
+        (await storage.listChunks(SESSION.sid)).map((chunk) =>
+          decodeChunkEvents(chunk.bytes, chunk.meta.codec)
+        )
+      )
+    )
+      .flat()
+      .map((event) => event.id);
+    expect(persistedIds).toEqual(["E-1", "E-2", "E-3", "E-4"]);
+  });
+
+  it("resumes partial multi-chunk delivery through encrypted indexeddb restart", async () => {
+    const databaseName = `wb-delivery-restart-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+      "encrypt",
+      "decrypt"
+    ]);
+    const session = { ...SESSION, sid: "S-encrypted-delivery-restart" };
+    const events = Array.from({ length: 4 }, (_, index) => ({
+      ...createEvent(`E-encrypted-${index + 1}`, "user.marker", index + 1, {
+        message: createNoisyPayload(64, index)
+      }),
+      sid: session.sid
+    }));
+    const provenance = (eventIndex: number) => ({
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-encrypted-delivery",
+      batchId: "batch-encrypted-delivery",
+      fingerprint: "6".repeat(64),
+      eventCount: events.length,
+      eventIndex
+    });
+    const query = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-encrypted-delivery",
+      batchId: "batch-encrypted-delivery"
+    };
+    const firstStorage = new EncryptedPipelineStorage(new IndexedDbPipelineStorage(databaseName), {
+      key
+    });
+    const first = createTestPipeline({ session, storage: firstStorage, maxChunkBytes: 1 });
+
+    await first.start();
+    await first.ingestBatchWithDelivery(
+      events.slice(0, 2),
+      new Map(events.slice(0, 2).map((event, index) => [event.id, provenance(index)]))
+    );
+    expect(await first.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({ complete: false })
+    );
+
+    const restartedStorage = new EncryptedPipelineStorage(
+      new IndexedDbPipelineStorage(databaseName),
+      { key }
+    );
+    const restarted = createTestPipeline({
+      session,
+      storage: restartedStorage,
+      maxChunkBytes: 1
+    });
+    await restarted.start();
+    await restarted.ingestBatchWithDelivery(
+      events.slice(2),
+      new Map(events.slice(2).map((event, index) => [event.id, provenance(index + 2)]))
+    );
+    await restarted.flush();
+
+    expect(await restarted.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
+    const persisted = (
+      await Promise.all(
+        (await restartedStorage.listChunks(session.sid)).map((chunk) =>
+          decodeChunkEvents(chunk.bytes, chunk.meta.codec)
+        )
+      )
+    ).flat();
+    expect(persisted.map((event) => event.id)).toEqual(events.map((event) => event.id));
+
+    await restarted.close({ purge: true });
+    await deleteIndexedDbDatabase(databaseName);
+  });
+
+  it("commits no-output progress without a chunk and completes only after output flush", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const base = {
+      tabId: 1,
+      frameId: 2,
+      documentId: "document-mixed",
+      batchId: "batch-mixed",
+      fingerprint: "b".repeat(64),
+      eventCount: 2
+    };
+    const query = {
+      tabId: base.tabId,
+      frameId: base.frameId,
+      documentId: base.documentId,
+      batchId: base.batchId
+    };
+    const event = createEvent("E-1", "user.marker", 1);
+
+    await pipeline.start();
+    await pipeline.commitDeliveryProgress([{ ...base, eventIndex: 1, outcome: "no-output" }]);
+    expect(await storage.listChunks(SESSION.sid)).toEqual([]);
+    await pipeline.ingestBatchWithDelivery(
+      [event],
+      new Map([[event.id, { ...base, eventIndex: 0 }]])
+    );
+    expect(await pipeline.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({
+        complete: false,
+        indexes: [{ eventIndex: 1, outcome: "no-output" }]
+      })
+    );
+
+    await pipeline.flush();
+    const completedReceipt = await pipeline.getDeliveryReceipt(query);
+    expect(completedReceipt).toEqual(expect.objectContaining({ complete: true }));
+    expect(completedReceipt?.indexes).toHaveLength(2);
+  });
+
+  it("flushes pending output before no-output progress can complete its delivery receipt", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const base = {
+      tabId: 1,
+      frameId: 2,
+      documentId: "document-flush-before-progress",
+      batchId: "batch-flush-before-progress",
+      fingerprint: "e".repeat(64),
+      eventCount: 2
+    };
+    const query = {
+      tabId: base.tabId,
+      frameId: base.frameId,
+      documentId: base.documentId,
+      batchId: base.batchId
+    };
+    const event = createEvent("E-1", "user.marker", 1);
+
+    await pipeline.start();
+    await pipeline.ingestBatchWithDelivery(
+      [event],
+      new Map([[event.id, { ...base, eventIndex: 0 }]])
+    );
+    expect(await storage.listChunks(SESSION.sid)).toEqual([]);
+
+    await pipeline.commitDeliveryProgress([{ ...base, eventIndex: 1, outcome: "no-output" }]);
+
+    expect(await storage.listChunks(SESSION.sid)).toHaveLength(1);
+    expect(await pipeline.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({
+        complete: true,
+        indexes: [
+          { eventIndex: 0, outcome: "event", eventId: event.id },
+          { eventIndex: 1, outcome: "no-output" }
+        ]
+      })
+    );
+  });
+
+  it("rejects no-output progress that conflicts with pending output provenance", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const base = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-outcome-conflict",
+      batchId: "batch-outcome-conflict",
+      fingerprint: "f".repeat(64),
+      eventCount: 1
+    };
+    const query = {
+      tabId: base.tabId,
+      frameId: base.frameId,
+      documentId: base.documentId,
+      batchId: base.batchId
+    };
+    const event = createEvent("E-1", "user.marker", 1);
+
+    await pipeline.start();
+    await pipeline.ingestBatchWithDelivery(
+      [event],
+      new Map([[event.id, { ...base, eventIndex: 0 }]])
+    );
+
+    await expect(
+      pipeline.commitDeliveryProgress([{ ...base, eventIndex: 0, outcome: "no-output" }])
+    ).rejects.toThrow(/conflicts with pending output provenance/i);
+    expect(await pipeline.getDeliveryReceipt(query)).toEqual({
+      ...base,
+      indexes: [{ eventIndex: 0, outcome: "event", eventId: event.id }],
+      complete: true
+    });
+  });
+
+  it("does not commit no-output progress when flushing pending output fails", async () => {
+    const storage = new FailOnceChunkStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const base = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-progress-flush-failure",
+      batchId: "batch-progress-flush-failure",
+      fingerprint: "9".repeat(64),
+      eventCount: 2
+    };
+    const query = {
+      tabId: base.tabId,
+      frameId: base.frameId,
+      documentId: base.documentId,
+      batchId: base.batchId
+    };
+    const event = createEvent("E-1", "user.marker", 1);
+
+    await pipeline.start();
+    await pipeline.ingestBatchWithDelivery(
+      [event],
+      new Map([[event.id, { ...base, eventIndex: 0 }]])
+    );
+
+    await expect(
+      pipeline.commitDeliveryProgress([{ ...base, eventIndex: 1, outcome: "no-output" }])
+    ).rejects.toThrow(/simulated chunk persistence failure/i);
+    expect(await pipeline.getDeliveryReceipt(query)).toBeUndefined();
+    expect(await storage.listChunks(SESSION.sid)).toEqual([]);
+
+    await pipeline.commitDeliveryProgress([{ ...base, eventIndex: 1, outcome: "no-output" }]);
+    expect(await pipeline.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
+  });
+
+  it("does not advance a delivery receipt when its output chunk commit fails", async () => {
+    const storage = new FailOnceChunkStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1 });
+    const event = createEvent("E-1", "user.marker", 1);
+    const provenance = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-failure",
+      batchId: "batch-failure",
+      fingerprint: "c".repeat(64),
+      eventCount: 1,
+      eventIndex: 0
+    };
+    const query = {
+      tabId: provenance.tabId,
+      frameId: provenance.frameId,
+      documentId: provenance.documentId,
+      batchId: provenance.batchId
+    };
+
+    await pipeline.start();
+    await expect(
+      pipeline.ingestBatchWithDelivery([event], new Map([[event.id, provenance]]))
+    ).rejects.toThrow(/simulated chunk persistence failure/i);
+    expect(await pipeline.getDeliveryReceipt(query)).toBeUndefined();
+    expect(await storage.listChunks(SESSION.sid)).toEqual([]);
+
+    await pipeline.ingestBatchWithDelivery([event], new Map([[event.id, provenance]]));
+    expect(await pipeline.getDeliveryReceipt(query)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
+  });
+
+  it("retries a delivery batch without duplicating events retained before a failed chunk append", async () => {
+    const storage = new FailOnceChunkStorage();
+    const events = [
+      createEvent("E-retained-1", "user.marker", 1, { value: "first" }),
+      createEvent("E-retained-2", "user.marker", 2, { value: "second" })
+    ];
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: JSON.stringify(events[0]).length + 2
+    });
+    const provenance = (eventIndex: number) => ({
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-retained-retry",
+      batchId: "batch-retained-retry",
+      fingerprint: "4".repeat(64),
+      eventCount: events.length,
+      eventIndex
+    });
+    const sidecar = new Map(
+      events.map((event, eventIndex) => [event.id, provenance(eventIndex)] as const)
+    );
+
+    await pipeline.start();
+    await expect(pipeline.ingestBatchWithDelivery(events, sidecar)).rejects.toThrow(
+      /simulated chunk persistence failure/i
+    );
+    await pipeline.ingestBatchWithDelivery(events, sidecar);
+    await pipeline.flush();
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const persisted = (
+      await Promise.all(chunks.map((chunk) => decodeChunkEvents(chunk.bytes, chunk.meta.codec)))
+    ).flat();
+    expect(persisted.map((event) => event.id)).toEqual(events.map((event) => event.id));
+    expect(new Set(persisted.map((event) => event.id)).size).toBe(events.length);
+  });
+
+  it("rejects an explicitly undefined delivery sidecar entry instead of dropping provenance", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const event = createEvent("E-undefined-sidecar", "user.marker", 1);
+    const sidecar = new Map([[event.id, undefined]]) as unknown as PipelineDeliverySidecar;
+
+    await pipeline.start();
+    await expect(pipeline.ingestBatchWithDelivery([event], sidecar)).rejects.toThrow(
+      /invalid pipeline delivery event provenance/i
+    );
+    await pipeline.flush();
+    expect(await storage.listChunks(SESSION.sid)).toEqual([]);
+  });
+
+  it("deduplicates exact pending and durable delivery retries across calls", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const event = createEvent("E-delivery-retry", "user.marker", 1);
+    const provenance = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-delivery-retry",
+      batchId: "batch-delivery-retry",
+      fingerprint: "7".repeat(64),
+      eventCount: 1,
+      eventIndex: 0
+    };
+    const sidecar = new Map([[event.id, provenance]]);
+
+    await pipeline.start();
+    await pipeline.ingestBatchWithDelivery([event], sidecar);
+    await pipeline.ingestBatchWithDelivery([event], sidecar);
+    await pipeline.flush();
+    await pipeline.ingestBatchWithDelivery([event], sidecar);
+    await pipeline.flush();
+
+    const chunks = await storage.listChunks(SESSION.sid);
+    const persisted = (
+      await Promise.all(chunks.map((chunk) => decodeChunkEvents(chunk.bytes, chunk.meta.codec)))
+    ).flat();
+    expect(persisted.map((candidate) => candidate.id)).toEqual([event.id]);
+    expect(chunks).toHaveLength(1);
+  });
+
+  it("rejects cross-call event-id and batch-index provenance conflicts", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = createTestPipeline({ session: SESSION, storage, maxChunkBytes: 1024 * 1024 });
+    const event = createEvent("E-delivery-conflict", "user.marker", 1);
+    const base = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-delivery-conflict",
+      batchId: "batch-delivery-conflict",
+      fingerprint: "8".repeat(64),
+      eventCount: 2
+    };
+
+    await pipeline.start();
+    await pipeline.ingestBatchWithDelivery(
+      [event],
+      new Map([[event.id, { ...base, eventIndex: 0 }]])
+    );
+
+    await expect(
+      pipeline.ingestBatchWithDelivery(
+        [event],
+        new Map([[event.id, { ...base, batchId: "different-batch", eventIndex: 0 }]])
+      )
+    ).rejects.toThrow(/event id was reused with different delivery provenance/i);
+    await expect(
+      pipeline.ingestBatchWithDelivery(
+        [createEvent("E-different-event", "user.marker", 2)],
+        new Map([
+          [
+            "E-different-event",
+            {
+              ...base,
+              eventIndex: 0
+            }
+          ]
+        ])
+      )
+    ).rejects.toThrow(/batch index already has a different pending event/i);
+
+    await pipeline.flush();
+    const chunks = await storage.listChunks(SESSION.sid);
+    const persisted = (
+      await Promise.all(chunks.map((chunk) => decodeChunkEvents(chunk.bytes, chunk.meta.codec)))
+    ).flat();
+    expect(persisted.map((candidate) => candidate.id)).toEqual([event.id]);
   });
 
   it("serializes concurrent ingests with close and persists each event exactly once", async () => {
@@ -1784,12 +2243,33 @@ describe("pipeline", () => {
     await pipelineB.ingest(createEvent("E-pb-1", "user.click", 2));
     await pipelineB.flush();
     await pipelineB.finalizeIndexes();
+    const deliveryProgress = {
+      tabId: 1,
+      frameId: 0,
+      documentId: "document-purge-a",
+      batchId: "batch-purge-a",
+      fingerprint: "5".repeat(64),
+      eventCount: 1,
+      eventIndex: 0,
+      outcome: "no-output" as const
+    };
+    const deliveryQuery = {
+      tabId: deliveryProgress.tabId,
+      frameId: deliveryProgress.frameId,
+      documentId: deliveryProgress.documentId,
+      batchId: deliveryProgress.batchId
+    };
+    await pipelineA.commitDeliveryProgress([deliveryProgress]);
+    expect(await pipelineA.getDeliveryReceipt(deliveryQuery)).toEqual(
+      expect.objectContaining({ complete: true })
+    );
 
     await pipelineA.close({ purge: true });
 
     expect(await storage.getSession(sessionA.sid)).toBeUndefined();
     expect(await storage.listChunks(sessionA.sid)).toHaveLength(0);
     expect(await storage.getIntegrity(sessionA.sid)).toBeUndefined();
+    expect(await storage.getDeliveryReceipt(sessionA.sid, deliveryQuery)).toBeUndefined();
     expect(await storage.getIndexes(sessionA.sid)).toEqual({
       time: [],
       request: [],
