@@ -136,7 +136,9 @@ import {
 } from "./stop-drain.js";
 import {
   RuntimeCleanupScheduler,
+  RuntimeStartCancelledError,
   RuntimeStartCoordinator,
+  type RuntimeStartToken,
   blockVolatileCapture,
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
@@ -149,6 +151,7 @@ import {
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
   isMapEntrySame,
+  isRuntimeCaptureAdmitted,
   isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
   mergeRuntimeCountersWithSequenceWatermark,
@@ -162,6 +165,7 @@ import {
   runActiveRuntimeRestorationTransaction,
   runDurableFailedRuntimeCleanup,
   runDurableRuntimeStopWorkflow,
+  runProvisionalRuntimeStartTransaction,
   runVolatileCaptureOperation,
   type PersistedActiveRuntime,
   type PersistedRuntime,
@@ -169,6 +173,7 @@ import {
   type PersistedScreenRecording,
   type PersistedStoppedRuntime,
   type PersistedStoppingRuntime,
+  type RuntimeActivationState,
   type VolatileCaptureFence
 } from "./runtime-state.js";
 
@@ -207,6 +212,7 @@ type SessionRuntime = {
   pipelineFlushTimer: ReturnType<typeof setTimeout> | null;
   pipelineFlushQueued: boolean;
   captureFence: VolatileCaptureFence;
+  activationState: RuntimeActivationState;
   stopping: boolean;
   responseBodyCaptures: number;
   responseBodyCaptureTimestamps: number[];
@@ -232,6 +238,7 @@ type SessionRuntime = {
 type ScreenRecordingRuntime = {
   recordingId: string;
   cdpScopeGeneration: number | null;
+  provisional: boolean;
   source: "tab";
   startedAt: number;
   startedMono: number;
@@ -697,6 +704,11 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
     return;
   }
 
+  if (!isRuntimeCaptureAdmitted(runtime.activationState)) {
+    sendContentPortRecordingState(port, runtime, false);
+    return;
+  }
+
   syncContentPortRecordingState(port);
 }
 
@@ -712,6 +724,7 @@ function syncContentPortRecordingState(port: PortLike): void {
 
   if (
     !runtime ||
+    !isRuntimeCaptureAdmitted(runtime.activationState) ||
     !isVolatileCaptureOpen(runtime.captureFence) ||
     runtime.stopping ||
     runtime.stoppedAt
@@ -854,7 +867,7 @@ async function handleInboundMessage(
   port?: PortLike,
   sender: MessageSenderLike | undefined = port?.sender
 ): Promise<unknown> {
-  if (message.kind.startsWith("ui.")) {
+  if (message.kind.startsWith("ui.") && message.kind !== "ui.start") {
     await runtimeStateRestorePromise;
   }
 
@@ -866,16 +879,9 @@ async function handleInboundMessage(
     }
 
     await startSession(tabId, message.mode, {
-      visualCapture: resolveFullModeVisualCapture(message)
+      visualCapture: resolveFullModeVisualCapture(message),
+      reloadPage: message.mode === "lite" && message.reloadPage === true
     });
-    if (message.mode === "lite" && message.reloadPage) {
-      try {
-        await reloadRecordingTab(tabId);
-      } catch (error) {
-        await stopSession(tabId);
-        throw error;
-      }
-    }
     return;
   }
 
@@ -925,7 +931,11 @@ async function handleInboundMessage(
     const frame = normalizeContentFrameId(sender?.frameId);
     const runtime = typeof tabId === "number" ? sessionsByTab.get(tabId) : undefined;
 
-    if (runtime && authorizeContentSender(runtime, sender, message.documentUrl)) {
+    if (
+      runtime &&
+      isRuntimeCaptureAdmitted(runtime.activationState) &&
+      authorizeContentSender(runtime, sender, message.documentUrl)
+    ) {
       ingestRawEvent({
         source: "content",
         rawType: "marker",
@@ -986,6 +996,17 @@ async function handleInboundMessage(
       };
     }
 
+    if (!isRuntimeCaptureAdmitted(runtime.activationState)) {
+      return {
+        kind: "sw.recording-status",
+        active: false,
+        tabId: runtime.tabId,
+        sid: runtime.sid,
+        mode: runtime.mode,
+        capturePolicy: runtime.config.capturePolicy
+      };
+    }
+
     const sampling = toStatusSampling(runtime);
 
     if (port?.name === PORT_NAMES.content) {
@@ -1030,7 +1051,10 @@ async function handleInboundMessage(
     }
 
     const activeCapture =
-      isVolatileCaptureOpen(runtime.captureFence) && !runtime.stopping && !runtime.stoppedAt;
+      isRuntimeCaptureAdmitted(runtime.activationState) &&
+      isVolatileCaptureOpen(runtime.captureFence) &&
+      !runtime.stopping &&
+      !runtime.stoppedAt;
     const activeSenderAuthorized =
       activeCapture && authorizeContentSender(runtime, sender, message.documentUrl);
     const stopDrain = pendingStopDrainAcks.get(runtime.sid)?.capability;
@@ -1125,28 +1149,42 @@ async function deleteSessionBySid(sid: string): Promise<void> {
 async function startSession(
   tabId: number,
   mode: CaptureMode,
-  options: { visualCapture?: FullModeVisualCapture } = {}
+  options: { visualCapture?: FullModeVisualCapture; reloadPage?: boolean } = {}
 ): Promise<void> {
-  await runtimeStateRestorePromise;
-  await sessionStartCoordinator.run(tabId, () => startSessionUnlocked(tabId, mode, options));
+  const startKey = JSON.stringify([
+    mode,
+    options.visualCapture ?? null,
+    options.reloadPage === true
+  ]);
+  await sessionStartCoordinator.run(tabId, startKey, async (token) => {
+    token.assertActive();
+    await runtimeStateRestorePromise;
+    token.assertActive();
+    await startSessionUnlocked(tabId, mode, options, token);
+  });
 }
 
 async function startSessionUnlocked(
   tabId: number,
   mode: CaptureMode,
-  options: { visualCapture?: FullModeVisualCapture }
+  options: { visualCapture?: FullModeVisualCapture; reloadPage?: boolean },
+  startToken: RuntimeStartToken
 ): Promise<void> {
   const sid = createSessionId();
   const startedAt = Date.now();
+  startToken.assertActive();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
+  startToken.assertActive();
   const sessionOrigin = resolveUrlOrigin(tabMetadata.captureUrl) ?? "";
   const enterprisePolicy = await loadEnterprisePolicy();
+  startToken.assertActive();
 
   const loadedRecorderConfig = applyFullModeVisualCapture(
     await loadRecorderConfig(mode),
     mode,
     options.visualCapture
   );
+  startToken.assertActive();
   const recorderConfig = applyEnterprisePolicyToRecorderConfig(
     withSessionCapturePolicy(loadedRecorderConfig, {
       tabId,
@@ -1166,21 +1204,15 @@ async function startSessionUnlocked(
     throw new Error(`Recording is outside the permitted capture scope (${startScope.reason}).`);
   }
 
+  const screenRecordingRequested =
+    mode === "full" && recorderConfig.capturePolicy?.categories.screenRecordings === "allow";
   assertRuntimeStartRequirements(resolveInstalledRuntimeCapabilities(chromeApi), {
     mode,
-    screenRecording:
-      mode === "full" && recorderConfig.capturePolicy?.categories.screenRecordings === "allow"
+    screenRecording: screenRecordingRequested
   });
 
-  const existing = sessionsByTab.get(tabId);
-
-  if (existing) {
-    await stopSession(tabId);
-  }
-
-  await ensureOffscreenDocument();
-
   const performanceBudget = await loadPerformanceBudgetConfig();
+  startToken.assertActive();
   const annotation = getSessionAnnotation(sid);
   const metadata: SessionMetadata = {
     sid,
@@ -1193,77 +1225,270 @@ async function startSessionUnlocked(
   };
 
   const pipeline = createOffscreenPipelineClient(sid);
-  await pipeline.start(metadata, recorderConfig.redaction, recorderConfig.capturePolicy);
-  const runtime = createSessionRuntime({
+  const provisionalActive = createInitialPersistedActiveRuntime({
     sid,
     tabId,
     mode,
-    url: metadata.url,
-    captureUrl: tabMetadata.captureUrl,
-    title: metadata.title,
-    tags: annotation.tags,
-    note: annotation.note,
+    metadata,
     config: recorderConfig,
-    startedAt,
-    pipeline,
-    performanceBudget
+    startedAt
+  });
+  const existing = sessionsByTab.get(tabId);
+  const runtime = await runProvisionalRuntimeStartTransaction({
+    token: startToken,
+    checkpointStopping: () => checkpointProvisionalRuntimeStart(provisionalActive),
+    startPipeline: async () => {
+      startToken.assertActive();
+      await ensureOffscreenDocument();
+      startToken.assertActive();
+      await pipeline.start(metadata, recorderConfig.redaction, recorderConfig.capturePolicy);
+    },
+    stopExisting: async () => {
+      startToken.assertActive();
+
+      if (existing && isMapEntrySame(sessionsByTab, tabId, existing)) {
+        await requestSessionStop(tabId);
+      } else if (sessionsByTab.has(tabId)) {
+        throw new Error("The tab recording changed while a replacement start was pending.");
+      }
+    },
+    prepareRuntime: () =>
+      createSessionRuntime({
+        sid,
+        tabId,
+        mode,
+        url: metadata.url,
+        captureUrl: tabMetadata.captureUrl,
+        title: metadata.title,
+        tags: annotation.tags,
+        note: annotation.note,
+        config: recorderConfig,
+        startedAt,
+        pipeline,
+        performanceBudget,
+        activationState: "starting"
+      }),
+    registerRuntime: (candidate) => {
+      if (sessionsByTab.has(tabId) || sessionsBySid.has(sid)) {
+        throw new Error("The provisional runtime identity is already registered.");
+      }
+
+      sessionsByTab.set(tabId, candidate);
+      sessionsBySid.set(sid, candidate);
+      scheduleConsentExpiry(candidate);
+
+      if (mode === "lite") {
+        installLiteWebRequestCapture();
+      }
+
+      notifyOffscreenPipelineStatus();
+    },
+    completeRuntime: async (candidate) => {
+      ingestRawEvent({
+        source: "system",
+        rawType: "config",
+        sid,
+        tabId,
+        t: Date.now(),
+        mono: monotonicTime(),
+        payload: recorderConfig
+      });
+      await flushBufferedPipelineEvents(candidate);
+      startToken.assertActive();
+      await candidate.pipeline.flush();
+
+      if (shouldInjectHooksForMode(mode)) {
+        startToken.assertActive();
+        await ensureContentScriptInjected(candidate);
+        startToken.assertActive();
+        await ensureInjectedHooks(tabId, 0);
+      }
+
+      if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
+        startToken.assertActive();
+        await attachCdp(candidate);
+      }
+
+      if (screenRecordingRequested) {
+        if (!shouldStartScreenRecording(candidate, true)) {
+          throw new Error("Screen recording prerequisites are not ready before activation.");
+        }
+
+        startToken.assertActive();
+        await startScreenRecording(candidate, true);
+
+        if (!candidate.screenRecording) {
+          throw new Error("Screen recording did not start before runtime activation.");
+        }
+
+        startToken.assertActive();
+        await flushBufferedPipelineEvents(candidate);
+        startToken.assertActive();
+        await candidate.pipeline.flush();
+      }
+
+      if (mode === "lite" && options.reloadPage === true) {
+        startToken.assertActive();
+        await reloadRecordingTab(tabId);
+      }
+    },
+    commitRuntime: (candidate, tombstone) =>
+      commitProvisionalRuntimeStart(candidate, tombstone, startToken),
+    cleanupPipeline: (tombstone) =>
+      cleanupFailedProvisionalPipelineStart(provisionalActive, tombstone, pipeline),
+    cleanupRuntime: (candidate, tombstone) =>
+      cleanupFailedProvisionalRuntimeStart(provisionalActive, tombstone, candidate)
   });
 
-  sessionsByTab.set(tabId, runtime);
-  sessionsBySid.set(sid, runtime);
-  scheduleConsentExpiry(runtime);
-
-  if (mode === "lite") {
-    installLiteWebRequestCapture();
-  }
-
-  ingestRawEvent({
-    source: "system",
-    rawType: "config",
-    sid,
-    tabId,
-    t: Date.now(),
-    mono: monotonicTime(),
-    payload: recorderConfig
-  });
-
-  if (shouldInjectHooksForMode(mode)) {
-    await ensureContentScriptInjected(runtime);
-    await ensureInjectedHooks(tabId, 0);
-  }
-
-  if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
-    await attachCdp(runtime);
-  }
-
-  // Make the owning session durable before an offscreen MediaRecorder can outlive this worker.
-  await persistRuntimeState();
-
-  if (shouldStartScreenRecording(runtime)) {
-    try {
-      await startScreenRecording(runtime);
-    } catch (error) {
-      await stopSession(tabId);
-      throw error;
+  if (!startToken.isActive()) {
+    if (isMapEntrySame(sessionsByTab, tabId, runtime)) {
+      await requestSessionStop(tabId);
     }
+    throw new RuntimeStartCancelledError();
   }
 
-  const sampling = toStatusSampling(runtime);
+  publishCommittedRuntimeStart(runtime);
+}
 
-  await setRecordingBadge();
-  await notifyAuthorizedContentFrames(runtime, true);
-  broadcast({
-    kind: "sw.recording-status",
-    active: true,
-    tabId,
-    sid,
-    mode,
-    sampling,
-    capturePolicy: recorderConfig.capturePolicy
+function createInitialPersistedActiveRuntime(input: {
+  sid: string;
+  tabId: number;
+  mode: CaptureMode;
+  metadata: SessionMetadata;
+  config: typeof DEFAULT_RECORDER_CONFIG;
+  startedAt: number;
+}): PersistedActiveRuntime {
+  return {
+    state: "active",
+    sid: input.sid,
+    tabId: input.tabId,
+    mode: input.mode,
+    url: sanitizeUrlForPrivacy(input.metadata.url),
+    ...(input.metadata.title ? { title: input.metadata.title.slice(0, 1_024) } : {}),
+    tags: normalizeSessionTags(input.metadata.tags),
+    config: input.config,
+    startedAt: input.startedAt,
+    counters: {
+      recorderEventSequence: 0,
+      recorderActionSequence: 0,
+      eventCount: 0,
+      errorCount: 0,
+      sizeBytes: 0,
+      budgetAlertCount: 0,
+      droppedBestEffortTasks: 0,
+      responseBodyCaptures: 0,
+      networkTotal: 0,
+      networkFailed: 0
+    }
+  };
+}
+
+async function checkpointProvisionalRuntimeStart(
+  active: PersistedActiveRuntime
+): Promise<PersistedStoppingRuntime> {
+  const stopRequestedAt = Date.now();
+  const cleanupDeadline = stopRequestedAt + resolveRuntimeLocalTtlMs(active.config.capturePolicy);
+  const tombstone = createStoppingRuntimeTombstone(active, stopRequestedAt, cleanupDeadline);
+  retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
+
+  try {
+    await persistRuntimeState({ required: true });
+  } catch (error) {
+    await scheduleRetainedStoppingRuntimeRecovery(tombstone).catch(() => undefined);
+    throw error;
+  }
+
+  await scheduleRetainedStoppingRuntimeRecovery(tombstone).catch((error) => {
+    console.warn("[WebBlackbox] failed to schedule provisional start cleanup", {
+      sid: tombstone.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
   });
-  pushSessionList();
-  await persistRuntimeState();
-  notifyOffscreenPipelineStatus();
+  return tombstone;
+}
+
+async function commitProvisionalRuntimeStart(
+  runtime: SessionRuntime,
+  tombstone: PersistedStoppingRuntime,
+  startToken: RuntimeStartToken
+): Promise<void> {
+  startToken.assertActive();
+
+  if (
+    runtime.activationState !== "starting" ||
+    !isMapEntrySame(sessionsByTab, runtime.tabId, runtime) ||
+    !isMapEntrySame(sessionsBySid, runtime.sid, runtime) ||
+    !deleteMapEntryIfSame(retainedStoppingRuntimesBySid, tombstone.sid, tombstone)
+  ) {
+    throw new Error("The provisional runtime lost its activation identity.");
+  }
+
+  try {
+    await persistRuntimeState({ required: true });
+  } catch (error) {
+    if (!retainedStoppingRuntimesBySid.has(tombstone.sid)) {
+      retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
+    }
+    await scheduleRetainedStoppingRuntimeRecovery(tombstone).catch(() => undefined);
+    throw error;
+  }
+
+  if (
+    !startToken.isActive() ||
+    !isMapEntrySame(sessionsByTab, runtime.tabId, runtime) ||
+    !isMapEntrySame(sessionsBySid, runtime.sid, runtime)
+  ) {
+    retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
+    throw new RuntimeStartCancelledError();
+  }
+
+  // The required storage write above is the only active-state commit point.
+  // Nothing below this assignment is allowed to reject the successful start.
+  runtime.activationState = "active";
+
+  if (runtime.screenRecording) {
+    runtime.screenRecording.provisional = false;
+  }
+  void Promise.resolve()
+    .then(() => runtimeCleanupScheduler.cancel(tombstone.sid))
+    .catch(() => undefined);
+}
+
+function publishCommittedRuntimeStart(runtime: SessionRuntime): void {
+  void setRecordingBadge().catch(() => undefined);
+  void notifyAuthorizedContentFrames(runtime, true).catch(() => undefined);
+
+  try {
+    broadcast({
+      kind: "sw.recording-status",
+      active: true,
+      tabId: runtime.tabId,
+      sid: runtime.sid,
+      mode: runtime.mode,
+      sampling: toStatusSampling(runtime),
+      capturePolicy: runtime.config.capturePolicy
+    });
+    pushSessionList();
+    notifyOffscreenPipelineStatus();
+  } catch (error) {
+    console.warn("[WebBlackbox] failed to publish committed runtime status", error);
+  }
+}
+
+function cleanupFailedProvisionalPipelineStart(
+  active: PersistedActiveRuntime,
+  tombstone: PersistedStoppingRuntime,
+  pipeline: SessionPipelineClient
+): Promise<void> {
+  return cleanupFailedPipelineRestoration(active, pipeline, tombstone);
+}
+
+function cleanupFailedProvisionalRuntimeStart(
+  active: PersistedActiveRuntime,
+  tombstone: PersistedStoppingRuntime,
+  runtime: SessionRuntime
+): Promise<void> {
+  return cleanupFailedActiveRuntimeRestoration(active, runtime, tombstone);
 }
 
 function createSessionRuntime(input: {
@@ -1284,6 +1509,7 @@ function createSessionRuntime(input: {
   counters?: PersistedRuntimeCounters;
   screenRecording?: PersistedScreenRecording;
   screenRecordingChunks?: readonly ScreenRecordingChunkReference[];
+  activationState?: RuntimeActivationState;
 }): SessionRuntime {
   const counters = input.counters ?? {
     recorderEventSequence: 0,
@@ -1368,6 +1594,7 @@ function createSessionRuntime(input: {
       ? {
           recordingId: input.screenRecording.recordingId,
           cdpScopeGeneration: null,
+          provisional: false,
           source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
           startedAt: input.screenRecording.startedAt,
           startedMono: input.screenRecording.startedMono,
@@ -1394,6 +1621,7 @@ function createSessionRuntime(input: {
     pipelineFlushTimer: null,
     pipelineFlushQueued: false,
     captureFence: createVolatileCaptureFence(input.stoppedAt !== undefined),
+    activationState: input.activationState ?? "active",
     stopping: false,
     responseBodyCaptures: counters.responseBodyCaptures,
     responseBodyCaptureTimestamps: [],
@@ -1465,7 +1693,9 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
     await restoreCdpGlobalCaptureAfterNavigation(runtime, tabMetadata.captureUrl, true);
   }
 
-  await notifyAuthorizedContentFrames(runtime, true);
+  if (runtime.activationState === "active") {
+    await notifyAuthorizedContentFrames(runtime, true);
+  }
 }
 
 async function handleCommittedChildDocument(details: {
@@ -1526,6 +1756,23 @@ async function handleCommittedChildDocument(details: {
 }
 
 function stopSession(tabId: number): Promise<void> {
+  sessionStartCoordinator.cancel(tabId);
+  const runtime = sessionsByTab.get(tabId);
+
+  if (runtime) {
+    blockVolatileCapture(runtime.captureFence);
+    runtime.contentDocuments.cancelPendingNavigations();
+    notifyOffscreenPipelineStatus();
+
+    if (runtime.activationState === "starting") {
+      return Promise.resolve();
+    }
+  }
+
+  return requestSessionStop(tabId);
+}
+
+function requestSessionStop(tabId: number): Promise<void> {
   const runtime = sessionsByTab.get(tabId);
 
   if (runtime) {
@@ -1802,10 +2049,19 @@ function ingestRawEvent(
     stopDrainClaim &&
     isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence)
   );
+  const provisionalSystemEvent = Boolean(
+    runtime &&
+    runtime.activationState === "starting" &&
+    rawEvent.source === "system" &&
+    (rawEvent.rawType === "config" || rawEvent.rawType.startsWith("screen.recording.")) &&
+    rawEvent.sid === runtime.sid
+  );
 
   if (
     !runtime ||
-    (!isVolatileCaptureOpen(runtime.captureFence) &&
+    ((!isVolatileCaptureOpen(runtime.captureFence) ||
+      !isRuntimeCaptureAdmitted(runtime.activationState)) &&
+      !provisionalSystemEvent &&
       !stopDrainAuthorized &&
       !isCaptureClosureEvent(rawEvent))
   ) {
@@ -2884,7 +3140,9 @@ async function recoverOffscreenSession(sid: string): Promise<void> {
 
 function toOffscreenPipelineRecoveryState(runtime: SessionRuntime) {
   return {
-    captureOpen: isVolatileCaptureOpen(runtime.captureFence),
+    captureOpen:
+      isRuntimeCaptureAdmitted(runtime.activationState) &&
+      isVolatileCaptureOpen(runtime.captureFence),
     stopping: runtime.stopping,
     stopped: runtime.stoppedAt !== undefined
   };
@@ -2913,7 +3171,10 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         event.sessionId
       );
       const scopeAllowed = scopeEvaluation.allowed;
-      const captureAllowed = scopeAllowed && isVolatileCaptureOpen(runtime.captureFence);
+      const captureAllowed =
+        scopeAllowed &&
+        isRuntimeCaptureAdmitted(runtime.activationState) &&
+        isVolatileCaptureOpen(runtime.captureFence);
       const cdpFrameTreeMutated = scopeEvaluation.globalFrameTreeMutation === true;
 
       if (scopeEvaluation.topNavigation) {
@@ -2932,12 +3193,17 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
           });
         }
       } else if (cdpFrameTreeMutated) {
-        const recordingGeneration = runtime.screenRecording?.cdpScopeGeneration;
+        const activeRecording = runtime.screenRecording;
+        const recordingGeneration = activeRecording?.cdpScopeGeneration;
 
         if (
           recordingGeneration !== undefined &&
           (recordingGeneration === null ||
-            !isRuntimeGlobalCdpCaptureClaimValid(runtime, recordingGeneration))
+            !isRuntimeGlobalCdpCaptureClaimValid(
+              runtime,
+              recordingGeneration,
+              activeRecording?.provisional === true
+            ))
         ) {
           void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
         }
@@ -3117,7 +3383,8 @@ async function restoreCdpGlobalCaptureAfterNavigation(
   }
 
   const recording = runtime.screenRecording;
-  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime);
+  const allowStarting = recording?.provisional === true;
+  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime, allowStarting);
 
   if (
     recording &&
@@ -3128,7 +3395,7 @@ async function restoreCdpGlobalCaptureAfterNavigation(
     await stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
   }
 
-  if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime) === null) {
+  if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime, allowStarting) === null) {
     const primed = await primeCdpFrameTreeScopes(runtime);
 
     if (!primed || !isRuntimeCaptureScopeActive(runtime) || runtime.captureUrl !== expectedUrl) {
@@ -3136,7 +3403,11 @@ async function restoreCdpGlobalCaptureAfterNavigation(
         recording &&
         runtime.screenRecording === recording &&
         (recording.cdpScopeGeneration === null ||
-          !isRuntimeGlobalCdpCaptureClaimValid(runtime, recording.cdpScopeGeneration))
+          !isRuntimeGlobalCdpCaptureClaimValid(
+            runtime,
+            recording.cdpScopeGeneration,
+            allowStarting
+          ))
       ) {
         await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
       }
@@ -3145,7 +3416,7 @@ async function restoreCdpGlobalCaptureAfterNavigation(
     }
   }
 
-  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime);
+  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime, allowStarting);
   const activeRecording = runtime.screenRecording;
 
   if (
@@ -3186,8 +3457,13 @@ function isRuntimeCaptureScopeActive(runtime: SessionRuntime): boolean {
   );
 }
 
-function claimRuntimeGlobalCdpCapture(runtime: SessionRuntime): number | null {
+function claimRuntimeGlobalCdpCapture(
+  runtime: SessionRuntime,
+  allowStarting = false
+): number | null {
   if (
+    (!isRuntimeCaptureAdmitted(runtime.activationState) &&
+      !(allowStarting && runtime.activationState === "starting")) ||
     !isRuntimeCaptureScopeActive(runtime) ||
     !canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl)
   ) {
@@ -3197,8 +3473,14 @@ function claimRuntimeGlobalCdpCapture(runtime: SessionRuntime): number | null {
   return runtime.cdpScope.generation;
 }
 
-function isRuntimeGlobalCdpCaptureClaimValid(runtime: SessionRuntime, generation: number): boolean {
+function isRuntimeGlobalCdpCaptureClaimValid(
+  runtime: SessionRuntime,
+  generation: number,
+  allowStarting = false
+): boolean {
   return (
+    (isRuntimeCaptureAdmitted(runtime.activationState) ||
+      (allowStarting && runtime.activationState === "starting")) &&
     isRuntimeCaptureScopeActive(runtime) &&
     canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl, generation)
   );
@@ -3654,16 +3936,16 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
   });
 }
 
-function shouldStartScreenRecording(runtime: SessionRuntime): boolean {
+function shouldStartScreenRecording(runtime: SessionRuntime, allowStarting = false): boolean {
   return (
     runtime.mode === "full" &&
-    claimRuntimeGlobalCdpCapture(runtime) !== null &&
+    claimRuntimeGlobalCdpCapture(runtime, allowStarting) !== null &&
     runtime.config.capturePolicy?.categories.screenRecordings === "allow"
   );
 }
 
-async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
-  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
+async function startScreenRecording(runtime: SessionRuntime, provisional = false): Promise<void> {
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime, provisional);
 
   if (runtime.screenRecording || cdpScopeGeneration === null) {
     return;
@@ -3680,7 +3962,7 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
     targetTabId: runtime.tabId
   });
 
-  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)) {
     return;
   }
 
@@ -3691,6 +3973,7 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
   const recording: ScreenRecordingRuntime = {
     recordingId,
     cdpScopeGeneration,
+    provisional,
     source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
     startedAt,
     startedMono,
@@ -3712,7 +3995,7 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
       source: SCREEN_RECORDING_OFFSCREEN_SOURCE
     });
 
-    if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+    if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)) {
       await stopScreenRecording(runtime, "capture-fence").catch(() => undefined);
       return;
     }
@@ -3792,7 +4075,11 @@ async function handleOffscreenScreenRecordingChunk(
 
   if (
     recording.cdpScopeGeneration === null ||
-    !isRuntimeGlobalCdpCaptureClaimValid(runtime, recording.cdpScopeGeneration)
+    !isRuntimeGlobalCdpCaptureClaimValid(
+      runtime,
+      recording.cdpScopeGeneration,
+      recording.provisional
+    )
   ) {
     await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
     return;
@@ -3810,7 +4097,7 @@ async function handleOffscreenScreenRecordingChunk(
 
     if (
       cdpScopeGeneration === null ||
-      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, recording.provisional)
     ) {
       return;
     }
@@ -3821,7 +4108,7 @@ async function handleOffscreenScreenRecordingChunk(
     if (
       !hash ||
       runtime.screenRecording !== recording ||
-      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, recording.provisional)
     ) {
       return;
     }
@@ -5550,6 +5837,7 @@ function hasActiveLiteRuntime(): boolean {
   for (const runtime of sessionsByTab.values()) {
     if (
       runtime.mode === "lite" &&
+      isRuntimeCaptureAdmitted(runtime.activationState) &&
       isVolatileCaptureOpen(runtime.captureFence) &&
       !runtime.stopping &&
       !runtime.stoppedAt
@@ -5571,6 +5859,7 @@ function resolveActiveLiteRuntime(tabId: number): SessionRuntime | undefined {
   if (
     !runtime ||
     runtime.mode !== "lite" ||
+    !isRuntimeCaptureAdmitted(runtime.activationState) ||
     !isVolatileCaptureOpen(runtime.captureFence) ||
     runtime.stopping ||
     runtime.stoppedAt
@@ -5623,6 +5912,7 @@ function enqueue(
 
   if (options.bestEffort) {
     if (
+      !isRuntimeCaptureAdmitted(runtime.activationState) ||
       !isVolatileCaptureOpen(runtime.captureFence) ||
       runtime.stopping ||
       runtime.queueDepth >= BEST_EFFORT_QUEUE_MAX_PENDING
@@ -5833,6 +6123,7 @@ function toSessionListItem(runtime: SessionRuntime): SessionListItem {
   const activeRuntime = sessionsByTab.get(runtime.tabId);
   const active =
     activeRuntime?.sid === runtime.sid &&
+    isRuntimeCaptureAdmitted(runtime.activationState) &&
     isVolatileCaptureOpen(runtime.captureFence) &&
     !runtime.stopping &&
     !runtime.stoppedAt;
@@ -5979,6 +6270,7 @@ function pushSessionList(): void {
 
 function buildSessionListMessage(): SessionListMessage {
   const sessions: SessionListItem[] = [...sessionsBySid.values()]
+    .filter((runtime) => isRuntimeCaptureAdmitted(runtime.activationState))
     .map((runtime) => toSessionListItem(runtime))
     .sort((left, right) => {
       const activeDiff = Number(right.active) - Number(left.active);
@@ -7076,13 +7368,18 @@ async function restoreActiveRuntime(
 
 async function cleanupFailedPipelineRestoration(
   persisted: PersistedActiveRuntime,
-  pipeline: SessionPipelineClient
+  pipeline: SessionPipelineClient,
+  existingTombstone?: PersistedStoppingRuntime
 ): Promise<void> {
   let tombstone: PersistedStoppingRuntime | null = null;
 
   await runDurableFailedRuntimeCleanup({
     persistStopping: async () => {
-      tombstone = await checkpointFailedActiveRuntimeCleanup(persisted);
+      tombstone = await checkpointFailedActiveRuntimeCleanup(
+        persisted,
+        undefined,
+        existingTombstone
+      );
     },
     cleanup: async () => {
       await pipeline.close({ purge: true });
@@ -7094,13 +7391,14 @@ async function cleanupFailedPipelineRestoration(
 
 async function cleanupFailedActiveRuntimeRestoration(
   persisted: PersistedActiveRuntime,
-  runtime: SessionRuntime
+  runtime: SessionRuntime,
+  existingTombstone?: PersistedStoppingRuntime
 ): Promise<void> {
   let tombstone: PersistedStoppingRuntime | null = null;
 
   await runDurableFailedRuntimeCleanup({
     persistStopping: async () => {
-      tombstone = await checkpointFailedActiveRuntimeCleanup(persisted, runtime);
+      tombstone = await checkpointFailedActiveRuntimeCleanup(persisted, runtime, existingTombstone);
     },
     cleanup: () => purgeFailedActiveRuntimeRestoration(runtime),
     clearStopping: () => clearFailedActiveRuntimeCleanup(requireTombstone(tombstone))
@@ -7109,13 +7407,20 @@ async function cleanupFailedActiveRuntimeRestoration(
 
 async function checkpointFailedActiveRuntimeCleanup(
   persisted: PersistedActiveRuntime,
-  runtime?: SessionRuntime
+  runtime?: SessionRuntime,
+  existingTombstone?: PersistedStoppingRuntime
 ): Promise<PersistedStoppingRuntime> {
-  const stopRequestedAt = Date.now();
+  const stopRequestedAt = existingTombstone?.stopRequestedAt ?? Date.now();
   const cleanupDeadline =
+    existingTombstone?.cleanupDeadline ??
     stopRequestedAt + resolveRuntimeLocalTtlMs(persisted.config.capturePolicy);
-  const tombstone = createStoppingRuntimeTombstone(persisted, stopRequestedAt, cleanupDeadline);
-  pendingRuntimeRestorationsBySid.delete(persisted.sid);
+  const tombstone =
+    existingTombstone ??
+    createStoppingRuntimeTombstone(persisted, stopRequestedAt, cleanupDeadline);
+
+  if (!existingTombstone) {
+    pendingRuntimeRestorationsBySid.delete(persisted.sid);
+  }
 
   if (runtime) {
     blockVolatileCapture(runtime.captureFence);
@@ -7434,7 +7739,10 @@ function notifyOffscreenPipelineStatus(): void {
 
   const activeRuntimes = [...sessionsByTab.values()].filter(
     (runtime) =>
-      isVolatileCaptureOpen(runtime.captureFence) && !runtime.stopping && !runtime.stoppedAt
+      isRuntimeCaptureAdmitted(runtime.activationState) &&
+      isVolatileCaptureOpen(runtime.captureFence) &&
+      !runtime.stopping &&
+      !runtime.stoppedAt
   );
 
   try {

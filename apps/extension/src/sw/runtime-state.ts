@@ -147,6 +147,12 @@ export type VolatileCaptureFence = {
   blocked: boolean;
 };
 
+export type RuntimeActivationState = "starting" | "active";
+
+export function isRuntimeCaptureAdmitted(state: RuntimeActivationState): boolean {
+  return state === "active";
+}
+
 export type DurableRuntimeStopWorkflowOptions = {
   captureFence: VolatileCaptureFence;
   persistStopping: () => void | Promise<void>;
@@ -193,25 +199,140 @@ export type DurableFailedRuntimeCleanupOptions = {
   clearStopping: () => void | Promise<void>;
 };
 
-export class RuntimeStartCoordinator {
-  private readonly inFlight = new Map<number, Promise<void>>();
+export type ProvisionalRuntimeStartTransactionOptions<TTombstone, TRuntime extends object> = {
+  token: RuntimeStartToken;
+  checkpointStopping: () => TTombstone | Promise<TTombstone>;
+  startPipeline: (tombstone: TTombstone) => void | Promise<void>;
+  stopExisting: (tombstone: TTombstone) => void | Promise<void>;
+  prepareRuntime: (tombstone: TTombstone) => TRuntime | Promise<TRuntime>;
+  registerRuntime: (runtime: TRuntime, tombstone: TTombstone) => void;
+  completeRuntime: (runtime: TRuntime, tombstone: TTombstone) => void | Promise<void>;
+  commitRuntime: (runtime: TRuntime, tombstone: TTombstone) => void | Promise<void>;
+  cleanupPipeline: (tombstone: TTombstone) => void | Promise<void>;
+  cleanupRuntime: (runtime: TRuntime, tombstone: TTombstone) => void | Promise<void>;
+};
 
-  public run(tabId: number, start: () => Promise<void>): Promise<void> {
+export class RuntimeStartCancelledError extends Error {
+  public constructor() {
+    super("Runtime start was cancelled before activation.");
+    this.name = "RuntimeStartCancelledError";
+  }
+}
+
+export class RuntimeStartToken {
+  private cancelled = false;
+
+  public cancel(): void {
+    this.cancelled = true;
+  }
+
+  public isActive(): boolean {
+    return !this.cancelled;
+  }
+
+  public assertActive(): void {
+    if (this.cancelled) {
+      throw new RuntimeStartCancelledError();
+    }
+  }
+}
+
+export class RuntimeStartCoordinator {
+  private readonly inFlight = new Map<
+    number,
+    {
+      key: string;
+      token: RuntimeStartToken;
+      task: Promise<void>;
+    }
+  >();
+
+  public run(
+    tabId: number,
+    key: string,
+    start: (token: RuntimeStartToken) => Promise<void>
+  ): Promise<void> {
     const existing = this.inFlight.get(tabId);
 
-    if (existing) {
-      return existing;
+    if (existing && existing.key === key && existing.token.isActive()) {
+      return existing.task;
     }
 
-    const task = Promise.resolve()
-      .then(start)
+    existing?.token.cancel();
+    const token = new RuntimeStartToken();
+    const preceding = existing?.task.catch(() => undefined) ?? Promise.resolve();
+    const entry = {
+      key,
+      token,
+      task: Promise.resolve() as Promise<void>
+    };
+    const task = preceding
+      .then(() => {
+        token.assertActive();
+        return start(token);
+      })
       .finally(() => {
-        if (this.inFlight.get(tabId) === task) {
+        if (this.inFlight.get(tabId) === entry) {
           this.inFlight.delete(tabId);
         }
       });
-    this.inFlight.set(tabId, task);
+    entry.task = task;
+    this.inFlight.set(tabId, entry);
     return task;
+  }
+
+  public cancel(tabId: number): void {
+    this.inFlight.get(tabId)?.token.cancel();
+  }
+}
+
+/**
+ * Runs a new-session start behind a durable stopping checkpoint. Anything
+ * after that checkpoint is provisional until the caller's single active
+ * commit succeeds. Failures and cancellation share the same identity-safe
+ * cleanup path, selected by whether a runtime was registered.
+ */
+export async function runProvisionalRuntimeStartTransaction<TTombstone, TRuntime extends object>(
+  options: ProvisionalRuntimeStartTransactionOptions<TTombstone, TRuntime>
+): Promise<TRuntime> {
+  let tombstone: TTombstone | undefined;
+  let runtime: TRuntime | undefined;
+
+  try {
+    options.token.assertActive();
+    tombstone = await options.checkpointStopping();
+    options.token.assertActive();
+    await options.startPipeline(tombstone);
+    options.token.assertActive();
+    await options.stopExisting(tombstone);
+    options.token.assertActive();
+    runtime = await options.prepareRuntime(tombstone);
+    options.token.assertActive();
+    options.registerRuntime(runtime, tombstone);
+    options.token.assertActive();
+    await options.completeRuntime(runtime, tombstone);
+    options.token.assertActive();
+    await options.commitRuntime(runtime, tombstone);
+    return runtime;
+  } catch (error) {
+    if (tombstone === undefined) {
+      throw error;
+    }
+
+    try {
+      if (runtime === undefined) {
+        await options.cleanupPipeline(tombstone);
+      } else {
+        await options.cleanupRuntime(runtime, tombstone);
+      }
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Runtime start failed and provisional cleanup did not complete."
+      );
+    }
+
+    throw error;
   }
 }
 

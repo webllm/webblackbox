@@ -15,6 +15,7 @@ import {
   executeIngestOperation,
   normalizeOptionalIngestOperationId
 } from "./ingest-idempotency.js";
+import { closeOffscreenPipelineSession } from "./pipeline-close.js";
 import { getExtensionPipelineStorage } from "./pipeline-storage.js";
 import { ResilientRuntimePort } from "./runtime-port.js";
 import {
@@ -321,6 +322,27 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     return null;
   }
 
+  if (message.op === "close") {
+    await closeOffscreenPipelineSession({
+      sid: message.sid,
+      purge: message.purge === true,
+      pipelines,
+      stopScreenRecording: () =>
+        stopOffscreenScreenRecording(
+          message.sid,
+          undefined,
+          message.purge === true ? "pipeline-purge" : "pipeline-close",
+          false
+        ),
+      ingestIdempotencyRegistry,
+      screenRecordingTerminalResults,
+      onScreenRecordingStopError: (error) => {
+        console.warn("[WebBlackbox] failed to stop offscreen screen recording", error);
+      }
+    });
+    return null;
+  }
+
   const pipeline = pipelines.get(message.sid);
 
   if (!pipeline) {
@@ -426,24 +448,6 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       exported.integrity,
       exported.privacyManifest.scanner
     );
-  }
-
-  if (message.op === "close") {
-    await stopOffscreenScreenRecording(
-      message.sid,
-      undefined,
-      message.purge === true ? "pipeline-purge" : "pipeline-close",
-      false
-    ).catch((error) => {
-      console.warn("[WebBlackbox] failed to stop offscreen screen recording", error);
-    });
-    await pipeline.close({
-      purge: message.purge === true
-    });
-    pipelines.delete(message.sid);
-    ingestIdempotencyRegistry.clearSession(message.sid);
-    screenRecordingTerminalResults.clearSession(message.sid);
-    return null;
   }
 
   throw new Error(`Unsupported pipeline operation: ${message.op}`);

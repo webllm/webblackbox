@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Made new-session startup atomic: capability, policy, performance-budget, pipeline, injection, CDP,
+  optional recording, and Lite reload prerequisites now complete behind a durable stopping tombstone
+  before one required active checkpoint; cancellation or failure purges the provisional session
+  identity-safely, while cleanup failures retain alarm-backed recovery state.
 - Added manifest-and-API capability preflight before capture side effects, so unsupported Full,
   recording, page-injection, and Lite browser-network paths fail closed without stopping an
   existing session or creating an offscreen pipeline.

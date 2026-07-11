@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   RuntimeCleanupScheduler,
+  RuntimeStartCancelledError,
   RuntimeStartCoordinator,
+  RuntimeStartToken,
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
   createVolatileCaptureFence,
@@ -17,6 +19,7 @@ import {
   disposeListenersBeforeTeardown,
   evaluateActiveRuntimeRestoration,
   isMapEntrySame,
+  isRuntimeCaptureAdmitted,
   isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
   mergeRuntimeCountersWithSequenceWatermark,
@@ -30,6 +33,7 @@ import {
   runActiveRuntimeRestorationTransaction,
   runDurableFailedRuntimeCleanup,
   runDurableRuntimeStopWorkflow,
+  runProvisionalRuntimeStartTransaction,
   runVolatileCaptureOperation,
   type PersistedActiveRuntime,
   type PersistedRuntime
@@ -973,18 +977,23 @@ describe("active runtime restoration transaction", () => {
 });
 
 describe("runtime start coordination", () => {
-  it("coalesces concurrent starts for one tab and allows a later start", async () => {
+  it("admits capture only after the active commit", () => {
+    expect(isRuntimeCaptureAdmitted("starting")).toBe(false);
+    expect(isRuntimeCaptureAdmitted("active")).toBe(true);
+  });
+
+  it("coalesces only identical concurrent starts and allows a later start", async () => {
     const coordinator = new RuntimeStartCoordinator();
     let release!: () => void;
     const firstStart = vi.fn(
-      () =>
+      async () =>
         new Promise<void>((resolve) => {
           release = resolve;
         })
     );
 
-    const first = coordinator.run(7, firstStart);
-    const duplicate = coordinator.run(7, firstStart);
+    const first = coordinator.run(7, "lite:none:false", firstStart);
+    const duplicate = coordinator.run(7, "lite:none:false", firstStart);
     await Promise.resolve();
     expect(firstStart).toHaveBeenCalledOnce();
     expect(duplicate).toBe(first);
@@ -993,8 +1002,299 @@ describe("runtime start coordination", () => {
 
     await coordinator.run(
       7,
+      "lite:none:false",
       firstStart.mockImplementation(async () => undefined)
     );
     expect(firstStart).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels and serializes a different concurrent start for the same tab", async () => {
+    const coordinator = new RuntimeStartCoordinator();
+    const order: string[] = [];
+    let release!: () => void;
+
+    const first = coordinator.run(7, "lite:none:false", async (token) => {
+      order.push("first:start");
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      token.assertActive();
+      order.push("first:commit");
+    });
+    await Promise.resolve();
+    const second = coordinator.run(7, "full:both:false", async () => {
+      order.push("second:start");
+    });
+
+    release();
+    const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+
+    expect(firstResult).toMatchObject({
+      status: "rejected",
+      reason: expect.any(RuntimeStartCancelledError)
+    });
+    expect(secondResult).toEqual({ status: "fulfilled", value: undefined });
+    expect(order).toEqual(["first:start", "second:start"]);
+  });
+
+  it("cancels an in-flight start synchronously for stop or tab removal", async () => {
+    const coordinator = new RuntimeStartCoordinator();
+    let release!: () => void;
+    const task = coordinator.run(7, "lite:none:true", async (token) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      token.assertActive();
+    });
+    await Promise.resolve();
+
+    coordinator.cancel(7);
+    release();
+
+    await expect(task).rejects.toBeInstanceOf(RuntimeStartCancelledError);
+  });
+});
+
+describe("provisional runtime start transaction", () => {
+  it("starts requested recording before the active commit", async () => {
+    const token = new RuntimeStartToken();
+    const startRecording = vi.fn().mockResolvedValue(undefined);
+    const commit = vi.fn(() => {
+      expect(startRecording).toHaveBeenCalledOnce();
+    });
+
+    await runProvisionalRuntimeStartTransaction({
+      token,
+      checkpointStopping: () => ({ sid: "new" }),
+      startPipeline: () => undefined,
+      stopExisting: () => undefined,
+      prepareRuntime: () => ({ sid: "new" }),
+      registerRuntime: () => undefined,
+      completeRuntime: startRecording,
+      commitRuntime: commit,
+      cleanupPipeline: () => undefined,
+      cleanupRuntime: () => undefined
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back instead of committing when requested recording fails", async () => {
+    const token = new RuntimeStartToken();
+    const commit = vi.fn();
+    const cleanupRuntime = vi.fn();
+
+    await expect(
+      runProvisionalRuntimeStartTransaction({
+        token,
+        checkpointStopping: () => ({ sid: "new" }),
+        startPipeline: () => undefined,
+        stopExisting: () => undefined,
+        prepareRuntime: () => ({ sid: "new" }),
+        registerRuntime: () => undefined,
+        completeRuntime: () => {
+          throw new Error("screen recording failed");
+        },
+        commitRuntime: commit,
+        cleanupPipeline: () => undefined,
+        cleanupRuntime
+      })
+    ).rejects.toThrow("screen recording failed");
+
+    expect(commit).not.toHaveBeenCalled();
+    expect(cleanupRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back a registered runtime when reload fails", async () => {
+    const token = new RuntimeStartToken();
+    const commit = vi.fn();
+    const cleanupRuntime = vi.fn();
+
+    await expect(
+      runProvisionalRuntimeStartTransaction({
+        token,
+        checkpointStopping: () => ({ sid: "new" }),
+        startPipeline: () => undefined,
+        stopExisting: () => undefined,
+        prepareRuntime: () => ({ sid: "new" }),
+        registerRuntime: () => undefined,
+        completeRuntime: async () => {
+          await Promise.resolve();
+          throw new Error("reload failed");
+        },
+        commitRuntime: commit,
+        cleanupPipeline: () => undefined,
+        cleanupRuntime
+      })
+    ).rejects.toThrow("reload failed");
+
+    expect(commit).not.toHaveBeenCalled();
+    expect(cleanupRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("does not run destructive cleanup when the durable checkpoint itself fails", async () => {
+    const token = new RuntimeStartToken();
+    const cleanupPipeline = vi.fn();
+    const cleanupRuntime = vi.fn();
+
+    await expect(
+      runProvisionalRuntimeStartTransaction({
+        token,
+        checkpointStopping: () => {
+          throw new Error("checkpoint failed");
+        },
+        startPipeline: () => undefined,
+        stopExisting: () => undefined,
+        prepareRuntime: () => ({ sid: "new" }),
+        registerRuntime: () => undefined,
+        completeRuntime: () => undefined,
+        commitRuntime: () => undefined,
+        cleanupPipeline,
+        cleanupRuntime
+      })
+    ).rejects.toThrow("checkpoint failed");
+
+    expect(cleanupPipeline).not.toHaveBeenCalled();
+    expect(cleanupRuntime).not.toHaveBeenCalled();
+  });
+
+  it("commits active state only after all provisional stages complete", async () => {
+    const order: string[] = [];
+    const runtime = { sid: "new" };
+    const coordinator = new RuntimeStartCoordinator();
+
+    await coordinator.run(7, "lite:none:true", async (token) => {
+      await runProvisionalRuntimeStartTransaction({
+        token,
+        checkpointStopping: () => {
+          order.push("checkpoint");
+          return { sid: "new", state: "stopping" as const };
+        },
+        startPipeline: () => {
+          order.push("pipeline");
+        },
+        stopExisting: () => {
+          order.push("stop-existing");
+        },
+        prepareRuntime: () => {
+          order.push("prepare");
+          return runtime;
+        },
+        registerRuntime: () => {
+          order.push("register");
+        },
+        completeRuntime: () => {
+          order.push("complete");
+        },
+        commitRuntime: () => {
+          order.push("commit-active");
+        },
+        cleanupPipeline: () => {
+          order.push("cleanup-pipeline");
+        },
+        cleanupRuntime: () => {
+          order.push("cleanup-runtime");
+        }
+      });
+    });
+
+    expect(order).toEqual([
+      "checkpoint",
+      "pipeline",
+      "stop-existing",
+      "prepare",
+      "register",
+      "complete",
+      "commit-active"
+    ]);
+  });
+
+  it.each([
+    ["pipeline", "pipeline"],
+    ["stop-existing", "pipeline"],
+    ["prepare", "pipeline"],
+    ["complete", "runtime"],
+    ["commit", "runtime"]
+  ] as const)("cleans the %s failure through the %s path", async (fault, cleanup) => {
+    const calls: string[] = [];
+    const token = new RuntimeStartToken();
+    const fail = (stage: typeof fault) => {
+      if (fault === stage) {
+        throw new Error(`${stage} failed`);
+      }
+    };
+
+    const task = runProvisionalRuntimeStartTransaction({
+      token,
+      checkpointStopping: () => ({ sid: "new" }),
+      startPipeline: () => fail("pipeline"),
+      stopExisting: () => fail("stop-existing"),
+      prepareRuntime: () => {
+        fail("prepare");
+        return { sid: "new" };
+      },
+      registerRuntime: () => undefined,
+      completeRuntime: () => fail("complete"),
+      commitRuntime: () => fail("commit"),
+      cleanupPipeline: () => {
+        calls.push("pipeline");
+      },
+      cleanupRuntime: () => {
+        calls.push("runtime");
+      }
+    });
+
+    await expect(task).rejects.toThrow(`${fault} failed`);
+    expect(calls).toEqual([cleanup]);
+  });
+
+  it("routes cancellation after checkpoint through provisional cleanup", async () => {
+    const coordinator = new RuntimeStartCoordinator();
+    const cleanup = vi.fn();
+
+    const task = coordinator.run(7, "lite:none:false", async (token) => {
+      await runProvisionalRuntimeStartTransaction({
+        token,
+        checkpointStopping: () => ({ sid: "new" }),
+        startPipeline: () => {
+          coordinator.cancel(7);
+        },
+        stopExisting: () => undefined,
+        prepareRuntime: () => ({ sid: "new" }),
+        registerRuntime: () => undefined,
+        completeRuntime: () => undefined,
+        commitRuntime: () => undefined,
+        cleanupPipeline: cleanup,
+        cleanupRuntime: () => undefined
+      });
+    });
+
+    await expect(task).rejects.toBeInstanceOf(RuntimeStartCancelledError);
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("reports both the start and cleanup failures", async () => {
+    const token = new RuntimeStartToken();
+    const task = runProvisionalRuntimeStartTransaction({
+      token,
+      checkpointStopping: () => ({ sid: "new" }),
+      startPipeline: () => {
+        throw new Error("pipeline failed");
+      },
+      stopExisting: () => undefined,
+      prepareRuntime: () => ({ sid: "new" }),
+      registerRuntime: () => undefined,
+      completeRuntime: () => undefined,
+      commitRuntime: () => undefined,
+      cleanupPipeline: () => {
+        throw new Error("cleanup failed");
+      },
+      cleanupRuntime: () => undefined
+    });
+
+    await expect(task).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: [expect.any(Error), expect.any(Error)]
+    });
   });
 });
