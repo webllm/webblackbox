@@ -1,5 +1,6 @@
 import {
   completeCdpChildFrameTreePrime,
+  completeCdpNonvisualChildBootstrap,
   failCdpChildSessionAttachment,
   failCdpChildSessionClaim,
   isCdpChildSessionAttachmentCurrent,
@@ -10,12 +11,7 @@ import {
   type CdpChildSessionClaim
 } from "./cdp-capture-scope.js";
 
-const CHILD_BASELINE_METHODS = [
-  "Network.enable",
-  "Runtime.enable",
-  "Log.enable",
-  "Page.enable"
-] as const;
+const CHILD_BASELINE_METHODS = ["Network.enable", "Runtime.enable", "Log.enable"] as const;
 
 export type CdpChildBootstrapOutcome = "ready" | "denied" | "failed" | "stale";
 
@@ -46,7 +42,11 @@ export async function bootstrapCdpChildSession(options: {
   const isClaimCurrent = () => isRuntimeCurrent() && isCdpChildSessionClaimCurrent(state, claim);
 
   if (!isCdpChildSessionBaselineReady(state, claim)) {
-    for (const method of CHILD_BASELINE_METHODS) {
+    const baselineMethods = child.visual
+      ? ([...CHILD_BASELINE_METHODS, "Page.enable"] as const)
+      : CHILD_BASELINE_METHODS;
+
+    for (const method of baselineMethods) {
       if (!isAttachmentCurrent()) {
         return "stale";
       }
@@ -87,6 +87,10 @@ export async function bootstrapCdpChildSession(options: {
 
   if (!isClaimCurrent()) {
     return "stale";
+  }
+
+  if (!child.visual) {
+    return completeCdpNonvisualChildBootstrap(state, claim);
   }
 
   let response: unknown;

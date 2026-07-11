@@ -89,6 +89,35 @@ describe("CDP child bootstrap", () => {
     });
   });
 
+  it("bootstraps an allowed worker without requiring Page-domain commands", async () => {
+    const { state, claim } = attached("worker", "https://widgets.example/worker.js");
+    const calls: string[] = [];
+
+    await expect(
+      bootstrapCdpChildSession({
+        state,
+        claim,
+        commands: successfulCommands(calls),
+        isRuntimeCurrent: () => true
+      })
+    ).resolves.toBe("ready");
+    expect(calls).toEqual([
+      "Network.enable",
+      "Runtime.enable",
+      "Log.enable",
+      "Target.setAutoAttach",
+      "DOMStorage.enable"
+    ]);
+    expect(calls).not.toContain("Page.enable");
+    expect(calls).not.toContain("Page.getFrameTree");
+    expect(state.childSessions.get("child")).toMatchObject({
+      visual: false,
+      status: "ready",
+      baselineReady: true,
+      sessionAllowed: true
+    });
+  });
+
   it.each(["Network.enable", "Runtime.enable", "Log.enable", "Page.enable"])(
     "keeps the child failed when %s rejects",
     async (failedMethod) => {

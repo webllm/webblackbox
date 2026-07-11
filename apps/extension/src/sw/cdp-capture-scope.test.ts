@@ -602,6 +602,36 @@ describe("CDP capture scope", () => {
     ).toBe(true);
     expect(isCdpSessionWithinScope(scope, "allowed-session")).toBe(true);
     expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.requestWillBeSent",
+        {
+          requestId: "worker-allowed",
+          request: { url: "https://widgets.example/api/data" }
+        },
+        "allowed-session"
+      ).allowed
+    ).toBe(true);
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.responseReceived",
+        { requestId: "worker-allowed" },
+        "allowed-session"
+      ).allowed
+    ).toBe(true);
+    expect(
+      evaluateCdpCaptureScopeEvent(
+        scope,
+        "Network.requestWillBeSent",
+        {
+          requestId: "worker-denied",
+          request: { url: "https://blocked.example/api/data" }
+        },
+        "allowed-session"
+      ).allowed
+    ).toBe(false);
+    expect(
       evaluateCdpCaptureScopeEvent(scope, "Target.attachedToTarget", {
         sessionId: "opaque-session",
         targetInfo: { type: "worker", url: "" }

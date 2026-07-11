@@ -487,6 +487,17 @@ export function evaluateCdpCaptureScopeEvent(
     };
   }
 
+  const child = sessionId ? state.childSessions.get(sessionId) : undefined;
+
+  if (method === "Network.requestWillBeSent" && child?.visual === false) {
+    const requestUrl = asString(asRecord(payload?.request)?.url);
+    const allowed = child.sessionAllowed && evaluateFrameDocument(state, requestUrl, false).allowed;
+
+    return {
+      allowed: rememberRequestScope(state, method, requestScopeKey, allowed)
+    };
+  }
+
   if (
     method.startsWith("Network.") ||
     method.startsWith("Runtime.") ||
@@ -675,6 +686,26 @@ export function failCdpChildSessionClaim(
 }
 
 export type CdpChildFrameTreePrimeOutcome = "ready" | "denied" | "failed" | "stale";
+
+export function completeCdpNonvisualChildBootstrap(
+  state: CdpCaptureScopeState,
+  claim: CdpChildSessionClaim
+): CdpChildFrameTreePrimeOutcome {
+  const child = state.childSessions.get(claim.sessionId);
+
+  if (!child || !isCdpChildSessionClaimCurrent(state, claim)) {
+    return "stale";
+  }
+
+  if (child.visual || !child.baselineReady || child.status === "failed") {
+    setCdpChildSessionStatus(state, child, "failed");
+    return "failed";
+  }
+
+  const outcome = child.sessionAllowed ? "ready" : "denied";
+  setCdpChildSessionStatus(state, child, outcome);
+  return outcome;
+}
 
 export function completeCdpChildFrameTreePrime(
   state: CdpCaptureScopeState,

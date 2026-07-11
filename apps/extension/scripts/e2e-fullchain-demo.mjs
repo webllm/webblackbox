@@ -2426,6 +2426,7 @@ async function runRealWorldScenarioAddons({
             const workerSource = [
               'self.onmessage = async () => {',
               '  try {',
+              '    await new Promise((resolve) => setTimeout(resolve, 500));',
               '    const response = await fetch(' + JSON.stringify(workerFetchUrl) + ');',
               '    const text = await response.text();',
               '    self.postMessage({ ok: true, bytes: text.length });',
