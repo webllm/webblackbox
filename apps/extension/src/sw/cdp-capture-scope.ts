@@ -854,7 +854,24 @@ function areEquivalentCaptureUrls(left: string | undefined, right: string): bool
   }
 
   try {
-    return new URL(left).href === new URL(right).href;
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+
+    if (leftUrl.href === rightUrl.href) {
+      return true;
+    }
+
+    // Page.getFrameTree may omit a hash-router fragment even though
+    // Page.navigatedWithinDocument reported the exact current route. Accept
+    // only that one-sided omission: all network-relevant URL components must
+    // still match, and two conflicting non-empty routes remain fail closed.
+    if (leftUrl.hash && rightUrl.hash) {
+      return false;
+    }
+
+    leftUrl.hash = "";
+    rightUrl.hash = "";
+    return leftUrl.href === rightUrl.href;
   } catch {
     return left === right;
   }

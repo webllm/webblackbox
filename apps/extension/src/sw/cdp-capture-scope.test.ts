@@ -379,6 +379,43 @@ describe("CDP capture scope", () => {
     ).toBe(false);
   });
 
+  it("accepts a frame-tree root that omits the authoritative SPA fragment", () => {
+    const scope = state();
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+    evaluateCdpCaptureScopeEvent(scope, "Page.navigatedWithinDocument", {
+      frameId: "root",
+      url: "https://app.example/home#/checkout?step=payment"
+    });
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" }
+    });
+
+    expect(
+      canCaptureGlobalCdpArtifactsForRoot(
+        scope,
+        "https://app.example/home#/checkout?step=payment",
+        scope.generation
+      )
+    ).toBe(true);
+  });
+
+  it("rejects a conflicting non-empty SPA fragment during root validation", () => {
+    const scope = state();
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home#/settings" }
+    });
+
+    expect(
+      canCaptureGlobalCdpArtifactsForRoot(
+        scope,
+        "https://app.example/home#/checkout",
+        scope.generation
+      )
+    ).toBe(false);
+  });
+
   it("keeps root validity separate from a child that blocks global artifacts", () => {
     const scope = state(policy({ includeSubframes: false }));
 

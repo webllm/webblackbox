@@ -3450,12 +3450,15 @@ async function restoreTabInstrumentationAfterNavigation(
   }
 }
 
-async function handleSameDocumentNavigation(details: {
-  tabId: number;
-  frameId: number;
-  documentId?: string;
-  url: string;
-}): Promise<void> {
+async function handleSameDocumentNavigation(
+  details: {
+    tabId: number;
+    frameId: number;
+    documentId?: string;
+    url: string;
+  },
+  isNavigationCurrent: () => boolean = () => true
+): Promise<void> {
   const runtime = sessionsByTab.get(details.tabId);
   const documentId = details.documentId;
   const currentDocument =
@@ -3467,6 +3470,7 @@ async function handleSameDocumentNavigation(details: {
   if (
     !runtime ||
     !isRuntimeCurrentCaptureOpen(runtime) ||
+    !isNavigationCurrent() ||
     typeof documentId !== "string" ||
     documentId.length === 0 ||
     currentDocument?.documentId !== documentId
@@ -3523,31 +3527,23 @@ async function handleSameDocumentNavigation(details: {
     documentId
   );
 
-  const decision =
+  const policyDecision =
     details.frameId === 0
-      ? await isRuntimeTopDocumentAllowed(runtime, details.url)
+      ? await resolveCurrentTabUrlPolicyDecision({
+          candidateUrl: details.url,
+          evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, details.url),
+          resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(runtime.tabId)
+        })
       : evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
-          url: details.url,
-          tabId: runtime.tabId,
-          frameId: details.frameId
-        }).allowed;
-  const currentTopUrl =
-    details.frameId === 0 ? await resolveCurrentTabCaptureUrl(runtime.tabId) : details.url;
+            url: details.url,
+            tabId: runtime.tabId,
+            frameId: details.frameId
+          }).allowed
+        ? "allowed"
+        : "denied";
 
   if (
-    details.frameId === 0 &&
-    runtime.contentNavigationRevisions.get(revisionKey) === revision &&
-    runtime.pendingContentPolicyRevisions.get(revisionKey) === revision &&
-    currentTopUrl !== details.url
-  ) {
-    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
-    runtime.pendingContentPolicyRevisions.delete(revisionKey);
-    runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
-    await stopRuntimeIfCurrent(runtime);
-    return;
-  }
-
-  if (
+    !isNavigationCurrent() ||
     !isRuntimeCurrentCaptureOpen(runtime) ||
     runtime.contentNavigationRevisions.get(revisionKey) !== revision ||
     runtime.pendingContentPolicyRevisions.get(revisionKey) !== revision ||
@@ -3558,7 +3554,14 @@ async function handleSameDocumentNavigation(details: {
     return;
   }
 
-  if (!decision) {
+  if (policyDecision === "stale") {
+    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+    runtime.pendingContentPolicyRevisions.delete(revisionKey);
+    runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+    return;
+  }
+
+  if (policyDecision === "denied") {
     runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
     runtime.pendingContentPolicyRevisions.delete(revisionKey);
     runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
@@ -3608,10 +3611,15 @@ async function handleSameDocumentNavigation(details: {
       documentsToReactivate,
       revisionKey,
       revision,
-      sameDocumentTransition
+      sameDocumentTransition,
+      isNavigationCurrent
     );
 
-    if (!reactivated && runtime.contentNavigationRevisions.get(revisionKey) === revision) {
+    if (
+      !reactivated &&
+      isNavigationCurrent() &&
+      runtime.contentNavigationRevisions.get(revisionKey) === revision
+    ) {
       runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
       runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
       await failSameDocumentReactivation(runtime, currentDocument);
@@ -3620,7 +3628,7 @@ async function handleSameDocumentNavigation(details: {
       runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
     }
   } catch (error) {
-    if (runtime.contentNavigationRevisions.get(revisionKey) === revision) {
+    if (isNavigationCurrent() && runtime.contentNavigationRevisions.get(revisionKey) === revision) {
       runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
       runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
       await failSameDocumentReactivation(runtime, currentDocument);
@@ -3699,10 +3707,12 @@ async function reactivateSameDocumentSubtree(
   documents: readonly { frameId: number; documentId: string; url: string }[],
   revisionKey: string,
   revision: number,
-  sameDocumentTransition?: ContentSameDocumentTransition
+  sameDocumentTransition?: ContentSameDocumentTransition,
+  isNavigationCurrent: () => boolean = () => true
 ): Promise<boolean> {
   const pending = [...documents];
   const isCurrent = () =>
+    isNavigationCurrent() &&
     isRuntimeCurrentCaptureOpen(runtime) &&
     runtime.contentNavigationRevisions.get(revisionKey) === revision;
 
@@ -6329,12 +6339,15 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
           } else if (document) {
             suspendFullCaptureForNavigation(claim, { cdpScopeAlreadyInvalidated: true });
             enqueueNavigationClaim(claim, async () => {
-              await handleSameDocumentNavigation({
-                tabId: runtime.tabId,
-                frameId: 0,
-                documentId: document.documentId,
-                url
-              });
+              await handleSameDocumentNavigation(
+                {
+                  tabId: runtime.tabId,
+                  frameId: 0,
+                  documentId: document.documentId,
+                  url
+                },
+                () => isSessionNavigationClaimCurrent(claim)
+              );
 
               if (!isSessionNavigationClaimCurrent(claim) || runtime.captureUrl !== url) {
                 return;
