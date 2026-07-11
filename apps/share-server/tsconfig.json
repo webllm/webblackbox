@@ -5,6 +5,7 @@
     "lib": ["ES2023", "DOM"],
     "baseUrl": ".",
     "paths": {
+      "@webblackbox/pipeline": ["../../packages/pipeline/src/index.ts"],
       "@webblackbox/player-sdk": ["../../packages/player-sdk/src/index.ts"],
       "@webblackbox/protocol": ["../../packages/protocol/src/index.ts"]
     },

@@ -108,17 +108,16 @@ describe("share-server", () => {
     expect(archiveFiles).toEqual([]);
   });
 
-  it("validates actual output for unreferenced lazy ZIP entries before retention", async () => {
+  it("validates actual output for optional lazy ZIP entries before retention", async () => {
     const server = await startShareServer();
-    const zip = new JSZip();
-    zip.file("manifest.json", "{}");
-    zip.file("index/unreferenced.json", "x".repeat(9 * 1024 * 1024));
+    const zip = await JSZip.loadAsync(await createEncryptedEnvelopeArchive());
+    zip.file("integrity/hashes.json", "x".repeat(9 * 1024 * 1024));
     const archive = await zip.generateAsync({
       type: "uint8array",
       compression: "DEFLATE",
       compressionOptions: { level: 9 }
     });
-    forgeZipUncompressedSize(archive, "index/unreferenced.json", 1);
+    forgeZipUncompressedSize(archive, "integrity/hashes.json", 1);
 
     const response = await fetch(`${server.baseUrl}/api/share/upload`, {
       method: "POST",
@@ -134,6 +133,25 @@ describe("share-server", () => {
     expect(payload.resource).toBe("maxMetadataEntryBytes");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toEqual([]);
+  });
+
+  it("rejects disabled plaintext before inflating optional archive entries", async () => {
+    const server = await startShareServer();
+    const zip = await JSZip.loadAsync(await createPlaintextEnvelopeArchive());
+    zip.file("integrity/hashes.json", "x".repeat(9 * 1024 * 1024));
+    const archive = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 }
+    });
+    forgeZipUncompressedSize(archive, "integrity/hashes.json", 1);
+
+    const response = await uploadRawArchive(server, archive);
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      error: "Public share uploads require encrypted WebBlackbox archives."
+    });
   });
 
   it("bounds concurrent upload buffering and inspection", async () => {
@@ -359,6 +377,298 @@ syncBuiltinESMExports();
       error: "Public share uploads require encrypted WebBlackbox archives."
     });
     expect(response.status).toBe(422);
+  });
+
+  it("server-scans explicitly allowed plaintext uploads instead of trusting archive claims", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+    const archive = await createPlaintextEnvelopeArchive({
+      includePassedPrivacyManifest: true,
+      blobValue: {
+        note: "-----BEGIN PRIVATE KEY-----"
+      }
+    });
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey
+      },
+      body: Buffer.from(archive)
+    });
+    const payload = (await response.json()) as {
+      error: string;
+      scanner: { preEncryption: boolean; status: string; findingCount: number };
+    };
+
+    expect(response.status).toBe(422);
+    expect(payload.error).toBe("Share upload blocked by the server privacy scanner.");
+    expect(payload.scanner).toMatchObject({
+      preEncryption: false,
+      status: "blocked",
+      findingCount: 1
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    await expect(readdir(resolve(server.dataDir, "archives"))).resolves.toEqual([]);
+  });
+
+  it("rejects invalid UTF-8 event chunks instead of issuing a passed server attestation", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+
+    const response = await uploadRawArchive(
+      server,
+      await createPlaintextArchiveWithInvalidUtf8Event()
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Upload is not a valid WebBlackbox archive."
+    });
+  });
+
+  it("does not attest unscanned opaque plaintext blobs as passed", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey
+      },
+      body: Buffer.from(
+        await createPlaintextEnvelopeArchive({ includePassedPrivacyManifest: true })
+      )
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        source: string;
+        trust: { privateContent: string };
+        privacy: {
+          scanner: {
+            preEncryption: boolean;
+            status: string;
+            findingCount: number;
+            coverage: {
+              complete: boolean;
+              scannedBlobCount: number;
+              opaqueBlobCount: number;
+              expectedBlobCount: number;
+              incompleteReason: string;
+            };
+          };
+        };
+      };
+      shareId: string;
+    };
+
+    expect(response.status).toBe(201);
+    expect(payload.summary).toMatchObject({
+      source: "server",
+      trust: { privateContent: "server-partially-analyzed" },
+      privacy: {
+        scanner: {
+          preEncryption: false,
+          status: "unknown",
+          findingCount: 0,
+          coverage: {
+            complete: false,
+            scannedBlobCount: 1,
+            opaqueBlobCount: 1,
+            expectedBlobCount: 2,
+            incompleteReason: "opaque-content"
+          }
+        }
+      }
+    });
+
+    const metadataResponse = await fetch(`${server.baseUrl}/api/share/${payload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const metadata = (await metadataResponse.json()) as typeof payload;
+    expect(metadata.summary).toMatchObject(payload.summary);
+  });
+
+  it("scans semantic JSON strings after Unicode escape decoding", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+    const escapedDash = "\\u002d";
+    const archive = await replaceArchiveFile(
+      await createPlaintextEnvelopeArchive({ includePassedPrivacyManifest: true }),
+      BLOB_FIXTURE_PATH,
+      new TextEncoder().encode(
+        `{"note":"${escapedDash.repeat(5)}BEGIN PRIVATE KEY${escapedDash.repeat(5)}"}`
+      )
+    );
+
+    const response = await uploadRawArchive(server, archive);
+    const payload = (await response.json()) as { error: string; scanner: { status: string } };
+
+    expect(response.status).toBe(422);
+    expect(payload.error).toBe("Share upload blocked by the server privacy scanner.");
+    expect(payload.scanner.status).toBe("blocked");
+  });
+
+  it("marks invalid UTF-8 text candidates opaque instead of attesting them as passed", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+    const secret = "-----BEGIN PRIVATE KEY-----";
+    const utf16 = new Uint8Array(2 + secret.length * 2);
+    utf16.set([0xff, 0xfe]);
+    for (let index = 0; index < secret.length; index += 1) {
+      utf16[2 + index * 2] = secret.charCodeAt(index);
+    }
+    const archive = await replaceArchiveFile(
+      await createPlaintextEnvelopeArchive({ includePassedPrivacyManifest: true }),
+      BLOB_FIXTURE_PATH,
+      utf16
+    );
+
+    const response = await uploadRawArchive(server, archive);
+    const payload = (await response.json()) as {
+      summary: {
+        trust: { privateContent: string };
+        privacy: { scanner: { status: string; coverage: { opaqueBlobCount: number } } };
+      };
+    };
+
+    expect(response.status).toBe(201);
+    expect(payload.summary).toMatchObject({
+      trust: { privateContent: "server-partially-analyzed" },
+      privacy: {
+        scanner: {
+          status: "unknown",
+          coverage: { opaqueBlobCount: 2 }
+        }
+      }
+    });
+  });
+
+  it("rejects every non-canonical plaintext blob path when server analysis is enabled", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+    const archive = await renameArchiveFile(
+      await createPlaintextEnvelopeArchive(),
+      BLOB_FIXTURE_PATH,
+      "blobs/private.json"
+    );
+
+    const response = await uploadRawArchive(server, archive);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Upload is not a valid WebBlackbox archive."
+    });
+  });
+
+  it("rejects unknown archive entries instead of excluding them from scan coverage", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS: "true"
+    });
+    const archive = await renameArchiveFile(
+      await createPlaintextEnvelopeArchive(),
+      BLOB_FIXTURE_PATH,
+      "secrets/private.json"
+    );
+
+    const response = await uploadRawArchive(server, archive);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Upload is not a valid WebBlackbox archive."
+    });
+  });
+
+  it("rejects disabled plaintext uploads before Player private-content analysis", async () => {
+    const server = await startShareServer();
+    const playerInvalidPlaintextArchive = await replaceArchiveFile(
+      await createPlaintextEnvelopeArchive(),
+      "index/time.json",
+      new TextEncoder().encode("not-json")
+    );
+
+    const response = await uploadRawArchive(server, playerInvalidPlaintextArchive);
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      error: "Public share uploads require encrypted WebBlackbox archives."
+    });
+  });
+
+  it("rejects encrypted envelopes with contradictory blob totals", async () => {
+    const server = await startShareServer();
+    const archive = await mutateArchiveManifest(
+      await createEncryptedEnvelopeArchive(),
+      (manifest) => {
+        (manifest.stats as Record<string, unknown>).blobCount = 1;
+      }
+    );
+
+    const response = await uploadRawArchive(server, archive);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Upload is not a valid WebBlackbox archive."
+    });
+  });
+
+  it("rejects malformed encrypted envelope metadata and stored-byte integrity", async () => {
+    const server = await startShareServer();
+    const source = await createEncryptedEnvelopeArchive();
+    const corruptions: Array<{ name: string; archive: Uint8Array }> = [
+      {
+        name: "missing required index",
+        archive: await removeArchiveFileWithoutIntegrityUpdate(source, "index/inv.json")
+      },
+      {
+        name: "extra encryption mapping",
+        archive: await mutateArchiveManifest(source, (manifest) => {
+          const encryption = manifest.encryption as Record<string, unknown>;
+          const files = encryption.files as Record<string, unknown>;
+          files["manifest.json"] = { ivBase64: toBase64(randomBytes(12)) };
+        })
+      },
+      {
+        name: "reused encryption IV",
+        archive: await mutateArchiveManifest(source, (manifest) => {
+          const encryption = manifest.encryption as Record<string, unknown>;
+          const files = encryption.files as Record<string, { ivBase64: string }>;
+          const paths = Object.keys(files);
+          const firstPath = paths[0];
+          const secondPath = paths[1];
+          const firstFile = firstPath ? files[firstPath] : undefined;
+          if (!firstPath || !secondPath || !firstFile) {
+            throw new Error("Encrypted fixture is missing mapped files.");
+          }
+          files[secondPath] = { ivBase64: firstFile.ivBase64 };
+        })
+      },
+      {
+        name: "tampered ciphertext",
+        archive: await replaceArchiveFileWithoutIntegrityUpdate(
+          source,
+          BLOB_FIXTURE_PATH,
+          randomBytes(64)
+        )
+      }
+    ];
+
+    for (const corruption of corruptions) {
+      const response = await uploadRawArchive(server, corruption.archive);
+      expect(response.status, corruption.name).toBe(400);
+      await expect(response.json(), corruption.name).resolves.toEqual({
+        error: "Upload is not a valid WebBlackbox archive."
+      });
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    }
   });
 
   it("does not present an encrypted upload without a client claim as analyzed", async () => {
@@ -605,6 +915,40 @@ syncBuiltinESMExports();
     expect(JSON.stringify(payload.summary)).not.toContain(extraSecret);
   });
 
+  it("downgrades persisted server attestations that predate explicit scan coverage", async () => {
+    const server = await startShareServer();
+    const upload = await uploadEncryptedFixture(server);
+    const recordPath = resolve(server.dataDir, "records", `${upload.shareId}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as {
+      summary: Record<string, unknown>;
+    };
+    record.summary = buildPersistedServerSummary(record.summary);
+    const privacy = record.summary.privacy as Record<string, unknown>;
+    const scanner = privacy.scanner as Record<string, unknown>;
+    delete scanner.coverage;
+    await writeFile(recordPath, JSON.stringify(record));
+
+    const response = await fetch(`${server.baseUrl}/api/share/${upload.shareId}/meta`, {
+      headers: { "x-webblackbox-api-key": apiKey }
+    });
+    const payload = (await response.json()) as {
+      summary: {
+        source: string;
+        analyzed: boolean;
+        privacy?: unknown;
+        trust: { privateContent: string };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.summary).toMatchObject({
+      source: "unavailable",
+      analyzed: false,
+      trust: { privateContent: "not-analyzed" }
+    });
+    expect(payload.summary.privacy).toBeUndefined();
+  });
+
   it("downgrades malformed current persisted server summaries to unavailable", async () => {
     const server = await startShareServer();
     const upload = await uploadEncryptedFixture(server);
@@ -640,6 +984,15 @@ syncBuiltinESMExports();
         mutate: (summary) => {
           const privacy = summary.privacy as Record<string, unknown>;
           (privacy.scanner as Record<string, unknown>).preEncryption = "true";
+        }
+      },
+      {
+        name: "coverage total mismatch",
+        mutate: (summary) => {
+          const privacy = summary.privacy as Record<string, unknown>;
+          const scanner = privacy.scanner as Record<string, unknown>;
+          const coverage = scanner.coverage as Record<string, unknown>;
+          coverage.expectedBlobCount = 99;
         }
       }
     ];
@@ -3009,11 +3362,129 @@ async function uploadEncryptedFixture(
   return (await response.json()) as { shareId: string };
 }
 
+async function uploadRawArchive(
+  server: RunningShareServer,
+  archive: Uint8Array
+): Promise<Response> {
+  return fetch(`${server.baseUrl}/api/share/upload`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      "x-webblackbox-api-key": apiKey
+    },
+    body: Buffer.from(archive)
+  });
+}
+
+async function replaceArchiveFile(
+  archive: Uint8Array,
+  path: string,
+  bytes: Uint8Array
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(archive);
+  const integrityFile = zip.file("integrity/hashes.json");
+  if (!integrityFile || !zip.file(path)) {
+    throw new Error(`Fixture archive is missing ${path}.`);
+  }
+  const integrity = JSON.parse(await integrityFile.async("string")) as {
+    manifestSha256: string;
+    files: Record<string, string>;
+  };
+  zip.file(path, bytes);
+  integrity.files[path] = createHash("sha256").update(bytes).digest("hex");
+  zip.file("integrity/hashes.json", JSON.stringify(integrity));
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function replaceArchiveFileWithoutIntegrityUpdate(
+  archive: Uint8Array,
+  path: string,
+  bytes: Uint8Array
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(archive);
+  if (!zip.file(path)) {
+    throw new Error(`Fixture archive is missing ${path}.`);
+  }
+  zip.file(path, bytes);
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function removeArchiveFileWithoutIntegrityUpdate(
+  archive: Uint8Array,
+  path: string
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(archive);
+  if (!zip.file(path)) {
+    throw new Error(`Fixture archive is missing ${path}.`);
+  }
+  zip.remove(path);
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function mutateArchiveManifest(
+  archive: Uint8Array,
+  mutate: (manifest: Record<string, unknown>) => void
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(archive);
+  const manifestFile = zip.file("manifest.json");
+  const integrityFile = zip.file("integrity/hashes.json");
+  if (!manifestFile || !integrityFile) {
+    throw new Error("Fixture archive is missing manifest metadata.");
+  }
+  const manifest = JSON.parse(await manifestFile.async("string")) as Record<string, unknown>;
+  const integrity = JSON.parse(await integrityFile.async("string")) as {
+    manifestSha256: string;
+    files: Record<string, string>;
+  };
+
+  mutate(manifest);
+  const content = JSON.stringify(manifest);
+  const hash = createHash("sha256").update(content).digest("hex");
+  zip.file("manifest.json", content);
+  integrity.manifestSha256 = hash;
+  integrity.files["manifest.json"] = hash;
+  zip.file("integrity/hashes.json", JSON.stringify(integrity));
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function renameArchiveFile(
+  archive: Uint8Array,
+  fromPath: string,
+  toPath: string
+): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(archive);
+  const source = zip.file(fromPath);
+  const integrityFile = zip.file("integrity/hashes.json");
+  if (!source || !integrityFile) {
+    throw new Error(`Fixture archive is missing ${fromPath}.`);
+  }
+  const bytes = await source.async("uint8array");
+  const integrity = JSON.parse(await integrityFile.async("string")) as {
+    manifestSha256: string;
+    files: Record<string, string>;
+  };
+  const hash = integrity.files[fromPath];
+  if (!hash) {
+    throw new Error(`Fixture integrity manifest is missing ${fromPath}.`);
+  }
+
+  zip.remove(fromPath);
+  zip.file(toPath, bytes);
+  delete integrity.files[fromPath];
+  integrity.files[toPath] = hash;
+  zip.file("integrity/hashes.json", JSON.stringify(integrity));
+  return zip.generateAsync({ type: "uint8array" });
+}
+
 function buildPersistedServerSummary(
   clientSummary: Record<string, unknown>
 ): Record<string, unknown> {
   const envelopeTotals = clientSummary.totals as Record<string, unknown>;
   const clientClaim = clientSummary.clientClaim as Record<string, unknown>;
+  const clientPrivacy = clientClaim.privacy as Record<string, unknown>;
+  const clientScanner = clientPrivacy.scanner as Record<string, unknown>;
+  const expectedEventCount = envelopeTotals.events as number;
+  const expectedBlobCount = envelopeTotals.blobs as number;
 
   return {
     schemaVersion: 2,
@@ -3035,7 +3506,23 @@ function buildPersistedServerSummary(
       durationMs: envelopeTotals.durationMs
     },
     topActionTriggers: [],
-    privacy: clientClaim.privacy
+    privacy: {
+      ...clientPrivacy,
+      scanner: {
+        ...clientScanner,
+        status: "passed",
+        findingCount: 0,
+        coverage: {
+          complete: true,
+          scannedEventCount: expectedEventCount,
+          scannedBlobCount: expectedBlobCount,
+          opaqueBlobCount: 0,
+          inspectedBytes: 0,
+          expectedEventCount,
+          expectedBlobCount
+        }
+      }
+    }
   };
 }
 
@@ -3096,8 +3583,74 @@ async function createEncryptedEnvelopeArchive(
   return createEnvelopeArchive(true, options);
 }
 
-async function createPlaintextEnvelopeArchive(): Promise<Uint8Array> {
-  return createEnvelopeArchive(false);
+async function createPlaintextEnvelopeArchive(
+  options: {
+    blobValue?: unknown;
+    includePassedPrivacyManifest?: boolean;
+  } = {}
+): Promise<Uint8Array> {
+  return createEnvelopeArchive(false, options);
+}
+
+async function createPlaintextArchiveWithInvalidUtf8Event(): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await createPlaintextEnvelopeArchive());
+  const manifestFile = zip.file("manifest.json");
+  const integrityFile = zip.file("integrity/hashes.json");
+  if (!manifestFile || !integrityFile) {
+    throw new Error("Plaintext fixture is missing archive metadata.");
+  }
+  const manifest = JSON.parse(await manifestFile.async("string")) as Record<string, unknown>;
+  const stats = manifest.stats as Record<string, unknown>;
+  stats.eventCount = 1;
+  stats.chunkCount = 1;
+  const event = {
+    v: 1,
+    sid: "S-invalid-utf8",
+    tab: 1,
+    t: 1_000,
+    mono: 1,
+    type: "console.entry",
+    id: "E-invalid-utf8",
+    data: { text: "-----BEGIN PRIVATE KEY-----" }
+  };
+  const eventBytes = new TextEncoder().encode(JSON.stringify(event));
+  const marker = Buffer.from("PRIVATE", "utf8");
+  const markerOffset = Buffer.from(eventBytes).indexOf(marker);
+  if (markerOffset < 0) {
+    throw new Error("Invalid UTF-8 fixture marker was not found.");
+  }
+  eventBytes[markerOffset + 3] = 0xff;
+  const eventHash = createHash("sha256").update(eventBytes).digest("hex");
+  const timeIndex = JSON.stringify([
+    {
+      chunkId: "chunk-000001",
+      seq: 1,
+      tStart: 1_000,
+      tEnd: 1_000,
+      monoStart: 1,
+      monoEnd: 1,
+      eventCount: 1,
+      byteLength: eventBytes.byteLength,
+      codec: "none",
+      sha256: eventHash
+    }
+  ]);
+  const manifestText = JSON.stringify(manifest);
+  zip.file("manifest.json", manifestText);
+  zip.file("index/time.json", timeIndex);
+  zip.file("events/chunk-000001.ndjson", eventBytes);
+
+  const integrity = JSON.parse(await integrityFile.async("string")) as {
+    manifestSha256: string;
+    files: Record<string, string>;
+  };
+  const manifestHash = createHash("sha256").update(manifestText).digest("hex");
+  integrity.manifestSha256 = manifestHash;
+  integrity.files["manifest.json"] = manifestHash;
+  integrity.files["index/time.json"] = createHash("sha256").update(timeIndex).digest("hex");
+  integrity.files["events/chunk-000001.ndjson"] = eventHash;
+  zip.file("integrity/hashes.json", JSON.stringify(integrity));
+  return zip.generateAsync({ type: "uint8array" });
 }
 
 async function createLargeEncryptedEnvelopeArchive(blobBytes: number): Promise<Uint8Array> {
@@ -3127,6 +3680,8 @@ async function createEnvelopeArchive(
     blobFileMode?: "ciphertext" | "plaintext";
     textBlobFileMode?: "ciphertext" | "plaintext";
     plaintextPrefixBytes?: number;
+    blobValue?: unknown;
+    includePassedPrivacyManifest?: boolean;
   } = {}
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -3215,7 +3770,7 @@ async function createEnvelopeArchive(
     zip,
     files,
     BLOB_FIXTURE_PATH,
-    { token: "blob-secret-token" },
+    options.blobValue ?? { token: "blob-secret-token" },
     encrypted,
     options.blobFileMode,
     options.plaintextPrefixBytes
@@ -3229,6 +3784,27 @@ async function createEnvelopeArchive(
     options.textBlobFileMode,
     options.plaintextPrefixBytes
   );
+  if (options.includePassedPrivacyManifest) {
+    addJsonFile(zip, files, "privacy/manifest.json", {
+      schemaVersion: 1,
+      generatedAt: "2026-02-13T00:00:00.000Z",
+      categories: [],
+      scanner: {
+        scannedAt: "2026-02-13T00:00:00.000Z",
+        preEncryption: true,
+        status: "passed",
+        findings: []
+      },
+      encryption: {
+        archive: "plaintext"
+      },
+      totals: {
+        events: 0,
+        blobs: 2,
+        privacyViolations: 0
+      }
+    });
+  }
   addJsonFile(zip, files, "integrity/hashes.json", {
     manifestSha256: files["manifest.json"],
     files

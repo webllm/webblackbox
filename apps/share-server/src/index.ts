@@ -8,6 +8,12 @@ import { pipeline } from "node:stream/promises";
 
 import JSZip from "jszip";
 import {
+  buildPrivacyManifest,
+  isPrivacyScannerTextMime,
+  type PrivacyScanBlob
+} from "@webblackbox/pipeline";
+import {
+  ArchiveEntryReadLimitError,
   ArchiveDecodeTimeoutError,
   ArchiveResourceLimitError,
   BoundedZipReader,
@@ -17,7 +23,16 @@ import {
   assertLoadedArchiveResourceLimits,
   resolveArchiveResourceLimits
 } from "@webblackbox/player-sdk";
-import { exportManifestSchema, type ExportManifest } from "@webblackbox/protocol";
+import {
+  assertArchiveBlobPaths,
+  assertArchiveFilePaths,
+  exportManifestSchema,
+  inferBlobMime,
+  isCanonicalArchiveBlobPath,
+  parseHashesManifest,
+  type ExportManifest,
+  type HashesManifest
+} from "@webblackbox/protocol";
 
 import { BoundedAuditWriter, type AuditWriteResult } from "./audit-writer.js";
 import { parseShareApiCredentials, type ShareApiScope } from "./auth-config.js";
@@ -112,7 +127,28 @@ type SharePrivacySummary = {
     blockedSelectorCount: number;
   };
   detected: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["detected"];
-  scanner: ReturnType<WebBlackboxPlayer["getPrivacyProtectionReport"]>["scanner"];
+  scanner: {
+    preEncryption: boolean;
+    status: "passed" | "blocked" | "unknown";
+    findingCount: number;
+    coverage?: {
+      complete: boolean;
+      scannedEventCount: number;
+      scannedBlobCount: number;
+      opaqueBlobCount: number;
+      inspectedBytes: number;
+      expectedEventCount: number;
+      expectedBlobCount: number;
+      incompleteReason?:
+        | "deadline"
+        | "decode-failed"
+        | "finding-limit"
+        | "target-byte-limit"
+        | "total-byte-limit"
+        | "opaque-content"
+        | "coverage-mismatch";
+    };
+  };
   categories?: Array<{
     category: string;
     events: number;
@@ -131,7 +167,11 @@ type ShareSummary = {
   encrypted: boolean;
   trust: {
     archiveEnvelope: "server-inspected";
-    privateContent: "server-analyzed" | "client-claim-unverified" | "not-analyzed";
+    privateContent:
+      | "server-analyzed"
+      | "server-partially-analyzed"
+      | "client-claim-unverified"
+      | "not-analyzed";
     archiveDigestMatched?: true;
   };
   analysisError?: string;
@@ -178,6 +218,10 @@ const MAX_UPLOAD_BYTES = Math.min(
 const SHARE_ARCHIVE_RESOURCE_LIMITS = resolveArchiveResourceLimits({
   maxInputBytes: MAX_UPLOAD_BYTES
 });
+const SHARE_PRIVACY_SCAN_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const SHARE_PRIVACY_SCAN_MAX_TARGET_BYTES = 2 * 1024 * 1024;
+const SHARE_PRIVACY_SCAN_MAX_FINDINGS = 1;
+const SHARE_PRIVACY_SCAN_DEADLINE_MS = 5_000;
 const MAX_CONCURRENT_UPLOAD_INSPECTIONS = parsePositiveInteger(
   process.env.WEBBLACKBOX_SHARE_MAX_CONCURRENT_INSPECTIONS,
   1
@@ -955,6 +999,20 @@ async function processUploadWithinInspectionSlot(
       });
       return;
     }
+    if (!archiveEnvelope.encrypted && !ALLOW_PLAINTEXT_SHARE_UPLOADS) {
+      await writeShareAuditEvent(request, {
+        action: "upload",
+        shareId: id,
+        outcome: "blocked",
+        details: {
+          reason: "plaintext-upload-disabled"
+        }
+      });
+      respondJson(response, 422, {
+        error: "Public share uploads require encrypted WebBlackbox archives."
+      });
+      return;
+    }
     archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
   } catch (error) {
     if (
@@ -1077,20 +1135,6 @@ async function processUploadWithinInspectionSlot(
     respondJson(response, 422, {
       error: "Share upload blocked by the client's privacy scanner claim.",
       scanner: clientSummary.privacy.scanner
-    });
-    return;
-  }
-
-  if (!summary.encrypted && !ALLOW_PLAINTEXT_SHARE_UPLOADS) {
-    await writeShareAuditEvent(request, {
-      action: "upload",
-      shareId: id,
-      outcome: "blocked"
-    });
-    respondJson(response, summary.analyzed ? 422 : 400, {
-      error: summary.analyzed
-        ? "Public share uploads require encrypted WebBlackbox archives."
-        : "Upload is not a valid encrypted WebBlackbox archive."
     });
     return;
   }
@@ -1508,6 +1552,50 @@ async function buildShareSummary(
     const derived = player.buildDerived();
     const actions = player.getActionTimeline();
     const privacyReport = player.getPrivacyProtectionReport();
+    const events = player.events;
+    const blobPaths = collectArchiveBlobPathsForPrivacyScan(player);
+    if (blobPaths.length !== manifest.stats.blobCount) {
+      throw new Error("Archive blob count does not match server privacy-scan inputs.");
+    }
+    const serverPrivacyManifest = await buildPrivacyManifest({
+      events,
+      blobs: readArchiveBlobsForPrivacyScan(player, blobPaths),
+      expectedBlobCount: blobPaths.length,
+      encrypted: Boolean(manifest.encryption),
+      preEncryption: false,
+      scan: {
+        maxTotalBytes: SHARE_PRIVACY_SCAN_MAX_TOTAL_BYTES,
+        maxTargetBytes: SHARE_PRIVACY_SCAN_MAX_TARGET_BYTES,
+        maxFindings: SHARE_PRIVACY_SCAN_MAX_FINDINGS,
+        deadlineMs: SHARE_PRIVACY_SCAN_DEADLINE_MS,
+        stopOnFinding: true
+      }
+    });
+    const scanCoverage = serverPrivacyManifest.scanner.coverage;
+    if (!scanCoverage) {
+      throw new Error("Server privacy scan did not report content coverage.");
+    }
+    const accountedBlobCount = scanCoverage.scannedBlobCount + scanCoverage.opaqueBlobCount;
+    const scanTraversalComplete =
+      scanCoverage.complete &&
+      scanCoverage.scannedEventCount === events.length &&
+      serverPrivacyManifest.totals.blobs === blobPaths.length &&
+      accountedBlobCount === blobPaths.length;
+    const scanComplete = scanTraversalComplete && scanCoverage.opaqueBlobCount === 0;
+    const incompleteReason = scanComplete
+      ? undefined
+      : (scanCoverage.incompleteReason ??
+        (scanCoverage.opaqueBlobCount > 0 ? "opaque-content" : "coverage-mismatch"));
+    const publicScanCoverage: NonNullable<SharePrivacySummary["scanner"]["coverage"]> = {
+      complete: scanComplete,
+      scannedEventCount: scanCoverage.scannedEventCount,
+      scannedBlobCount: scanCoverage.scannedBlobCount,
+      opaqueBlobCount: scanCoverage.opaqueBlobCount,
+      inspectedBytes: scanCoverage.inspectedBytes,
+      expectedEventCount: events.length,
+      expectedBlobCount: blobPaths.length,
+      ...(incompleteReason ? { incompleteReason } : {})
+    };
 
     return {
       schemaVersion: 2,
@@ -1516,7 +1604,7 @@ async function buildShareSummary(
       encrypted: envelope.encrypted || Boolean(manifest.encryption),
       trust: {
         archiveEnvelope: "server-inspected",
-        privateContent: "server-analyzed"
+        privateContent: scanComplete ? "server-analyzed" : "server-partially-analyzed"
       },
       manifest: {
         mode: manifest.mode,
@@ -1525,8 +1613,8 @@ async function buildShareSummary(
       },
       totals: {
         events: derived.totals.events,
-        blobs: player.archive.privacyManifest?.totals.blobs,
-        privacyViolations: player.archive.privacyManifest?.totals.privacyViolations,
+        blobs: blobPaths.length,
+        privacyViolations: serverPrivacyManifest.totals.privacyViolations,
         errors: derived.totals.errors,
         requests: derived.totals.requests,
         actions: derived.actionSpans.length,
@@ -1542,8 +1630,18 @@ async function buildShareSummary(
           blockedSelectorCount: privacyReport.redaction.blockedSelectors.length
         },
         detected: privacyReport.detected,
-        scanner: privacyReport.scanner,
-        categories: player.archive.privacyManifest?.categories.map((category) => ({ ...category }))
+        scanner: {
+          preEncryption: serverPrivacyManifest.scanner.preEncryption,
+          status:
+            serverPrivacyManifest.scanner.status === "blocked"
+              ? "blocked"
+              : scanComplete
+                ? "passed"
+                : "unknown",
+          findingCount: serverPrivacyManifest.scanner.findings.length,
+          coverage: publicScanCoverage
+        },
+        categories: serverPrivacyManifest.categories.map((category) => ({ ...category }))
       }
     };
   } catch (error) {
@@ -1577,29 +1675,88 @@ async function buildShareSummary(
   }
 }
 
+function collectArchiveBlobPathsForPrivacyScan(player: WebBlackboxPlayer): string[] {
+  const paths = Object.keys(player.archive.integrity.files)
+    .filter((path) => path.startsWith("blobs/"))
+    .sort();
+  const invalidPath = paths.find((path) => !isCanonicalArchiveBlobPath(path));
+  if (invalidPath) {
+    throw new Error(`Archive blob ${invalidPath} is not a canonical privacy-scan input.`);
+  }
+  return paths;
+}
+
+async function* readArchiveBlobsForPrivacyScan(
+  player: WebBlackboxPlayer,
+  paths: string[]
+): AsyncIterable<PrivacyScanBlob> {
+  for (const path of paths) {
+    const extension = path.slice(path.lastIndexOf(".") + 1);
+    const mime = inferBlobMime(extension);
+    if (!isPrivacyScannerTextMime(mime)) {
+      yield { hash: path, mime, bytes: new Uint8Array(0) };
+      continue;
+    }
+
+    try {
+      const blob = await player.readBlobTransient(path, SHARE_PRIVACY_SCAN_MAX_TARGET_BYTES);
+      if (!blob) {
+        throw new Error(`Archive blob ${path} could not be read for server privacy analysis.`);
+      }
+      yield { hash: path, mime: blob.mime, bytes: blob.bytes };
+    } catch (error) {
+      if (!(error instanceof ArchiveEntryReadLimitError)) {
+        throw error;
+      }
+      yield {
+        hash: path,
+        mime,
+        bytes: new Uint8Array(0),
+        truncated: true,
+        sourceByteLength: error.actual
+      };
+    }
+  }
+}
+
 async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelopeSummary> {
   try {
     assertArchiveInputResourceLimits(bytes, SHARE_ARCHIVE_RESOURCE_LIMITS);
     const zip = await JSZip.loadAsync(bytes);
     assertLoadedArchiveResourceLimits(zip, SHARE_ARCHIVE_RESOURCE_LIMITS);
+    const archivePaths = Object.entries(zip.files)
+      .filter(([, file]) => !file.dir)
+      .map(([path]) => path);
+    assertArchiveFilePaths(archivePaths);
     const zipReader = new BoundedZipReader(zip, SHARE_ARCHIVE_RESOURCE_LIMITS, false);
     const rawManifest = JSON.parse(await readZipText(zipReader, "manifest.json")) as unknown;
-    const manifestRecord = asRecord(rawManifest);
-    const encryption = asRecord(manifestRecord.encryption);
-    const encrypted = Object.keys(encryption).length > 0;
-    const encryptedFiles = asRecord(encryption.files);
+    const manifest = exportManifestSchema.parse(rawManifest);
+    assertRequiredArchivePaths(archivePaths);
+    const actualBlobCount = assertArchiveBlobPaths(archivePaths);
+    if (actualBlobCount !== manifest.stats.blobCount) {
+      throw new Error("Manifest blob count does not match archive contents.");
+    }
+    const encrypted = Boolean(manifest.encryption);
+    const encryptedFiles = manifest.encryption?.files ?? {};
     const privatePaths = collectArchivePrivatePaths(zip);
+    assertEncryptedFileMetadata(privatePaths, encryptedFiles, encrypted);
     const missingEncryptedPaths = encrypted
       ? privatePaths.filter((path) => !isEncryptedFileMeta(encryptedFiles[path]))
       : [];
-    const plaintextEncryptedPaths = await inspectActualArchiveEntries(
-      zip,
-      zipReader,
-      encrypted,
-      new Set(privatePaths),
-      encryptedFiles
-    );
-    const manifest = exportManifestSchema.parse(rawManifest);
+    let plaintextEncryptedPaths: string[] = [];
+    if (encrypted) {
+      const integrity = parseHashesManifest(
+        JSON.parse(await readZipText(zipReader, "integrity/hashes.json")) as unknown
+      );
+      assertArchiveIntegrityFileSet(archivePaths, integrity);
+      plaintextEncryptedPaths = await inspectActualArchiveEntries(
+        zip,
+        zipReader,
+        new Set(privatePaths),
+        encryptedFiles,
+        integrity
+      );
+    }
 
     return {
       encrypted,
@@ -1631,6 +1788,62 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
       plaintextEncryptedPaths: [],
       analysisError: redactText(error instanceof Error ? error.message : String(error), 240)
     };
+  }
+}
+
+const REQUIRED_SHARE_ARCHIVE_PATHS = [
+  "manifest.json",
+  "index/time.json",
+  "index/req.json",
+  "index/inv.json",
+  "integrity/hashes.json"
+] as const;
+
+function assertRequiredArchivePaths(paths: readonly string[]): void {
+  const pathSet = new Set(paths);
+  if (pathSet.size !== paths.length) {
+    throw new Error("Archive contains duplicate file paths.");
+  }
+  for (const path of REQUIRED_SHARE_ARCHIVE_PATHS) {
+    if (!pathSet.has(path)) {
+      throw new Error(`Archive is missing required file '${path}'.`);
+    }
+  }
+}
+
+function assertEncryptedFileMetadata(
+  privatePaths: readonly string[],
+  encryptedFiles: Record<string, { ivBase64: string }>,
+  encrypted: boolean
+): void {
+  if (!encrypted) {
+    return;
+  }
+
+  const privatePathSet = new Set(privatePaths);
+  const initializationVectors = new Set<string>();
+  for (const [path, metadata] of Object.entries(encryptedFiles)) {
+    if (!privatePathSet.has(path)) {
+      throw new Error(`Encrypted archive declares metadata for non-private file '${path}'.`);
+    }
+    if (initializationVectors.has(metadata.ivBase64)) {
+      throw new Error("Encrypted archive reuses an AES-GCM initialization vector.");
+    }
+    initializationVectors.add(metadata.ivBase64);
+  }
+}
+
+function assertArchiveIntegrityFileSet(
+  archivePaths: readonly string[],
+  integrity: HashesManifest
+): void {
+  const actualPaths = archivePaths.filter((path) => path !== "integrity/hashes.json").sort();
+  const expectedPaths = Object.keys(integrity.files).sort();
+  if (
+    actualPaths.length !== expectedPaths.length ||
+    actualPaths.some((path, index) => path !== expectedPaths[index])
+  ) {
+    throw new Error("Archive integrity manifest does not match archive contents.");
   }
 }
 
@@ -1675,20 +1888,30 @@ function isEncryptedFileMeta(value: unknown): boolean {
 async function inspectActualArchiveEntries(
   zip: JSZip,
   zipReader: BoundedZipReader,
-  encrypted: boolean,
   privatePaths: Set<string>,
-  encryptedFiles: Record<string, unknown>
+  encryptedFiles: Record<string, { ivBase64: string }>,
+  integrity: HashesManifest
 ): Promise<string[]> {
   const plaintextPaths: string[] = [];
 
   for (const [path, file] of Object.entries(zip.files)) {
-    if (file.dir || path === "manifest.json") {
+    if (file.dir || path === "integrity/hashes.json") {
       continue;
     }
 
     const bytes = await zipReader.read(path);
+    const actualHash = createHash("sha256").update(bytes).digest("hex");
+    const expectedHash = integrity.files[path];
+    if (!expectedHash || actualHash !== expectedHash) {
+      throw new Error(`Archive integrity mismatch for '${path}'.`);
+    }
+    if (path === "manifest.json") {
+      if (actualHash !== integrity.manifestSha256) {
+        throw new Error("Archive integrity mismatch for 'manifest.json'.");
+      }
+      continue;
+    }
     if (
-      encrypted &&
       privatePaths.has(path) &&
       isEncryptedFileMeta(encryptedFiles[path]) &&
       looksLikePlaintextPrivateArchiveFile(path, bytes)
@@ -1886,7 +2109,7 @@ function decodeBase64Strict(value: string): Buffer | null {
 }
 
 async function readZipText(zipReader: BoundedZipReader, path: string): Promise<string> {
-  return new TextDecoder().decode(await zipReader.read(path));
+  return new TextDecoder("utf-8", { fatal: true }).decode(await zipReader.read(path));
 }
 
 function readClientShareSummary(
@@ -3383,16 +3606,51 @@ function normalizeCurrentPersistedShareSummary(
     const totals = normalizePersistedShareTotals(record.totals, "server");
     const topActionTriggers = normalizePersistedActionTriggerSummaries(record.topActionTriggers);
     const privacy = normalizePersistedSharePrivacySummary(record.privacy);
+    const privateContent = trust.privateContent;
     if (
       record.analyzed !== true ||
-      trust.privateContent !== "server-analyzed" ||
+      (privateContent !== "server-analyzed" && privateContent !== "server-partially-analyzed") ||
       trust.archiveDigestMatched !== undefined ||
       record.analysisError !== undefined ||
       record.clientClaim !== undefined ||
+      manifest === undefined ||
       totals === null ||
+      totals === undefined ||
+      typeof totals.blobs !== "number" ||
       topActionTriggers === null ||
-      privacy === null
+      topActionTriggers === undefined ||
+      privacy === null ||
+      privacy === undefined
     ) {
+      return null;
+    }
+    const scanner = privacy.scanner;
+    const coverage = scanner.coverage;
+    const coverageMatchesArchiveTotals =
+      coverage !== undefined &&
+      coverage.expectedEventCount === totals.events &&
+      coverage.expectedBlobCount === totals.blobs;
+    const coverageCountsAreBounded =
+      coverage !== undefined &&
+      coverage.scannedEventCount <= coverage.expectedEventCount &&
+      coverage.scannedBlobCount + coverage.opaqueBlobCount <= coverage.expectedBlobCount;
+    const validCompleteAttestation =
+      privateContent === "server-analyzed" &&
+      scanner?.status === "passed" &&
+      scanner.findingCount === 0 &&
+      coverage?.complete === true &&
+      coverageMatchesArchiveTotals &&
+      coverage.scannedEventCount === coverage.expectedEventCount &&
+      coverage.scannedBlobCount === coverage.expectedBlobCount &&
+      coverage.opaqueBlobCount === 0;
+    const validPartialAnalysis =
+      privateContent === "server-partially-analyzed" &&
+      scanner?.status === "unknown" &&
+      scanner.findingCount === 0 &&
+      coverage?.complete === false &&
+      coverageMatchesArchiveTotals &&
+      coverageCountsAreBounded;
+    if (!validCompleteAttestation && !validPartialAnalysis) {
       return null;
     }
 
@@ -3403,7 +3661,7 @@ function normalizeCurrentPersistedShareSummary(
       encrypted: record.encrypted,
       trust: {
         archiveEnvelope: "server-inspected",
-        privateContent: "server-analyzed"
+        privateContent
       },
       manifest,
       totals,
@@ -3539,21 +3797,10 @@ function normalizeLegacyPersistedShareSummary(
     };
   }
 
+  // Older server summaries predate independent scan coverage and may have promoted an embedded
+  // archive claim. They cannot be upgraded into a current server attestation.
   if (record.source === "server" && record.analyzed === true) {
-    return {
-      schemaVersion: 2,
-      source: "server",
-      analyzed: true,
-      encrypted: record.encrypted,
-      trust: {
-        archiveEnvelope: "server-inspected",
-        privateContent: "server-analyzed"
-      },
-      manifest,
-      totals,
-      topActionTriggers,
-      privacy
-    };
+    return null;
   }
 
   return null;
@@ -3699,6 +3946,7 @@ function normalizePersistedSharePrivacySummary(value: unknown): ShareSummary["pr
   const hashedSensitiveValues = readPersistedSummaryCount(detected.hashedSensitiveValues);
   const sensitiveKeyMentions = readPersistedSummaryCount(detected.sensitiveKeyMentions);
   const findingCount = readPersistedSummaryCount(scanner.findingCount);
+  const coverage = normalizePersistedPrivacyScanCoverage(scanner.coverage);
   if (
     typeof redaction.hashSensitiveValues !== "boolean" ||
     headerRuleCount === null ||
@@ -3710,7 +3958,8 @@ function normalizePersistedSharePrivacySummary(value: unknown): ShareSummary["pr
     sensitiveKeyMentions === null ||
     typeof scanner.preEncryption !== "boolean" ||
     (scanner.status !== "passed" && scanner.status !== "blocked" && scanner.status !== "unknown") ||
-    findingCount === null
+    findingCount === null ||
+    coverage === null
   ) {
     return null;
   }
@@ -3736,9 +3985,66 @@ function normalizePersistedSharePrivacySummary(value: unknown): ShareSummary["pr
     scanner: {
       preEncryption: scanner.preEncryption,
       status: scanner.status,
-      findingCount
+      findingCount,
+      ...(coverage === undefined ? {} : { coverage })
     },
     categories
+  };
+}
+
+function normalizePersistedPrivacyScanCoverage(
+  value: unknown
+): SharePrivacySummary["scanner"]["coverage"] | null {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const record = readPersistedObject(value);
+  if (!record || typeof record.complete !== "boolean") {
+    return null;
+  }
+  const scannedEventCount = readPersistedSummaryCount(record.scannedEventCount);
+  const scannedBlobCount = readPersistedSummaryCount(record.scannedBlobCount);
+  const opaqueBlobCount = readPersistedSummaryCount(record.opaqueBlobCount);
+  const inspectedBytes = readPersistedSummaryCount(record.inspectedBytes);
+  const expectedEventCount = readPersistedSummaryCount(record.expectedEventCount);
+  const expectedBlobCount = readPersistedSummaryCount(record.expectedBlobCount);
+  const incompleteReason = record.incompleteReason;
+  if (
+    scannedEventCount === null ||
+    scannedBlobCount === null ||
+    opaqueBlobCount === null ||
+    inspectedBytes === null ||
+    expectedEventCount === null ||
+    expectedBlobCount === null ||
+    (incompleteReason !== undefined &&
+      incompleteReason !== "deadline" &&
+      incompleteReason !== "decode-failed" &&
+      incompleteReason !== "finding-limit" &&
+      incompleteReason !== "target-byte-limit" &&
+      incompleteReason !== "total-byte-limit" &&
+      incompleteReason !== "opaque-content" &&
+      incompleteReason !== "coverage-mismatch")
+  ) {
+    return null;
+  }
+
+  if (
+    (record.complete && incompleteReason !== undefined) ||
+    (!record.complete && !incompleteReason)
+  ) {
+    return null;
+  }
+
+  return {
+    complete: record.complete,
+    scannedEventCount,
+    scannedBlobCount,
+    opaqueBlobCount,
+    inspectedBytes,
+    expectedEventCount,
+    expectedBlobCount,
+    ...(incompleteReason === undefined ? {} : { incompleteReason })
   };
 }
 

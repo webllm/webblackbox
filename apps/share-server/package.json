@@ -7,7 +7,7 @@
   "main": "./dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "prebuild": "pnpm --filter @webblackbox/protocol build && pnpm --filter @webblackbox/player-sdk build",
+    "prebuild": "pnpm --filter @webblackbox/protocol build && pnpm --filter @webblackbox/pipeline build && pnpm --filter @webblackbox/player-sdk build",
     "build": "tsup src/index.ts --format esm --clean",
     "e2e:share": "pnpm build && node scripts/e2e-share-flow.mjs",
     "start": "node dist/index.js",
@@ -16,6 +16,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@webblackbox/pipeline": "workspace:*",
     "@webblackbox/player-sdk": "workspace:*",
     "@webblackbox/protocol": "workspace:*",
     "jszip": "3.10.1"
