@@ -10,6 +10,7 @@ import {
   assertChromeArchive,
   createChromeArchive,
   createExtensionManifest,
+  validateInjectedModuleBuildSource,
   validateExtensionManifest
 } from "../../scripts/lib/extension-build.mjs";
 
@@ -53,6 +54,13 @@ describe("extension build manifest", () => {
     expect(manifest.permissions).toContain("tabCapture");
     expect(manifest.permissions).toContain("webNavigation");
     expect(manifest).not.toHaveProperty("content_scripts");
+    expect(manifest.web_accessible_resources).toEqual([
+      {
+        resources: ["content-agent.js", "injected.js"],
+        matches: ["<all_urls>"],
+        use_dynamic_url: true
+      }
+    ]);
     expect(manifest.content_security_policy?.extension_pages).toContain("script-src 'self'");
     expect(manifest.content_security_policy?.extension_pages).not.toContain("'unsafe-inline'");
     expect(validateExtensionManifest(manifest, { version: "1.2.3" })).toEqual([]);
@@ -329,6 +337,24 @@ describe("extension build manifest", () => {
     );
   });
 
+  it.each([undefined, false])(
+    "rejects web resources when use_dynamic_url is %s",
+    (useDynamicUrl) => {
+      const manifest = createExtensionManifest({ version: "1.2.3", release: true });
+      const [resourceEntry] = manifest.web_accessible_resources;
+
+      if (useDynamicUrl === undefined) {
+        delete resourceEntry.use_dynamic_url;
+      } else {
+        resourceEntry.use_dynamic_url = useDynamicUrl;
+      }
+
+      expect(validateExtensionManifest(manifest, { version: "1.2.3", release: true })).toContain(
+        "Manifest web resources must use dynamic URLs."
+      );
+    }
+  );
+
   it("packages a release archive without the development key", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-build-test-"));
     const sourceDir = resolve(root, "build");
@@ -350,6 +376,46 @@ describe("extension build manifest", () => {
       expect(packagedManifest.version).toBe("1.2.3");
       expect(packagedManifest).not.toHaveProperty("key");
       expect(zip.file("popup.js")).toBeTruthy();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates byte-for-byte reproducible archives without generated directory entries", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-repro-test-"));
+    const sourceDir = resolve(root, "build");
+    const firstArchivePath = resolve(root, "first.zip");
+    const secondArchivePath = resolve(root, "second.zip");
+
+    try {
+      await writeBuildFixture(sourceDir, createExtensionManifest({ version: "1.2.3" }));
+      await createChromeArchive({ sourceDir, outputPath: firstArchivePath });
+      await createChromeArchive({ sourceDir, outputPath: secondArchivePath });
+
+      const firstBytes = await readFile(firstArchivePath);
+      const secondBytes = await readFile(secondArchivePath);
+      expect(firstBytes.equals(secondBytes)).toBe(true);
+
+      const zip = await JSZip.loadAsync(firstBytes);
+      const entries = Object.values(zip.files);
+      expect(entries.some((entry) => entry.dir)).toBe(false);
+      expect(entries.every((entry) => entry.date.getTime() === Date.UTC(1980, 0, 1))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when stale files remain in the build directory", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "webblackbox-extension-closed-build-test-"));
+    const sourceDir = resolve(root, "build");
+
+    try {
+      await writeBuildFixture(sourceDir, createExtensionManifest({ version: "1.2.3" }));
+      await writeFile(resolve(sourceDir, "unexpected-debug.txt"), "must not ship\n", "utf8");
+
+      await expect(
+        createChromeArchive({ sourceDir, outputPath: resolve(root, "archive.zip") })
+      ).rejects.toThrow("Unexpected packaged file 'unexpected-debug.txt'");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -427,6 +493,43 @@ describe("extension build manifest", () => {
   });
 });
 
+describe("injected module build output", () => {
+  it("accepts only the direct bootstrap and control ESM exports", () => {
+    expect(
+      validateInjectedModuleBuildSource(`
+        function directBootstrap() {}
+        function directControl() {}
+        export {
+          directBootstrap as bootstrap,
+          directControl as control
+        };
+      `)
+    ).toEqual([]);
+  });
+
+  it.each([
+    ["no exports", "function bootstrap() {}\nfunction control() {}\n"],
+    [
+      "an extra export",
+      "export function bootstrap() {}\nexport function control() {}\nexport const autoInstall = true;\n"
+    ],
+    [
+      "a default export",
+      "export function bootstrap() {}\nexport function control() {}\nexport default bootstrap;\n"
+    ],
+    [
+      "export text inside a string",
+      "const source = 'export function bootstrap() {} export function control() {}';\n"
+    ],
+    [
+      "a star re-export",
+      "export function bootstrap() {}\nexport function control() {}\nexport * from './extra.js';\n"
+    ]
+  ])("rejects %s", (_case, source) => {
+    expect(validateInjectedModuleBuildSource(source)).not.toEqual([]);
+  });
+});
+
 async function writeBuildFixture(outputDir, manifest) {
   const fixtureFiles = {
     "manifest.json": `${JSON.stringify(manifest, null, 2)}\n`,
@@ -434,7 +537,7 @@ async function writeBuildFixture(outputDir, manifest) {
     "_locales/zh_CN/messages.json": '{"extensionName":{"message":"WebBlackbox"}}\n',
     "content-agent.js": "export {};\n",
     "content.js": "export {};\n",
-    "injected.js": "export {};\n",
+    "injected.js": "export function bootstrap() {}\nexport function control() {}\n",
     "offscreen.html": "<!doctype html><title>offscreen</title>\n",
     "offscreen.js": "export {};\n",
     "options.html": "<!doctype html><title>options</title>\n",

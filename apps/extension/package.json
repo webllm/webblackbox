@@ -38,6 +38,7 @@
   },
   "devDependencies": {
     "cross-env": "^10.1.0",
+    "es-module-lexer": "^2.3.0",
     "fake-indexeddb": "^6.2.5",
     "jszip": "^3.10.1"
   }

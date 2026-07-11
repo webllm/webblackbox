@@ -3,6 +3,9 @@ import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
+import { init as initEsmLexer, parse as parseEsm } from "es-module-lexer";
+
+await initEsmLexer;
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 
@@ -84,6 +87,7 @@ const STORE_SAFE_PERMISSIONS = [
 const URL_MATCHES = ["<all_urls>"];
 const ARCHIVE_FIXED_DATE = new Date("1980-01-01T00:00:00.000Z");
 const ARCHIVE_EXCLUDED_FILE_NAMES = new Set([".DS_Store"]);
+const INJECTED_MODULE_EXPORTS = ["bootstrap", "control"];
 
 async function readJson(path) {
   const text = await readFile(path, "utf8");
@@ -135,7 +139,8 @@ export function createExtensionManifest({ version, release = false, profile = "d
     web_accessible_resources: [
       {
         resources: ["content-agent.js", "injected.js"],
-        matches: [...URL_MATCHES]
+        matches: [...URL_MATCHES],
+        use_dynamic_url: true
       }
     ],
     content_security_policy: {
@@ -199,16 +204,21 @@ export function validateExtensionManifest(
   }
 
   const webAccessibleResources = manifest?.web_accessible_resources;
-  const injectedResources =
+  const injectedResourceEntry =
     Array.isArray(webAccessibleResources) && webAccessibleResources.length === 1
-      ? webAccessibleResources[0]?.resources
+      ? webAccessibleResources[0]
       : null;
+  const injectedResources = injectedResourceEntry?.resources;
 
   if (
     !Array.isArray(injectedResources) ||
     injectedResources.join(",") !== "content-agent.js,injected.js"
   ) {
     issues.push("Manifest must only expose content-agent.js and injected.js as web resources.");
+  }
+
+  if (injectedResourceEntry?.use_dynamic_url !== true) {
+    issues.push("Manifest web resources must use dynamic URLs.");
   }
 
   if (storeSafe) {
@@ -219,6 +229,46 @@ export function validateExtensionManifest(
 
   validateAbsentOrEmptyArray(manifest, "optional_permissions", issues);
   validateAbsentOrEmptyArray(manifest, "optional_host_permissions", issues);
+
+  return issues;
+}
+
+export function validateInjectedModuleBuildSource(source) {
+  if (typeof source !== "string") {
+    return ["injected.js must be an ECMAScript module source file."];
+  }
+
+  let imports;
+  let exports;
+  try {
+    [imports, exports] = parseEsm(source, "injected.js");
+  } catch (error) {
+    return [
+      `injected.js must contain valid ECMAScript module syntax: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    ];
+  }
+
+  const actualExports = [...new Set(exports.map((entry) => entry.n))].sort();
+  const expectedExports = [...INJECTED_MODULE_EXPORTS].sort();
+  const issues = [];
+
+  if (actualExports.join(",") !== expectedExports.join(",")) {
+    issues.push(
+      `injected.js must only export ${INJECTED_MODULE_EXPORTS.join(" and ")}; found ${
+        actualExports.length > 0 ? actualExports.join(", ") : "no named exports"
+      }.`
+    );
+  }
+
+  if (actualExports.includes("default")) {
+    issues.push("injected.js must not expose a default export.");
+  }
+
+  if (imports.some((entry) => source.startsWith("export", entry.ss))) {
+    issues.push("injected.js must not re-export code from another module.");
+  }
 
   return issues;
 }
@@ -284,6 +334,10 @@ export async function assertExtensionBuild(outputDir, { version, release = false
   await Promise.all(
     REQUIRED_BUILD_FILES.map((file) => access(resolve(outputDir, file), constants.R_OK))
   );
+  const buildFileIssues = validatePackagedFileSet(await listPackagedFiles(outputDir));
+  if (buildFileIssues.length > 0) {
+    throw new Error(`Build output file set is invalid:\n- ${buildFileIssues.join("\n- ")}`);
+  }
 
   const manifest = await readJson(resolve(outputDir, "manifest.json"));
   const resolvedProfile = profile ?? inferManifestProfile(manifest);
@@ -295,6 +349,15 @@ export async function assertExtensionBuild(outputDir, { version, release = false
 
   if (issues.length > 0) {
     throw new Error(`Build output manifest is invalid:\n- ${issues.join("\n- ")}`);
+  }
+
+  const injectedModuleIssues = validateInjectedModuleBuildSource(
+    await readFile(resolve(outputDir, "injected.js"), "utf8")
+  );
+  if (injectedModuleIssues.length > 0) {
+    throw new Error(
+      `Build output injected module is invalid:\n- ${injectedModuleIssues.join("\n- ")}`
+    );
   }
 
   return manifest;
@@ -374,7 +437,8 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
 
     zip.file(relativePath, bytes, {
       binary: true,
-      date: ARCHIVE_FIXED_DATE
+      date: ARCHIVE_FIXED_DATE,
+      createFolders: false
     });
   }
 
@@ -411,6 +475,19 @@ export async function createChromeArchive({ sourceDir = buildDir, outputPath } =
 export async function assertChromeArchive(archivePath, { version, profile = "store-safe" } = {}) {
   const archiveBytes = await readFile(archivePath);
   const zip = await JSZip.loadAsync(archiveBytes);
+  const directoryEntries = Object.values(zip.files)
+    .filter((entry) => entry.dir)
+    .map((entry) => entry.name)
+    .sort();
+  if (directoryEntries.length > 0) {
+    throw new Error(
+      `Chrome archive must not contain generated directory entries: ${directoryEntries.join(", ")}`
+    );
+  }
+  const archiveFileIssues = validatePackagedFileSet(Object.keys(zip.files));
+  if (archiveFileIssues.length > 0) {
+    throw new Error(`Chrome archive file set is invalid:\n- ${archiveFileIssues.join("\n- ")}`);
+  }
   const manifestEntry = zip.file("manifest.json");
 
   if (!manifestEntry) {
@@ -429,6 +506,25 @@ export async function assertChromeArchive(archivePath, { version, profile = "sto
   }
 
   return manifest;
+}
+
+function validatePackagedFileSet(files) {
+  const actual = new Set(files);
+  const expected = new Set(REQUIRED_BUILD_FILES);
+  const issues = [];
+
+  for (const path of REQUIRED_BUILD_FILES) {
+    if (!actual.has(path)) {
+      issues.push(`Missing required packaged file '${path}'.`);
+    }
+  }
+  for (const path of [...actual].sort()) {
+    if (!expected.has(path)) {
+      issues.push(`Unexpected packaged file '${path}'.`);
+    }
+  }
+
+  return issues;
 }
 
 function validateUniqueStringArray(value, fieldName, issues) {
