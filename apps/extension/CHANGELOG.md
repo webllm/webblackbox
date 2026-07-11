@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Made the isolated-world content bootstrap a per-document singleton, including lifecycle-safe
+  suspension and resynchronization across back-forward cache restores, so repeated injection cannot
+  duplicate agents, ports, listeners, or captured events.
 - Stopped automatically replaying an export download after an ambiguous offscreen disconnect,
   preventing a lost acknowledgement from creating duplicate user-visible files.
 - Required a successfully validated CDP frame tree before screenshots, DOM/storage snapshots,

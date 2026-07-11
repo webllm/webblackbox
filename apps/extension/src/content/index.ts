@@ -5,7 +5,9 @@ import type { LiteCaptureAgentOptions } from "webblackbox/types";
 import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
+import { acquireContentBootstrapLease, type ContentBootstrapLease } from "./bootstrap-lease.js";
 import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
+import { bindContentPageLifecycle } from "./page-lifecycle.js";
 import { resolveRecordingStatusTabId } from "./recording-status.js";
 import {
   buildContentStopDrainedMessage,
@@ -16,334 +18,407 @@ import {
 
 type ContentAgentModule = typeof import("./content-agent.js");
 
-const chromeApi = getChromeApi();
-const { t } = createExtensionI18n();
-let contentPort: PortLike | null = null;
-let reconnectTimer = 0;
-let reconnectAttempts = 0;
-let captureAgent: LiteCaptureAgent | null = null;
-let captureAgentPromise: Promise<LiteCaptureAgent> | null = null;
+const contentBootstrapLease = acquireContentBootstrapLease(globalThis);
 
-let recordingActive = false;
-let recordingStatusVersion = 0;
-let pendingEvents: RawRecorderEvent[] = [];
-let pendingEventFlushTimer = 0;
-let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
-let stopDrainContext: ContentStopDrainContext | null = null;
+if (contentBootstrapLease) {
+  bootstrapContentRuntime(contentBootstrapLease);
+}
 
-const PORT_RECONNECT_INITIAL_MS = 250;
-const PORT_RECONNECT_MAX_MS = 5_000;
-const PENDING_EVENT_MAX = 1_200;
-const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
-const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
+function bootstrapContentRuntime(bootstrapLease: ContentBootstrapLease): void {
+  const chromeApi = getChromeApi();
+  const { t } = createExtensionI18n();
+  let contentPort: PortLike | null = null;
+  let reconnectTimer = 0;
+  let reconnectAttempts = 0;
+  let captureAgent: LiteCaptureAgent | null = null;
+  let captureAgentPromise: Promise<LiteCaptureAgent> | null = null;
 
-void requestRecordingStatusOnce();
+  let recordingActive = false;
+  let recordingStatusVersion = 0;
+  let pendingEvents: RawRecorderEvent[] = [];
+  let pendingEventFlushTimer = 0;
+  let pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
+  let stopDrainContext: ContentStopDrainContext | null = null;
+  let lifecycleVersion = 0;
 
-chromeApi?.runtime?.onMessage.addListener((message) => {
-  if (isMarkerCommand(message)) {
-    if (recordingActive) {
-      void emitKeyboardMarker();
+  const PORT_RECONNECT_INITIAL_MS = 250;
+  const PORT_RECONNECT_MAX_MS = 5_000;
+  const PENDING_EVENT_MAX = 1_200;
+  const PORT_DEBUG_LOG_FLAG = "__WEBBLACKBOX_DEBUG_PORT__";
+  const INJECTED_CAPTURE_CONFIG_EVENT = "webblackbox:injected-config";
+
+  void requestRecordingStatusOnce();
+
+  const onRuntimeMessage = (message: unknown) => {
+    if (!bootstrapLease.isActive()) {
+      return false;
     }
 
-    return false;
-  }
+    if (isMarkerCommand(message)) {
+      if (recordingActive) {
+        void emitKeyboardMarker();
+      }
 
-  void handleSwMessage(message as ExtensionOutboundMessage);
-  return false;
-});
+      return false;
+    }
 
-window.addEventListener("beforeunload", cleanup);
-window.addEventListener("pagehide", cleanup, { once: true });
-
-function cleanup(): void {
-  recordingActive = false;
-  stopDrainContext = null;
-  recordingStatusVersion += 1;
-  stopPortReconnect();
-  stopPendingEventFlush();
-  pendingEvents = [];
-  captureAgent?.dispose();
-  captureAgent = null;
-  captureAgentPromise = null;
-  disconnectContentPort();
-}
-
-function connectContentPort(): void {
-  if (!recordingActive || !chromeApi?.runtime || contentPort) {
-    return;
-  }
-
-  try {
-    const port = chromeApi.runtime.connect({ name: PORT_NAMES.content });
-    bindContentPort(port);
-  } catch (error) {
-    debugPortSendFailure("runtime.connect", error);
-    schedulePortReconnect();
-  }
-}
-
-function bindContentPort(port: PortLike): void {
-  stopPortReconnect();
-  reconnectAttempts = 0;
-  contentPort = port;
-
-  const onMessage = (message: unknown) => {
     void handleSwMessage(message as ExtensionOutboundMessage);
+    return false;
   };
 
-  const onDisconnect = () => {
-    if (contentPort === port) {
-      contentPort = null;
+  chromeApi?.runtime?.onMessage.addListener(onRuntimeMessage);
+
+  const unbindPageLifecycle = bindContentPageLifecycle(window, {
+    dispose: cleanup,
+    resume: resumeFromBackForwardCache,
+    suspend: suspendForBackForwardCache
+  });
+
+  function resumeFromBackForwardCache(): void {
+    if (!bootstrapLease.resume()) {
+      return;
     }
 
-    port.onMessage.removeListener(onMessage);
-    port.onDisconnect.removeListener(onDisconnect);
+    lifecycleVersion += 1;
+    recordingStatusVersion += 1;
+    void requestRecordingStatusOnce();
+  }
+
+  function suspendForBackForwardCache(): void {
+    if (!bootstrapLease.suspend()) {
+      return;
+    }
+
+    // Drain what can still be posted synchronously. Never retain anonymous
+    // events across the suspension: the active SW session may change while the
+    // document is cached, and replaying them would attribute them to a new sid.
+    void flushAllPendingEvents();
+    lifecycleVersion += 1;
+    recordingStatusVersion += 1;
+    recordingActive = false;
+    stopDrainContext = null;
+    stopPortReconnect();
     stopPendingEventFlush();
-    schedulePortReconnect();
-  };
-
-  port.onMessage.addListener(onMessage);
-  port.onDisconnect.addListener(onDisconnect);
-
-  if (recordingActive) {
-    schedulePendingEventFlush();
-  }
-}
-
-function disconnectContentPort(): void {
-  const port = contentPort;
-
-  if (!port) {
-    return;
+    pendingEvents = [];
+    captureAgent?.dispose();
+    captureAgent = null;
+    captureAgentPromise = null;
+    disconnectContentPort();
   }
 
-  contentPort = null;
+  function cleanup(): void {
+    if (!bootstrapLease.dispose()) {
+      return;
+    }
 
-  try {
-    port.disconnect?.();
-  } catch (error) {
-    debugPortSendFailure("runtime.disconnect", error);
-  }
-}
-
-function schedulePortReconnect(): void {
-  if (!recordingActive || !chromeApi?.runtime || reconnectTimer > 0 || contentPort) {
-    return;
-  }
-
-  const delay = Math.min(PORT_RECONNECT_INITIAL_MS * 2 ** reconnectAttempts, PORT_RECONNECT_MAX_MS);
-  reconnectAttempts += 1;
-
-  reconnectTimer = window.setTimeout(() => {
-    reconnectTimer = 0;
-    connectContentPort();
-  }, delay);
-}
-
-function stopPortReconnect(): void {
-  reconnectAttempts = 0;
-
-  if (reconnectTimer > 0) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = 0;
-  }
-}
-
-function queuePendingEvents(events: RawRecorderEvent[]): void {
-  if (!recordingActive || events.length === 0) {
-    return;
+    recordingActive = false;
+    stopDrainContext = null;
+    lifecycleVersion += 1;
+    recordingStatusVersion += 1;
+    removeRuntimeMessageListener();
+    unbindPageLifecycle();
+    stopPortReconnect();
+    stopPendingEventFlush();
+    pendingEvents = [];
+    captureAgent?.dispose();
+    captureAgent = null;
+    captureAgentPromise = null;
+    disconnectContentPort();
   }
 
-  pendingEvents.push(...events);
-  trimPendingEvents();
-}
+  function removeRuntimeMessageListener(): void {
+    const onMessage = chromeApi?.runtime?.onMessage as
+      | {
+          removeListener?: (listener: typeof onRuntimeMessage) => void;
+        }
+      | undefined;
 
-function trimPendingEvents(): void {
-  if (pendingEvents.length <= PENDING_EVENT_MAX) {
-    return;
+    onMessage?.removeListener?.(onRuntimeMessage);
   }
 
-  pendingEvents.splice(0, pendingEvents.length - PENDING_EVENT_MAX);
-}
+  function connectContentPort(): void {
+    if (!recordingActive || !chromeApi?.runtime || contentPort) {
+      return;
+    }
 
-function flushPendingEventsChunk(): boolean {
-  if (!contentPort || !recordingActive || pendingEvents.length === 0) {
-    return false;
+    try {
+      const port = chromeApi.runtime.connect({ name: PORT_NAMES.content });
+      bindContentPort(port);
+    } catch (error) {
+      debugPortSendFailure("runtime.connect", error);
+      schedulePortReconnect();
+    }
   }
 
-  const batch = pendingEvents.splice(0, CONTENT_EVENT_FLUSH_CHUNK);
+  function bindContentPort(port: PortLike): void {
+    stopPortReconnect();
+    reconnectAttempts = 0;
+    contentPort = port;
 
-  try {
-    contentPort.postMessage({
-      kind: "content.events",
-      events: batch,
-      ...stopDrainEventFields(stopDrainContext, readDocumentUrl())
-    });
-  } catch (error) {
-    debugPortSendFailure("content.events.replay", error);
-    pendingEvents = [...batch, ...pendingEvents];
-    trimPendingEvents();
+    const onMessage = (message: unknown) => {
+      void handleSwMessage(message as ExtensionOutboundMessage);
+    };
+
+    const onDisconnect = () => {
+      if (contentPort === port) {
+        contentPort = null;
+      }
+
+      port.onMessage.removeListener(onMessage);
+      port.onDisconnect.removeListener(onDisconnect);
+      stopPendingEventFlush();
+      schedulePortReconnect();
+    };
+
+    port.onMessage.addListener(onMessage);
+    port.onDisconnect.addListener(onDisconnect);
+
+    if (recordingActive) {
+      schedulePendingEventFlush();
+    }
+  }
+
+  function disconnectContentPort(): void {
+    const port = contentPort;
+
+    if (!port) {
+      return;
+    }
+
     contentPort = null;
-    schedulePortReconnect();
-    return false;
+
+    try {
+      port.disconnect?.();
+    } catch (error) {
+      debugPortSendFailure("runtime.disconnect", error);
+    }
   }
 
-  return true;
-}
+  function schedulePortReconnect(): void {
+    if (!recordingActive || !chromeApi?.runtime || reconnectTimer > 0 || contentPort) {
+      return;
+    }
 
-function flushPendingEvents(): void {
-  if (!flushPendingEventsChunk()) {
-    return;
+    const delay = Math.min(
+      PORT_RECONNECT_INITIAL_MS * 2 ** reconnectAttempts,
+      PORT_RECONNECT_MAX_MS
+    );
+    reconnectAttempts += 1;
+
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = 0;
+      connectContentPort();
+    }, delay);
   }
 
-  if (pendingEvents.length > 0) {
-    schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
+  function stopPortReconnect(): void {
+    reconnectAttempts = 0;
+
+    if (reconnectTimer > 0) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = 0;
+    }
   }
-}
 
-async function flushAllPendingEvents(): Promise<void> {
-  stopPendingEventFlush();
+  function queuePendingEvents(events: RawRecorderEvent[]): void {
+    if (!recordingActive || events.length === 0) {
+      return;
+    }
 
-  while (contentPort && recordingActive && pendingEvents.length > 0) {
+    pendingEvents.push(...events);
+    trimPendingEvents();
+  }
+
+  function trimPendingEvents(): void {
+    if (pendingEvents.length <= PENDING_EVENT_MAX) {
+      return;
+    }
+
+    pendingEvents.splice(0, pendingEvents.length - PENDING_EVENT_MAX);
+  }
+
+  function flushPendingEventsChunk(): boolean {
+    if (!contentPort || !recordingActive || pendingEvents.length === 0) {
+      return false;
+    }
+
+    const batch = pendingEvents.splice(0, CONTENT_EVENT_FLUSH_CHUNK);
+
+    try {
+      contentPort.postMessage({
+        kind: "content.events",
+        events: batch,
+        ...stopDrainEventFields(stopDrainContext, readDocumentUrl())
+      });
+    } catch (error) {
+      debugPortSendFailure("content.events.replay", error);
+      pendingEvents = [...batch, ...pendingEvents];
+      trimPendingEvents();
+      contentPort = null;
+      schedulePortReconnect();
+      return false;
+    }
+
+    return true;
+  }
+
+  function flushPendingEvents(): void {
     if (!flushPendingEventsChunk()) {
       return;
     }
-  }
-}
 
-function emitBatch(events: RawRecorderEvent[]): void {
-  if (events.length === 0) {
-    return;
+    if (pendingEvents.length > 0) {
+      schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
+    }
   }
 
-  queuePendingEvents(events);
+  async function flushAllPendingEvents(): Promise<void> {
+    stopPendingEventFlush();
 
-  if (!contentPort) {
-    connectContentPort();
-    return;
-  }
-
-  schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
-}
-
-function emitMarker(message: string): void {
-  if (!contentPort) {
-    connectContentPort();
-    return;
-  }
-
-  try {
-    contentPort.postMessage({
-      kind: "content.marker",
-      message,
-      documentUrl: readDocumentUrl()
-    });
-  } catch (error) {
-    debugPortSendFailure("content.marker", error);
-  }
-}
-
-function emitStopDrained(sid?: string): void {
-  const message = buildContentStopDrainedMessage(sid, stopDrainContext);
-
-  if (!contentPort || window.top !== window || !message) {
-    return;
-  }
-
-  try {
-    contentPort.postMessage(message);
-  } catch (error) {
-    debugPortSendFailure("content.stop-drained", error);
-  }
-}
-
-async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void> {
-  if (!message || typeof message !== "object") {
-    return;
-  }
-
-  if (message.kind === "sw.recording-status") {
-    const statusVersion = (recordingStatusVersion += 1);
-    syncInjectedCaptureConfig(message);
-    const nextState = {
-      active: message.active,
-      sid: message.sid,
-      tabId: resolveRecordingStatusTabId(message),
-      mode: message.mode,
-      sampling: message.sampling,
-      capturePolicy: message.capturePolicy
-    };
-
-    if (message.active) {
-      stopDrainContext = null;
-      recordingActive = true;
-      connectContentPort();
-      const agent = await ensureCaptureAgent();
-
-      if (statusVersion !== recordingStatusVersion || !recordingActive) {
+    while (contentPort && recordingActive && pendingEvents.length > 0) {
+      if (!flushPendingEventsChunk()) {
         return;
       }
+    }
+  }
 
-      agent.setRecordingStatus(nextState);
-      schedulePendingEventFlush();
-    } else {
-      const wasRecording = recordingActive;
-      const agent = captureAgent;
-      stopDrainContext = resolveContentStopDrainContext(message, window.top === window);
-
-      if (wasRecording && agent) {
-        await agent.prepareStopCapture();
-
-        if (statusVersion !== recordingStatusVersion) {
-          return;
-        }
-
-        agent.setRecordingStatus(nextState);
-        await flushAllPendingEvents();
-
-        if (statusVersion !== recordingStatusVersion) {
-          return;
-        }
-
-        emitStopDrained(nextState.sid);
-      } else if (agent) {
-        agent.setRecordingStatus(nextState);
-      } else if (wasRecording) {
-        emitStopDrained(nextState.sid);
-      }
-
-      if (statusVersion !== recordingStatusVersion) {
-        return;
-      }
-
-      recordingActive = false;
-      stopDrainContext = null;
-      stopPendingEventFlush();
-      pendingEvents = [];
-      disconnectContentPort();
+  function emitBatch(events: RawRecorderEvent[]): void {
+    if (events.length === 0) {
+      return;
     }
 
-    return;
+    queuePendingEvents(events);
+
+    if (!contentPort) {
+      connectContentPort();
+      return;
+    }
+
+    schedulePendingEventFlush(pendingEvents.length >= CONTENT_EVENT_FLUSH_CHUNK);
   }
 
-  if (message.kind === "sw.freeze") {
-    captureAgent?.setIndicatorState(message.sid, "freeze");
+  function emitMarker(message: string): void {
+    if (!contentPort) {
+      connectContentPort();
+      return;
+    }
+
+    try {
+      contentPort.postMessage({
+        kind: "content.marker",
+        message,
+        documentUrl: readDocumentUrl()
+      });
+    } catch (error) {
+      debugPortSendFailure("content.marker", error);
+    }
   }
-}
 
-async function ensureCaptureAgent(): Promise<LiteCaptureAgent> {
-  if (captureAgent) {
-    return captureAgent;
+  function emitStopDrained(sid?: string): void {
+    const message = buildContentStopDrainedMessage(sid, stopDrainContext);
+
+    if (!contentPort || window.top !== window || !message) {
+      return;
+    }
+
+    try {
+      contentPort.postMessage(message);
+    } catch (error) {
+      debugPortSendFailure("content.stop-drained", error);
+    }
   }
 
-  if (captureAgentPromise) {
-    return captureAgentPromise;
+  async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void> {
+    if (!bootstrapLease.isActive() || !message || typeof message !== "object") {
+      return;
+    }
+
+    if (message.kind === "sw.recording-status") {
+      const statusVersion = (recordingStatusVersion += 1);
+      syncInjectedCaptureConfig(message);
+      const nextState = {
+        active: message.active,
+        sid: message.sid,
+        tabId: resolveRecordingStatusTabId(message),
+        mode: message.mode,
+        sampling: message.sampling,
+        capturePolicy: message.capturePolicy
+      };
+
+      if (message.active) {
+        stopDrainContext = null;
+        recordingActive = true;
+        connectContentPort();
+        const agent = await ensureCaptureAgent();
+
+        if (
+          !bootstrapLease.isActive() ||
+          statusVersion !== recordingStatusVersion ||
+          !recordingActive
+        ) {
+          return;
+        }
+
+        agent.setRecordingStatus(nextState);
+        schedulePendingEventFlush();
+      } else {
+        const wasRecording = recordingActive;
+        const agent = captureAgent;
+        stopDrainContext = resolveContentStopDrainContext(message, window.top === window);
+
+        if (wasRecording && agent) {
+          await agent.prepareStopCapture();
+
+          if (statusVersion !== recordingStatusVersion) {
+            return;
+          }
+
+          agent.setRecordingStatus(nextState);
+          await flushAllPendingEvents();
+
+          if (statusVersion !== recordingStatusVersion) {
+            return;
+          }
+
+          emitStopDrained(nextState.sid);
+        } else if (agent) {
+          agent.setRecordingStatus(nextState);
+        } else if (wasRecording) {
+          emitStopDrained(nextState.sid);
+        }
+
+        if (statusVersion !== recordingStatusVersion) {
+          return;
+        }
+
+        recordingActive = false;
+        stopDrainContext = null;
+        stopPendingEventFlush();
+        pendingEvents = [];
+        disconnectContentPort();
+      }
+
+      return;
+    }
+
+    if (message.kind === "sw.freeze") {
+      captureAgent?.setIndicatorState(message.sid, "freeze");
+    }
   }
 
-  const moduleUrl = chromeApi?.runtime?.getURL?.("content-agent.js") ?? "./content-agent.js";
+  async function ensureCaptureAgent(): Promise<LiteCaptureAgent> {
+    if (captureAgent) {
+      return captureAgent;
+    }
 
-  captureAgentPromise = import(moduleUrl)
-    .then((module) => {
+    if (captureAgentPromise) {
+      return captureAgentPromise;
+    }
+
+    const moduleUrl = chromeApi?.runtime?.getURL?.("content-agent.js") ?? "./content-agent.js";
+
+    const agentLifecycleVersion = lifecycleVersion;
+    const nextCaptureAgentPromise = import(moduleUrl).then((module) => {
       const { createContentCaptureAgent } = module as ContentAgentModule;
       const options: LiteCaptureAgentOptions = {
         emitBatch,
@@ -351,143 +426,173 @@ async function ensureCaptureAgent(): Promise<LiteCaptureAgent> {
         showIndicator: true
       };
       const agent = createContentCaptureAgent(options);
+
+      if (!bootstrapLease.isActive() || agentLifecycleVersion !== lifecycleVersion) {
+        agent.dispose();
+        return agent;
+      }
+
       captureAgent = agent;
       return agent;
-    })
-    .finally(() => {
-      captureAgentPromise = null;
     });
 
-  return captureAgentPromise;
-}
+    captureAgentPromise = nextCaptureAgentPromise;
+    void nextCaptureAgentPromise.then(
+      () => {
+        if (captureAgentPromise === nextCaptureAgentPromise) {
+          captureAgentPromise = null;
+        }
+      },
+      () => {
+        if (captureAgentPromise === nextCaptureAgentPromise) {
+          captureAgentPromise = null;
+        }
+      }
+    );
 
-async function emitKeyboardMarker(): Promise<void> {
-  const statusVersion = recordingStatusVersion;
-  const agent = await ensureCaptureAgent();
-
-  if (statusVersion !== recordingStatusVersion || !recordingActive) {
-    return;
+    return nextCaptureAgentPromise;
   }
 
-  agent.emitMarker(t("contentKeyboardMarker"));
-}
+  async function emitKeyboardMarker(): Promise<void> {
+    const statusVersion = recordingStatusVersion;
+    const agent = await ensureCaptureAgent();
 
-async function requestRecordingStatusOnce(): Promise<void> {
-  if (!chromeApi?.runtime?.sendMessage) {
-    return;
-  }
-
-  try {
-    const response = await chromeApi.runtime.sendMessage({
-      kind: "content.ready",
-      documentUrl: readDocumentUrl()
-    });
-
-    if (isRecordingStatusMessage(response)) {
-      await handleSwMessage(response);
-    }
-  } catch (error) {
-    debugPortSendFailure("content.ready", error);
-  }
-}
-
-function isRecordingStatusMessage(message: unknown): message is ExtensionOutboundMessage {
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return false;
-  }
-
-  return (message as { kind?: unknown }).kind === "sw.recording-status";
-}
-
-function schedulePendingEventFlush(immediate = false): void {
-  if (!contentPort || !recordingActive || pendingEvents.length === 0) {
-    return;
-  }
-
-  const delayMs = resolveContentEventFlushDelay(pendingEvents.length, immediate);
-
-  if (pendingEventFlushTimer > 0) {
-    if (delayMs >= pendingEventFlushDelayMs) {
+    if (
+      !bootstrapLease.isActive() ||
+      statusVersion !== recordingStatusVersion ||
+      !recordingActive
+    ) {
       return;
     }
 
-    clearTimeout(pendingEventFlushTimer);
-    pendingEventFlushTimer = 0;
+    agent.emitMarker(t("contentKeyboardMarker"));
   }
 
-  pendingEventFlushDelayMs = delayMs;
+  async function requestRecordingStatusOnce(): Promise<void> {
+    if (!bootstrapLease.isActive() || !chromeApi?.runtime?.sendMessage) {
+      return;
+    }
 
-  pendingEventFlushTimer = window.setTimeout(() => {
-    pendingEventFlushTimer = 0;
-    pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
-    flushPendingEvents();
-  }, delayMs);
-}
+    const requestLifecycleVersion = lifecycleVersion;
 
-function stopPendingEventFlush(): void {
-  if (pendingEventFlushTimer > 0) {
-    clearTimeout(pendingEventFlushTimer);
-    pendingEventFlushTimer = 0;
-  }
+    try {
+      const response = await chromeApi.runtime.sendMessage({
+        kind: "content.ready",
+        documentUrl: readDocumentUrl()
+      });
 
-  pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
-}
-
-function debugPortSendFailure(kind: string, error: unknown): void {
-  const flags = globalThis as unknown as Record<string, unknown>;
-  const enabled = flags[PORT_DEBUG_LOG_FLAG] === true || flags.__WEBBLACKBOX_PERF__ === true;
-
-  if (!enabled) {
-    return;
-  }
-
-  console.debug("[WebBlackbox][port] content postMessage failed", {
-    kind,
-    error: error instanceof Error ? error.message : String(error)
-  });
-}
-
-function isMarkerCommand(message: unknown): boolean {
-  if (message === null || typeof message !== "object" || Array.isArray(message)) {
-    return false;
-  }
-
-  return (message as { kind?: unknown }).kind === "sw.marker-command";
-}
-
-function syncInjectedCaptureConfig(
-  message: Extract<ExtensionOutboundMessage, { kind: "sw.recording-status" }>
-): void {
-  const bodyCaptureMaxBytes =
-    message.active &&
-    message.mode === "lite" &&
-    message.capturePolicy?.categories.network === "body-allowlist"
-      ? normalizeBodyCaptureBudget(message.sampling?.bodyCaptureMaxBytes)
-      : 0;
-
-  window.dispatchEvent(
-    new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
-      detail: {
-        active: message.active && message.mode === "lite",
-        bodyCaptureMaxBytes,
-        capturePolicy: message.capturePolicy
+      if (
+        requestLifecycleVersion === lifecycleVersion &&
+        bootstrapLease.isActive() &&
+        isRecordingStatusMessage(response)
+      ) {
+        await handleSwMessage(response);
       }
-    })
-  );
-}
-
-function normalizeBodyCaptureBudget(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return 0;
+    } catch (error) {
+      if (requestLifecycleVersion === lifecycleVersion && bootstrapLease.isActive()) {
+        debugPortSendFailure("content.ready", error);
+      }
+    }
   }
 
-  return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
-}
+  function isRecordingStatusMessage(message: unknown): message is ExtensionOutboundMessage {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      return false;
+    }
 
-function readDocumentUrl(): string | undefined {
-  try {
-    return window.location.href;
-  } catch {
-    return undefined;
+    return (message as { kind?: unknown }).kind === "sw.recording-status";
+  }
+
+  function schedulePendingEventFlush(immediate = false): void {
+    if (!contentPort || !recordingActive || pendingEvents.length === 0) {
+      return;
+    }
+
+    const delayMs = resolveContentEventFlushDelay(pendingEvents.length, immediate);
+
+    if (pendingEventFlushTimer > 0) {
+      if (delayMs >= pendingEventFlushDelayMs) {
+        return;
+      }
+
+      clearTimeout(pendingEventFlushTimer);
+      pendingEventFlushTimer = 0;
+    }
+
+    pendingEventFlushDelayMs = delayMs;
+
+    pendingEventFlushTimer = window.setTimeout(() => {
+      pendingEventFlushTimer = 0;
+      pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
+      flushPendingEvents();
+    }, delayMs);
+  }
+
+  function stopPendingEventFlush(): void {
+    if (pendingEventFlushTimer > 0) {
+      clearTimeout(pendingEventFlushTimer);
+      pendingEventFlushTimer = 0;
+    }
+
+    pendingEventFlushDelayMs = Number.POSITIVE_INFINITY;
+  }
+
+  function debugPortSendFailure(kind: string, error: unknown): void {
+    const flags = globalThis as unknown as Record<string, unknown>;
+    const enabled = flags[PORT_DEBUG_LOG_FLAG] === true || flags.__WEBBLACKBOX_PERF__ === true;
+
+    if (!enabled) {
+      return;
+    }
+
+    console.debug("[WebBlackbox][port] content postMessage failed", {
+      kind,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  function isMarkerCommand(message: unknown): boolean {
+    if (message === null || typeof message !== "object" || Array.isArray(message)) {
+      return false;
+    }
+
+    return (message as { kind?: unknown }).kind === "sw.marker-command";
+  }
+
+  function syncInjectedCaptureConfig(
+    message: Extract<ExtensionOutboundMessage, { kind: "sw.recording-status" }>
+  ): void {
+    const bodyCaptureMaxBytes =
+      message.active &&
+      message.mode === "lite" &&
+      message.capturePolicy?.categories.network === "body-allowlist"
+        ? normalizeBodyCaptureBudget(message.sampling?.bodyCaptureMaxBytes)
+        : 0;
+
+    window.dispatchEvent(
+      new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
+        detail: {
+          active: message.active && message.mode === "lite",
+          bodyCaptureMaxBytes,
+          capturePolicy: message.capturePolicy
+        }
+      })
+    );
+  }
+
+  function normalizeBodyCaptureBudget(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      return 0;
+    }
+
+    return Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)));
+  }
+
+  function readDocumentUrl(): string | undefined {
+    try {
+      return window.location.href;
+    } catch {
+      return undefined;
+    }
   }
 }
