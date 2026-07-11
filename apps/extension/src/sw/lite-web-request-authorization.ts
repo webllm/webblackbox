@@ -1,4 +1,7 @@
-import { ContentDocumentAuthorization } from "./content-document-authorization.js";
+import {
+  ContentDocumentAuthorization,
+  type ContentNavigationAuthorization
+} from "./content-document-authorization.js";
 
 export type LiteWebRequestAuthorizationPhase = "before" | "completion";
 
@@ -6,6 +9,8 @@ export type LiteWebRequestAuthorizationDetails = Readonly<{
   tabId: number;
   frameId?: number;
   documentId?: string;
+  parentFrameId?: number;
+  parentDocumentId?: string;
   type?: string;
   url: string;
 }>;
@@ -14,14 +19,15 @@ export type LiteWebRequestAuthorizationDecision = Readonly<{
   allowed: boolean;
   frameId: number;
   kind: "top-document" | "top-navigation" | "child-document" | "subframe-navigation";
+  navigationAuthorization?: ContentNavigationAuthorization;
+  navigationCurrent?: boolean;
 }>;
 
 export function authorizeLiteWebRequest(input: {
   authorization: ContentDocumentAuthorization;
   details: LiteWebRequestAuthorizationDetails;
   phase: LiteWebRequestAuthorizationPhase;
-  topDocumentUrl: string;
-  navigationStartedAllowed?: boolean;
+  navigationAuthorization?: ContentNavigationAuthorization;
   evaluateScope: (documentUrl: string, frameId: number) => boolean;
 }): LiteWebRequestAuthorizationDecision {
   const frameId = normalizeFrameId(input.details.frameId);
@@ -32,18 +38,48 @@ export function authorizeLiteWebRequest(input: {
 
   if (frameId === 0) {
     if (input.details.type === "main_frame") {
+      if (input.phase === "before") {
+        const navigationAuthorization = input.navigationAuthorization
+          ? input.authorization.continueNavigation(input.navigationAuthorization, input.details.url)
+          : input.authorization.beginNavigation(frameId, input.details.url);
+        const allowed =
+          navigationAuthorization !== null && input.evaluateScope(input.details.url, frameId);
+
+        return {
+          allowed,
+          frameId,
+          kind: "top-navigation",
+          navigationCurrent: navigationAuthorization !== null,
+          ...(allowed ? { navigationAuthorization } : {})
+        };
+      }
+
+      const navigationCurrent =
+        input.navigationAuthorization !== undefined &&
+        input.authorization.matchesNavigationCompletion({
+          authorization: input.navigationAuthorization,
+          frameId,
+          documentId: input.details.documentId
+        });
+
       return {
-        allowed:
-          input.phase === "before"
-            ? input.evaluateScope(input.details.url, 0)
-            : input.navigationStartedAllowed === true && input.evaluateScope(input.details.url, 0),
+        allowed: navigationCurrent && input.evaluateScope(input.details.url, frameId),
         frameId,
-        kind: "top-navigation"
+        kind: "top-navigation",
+        navigationCurrent
       };
     }
 
+    const document = input.authorization.get(frameId);
     return {
-      allowed: input.evaluateScope(input.topDocumentUrl, 0),
+      allowed:
+        document !== null &&
+        input.authorization.matchesWebRequest({
+          tabId: input.details.tabId,
+          frameId,
+          documentId: input.details.documentId
+        }) &&
+        input.evaluateScope(document.url, frameId),
       frameId,
       kind: "top-document"
     };
@@ -51,19 +87,48 @@ export function authorizeLiteWebRequest(input: {
 
   if (input.details.type === "sub_frame") {
     if (input.phase === "before") {
-      input.authorization.beginNavigation(frameId);
+      if (
+        input.details.parentFrameId === undefined ||
+        !input.authorization.matchesKnownDocument({
+          frameId: input.details.parentFrameId,
+          documentId: input.details.parentDocumentId
+        })
+      ) {
+        return {
+          allowed: false,
+          frameId,
+          kind: "subframe-navigation",
+          navigationCurrent: false
+        };
+      }
+
+      const navigationAuthorization = input.navigationAuthorization
+        ? input.authorization.continueNavigation(input.navigationAuthorization, input.details.url)
+        : input.authorization.beginNavigation(frameId, input.details.url);
+      const allowed =
+        navigationAuthorization !== null && input.evaluateScope(input.details.url, frameId);
       return {
-        allowed: input.evaluateScope(input.details.url, frameId),
+        allowed,
         frameId,
-        kind: "subframe-navigation"
+        kind: "subframe-navigation",
+        navigationCurrent: navigationAuthorization !== null,
+        ...(allowed ? { navigationAuthorization } : {})
       };
     }
 
+    const navigationCurrent =
+      input.navigationAuthorization !== undefined &&
+      input.authorization.matchesNavigationCompletion({
+        authorization: input.navigationAuthorization,
+        frameId,
+        documentId: input.details.documentId
+      });
+
     return {
-      allowed:
-        input.navigationStartedAllowed === true && input.evaluateScope(input.details.url, frameId),
+      allowed: navigationCurrent && input.evaluateScope(input.details.url, frameId),
       frameId,
-      kind: "subframe-navigation"
+      kind: "subframe-navigation",
+      navigationCurrent
     };
   }
 

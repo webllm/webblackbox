@@ -16,3 +16,23 @@ export function resolveRecordingStatusTabId(message: RecordingStatusMessage): nu
 
   return tabId;
 }
+
+export function isRecordingStatusRefreshRequest(message: unknown): boolean {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    !Array.isArray(message) &&
+    (message as { kind?: unknown }).kind === "sw.request-recording-status"
+  );
+}
+
+export function resolveRecordingStatusRefreshAction(
+  message: unknown,
+  bootstrapActive: boolean
+): "ignore" | "ack-only" | "ack-and-request" {
+  if (!isRecordingStatusRefreshRequest(message)) {
+    return "ignore";
+  }
+
+  return bootstrapActive ? "ack-and-request" : "ack-only";
+}

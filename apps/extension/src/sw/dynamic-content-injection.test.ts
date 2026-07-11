@@ -74,7 +74,11 @@ describe("injectPendingContentDocument", () => {
 
     const bError = new Error("document B was replaced");
     bMain.reject(bError);
-    await expect(injectionB).resolves.toEqual({ status: "failed", error: bError });
+    await expect(injectionB).resolves.toEqual({
+      status: "failed",
+      failedCurrentNavigation: false,
+      error: bError
+    });
 
     expect(authorization.getPending(FRAME_ID)?.documentId).toBe("document-c");
     expect(
@@ -107,7 +111,11 @@ describe("injectPendingContentDocument", () => {
         document,
         isRuntimeActive: () => true
       })
-    ).resolves.toEqual({ status: "failed", error: contentError });
+    ).resolves.toEqual({
+      status: "failed",
+      failedCurrentNavigation: true,
+      error: contentError
+    });
     expect(authorization.get(FRAME_ID)).toBeNull();
   });
 

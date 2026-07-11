@@ -2,13 +2,17 @@ import type { RawRecorderEvent } from "@webblackbox/recorder";
 import type { LiteCaptureAgent } from "webblackbox/lite-capture-agent";
 import type { LiteCaptureAgentOptions } from "webblackbox/types";
 
-import { getChromeApi, type PortLike } from "../shared/chrome-api.js";
+import { getChromeApi, type MessageSenderLike, type PortLike } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES, type ExtensionOutboundMessage } from "../shared/messages.js";
 import { acquireContentBootstrapLease, type ContentBootstrapLease } from "./bootstrap-lease.js";
 import { CONTENT_EVENT_FLUSH_CHUNK, resolveContentEventFlushDelay } from "./flush-policy.js";
 import { bindContentPageLifecycle } from "./page-lifecycle.js";
-import { resolveRecordingStatusTabId } from "./recording-status.js";
+import {
+  isRecordingStatusRefreshRequest,
+  resolveRecordingStatusRefreshAction,
+  resolveRecordingStatusTabId
+} from "./recording-status.js";
 import {
   buildContentStopDrainedMessage,
   resolveContentStopDrainContext,
@@ -49,7 +53,23 @@ function bootstrapContentRuntime(bootstrapLease: ContentBootstrapLease): void {
 
   void requestRecordingStatusOnce();
 
-  const onRuntimeMessage = (message: unknown) => {
+  const onRuntimeMessage = (
+    message: unknown,
+    _sender: MessageSenderLike,
+    sendResponse: (response: unknown) => void
+  ) => {
+    const refreshAction = resolveRecordingStatusRefreshAction(message, bootstrapLease.isActive());
+
+    if (refreshAction !== "ignore") {
+      sendResponse({ kind: "content.recording-status-requested" });
+
+      if (refreshAction === "ack-and-request") {
+        void requestRecordingStatusOnce();
+      }
+
+      return false;
+    }
+
     if (!bootstrapLease.isActive()) {
       return false;
     }
@@ -330,6 +350,11 @@ function bootstrapContentRuntime(bootstrapLease: ContentBootstrapLease): void {
 
   async function handleSwMessage(message: ExtensionOutboundMessage): Promise<void> {
     if (!bootstrapLease.isActive() || !message || typeof message !== "object") {
+      return;
+    }
+
+    if (isRecordingStatusRefreshRequest(message)) {
+      void requestRecordingStatusOnce();
       return;
     }
 

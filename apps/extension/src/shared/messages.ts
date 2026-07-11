@@ -124,6 +124,10 @@ export type RecordingStatusMessage = {
   };
 };
 
+export type RequestRecordingStatusMessage = {
+  kind: "sw.request-recording-status";
+};
+
 export type FreezeNoticeMessage = {
   kind: "sw.freeze";
   sid: string;
@@ -181,6 +185,7 @@ export type PipelineStatusMessage = {
 
 export type ExtensionOutboundMessage =
   | RecordingStatusMessage
+  | RequestRecordingStatusMessage
   | FreezeNoticeMessage
   | SessionListMessage
   | ExportStatusMessage

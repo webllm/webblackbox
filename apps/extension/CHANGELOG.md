@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Bound Lite navigation and browser-network capture to exact active Chrome documents and parent
+  chains, closing the previous page synchronously, keeping committed replacements pending until
+  exact dual-world injection and content readiness, and rejecting superseded completions, errors,
+  and policy results without letting stale senders stop or reopen the replacement document.
 - Made popup and options capture controls capability-aware: store-safe installs expose only Lite,
   Full visual choices require CDP, recording choices require tabCapture, and saving a reduced UI
   preserves supported hidden configuration instead of resetting it.

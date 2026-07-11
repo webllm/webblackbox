@@ -2,7 +2,11 @@ import { DEFAULT_RECORDER_CONFIG } from "@webblackbox/protocol";
 import { describe, expect, it } from "vitest";
 
 import type { RecordingStatusMessage } from "../shared/messages.js";
-import { resolveRecordingStatusTabId } from "./recording-status.js";
+import {
+  isRecordingStatusRefreshRequest,
+  resolveRecordingStatusRefreshAction,
+  resolveRecordingStatusTabId
+} from "./recording-status.js";
 
 function status(input: Partial<RecordingStatusMessage>): RecordingStatusMessage {
   return {
@@ -20,6 +24,21 @@ function capturePolicy(tabId: number) {
 }
 
 describe("resolveRecordingStatusTabId", () => {
+  it("recognizes only the side-effect-free exact status refresh request", () => {
+    expect(isRecordingStatusRefreshRequest({ kind: "sw.request-recording-status" })).toBe(true);
+    expect(isRecordingStatusRefreshRequest({ kind: "sw.recording-status", active: false })).toBe(
+      false
+    );
+  });
+
+  it("acknowledges a suspended singleton and waits for pageshow to request status", () => {
+    const request = { kind: "sw.request-recording-status" };
+
+    expect(resolveRecordingStatusRefreshAction(request, false)).toBe("ack-only");
+    expect(resolveRecordingStatusRefreshAction(request, true)).toBe("ack-and-request");
+    expect(resolveRecordingStatusRefreshAction({ kind: "sw.freeze" }, true)).toBe("ignore");
+  });
+
   it("preserves the service worker tab identity when it matches capture scope", () => {
     expect(
       resolveRecordingStatusTabId(

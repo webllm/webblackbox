@@ -101,7 +101,12 @@ import {
   buildLiteNetworkResponseRawEvent
 } from "./lite-network-baseline.js";
 import { authorizeLiteWebRequest } from "./lite-web-request-authorization.js";
-import { shouldUpdateSessionMetadataFromNavigation } from "./navigation-metadata.js";
+import {
+  canUseExactLiteTopDocumentAuthorization,
+  classifyActiveCommittedDocument,
+  resolveCurrentTabUrlPolicyDecision,
+  shouldUpdateSessionMetadataFromNavigation
+} from "./navigation-metadata.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 import {
   acknowledgePipelineBatch,
@@ -694,12 +699,7 @@ async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
 
   if (!(await authorizeContentSenderForReady(runtime, port.sender))) {
     sendContentPortRecordingState(port, runtime, false);
-
-    if (normalizeSenderFrameId(port.sender) === 0) {
-      await stopSession(tabId);
-    } else {
-      failContentSender(runtime, port.sender);
-    }
+    await deactivateDeniedContentFrame(runtime, port.sender, port);
 
     return;
   }
@@ -735,7 +735,12 @@ function syncContentPortRecordingState(port: PortLike): void {
 
   if (!authorizeContentSender(runtime, port.sender)) {
     sendContentPortRecordingState(port, runtime, false);
-    failContentSender(runtime, port.sender);
+
+    if (shouldStopRuntimeForDeniedContentSender(runtime, port.sender)) {
+      requestStopRuntimeIfCurrent(runtime, "content-port-denied");
+    } else {
+      failContentSender(runtime, port.sender);
+    }
     return;
   }
 
@@ -852,8 +857,8 @@ chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
 });
 
 chromeApi?.webNavigation?.onCommitted.addListener((details) => {
-  void handleCommittedChildDocument(details).catch((error) => {
-    console.warn("[WebBlackbox] committed child document handling failed closed", {
+  void handleCommittedContentDocument(details).catch((error) => {
+    console.warn("[WebBlackbox] committed document handling failed closed", {
       tabId: details.tabId,
       frameId: details.frameId,
       documentId: details.documentId,
@@ -980,11 +985,7 @@ async function handleInboundMessage(
     }
 
     if (!(await authorizeContentSenderForReady(runtime, sender, message.documentUrl))) {
-      if (normalizeSenderFrameId(sender) === 0) {
-        await stopSession(tabId);
-      } else {
-        await deactivateDeniedContentFrame(runtime, sender, port);
-      }
+      await deactivateDeniedContentFrame(runtime, sender, port);
 
       return {
         kind: "sw.recording-status",
@@ -1060,9 +1061,7 @@ async function handleInboundMessage(
     const stopDrain = pendingStopDrainAcks.get(runtime.sid)?.capability;
 
     if (!activeSenderAuthorized && !stopDrain) {
-      if (activeCapture && normalizeSenderFrameId(sender) === 0) {
-        await stopSession(tabId);
-      } else if (activeCapture) {
+      if (activeCapture) {
         await deactivateDeniedContentFrame(runtime, sender, port);
       }
 
@@ -1669,12 +1668,42 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
     return;
   }
 
+  const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
+
   if (runtime.mode === "full" && runtime.cdpRouter) {
     invalidateCdpCaptureFrameTree(runtime.cdpScope);
     void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
   }
 
   const tabMetadata = await resolveTabSessionMetadata(tabId);
+
+  if (exactLiteTopDocument) {
+    const decision = await resolveCurrentTabUrlPolicyDecision({
+      candidateUrl: tabMetadata.captureUrl,
+      evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl),
+      resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(tabId)
+    });
+
+    if (!isRuntimeCurrentCaptureOpen(runtime)) {
+      return;
+    }
+
+    if (decision === "stale") {
+      return;
+    }
+
+    if (decision === "denied") {
+      await stopRuntimeIfCurrent(runtime);
+      return;
+    }
+
+    runtime.captureUrl = tabMetadata.captureUrl;
+    runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
+    runtime.url = tabMetadata.url;
+    pushSessionList();
+    scheduleRuntimeStatePersist();
+    return;
+  }
 
   if (!(await isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl))) {
     await stopSession(tabId);
@@ -1684,6 +1713,7 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
   runtime.captureUrl = tabMetadata.captureUrl;
   runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
   runtime.url = tabMetadata.url;
+
   resetAuthorizedContentFrames(runtime);
 
   await ensureContentScriptInjected(runtime);
@@ -1698,18 +1728,34 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
   }
 }
 
-async function handleCommittedChildDocument(details: {
+async function handleCommittedContentDocument(details: {
   tabId: number;
   frameId: number;
   documentId?: string;
+  documentLifecycle?: string;
+  frameType?: string;
+  parentDocumentId?: string;
+  parentFrameId?: number;
   url: string;
 }): Promise<void> {
   const runtime = sessionsByTab.get(details.tabId);
+  const committedKind = classifyActiveCommittedDocument(details);
+  const topLiteDocument =
+    committedKind === "top" &&
+    runtime !== undefined &&
+    usesExactLiteTopDocumentAuthorization(runtime);
+  const includedChildDocument =
+    committedKind === "child" &&
+    runtime?.config.capturePolicy?.scope.includeSubframes === true &&
+    details.parentFrameId !== undefined &&
+    runtime.contentDocuments.matchesKnownDocument({
+      frameId: details.parentFrameId,
+      documentId: details.parentDocumentId
+    });
 
   if (
     !runtime ||
-    details.frameId <= 0 ||
-    runtime.config.capturePolicy?.scope.includeSubframes !== true ||
+    (!topLiteDocument && !includedChildDocument) ||
     !isVolatileCaptureOpen(runtime.captureFence) ||
     runtime.stopping ||
     runtime.stoppedAt
@@ -1718,19 +1764,52 @@ async function handleCommittedChildDocument(details: {
   }
 
   const preparation = await runtime.contentDocuments
-    .prepareCommittedNavigation(details, ({ url, frameId }) =>
-      evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+    .prepareCommittedNavigation(details, async ({ url, frameId }) => {
+      if (frameId === 0) {
+        return isRuntimeTopDocumentAllowed(runtime, url);
+      }
+
+      return evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
         url,
         tabId: runtime.tabId,
         frameId
-      })
-    )
+      });
+    })
     .finally(() => {
       syncAuthorizedContentFrames(runtime);
     });
 
-  if (!preparation.prepared) {
+  if (!isRuntimeCurrentCaptureOpen(runtime)) {
     return;
+  }
+
+  if (!preparation.prepared) {
+    if (
+      topLiteDocument &&
+      (preparation.reason === "invalid-navigation" ||
+        preparation.reason === "scope-denied" ||
+        preparation.reason === "scope-error")
+    ) {
+      await stopRuntimeIfCurrent(runtime);
+    }
+    return;
+  }
+
+  if (
+    !runtime.contentDocuments.isCurrentNavigation(
+      preparation.document.frameId,
+      preparation.document.documentId
+    )
+  ) {
+    return;
+  }
+
+  if (topLiteDocument) {
+    runtime.captureUrl = preparation.document.url;
+    runtime.cdpScope.captureUrl = preparation.document.url;
+    runtime.url = sanitizeUrlForPrivacy(preparation.document.url);
+    pushSessionList();
+    scheduleRuntimeStatePersist();
   }
 
   const result = await injectPendingContentDocument({
@@ -1743,16 +1822,110 @@ async function handleCommittedChildDocument(details: {
       !runtime.stoppedAt &&
       sessionsByTab.get(runtime.tabId) === runtime
   });
+
+  if (result.status === "injected") {
+    try {
+      await requestExactContentRecordingStatus(runtime, preparation.document);
+    } catch (error) {
+      const failedCurrentNavigation = runtime.contentDocuments.failNavigation(
+        preparation.document.frameId,
+        preparation.document.documentId
+      );
+      syncAuthorizedContentFrames(runtime);
+      console.warn("[WebBlackbox] prepared document status request failed closed", {
+        tabId: runtime.tabId,
+        frameId: preparation.document.frameId,
+        documentId: preparation.document.documentId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+
+      if (topLiteDocument && failedCurrentNavigation) {
+        await stopRuntimeIfCurrent(runtime);
+      }
+      return;
+    }
+
+    runtime.contentDocuments.completePendingInjection(
+      preparation.document.frameId,
+      preparation.document.documentId
+    );
+  } else if (result.status === "stale") {
+    runtime.contentDocuments.failNavigation(
+      preparation.document.frameId,
+      preparation.document.documentId
+    );
+  }
   syncAuthorizedContentFrames(runtime);
 
   if (result.status === "failed") {
-    console.warn("[WebBlackbox] dynamic child injection failed closed", {
+    console.warn("[WebBlackbox] dynamic document injection failed closed", {
       tabId: runtime.tabId,
       frameId: preparation.document.frameId,
       documentId: preparation.document.documentId,
       error: result.error instanceof Error ? result.error.message : String(result.error)
     });
+
+    if (topLiteDocument && result.failedCurrentNavigation) {
+      await stopRuntimeIfCurrent(runtime);
+    }
   }
+}
+
+async function requestExactContentRecordingStatus(
+  runtime: SessionRuntime,
+  document: { frameId: number; documentId: string }
+): Promise<void> {
+  if (!chromeApi?.tabs?.sendMessage) {
+    throw new Error("Chrome tabs messaging is unavailable for exact status request.");
+  }
+
+  const acknowledgement = await chromeApi.tabs.sendMessage(
+    runtime.tabId,
+    {
+      kind: "sw.request-recording-status"
+    },
+    {
+      frameId: document.frameId,
+      documentId: document.documentId
+    }
+  );
+
+  if (
+    typeof acknowledgement !== "object" ||
+    acknowledgement === null ||
+    Array.isArray(acknowledgement) ||
+    (acknowledgement as { kind?: unknown }).kind !== "content.recording-status-requested"
+  ) {
+    throw new Error("Exact content document did not acknowledge the status request.");
+  }
+}
+
+async function stopRuntimeIfCurrent(runtime: SessionRuntime): Promise<void> {
+  if (sessionsByTab.get(runtime.tabId) !== runtime) {
+    return;
+  }
+
+  await stopSession(runtime.tabId);
+}
+
+function isRuntimeCurrentCaptureOpen(runtime: SessionRuntime): boolean {
+  return (
+    sessionsByTab.get(runtime.tabId) === runtime &&
+    isVolatileCaptureOpen(runtime.captureFence) &&
+    !runtime.stopping &&
+    !runtime.stoppedAt
+  );
+}
+
+function requestStopRuntimeIfCurrent(runtime: SessionRuntime, reason: string): void {
+  void stopRuntimeIfCurrent(runtime).catch((error) => {
+    console.warn("[WebBlackbox] failed to stop current Lite navigation", {
+      tabId: runtime.tabId,
+      sid: runtime.sid,
+      reason,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 }
 
 function stopSession(tabId: number): Promise<void> {
@@ -4917,7 +5090,8 @@ function normalizeSenderFrameId(sender: MessageSenderLike | undefined): number {
 function authorizeContentSender(
   runtime: SessionRuntime,
   sender: MessageSenderLike | undefined,
-  documentUrl?: string
+  documentUrl?: string,
+  ready = false
 ): boolean {
   if (!isVolatileCaptureOpen(runtime.captureFence)) {
     return false;
@@ -4941,9 +5115,7 @@ function authorizeContentSender(
       ? documentUrl
       : typeof sender?.url === "string" && sender.url.length > 0
         ? sender.url
-        : frameId === 0
-          ? runtime.captureUrl
-          : null;
+        : null;
   const decision = evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
     url: senderUrl,
     tabId,
@@ -4954,39 +5126,49 @@ function authorizeContentSender(
     return false;
   }
 
-  if (frameId === 0 && senderUrl) {
-    const currentTopDocument = runtime.contentDocuments.get(0);
-
-    if (currentTopDocument && currentTopDocument.documentId !== documentId) {
-      resetAuthorizedContentFrames(runtime, senderUrl);
-    } else if (!currentTopDocument && runtime.captureUrl !== senderUrl) {
-      resetAuthorizedContentFrames(runtime, senderUrl);
-    }
-
-    if (senderUrl !== runtime.captureUrl) {
-      runtime.captureUrl = senderUrl;
-      runtime.cdpScope.captureUrl = senderUrl;
-      runtime.url = sanitizeUrlForPrivacy(senderUrl);
-    }
-  }
-
   if (!senderUrl) {
     return false;
   }
 
-  const authorized = runtime.contentDocuments.authorize({
+  const authorizationInput = {
     tabId,
     frameId,
     documentId,
     url: senderUrl
-  });
+  };
+  const authorized =
+    frameId === 0
+      ? runtime.contentDocuments.authorizeTopSender(authorizationInput, {
+          allowNavigationFallback: !usesExactLiteTopDocumentAuthorization(runtime),
+          currentCaptureUrl: runtime.captureUrl,
+          ready
+        })
+      : ready
+        ? runtime.contentDocuments.authorize(authorizationInput)
+        : runtime.contentDocuments.authorizeEvent(authorizationInput);
 
   if (!authorized) {
     return false;
   }
 
+  if (frameId === 0 && senderUrl !== runtime.captureUrl) {
+    runtime.captureUrl = senderUrl;
+    runtime.cdpScope.captureUrl = senderUrl;
+    runtime.url = sanitizeUrlForPrivacy(senderUrl);
+  }
+
   syncAuthorizedContentFrames(runtime);
   return true;
+}
+
+function shouldStopRuntimeForDeniedContentSender(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined
+): boolean {
+  return runtime.contentDocuments.shouldStopRuntimeForDeniedSender({
+    frameId: normalizeSenderFrameId(sender),
+    documentId: sender?.documentId
+  });
 }
 
 async function authorizeContentSenderForReady(
@@ -4994,8 +5176,37 @@ async function authorizeContentSenderForReady(
   sender: MessageSenderLike | undefined,
   documentUrl?: string
 ): Promise<boolean> {
-  if (!authorizeContentSender(runtime, sender, documentUrl)) {
-    return false;
+  if (!authorizeContentSender(runtime, sender, documentUrl, true)) {
+    const frameId = normalizeSenderFrameId(sender);
+    const senderUrl =
+      typeof documentUrl === "string" && documentUrl.length > 0
+        ? documentUrl
+        : typeof sender?.url === "string" && sender.url.length > 0
+          ? sender.url
+          : null;
+    const preparing =
+      typeof sender?.tab?.id === "number" &&
+      frameId >= 0 &&
+      typeof sender.documentId === "string" &&
+      senderUrl
+        ? runtime.contentDocuments.waitForPreparingAuthorization({
+            tabId: sender.tab.id,
+            frameId,
+            documentId: sender.documentId,
+            url: senderUrl
+          })
+        : null;
+
+    if (
+      !(
+        preparing &&
+        (await preparing) &&
+        isRuntimeCurrentCaptureOpen(runtime) &&
+        authorizeContentSender(runtime, sender, documentUrl, true)
+      )
+    ) {
+      return false;
+    }
   }
 
   if (!shouldInjectHooksForMode(runtime.mode)) {
@@ -5005,6 +5216,10 @@ async function authorizeContentSenderForReady(
   const frameId = normalizeSenderFrameId(sender);
 
   if (frameId === 0) {
+    if (usesExactLiteTopDocumentAuthorization(runtime)) {
+      return true;
+    }
+
     await ensureInjectedHooks(runtime.tabId, 0);
     return true;
   }
@@ -5077,6 +5292,11 @@ async function deactivateDeniedContentFrame(
   sender: MessageSenderLike | undefined,
   port?: PortLike
 ): Promise<void> {
+  if (shouldStopRuntimeForDeniedContentSender(runtime, sender)) {
+    await stopRuntimeIfCurrent(runtime);
+    return;
+  }
+
   const frameId = normalizeSenderFrameId(sender);
 
   if (frameId < 0) {
@@ -5106,6 +5326,19 @@ function resetAuthorizedContentFrames(
 ): void {
   runtime.contentDocuments.reset({ url: topDocumentUrl });
   syncAuthorizedContentFrames(runtime);
+}
+
+function usesExactLiteTopDocumentAuthorization(runtime: SessionRuntime): boolean {
+  try {
+    return canUseExactLiteTopDocumentAuthorization({
+      mode: runtime.mode,
+      permissions: chromeApi?.runtime?.getManifest?.().permissions,
+      hasWebNavigationApi: typeof chromeApi?.webNavigation?.onCommitted?.addListener === "function",
+      hasScriptingApi: typeof chromeApi?.scripting?.executeScript === "function"
+    });
+  } catch {
+    return false;
+  }
 }
 
 function asString(value: unknown): string | null {
@@ -5612,6 +5845,8 @@ function installLiteWebRequestCapture(): void {
     tabId: number;
     documentId?: string;
     frameId?: number;
+    parentDocumentId?: string;
+    parentFrameId?: number;
     method?: string;
     type?: string;
     url: string;
@@ -5623,11 +5858,14 @@ function installLiteWebRequestCapture(): void {
       return;
     }
 
+    const requestMetaKey = buildRequestMetaKey(details.requestId);
+    const existingMetadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
+
     const authorization = authorizeLiteWebRequest({
       authorization: runtime.contentDocuments,
       details,
       phase: "before",
-      topDocumentUrl: runtime.captureUrl,
+      navigationAuthorization: existingMetadata?.liteNavigationAuthorization,
       evaluateScope: (documentUrl, frameId) =>
         evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
           url: documentUrl,
@@ -5636,24 +5874,28 @@ function installLiteWebRequestCapture(): void {
         }).allowed
     });
 
-    if (authorization.kind === "subframe-navigation") {
+    if (authorization.kind === "subframe-navigation" || authorization.kind === "top-navigation") {
       syncAuthorizedContentFrames(runtime);
     }
 
     if (!authorization.allowed) {
-      deleteRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId));
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+
+      if (authorization.kind === "top-navigation" && authorization.navigationCurrent === true) {
+        requestStopRuntimeIfCurrent(runtime, "navigation-before-denied");
+      }
       return;
     }
 
     const startedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
-    upsertRequestMeta(runtime.requestMeta, buildRequestMetaKey(details.requestId), {
+    upsertRequestMeta(runtime.requestMeta, requestMetaKey, {
       url: details.url,
       method: details.method,
       startedAt,
       resourceType: details.type,
-      liteNavigationAuthorized:
+      liteNavigationAuthorization:
         authorization.kind === "subframe-navigation" || authorization.kind === "top-navigation"
-          ? true
+          ? authorization.navigationAuthorization
           : undefined
     });
 
@@ -5702,8 +5944,7 @@ function installLiteWebRequestCapture(): void {
         type: details.type ?? metadata?.resourceType
       },
       phase: "completion",
-      topDocumentUrl: runtime.captureUrl,
-      navigationStartedAllowed: metadata?.liteNavigationAuthorized,
+      navigationAuthorization: metadata?.liteNavigationAuthorization,
       evaluateScope: (documentUrl, frameId) =>
         evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
           url: documentUrl,
@@ -5711,9 +5952,14 @@ function installLiteWebRequestCapture(): void {
           frameId
         }).allowed
     });
+    finalizeLiteNavigation(runtime, metadata?.liteNavigationAuthorization);
 
     if (!authorization.allowed) {
       deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+
+      if (authorization.kind === "top-navigation" && authorization.navigationCurrent === true) {
+        requestStopRuntimeIfCurrent(runtime, "navigation-completion-denied");
+      }
       return;
     }
 
@@ -5771,8 +6017,7 @@ function installLiteWebRequestCapture(): void {
         type: details.type ?? metadata?.resourceType
       },
       phase: "completion",
-      topDocumentUrl: runtime.captureUrl,
-      navigationStartedAllowed: metadata?.liteNavigationAuthorized,
+      navigationAuthorization: metadata?.liteNavigationAuthorization,
       evaluateScope: (documentUrl, frameId) =>
         evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
           url: documentUrl,
@@ -5780,9 +6025,14 @@ function installLiteWebRequestCapture(): void {
           frameId
         }).allowed
     });
+    finalizeLiteNavigation(runtime, metadata?.liteNavigationAuthorization);
 
     if (!authorization.allowed) {
       deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+
+      if (authorization.kind === "top-navigation" && authorization.navigationCurrent === true) {
+        requestStopRuntimeIfCurrent(runtime, "navigation-error");
+      }
       return;
     }
 
@@ -5811,6 +6061,10 @@ function installLiteWebRequestCapture(): void {
     );
 
     deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+
+    if (authorization.kind === "top-navigation" && authorization.navigationCurrent === true) {
+      requestStopRuntimeIfCurrent(runtime, "navigation-error");
+    }
   };
 
   chromeApi.webRequest.onBeforeRequest.addListener(onBeforeRequest, filter);
@@ -5823,6 +6077,15 @@ function installLiteWebRequestCapture(): void {
     chromeApi.webRequest?.onErrorOccurred.removeListener(onErrorOccurred);
     liteWebRequestCaptureCleanup = null;
   };
+}
+
+function finalizeLiteNavigation(
+  runtime: SessionRuntime,
+  authorization: RequestMetaEntry["liteNavigationAuthorization"]
+): void {
+  if (authorization) {
+    runtime.contentDocuments.finalizeNavigation(authorization);
+  }
 }
 
 function uninstallLiteWebRequestCaptureIfUnused(): void {
@@ -6231,8 +6494,37 @@ async function updateSessionMetadataFromEventAsync(
   }
 
   if (nextUrl) {
-    if (!(await isRuntimeTopDocumentAllowed(runtime, nextUrl))) {
-      await stopSession(runtime.tabId);
+    const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
+    const exactDocument = exactLiteTopDocument ? runtime.contentDocuments.get(0) : null;
+
+    if (exactLiteTopDocument && (!exactDocument || exactDocument.url !== nextUrl)) {
+      return;
+    }
+
+    const allowed = await isRuntimeTopDocumentAllowed(runtime, nextUrl);
+
+    if (!isRuntimeCurrentCaptureOpen(runtime)) {
+      return;
+    }
+
+    if (
+      exactDocument &&
+      !runtime.contentDocuments.matchesSender({
+        tabId: runtime.tabId,
+        frameId: 0,
+        documentId: exactDocument.documentId,
+        url: exactDocument.url
+      })
+    ) {
+      return;
+    }
+
+    if (!allowed) {
+      if (exactLiteTopDocument) {
+        await stopRuntimeIfCurrent(runtime);
+      } else {
+        await stopSession(runtime.tabId);
+      }
       return;
     }
 
@@ -6242,7 +6534,9 @@ async function updateSessionMetadataFromEventAsync(
       runtime.url = sanitizedNextUrl;
       runtime.captureUrl = nextUrl;
       runtime.cdpScope.captureUrl = nextUrl;
-      resetAuthorizedContentFrames(runtime);
+      if (!exactLiteTopDocument) {
+        resetAuthorizedContentFrames(runtime);
+      }
       changed = true;
     }
   }
@@ -6300,12 +6594,33 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     return;
   }
 
+  const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
+
   if (runtime.mode === "full" && runtime.cdpRouter && rawUrl !== runtime.captureUrl) {
     invalidateCdpCaptureFrameTree(runtime.cdpScope);
     void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
   }
 
-  if (!(await isRuntimeTopDocumentAllowed(runtime, rawUrl))) {
+  if (exactLiteTopDocument) {
+    const decision = await resolveCurrentTabUrlPolicyDecision({
+      candidateUrl: rawUrl,
+      evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, rawUrl),
+      resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(tabId)
+    });
+
+    if (!isRuntimeCurrentCaptureOpen(runtime)) {
+      return;
+    }
+
+    if (decision === "stale") {
+      return;
+    }
+
+    if (decision === "denied") {
+      await stopRuntimeIfCurrent(runtime);
+      return;
+    }
+  } else if (!(await isRuntimeTopDocumentAllowed(runtime, rawUrl))) {
     await stopSession(tabId);
     return;
   }
@@ -6316,9 +6631,24 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     runtime.url = nextUrl;
     runtime.captureUrl = rawUrl;
     runtime.cdpScope.captureUrl = rawUrl;
-    resetAuthorizedContentFrames(runtime);
+    if (!exactLiteTopDocument) {
+      resetAuthorizedContentFrames(runtime);
+    }
     pushSessionList();
     scheduleRuntimeStatePersist();
+  }
+}
+
+async function resolveCurrentTabCaptureUrl(tabId: number): Promise<string | null> {
+  if (!chromeApi?.tabs?.get) {
+    return null;
+  }
+
+  try {
+    const tab = await chromeApi.tabs.get(tabId);
+    return typeof tab?.url === "string" && tab.url.length > 0 ? tab.url : null;
+  } catch {
+    return null;
   }
 }
 

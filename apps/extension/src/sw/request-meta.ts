@@ -1,3 +1,5 @@
+import type { ContentNavigationAuthorization } from "./content-document-authorization.js";
+
 export type RequestMetaEntry = {
   url?: string;
   method?: string;
@@ -5,7 +7,7 @@ export type RequestMetaEntry = {
   mimeType?: string;
   status?: number;
   resourceType?: string;
-  liteNavigationAuthorized?: boolean;
+  liteNavigationAuthorization?: ContentNavigationAuthorization;
   updatedAt: number;
 };
 

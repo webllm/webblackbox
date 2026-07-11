@@ -143,6 +143,10 @@ export type ChromeApi = {
           tabId: number;
           frameId: number;
           documentId?: string;
+          documentLifecycle?: "prerender" | "active" | "cached" | "pending_deletion";
+          frameType?: "outermost_frame" | "fenced_frame" | "sub_frame";
+          parentDocumentId?: string;
+          parentFrameId?: number;
           url: string;
           timeStamp?: number;
         }) => void
@@ -152,6 +156,10 @@ export type ChromeApi = {
           tabId: number;
           frameId: number;
           documentId?: string;
+          documentLifecycle?: "prerender" | "active" | "cached" | "pending_deletion";
+          frameType?: "outermost_frame" | "fenced_frame" | "sub_frame";
+          parentDocumentId?: string;
+          parentFrameId?: number;
           url: string;
           timeStamp?: number;
         }) => void
@@ -166,6 +174,8 @@ export type ChromeApi = {
           tabId: number;
           documentId?: string;
           frameId?: number;
+          parentDocumentId?: string;
+          parentFrameId?: number;
           method?: string;
           type?: string;
           url: string;

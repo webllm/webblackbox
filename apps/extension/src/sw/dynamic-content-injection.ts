@@ -7,7 +7,7 @@ import { injectContentScript, injectMainWorldHook } from "./script-injection.js"
 
 export type DynamicContentInjectionResult =
   | Readonly<{ status: "injected" | "stale" }>
-  | Readonly<{ status: "failed"; error: unknown }>;
+  | Readonly<{ status: "failed"; failedCurrentNavigation: boolean; error: unknown }>;
 
 /**
  * Injects both worlds into one exact committed document. Every async boundary
@@ -43,9 +43,14 @@ export async function injectPendingContentDocument(input: {
       frameId,
       documentId
     });
+
+    if (!isCurrent()) {
+      return { status: "stale" };
+    }
+
     return { status: "injected" };
   } catch (error) {
-    input.authorization.failNavigation(frameId, documentId);
-    return { status: "failed", error };
+    const failedCurrentNavigation = input.authorization.failNavigation(frameId, documentId);
+    return { status: "failed", failedCurrentNavigation, error };
   }
 }
