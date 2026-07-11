@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Kept active-runtime restoration provisional through pipeline resume, required injection and CDP
+  bootstrap, interrupted-recording recovery, and requested screen-recording restart; capture and
+  active content publication now begin only after one identity-fenced activation commit, while
+  partial failures clean up once without briefly exposing an active session.
 - Fenced Full and non-exact top-navigation work with runtime-bound monotonic revisions, so delayed
   policy, injection, CDP frame-tree, queued, and screen-recording work cannot revive an earlier
   same-URL navigation or operate on a same-tab replacement runtime; invalid roots now stop only the

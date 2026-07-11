@@ -14,11 +14,13 @@ import {
   createRuntimeStateSnapshot,
   createStoppingRuntimeTombstone,
   compactScreenRecordingChunkHashes,
+  commitRestoredRuntimeActivation,
   deleteMapEntryIfSame,
   deriveDurableScreenRecordingChunkCount,
   disposeListenersBeforeTeardown,
   evaluateActiveRuntimeRestoration,
   isMapEntrySame,
+  isRuntimeActivationProvisional,
   isRuntimeCaptureAdmitted,
   isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
@@ -793,6 +795,59 @@ describe("MV3 cleanup scheduling", () => {
 });
 
 describe("active runtime restoration transaction", () => {
+  it("keeps a survived recording provisional until the final activation commit", async () => {
+    const order: string[] = [];
+    const runtime = {
+      activationState: "starting" as const,
+      captureFence: createVolatileCaptureFence(),
+      stopping: false,
+      screenRecording: {
+        provisional: isRuntimeActivationProvisional("starting")
+      }
+    };
+    const cleanupRuntime = vi.fn();
+    const result = await runActiveRuntimeRestorationTransaction({
+      startPipeline: () => {
+        order.push("pipeline");
+      },
+      prepareRuntime: () => {
+        order.push("prepare");
+        return runtime;
+      },
+      registerRuntime: () => {
+        order.push("register");
+      },
+      completeRuntime: () => {
+        expect(isRuntimeCaptureAdmitted(runtime.activationState)).toBe(false);
+        expect(runtime.screenRecording.provisional).toBe(true);
+        order.push("interrupted-events-flushed");
+      },
+      activateRuntime: () => {
+        commitRestoredRuntimeActivation(runtime, {
+          currentByTab: true,
+          currentBySid: true
+        });
+        expect(isRuntimeCaptureAdmitted(runtime.activationState)).toBe(true);
+        expect(runtime.screenRecording.provisional).toBe(false);
+        order.push("commit-active");
+      },
+      cleanupPipeline: vi.fn(),
+      cleanupRuntime
+    });
+
+    expect(result).toEqual({ kind: "restored", runtime });
+    order.push("notify-active");
+    expect(order).toEqual([
+      "pipeline",
+      "prepare",
+      "register",
+      "interrupted-events-flushed",
+      "commit-active",
+      "notify-active"
+    ]);
+    expect(cleanupRuntime).not.toHaveBeenCalled();
+  });
+
   it.each(["start", "resume"] as const)(
     "purges pipeline-only state when %s fails before runtime registration",
     async (fault) => {
@@ -809,6 +864,7 @@ describe("active runtime restoration transaction", () => {
         },
         registerRuntime: vi.fn(),
         completeRuntime: vi.fn(),
+        activateRuntime: vi.fn(),
         cleanupPipeline,
         cleanupRuntime
       });
@@ -831,6 +887,7 @@ describe("active runtime restoration transaction", () => {
         deleteMapEntryIfSame(sessionsByTab, failed.tabId, failed);
         deleteMapEntryIfSame(sessionsBySid, failed.sid, failed);
       });
+      const activateRuntime = vi.fn();
       const stages = ["content", "cdp", "recording", "flush"] as const;
       const result = await runActiveRuntimeRestorationTransaction({
         startPipeline: vi.fn(async () => undefined),
@@ -846,6 +903,7 @@ describe("active runtime restoration transaction", () => {
             }
           }
         },
+        activateRuntime,
         cleanupPipeline,
         cleanupRuntime
       });
@@ -853,12 +911,73 @@ describe("active runtime restoration transaction", () => {
       expect(result).toMatchObject({ kind: "failed-cleaned", phase: "runtime" });
       expect(cleanupRuntime).toHaveBeenCalledOnce();
       expect(cleanupPipeline).not.toHaveBeenCalled();
+      expect(activateRuntime).not.toHaveBeenCalled();
       expect(sessionsByTab.has(runtime.tabId)).toBe(false);
       expect(sessionsBySid.has(runtime.sid)).toBe(false);
       expect(sessionsByTab.get(other.tabId)).toBe(other);
       expect(sessionsBySid.get(other.sid)).toBe(other);
     }
   );
+
+  it("cleans exactly once without publishing when the activation identity is lost", async () => {
+    const runtime = {
+      activationState: "starting" as const,
+      captureFence: createVolatileCaptureFence(),
+      stopping: false,
+      screenRecording: { provisional: true }
+    };
+    const publishActive = vi.fn();
+    const cleanupRuntime = vi.fn();
+    const result = await runActiveRuntimeRestorationTransaction({
+      startPipeline: vi.fn(),
+      prepareRuntime: () => runtime,
+      registerRuntime: vi.fn(),
+      completeRuntime: vi.fn(),
+      activateRuntime: () => {
+        commitRestoredRuntimeActivation(runtime, {
+          currentByTab: true,
+          currentBySid: false
+        });
+      },
+      cleanupPipeline: vi.fn(),
+      cleanupRuntime
+    });
+
+    if (result.kind === "restored") {
+      publishActive();
+    }
+
+    expect(result).toMatchObject({ kind: "failed-cleaned", phase: "runtime" });
+    expect(runtime.activationState).toBe("starting");
+    expect(runtime.screenRecording.provisional).toBe(true);
+    expect(cleanupRuntime).toHaveBeenCalledOnce();
+    expect(publishActive).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["tab registry", { currentByTab: false, currentBySid: true }, false, "starting"],
+    ["sid registry", { currentByTab: true, currentBySid: false }, false, "starting"],
+    ["capture fence", { currentByTab: true, currentBySid: true }, true, "starting"],
+    ["activation state", { currentByTab: true, currentBySid: true }, false, "active"]
+  ] as const)("rejects activation after losing the %s invariant", (_, identity, blocked, state) => {
+    const runtime: {
+      activationState: "starting" | "active";
+      captureFence: { blocked: boolean };
+      stopping: boolean;
+      screenRecording: { provisional: boolean };
+    } = {
+      activationState: state,
+      captureFence: createVolatileCaptureFence(blocked),
+      stopping: false,
+      screenRecording: { provisional: true }
+    };
+
+    expect(() => commitRestoredRuntimeActivation(runtime, identity)).toThrow(
+      "lost its provisional activation identity"
+    );
+    expect(runtime.activationState).toBe(state);
+    expect(runtime.screenRecording.provisional).toBe(true);
+  });
 
   it("reports purge failure without replaying restoration cleanup", async () => {
     const purgeError = new Error("purge failed");
@@ -872,6 +991,7 @@ describe("active runtime restoration transaction", () => {
       },
       registerRuntime: vi.fn(),
       completeRuntime: vi.fn(),
+      activateRuntime: vi.fn(),
       cleanupPipeline,
       cleanupRuntime: vi.fn()
     });

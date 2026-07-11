@@ -175,6 +175,7 @@ import {
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
   compactScreenRecordingChunkHashes,
+  commitRestoredRuntimeActivation,
   createVolatileCaptureFence,
   createRuntimeStateSnapshot,
   createStoppingRuntimeTombstone,
@@ -183,6 +184,7 @@ import {
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
   isMapEntrySame,
+  isRuntimeActivationProvisional,
   isRuntimeCaptureAdmitted,
   isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
@@ -1651,7 +1653,7 @@ function createSessionRuntime(input: {
       ? {
           recordingId: input.screenRecording.recordingId,
           cdpScopeGeneration: null,
-          provisional: false,
+          provisional: isRuntimeActivationProvisional(input.activationState ?? "active"),
           source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
           startedAt: input.screenRecording.startedAt,
           startedMono: input.screenRecording.startedMono,
@@ -3545,6 +3547,14 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         event.params ?? {},
         event.sessionId
       );
+
+      // Bootstrap events may prime the provisional CDP scope, but they must
+      // not enter navigation ownership, capture, or follow-up queues until the
+      // restoration transaction commits active.
+      if (isRuntimeActivationProvisional(runtime.activationState)) {
+        return;
+      }
+
       const scopeAllowed = scopeEvaluation.allowed;
       const captureAllowed =
         scopeAllowed &&
@@ -3961,9 +3971,14 @@ function claimRuntimeGlobalCdpCapture(
   runtime: SessionRuntime,
   allowStarting = false
 ): number | null {
+  const provisionalIdentityCurrent =
+    allowStarting &&
+    isRuntimeActivationProvisional(runtime.activationState) &&
+    isMapEntrySame(sessionsByTab, runtime.tabId, runtime) &&
+    isMapEntrySame(sessionsBySid, runtime.sid, runtime);
+
   if (
-    (!isRuntimeCaptureAdmitted(runtime.activationState) &&
-      !(allowStarting && runtime.activationState === "starting")) ||
+    (!isRuntimeCaptureAdmitted(runtime.activationState) && !provisionalIdentityCurrent) ||
     !isRuntimeCaptureScopeActive(runtime) ||
     !canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl)
   ) {
@@ -3978,9 +3993,14 @@ function isRuntimeGlobalCdpCaptureClaimValid(
   generation: number,
   allowStarting = false
 ): boolean {
+  const provisionalIdentityCurrent =
+    allowStarting &&
+    isRuntimeActivationProvisional(runtime.activationState) &&
+    isMapEntrySame(sessionsByTab, runtime.tabId, runtime) &&
+    isMapEntrySame(sessionsBySid, runtime.sid, runtime);
+
   return (
-    (isRuntimeCaptureAdmitted(runtime.activationState) ||
-      (allowStarting && runtime.activationState === "starting")) &&
+    (isRuntimeCaptureAdmitted(runtime.activationState) || provisionalIdentityCurrent) &&
     isRuntimeCaptureScopeActive(runtime) &&
     canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl, generation)
   );
@@ -8000,7 +8020,8 @@ async function restoreActiveRuntime(
         performanceBudget,
         counters: restoredCounters,
         screenRecording,
-        screenRecordingChunks
+        screenRecordingChunks,
+        activationState: "starting"
       });
 
       return {
@@ -8071,7 +8092,9 @@ async function restoreActiveRuntime(
         await attachCdp(runtime);
       }
 
-      await notifyAuthorizedContentFrames(runtime, true);
+      if (runtime.screenRecording && claimRuntimeGlobalCdpCapture(runtime, true) === null) {
+        await stopScreenRecording(runtime, "capture-scope");
+      }
 
       if (interruptedScreenRecordings.length > 0) {
         for (const interrupted of interruptedScreenRecordings) {
@@ -8121,22 +8144,35 @@ async function restoreActiveRuntime(
         await runtime.pipeline.flush();
       }
 
-      if (!runtime.screenRecording && shouldStartScreenRecording(runtime)) {
-        await startScreenRecording(runtime).catch((error) => {
-          console.warn("[WebBlackbox] failed to restart screen recording", {
-            sid: runtime.sid,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        });
+      if (!runtime.screenRecording && shouldStartScreenRecording(runtime, true)) {
+        await startScreenRecording(runtime, true);
+
+        if (!runtime.screenRecording && shouldStartScreenRecording(runtime, true)) {
+          throw new Error("Screen recording did not restart before runtime restoration committed.");
+        }
+
         await flushBufferedPipelineEvents(runtime);
         await runtime.pipeline.flush();
       }
+
+      // This is the last fallible restoration stage. It also drains a
+      // survived recording that was stopped because the restored frame tree
+      // is globally blocked, even when there were no interrupted rows.
+      await flushBufferedPipelineEvents(runtime);
+      await runtime.pipeline.flush();
+    },
+    activateRuntime: ({ runtime }) => {
+      commitRestoredRuntimeActivation(runtime, {
+        currentByTab: isMapEntrySame(sessionsByTab, runtime.tabId, runtime),
+        currentBySid: isMapEntrySame(sessionsBySid, runtime.sid, runtime)
+      });
     },
     cleanupPipeline: () => cleanupFailedPipelineRestoration(candidate, pipeline),
     cleanupRuntime: ({ runtime }) => cleanupFailedActiveRuntimeRestoration(candidate, runtime)
   });
 
   if (transaction.kind === "restored") {
+    await notifyAuthorizedContentFrames(transaction.runtime.runtime, true).catch(() => undefined);
     scheduleFullModeSessionStartArtifacts(transaction.runtime.runtime);
     return { kind: "restored", runtime: transaction.runtime.runtime };
   }

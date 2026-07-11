@@ -153,6 +153,46 @@ export function isRuntimeCaptureAdmitted(state: RuntimeActivationState): boolean
   return state === "active";
 }
 
+export function isRuntimeActivationProvisional(state: RuntimeActivationState): boolean {
+  return state === "starting";
+}
+
+export type RestoredRuntimeActivationTarget = {
+  activationState: RuntimeActivationState;
+  captureFence: VolatileCaptureFence;
+  stopping: boolean;
+  stoppedAt?: number;
+  screenRecording: { provisional: boolean } | null;
+};
+
+/**
+ * Commits a restored runtime only while both registries still name the same
+ * provisional identity. The validation and mutation are synchronous so no
+ * event can observe an active runtime with a provisional recording resource.
+ */
+export function commitRestoredRuntimeActivation(
+  runtime: RestoredRuntimeActivationTarget,
+  identity: Readonly<{ currentByTab: boolean; currentBySid: boolean }>
+): void {
+  if (
+    !identity.currentByTab ||
+    !identity.currentBySid ||
+    !isVolatileCaptureOpen(runtime.captureFence) ||
+    runtime.activationState !== "starting" ||
+    runtime.stopping ||
+    runtime.stoppedAt !== undefined ||
+    (runtime.screenRecording !== null && !runtime.screenRecording.provisional)
+  ) {
+    throw new Error("The restoring runtime lost its provisional activation identity.");
+  }
+
+  runtime.activationState = "active";
+
+  if (runtime.screenRecording) {
+    runtime.screenRecording.provisional = false;
+  }
+}
+
 export type DurableRuntimeStopWorkflowOptions = {
   captureFence: VolatileCaptureFence;
   persistStopping: () => void | Promise<void>;
@@ -180,6 +220,7 @@ export type ActiveRuntimeRestorationTransactionOptions<TRuntime extends object> 
   prepareRuntime: () => TRuntime | Promise<TRuntime>;
   registerRuntime: (runtime: TRuntime) => void;
   completeRuntime: (runtime: TRuntime) => void | Promise<void>;
+  activateRuntime: (runtime: TRuntime) => void;
   cleanupPipeline: () => void | Promise<void>;
   cleanupRuntime: (runtime: TRuntime) => void | Promise<void>;
 };
@@ -353,6 +394,7 @@ export async function runActiveRuntimeRestorationTransaction<TRuntime extends ob
     runtime = await options.prepareRuntime();
     options.registerRuntime(runtime);
     await options.completeRuntime(runtime);
+    options.activateRuntime(runtime);
     return { kind: "restored", runtime };
   } catch (error) {
     try {
