@@ -7,10 +7,25 @@ import {
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 import { snapdom } from "@zumer/snapdom";
 
-import type { LiteCaptureAgentOptions, LiteCaptureSampling, LiteCaptureState } from "./types.js";
-import { parseInjectedCaptureWindowMessage } from "./injected-hooks.js";
+import type {
+  LiteCaptureAgentOptions,
+  LiteCaptureSampling,
+  LiteCaptureState,
+  LiteStopCaptureArtifact,
+  LiteStopCaptureDegradationReason,
+  LiteStopCaptureResult
+} from "./types.js";
+import {
+  isInjectedActivationId,
+  parseInjectedCaptureArmedMessage,
+  parseInjectedCaptureWindowMessage,
+  type InjectedDirectCaptureEvent,
+  type InjectedDirectDrainResult
+} from "./injected-hooks.js";
 
 const PRE_RECORDING_BUFFER_MAX = 400;
+const INJECTED_DIRECT_SEQUENCE_CACHE_MAX = 512;
+const INJECTED_DIRECT_SIGNATURE_CACHE_MAX_BYTES = 1024 * 1024;
 const SCREENSHOT_MAX_DATA_URL_LENGTH = 10 * 1024 * 1024;
 const SCREENSHOT_POINTER_STALE_MS = 2_500;
 const SCREENSHOT_ACTION_COOLDOWN_MS = 2_000;
@@ -174,6 +189,12 @@ type TargetPayloadDetail = "action" | "input" | "fast" | "navigation";
 type CapturePressureStage = "none" | "soft" | "hard" | "critical";
 type EditableKeydownContext = "input" | "protected" | "textarea" | "contenteditable";
 
+export type InjectedDirectReplayMergeResult = Readonly<{
+  confirmed: boolean;
+  conflict: boolean;
+  replayedEvents: number;
+}>;
+
 /**
  * Browser-side event capture agent used by `WebBlackboxLiteSdk`.
  * It collects DOM/input/network/error/perf signals and emits buffered raw events.
@@ -182,11 +203,14 @@ export class LiteCaptureAgent {
   private readonly eventBuffer: RawRecorderEvent[] = [];
   private readonly preRecordingBuffer: RawRecorderEvent[] = [];
   private readonly cleanupCallbacks: Array<() => void> = [];
+  private injectedBridgeCleanup: (() => void) | null = null;
   private readonly frameMarker: string | undefined;
   private readonly isTopLevelFrame: boolean;
 
   private recordingActive = false;
   private captureInstalled = false;
+  private activationId: string | null = null;
+  private eventBufferActivationId: string | null = null;
   private sid = "";
   private tabId = -1;
   private mode: LiteCaptureState["mode"] = "lite";
@@ -211,7 +235,10 @@ export class LiteCaptureAgent {
   private screenshotCaptureBlocked = false;
   private screenshotInFlightPromise: Promise<void> | null = null;
   private screenshotPendingReason: string | null = null;
-  private stopCapturePrepared = false;
+  private stopCapturePromise: Promise<LiteStopCaptureResult> | null = null;
+  private stopCaptureResult: LiteStopCaptureResult | null = null;
+  private stopScreenshotCaptured = false;
+  private ordinaryCaptureFrozen = false;
   private lastActionScreenshotMono = Number.NEGATIVE_INFINITY;
   private lastUserActivityMono = monotonicTime();
   private scrollBurstActiveUntilMono = Number.NEGATIVE_INFINITY;
@@ -243,6 +270,10 @@ export class LiteCaptureAgent {
   private injectedBridgeEventCount = 0;
   private injectedBridgePayloadWindowStartedAt = 0;
   private injectedBridgePayloadChars = 0;
+  private injectedBridgeArmedActivationId: string | null = null;
+  private readonly injectedDirectEventSignatures = new Map<number, string>();
+  private readonly injectedDirectConflictedSequences = new Set<number>();
+  private injectedDirectSignatureBytes = 0;
 
   /** Creates and installs capture hooks for the current page context. */
   public constructor(private readonly options: LiteCaptureAgentOptions) {
@@ -257,21 +288,52 @@ export class LiteCaptureAgent {
       return;
     }
 
-    const wasRecording = this.recordingActive;
+    const requestedActivationId = isInjectedActivationId(state.activationId)
+      ? state.activationId
+      : null;
+    const currentActivationId = this.activationId;
+
+    if (state.active ? !requestedActivationId : currentActivationId !== requestedActivationId) {
+      return;
+    }
+
+    let wasRecording = this.recordingActive;
     const nextPolicy = state.capturePolicy ?? this.capturePolicy;
+    const nextMode = state.mode ?? this.mode;
+    const replacingActivation = Boolean(
+      state.active &&
+      currentActivationId &&
+      (currentActivationId !== requestedActivationId || nextMode !== this.mode)
+    );
+
+    if (replacingActivation) {
+      this.dropPendingActivation();
+      wasRecording = false;
+    }
 
     if (typeof state.tabId === "number" && Number.isFinite(state.tabId)) {
       this.tabId = Math.round(state.tabId);
     }
 
-    const nextActive = state.active && this.isDocumentWithinScope(nextPolicy);
+    const nextActive = Boolean(
+      state.active && requestedActivationId && this.isDocumentWithinScope(nextPolicy)
+    );
 
     this.capturePolicy = nextPolicy;
+    this.mode = nextMode;
+    this.sampling = sanitizeSamplingConfig(state.sampling);
 
-    if (state.active && !wasRecording) {
+    if (typeof state.sid === "string") {
+      this.sid = state.sid;
+    }
+
+    if (nextActive && !wasRecording) {
       this.hasDomSnapshot = false;
       this.hasLocalStorageSnapshot = false;
-      this.stopCapturePrepared = false;
+      this.stopCapturePromise = null;
+      this.stopCaptureResult = null;
+      this.stopScreenshotCaptured = false;
+      this.ordinaryCaptureFrozen = false;
     }
 
     if (!state.active && wasRecording && this.shouldCaptureDomSnapshots() && !this.hasDomSnapshot) {
@@ -287,32 +349,34 @@ export class LiteCaptureAgent {
       this.emitLocalStorageSnapshot("stop");
     }
 
-    this.recordingActive = nextActive;
-    this.mode = state.mode ?? this.mode;
-    this.sampling = sanitizeSamplingConfig(state.sampling);
-
-    if (typeof state.sid === "string") {
-      this.sid = state.sid;
-    }
-
-    if (this.recordingActive) {
-      this.scheduleScopeExpiry();
-      this.ensureCaptureInstalled();
-
-      if (!wasRecording) {
-        this.flushPreRecordingBuffer();
+    if (nextActive && requestedActivationId) {
+      if (this.activationId !== requestedActivationId) {
+        this.clearActivationBuffers();
+        this.resetInjectedBridgeBudget();
       }
 
+      this.activationId = requestedActivationId;
+      this.recordingActive = true;
+      this.ordinaryCaptureFrozen = false;
+      this.scheduleScopeExpiry();
+      this.ensureCaptureInstalled();
       this.ensureIndicator(this.sid, this.mode);
       this.startMutationAndSnapshots();
       return;
     }
 
+    const stoppingActivationId = this.activationId;
+    this.cancelBufferedFlush();
+    this.recordingActive = false;
+    this.ordinaryCaptureFrozen = false;
     this.clearScopeExpiryTimer();
     this.stopMutationAndSnapshots();
     this.teardownCapture();
     this.removeIndicator();
-    this.flush();
+    this.drainBufferedEvents(stoppingActivationId, true);
+    this.clearActivationBuffers();
+    this.activationId = null;
+    this.resetInjectedBridgeBudget();
   }
 
   /** Emits a manual marker event and optional snapshot/screenshot side effects. */
@@ -351,42 +415,207 @@ export class LiteCaptureAgent {
   /** Flushes the current buffered raw events immediately. */
   public flush(): void {
     this.flushPendingScrollEvent();
-    this.drainBufferedEvents();
+    this.drainBufferedEvents(this.activationId);
+  }
+
+  /** Stops ordinary listeners/timers while retaining one activation for final artifacts. */
+  public freezeOrdinaryCapture(): void {
+    this.freezeCaptureProducers(false);
+  }
+
+  /** Stops ordinary producers while preserving the MAIN-world bridge for its tail barrier. */
+  public quiesceOrdinaryCapture(): void {
+    this.freezeCaptureProducers(true);
+  }
+
+  /**
+   * Merges the privileged MAIN replay window after quiescence. Window messages
+   * are only a streaming optimization; this result is the stop-tail evidence.
+   */
+  public mergeInjectedDirectReplay(
+    result: InjectedDirectDrainResult
+  ): InjectedDirectReplayMergeResult {
+    if (
+      this.disposed ||
+      !this.recordingActive ||
+      !this.activationId ||
+      result.activationId !== this.activationId
+    ) {
+      return { confirmed: false, conflict: false, replayedEvents: 0 };
+    }
+
+    let expectedSequence = result.truncatedBefore + 1;
+    let replayedEvents = 0;
+    let conflict = false;
+
+    for (const event of result.events) {
+      if (event.activationId !== this.activationId || event.seq !== expectedSequence) {
+        return { confirmed: false, conflict: true, replayedEvents };
+      }
+      expectedSequence += 1;
+      const signature = serializeInjectedDirectEvent(event);
+      const streamedSignature = this.injectedDirectEventSignatures.get(event.seq);
+      conflict ||= this.injectedDirectConflictedSequences.has(event.seq);
+      if (!signature || streamedSignature !== signature) {
+        if (streamedSignature !== undefined) {
+          conflict = true;
+        }
+        this.queueInjectedRawEvent(event, event.t, event.mono);
+        replayedEvents += 1;
+      }
+      if (signature) {
+        this.storeInjectedDirectEventSignature(event.seq, signature);
+      }
+    }
+
+    const coversProducedThrough =
+      result.events.length === 0
+        ? result.producedThrough === result.truncatedBefore
+        : expectedSequence - 1 === result.producedThrough;
+    this.flush();
+    return {
+      confirmed: result.truncatedBefore === 0 && coversProducedThrough && !conflict,
+      conflict,
+      replayedEvents
+    };
+  }
+
+  private freezeCaptureProducers(preserveInjectedBridge: boolean): void {
+    if (this.disposed || !this.recordingActive || !this.activationId) {
+      return;
+    }
+
+    if (!this.ordinaryCaptureFrozen) {
+      this.stopMutationAndSnapshots();
+      this.teardownCapture({ preserveInjectedBridge });
+      this.clearScopeExpiryTimer();
+      this.ordinaryCaptureFrozen = true;
+    } else if (!preserveInjectedBridge) {
+      this.teardownInjectedMessageBridge();
+    }
+    this.flush();
   }
 
   /** Emits exactly one final stop artifact per enabled top-frame capture category. */
-  public async prepareStopCapture(): Promise<void> {
-    if (this.disposed || !this.recordingActive || !this.isDocumentWithinScope()) {
-      this.deactivateForScope();
-      return;
+  public prepareStopCapture(): Promise<LiteStopCaptureResult> {
+    if (this.stopCaptureResult) {
+      return Promise.resolve(this.stopCaptureResult);
     }
 
-    if (this.stopCapturePrepared) {
-      return;
-    }
-    this.stopCapturePrepared = true;
-
-    if (this.shouldCaptureDomSnapshots()) {
-      this.emitDomSnapshot("stop");
+    if (this.stopCapturePromise) {
+      return this.stopCapturePromise;
     }
 
-    if (this.shouldCaptureLocalStorageSnapshot()) {
-      this.emitLocalStorageSnapshot("stop");
-    }
-
-    try {
-      await this.screenshotInFlightPromise;
-    } catch {
-      void 0;
-    }
-
-    if (this.shouldCaptureScreenshots()) {
-      if (this.screenshotCaptureBlocked) {
-        return;
+    const expectedArtifacts = this.resolveExpectedStopCaptureArtifacts();
+    const capturePromise = this.prepareStopCaptureOnce(expectedArtifacts);
+    this.stopCapturePromise = capturePromise;
+    void capturePromise.then(
+      (result) => {
+        if (this.stopCapturePromise === capturePromise) {
+          this.stopCaptureResult = result;
+          this.stopCapturePromise = null;
+        }
+      },
+      () => {
+        if (this.stopCapturePromise === capturePromise) {
+          this.stopCapturePromise = null;
+        }
       }
+    );
+    return capturePromise;
+  }
 
-      await this.startScreenshotCapture("stop");
+  private async prepareStopCaptureOnce(
+    expectedArtifacts: readonly LiteStopCaptureArtifact[]
+  ): Promise<LiteStopCaptureResult> {
+    if (this.disposed) {
+      return createStopCaptureResult(expectedArtifacts, [], "disposed");
     }
+
+    let withinScope = false;
+    try {
+      withinScope = this.isDocumentWithinScope();
+    } catch {
+      withinScope = false;
+    }
+
+    if (!withinScope) {
+      this.deactivateForScope();
+      return createStopCaptureResult(expectedArtifacts, [], "out-of-scope");
+    }
+
+    if (!this.recordingActive || !this.activationId) {
+      return createStopCaptureResult(expectedArtifacts, [], "inactive");
+    }
+
+    const emittedArtifacts: LiteStopCaptureArtifact[] = [];
+
+    if (expectedArtifacts.includes("snapshot")) {
+      try {
+        if (this.emitDomSnapshot("stop")) {
+          emittedArtifacts.push("snapshot");
+        }
+      } catch {
+        void 0;
+      }
+    }
+
+    if (expectedArtifacts.includes("localStorageSnapshot")) {
+      try {
+        if (this.emitLocalStorageSnapshot("stop")) {
+          emittedArtifacts.push("localStorageSnapshot");
+        }
+      } catch {
+        void 0;
+      }
+    }
+
+    if (expectedArtifacts.includes("screenshot")) {
+      try {
+        await this.screenshotInFlightPromise;
+
+        if (!this.screenshotCaptureBlocked && this.shouldCaptureScreenshots()) {
+          await this.startScreenshotCapture("stop");
+        }
+
+        if (this.stopScreenshotCaptured) {
+          emittedArtifacts.push("screenshot");
+        }
+      } catch {
+        void 0;
+      }
+    }
+
+    return createStopCaptureResult(
+      expectedArtifacts,
+      emittedArtifacts,
+      emittedArtifacts.length === expectedArtifacts.length ? null : "artifact-error"
+    );
+  }
+
+  private resolveExpectedStopCaptureArtifacts(): LiteStopCaptureArtifact[] {
+    if (this.mode === "full" || !this.isTopLevelFrame) {
+      return [];
+    }
+
+    const expectedArtifacts: LiteStopCaptureArtifact[] = [];
+
+    if (this.capturePolicy.categories.dom !== "off") {
+      expectedArtifacts.push("snapshot");
+    }
+
+    if (this.capturePolicy.categories.storage !== "off") {
+      expectedArtifacts.push("localStorageSnapshot");
+    }
+
+    if (
+      this.sampling.screenshotIdleMs > 0 &&
+      this.capturePolicy.categories.screenshots === "allow"
+    ) {
+      expectedArtifacts.push("screenshot");
+    }
+
+    return expectedArtifacts;
   }
 
   /** Tears down listeners/timers and releases all internal buffers. */
@@ -406,33 +635,78 @@ export class LiteCaptureAgent {
     }
 
     this.runCleanupCallbacks();
+    this.teardownInjectedMessageBridge();
     this.clearPendingTargetEnrichmentTimers();
 
     this.eventBuffer.length = 0;
     this.preRecordingBuffer.length = 0;
+    this.eventBufferActivationId = null;
+    this.activationId = null;
+    this.resetInjectedBridgeBudget();
     this.mutationSummary = createEmptyMutationSummary();
     this.selectorCache = new WeakMap<Element, string>();
     this.selectorCacheSize = 0;
   }
 
   private installInjectedMessageBridge(): void {
-    this.listen(window, "message", (event: MessageEvent<unknown>) => {
+    if (this.injectedBridgeCleanup) {
+      return;
+    }
+
+    const listener = (event: MessageEvent<unknown>) => {
       if (event.source !== window) {
+        return;
+      }
+
+      const armedActivationId = parseInjectedCaptureArmedMessage(event.data);
+
+      if (armedActivationId) {
+        if (
+          this.recordingActive &&
+          this.mode !== "full" &&
+          this.activationId === armedActivationId &&
+          this.injectedBridgeArmedActivationId !== armedActivationId
+        ) {
+          this.injectedBridgeArmedActivationId = armedActivationId;
+          this.options.onInjectedBridgeArmed?.(armedActivationId);
+        }
         return;
       }
 
       const events = parseInjectedCaptureWindowMessage(event.data);
       const payloadChars = events ? JSON.stringify(events).length : 0;
-      if (!events || !this.consumeInjectedBridgeBudget(events.length, payloadChars)) {
+      const messageActivationId = events?.[0]?.activationId;
+      if (
+        !events ||
+        !messageActivationId ||
+        !this.recordingActive ||
+        this.mode === "full" ||
+        this.activationId !== messageActivationId ||
+        !this.consumeInjectedBridgeBudget(events.length, payloadChars)
+      ) {
         return;
       }
 
       const receivedAt = Date.now();
       const receivedMono = monotonicTime();
       for (const [index, item] of events.entries()) {
+        if (item.activationId !== messageActivationId) {
+          return;
+        }
+        if (item.seq !== undefined) {
+          const observed = this.rememberInjectedDirectEvent(item as InjectedDirectCaptureEvent);
+          if (observed === "duplicate") {
+            continue;
+          }
+        }
         this.queueInjectedRawEvent(item, receivedAt, receivedMono + index / 1_000);
       }
-    });
+    };
+    window.addEventListener("message", listener);
+    this.injectedBridgeCleanup = () => {
+      window.removeEventListener("message", listener);
+      this.injectedBridgeCleanup = null;
+    };
   }
 
   private consumeInjectedBridgeBudget(eventCount: number, payloadChars: number): boolean {
@@ -459,11 +733,70 @@ export class LiteCaptureAgent {
     return true;
   }
 
+  private resetInjectedBridgeBudget(): void {
+    this.injectedBridgeWindowStartedAt = 0;
+    this.injectedBridgeEventCount = 0;
+    this.injectedBridgePayloadWindowStartedAt = 0;
+    this.injectedBridgePayloadChars = 0;
+    this.injectedBridgeArmedActivationId = null;
+    this.injectedDirectEventSignatures.clear();
+    this.injectedDirectConflictedSequences.clear();
+    this.injectedDirectSignatureBytes = 0;
+  }
+
+  private rememberInjectedDirectEvent(
+    event: InjectedDirectCaptureEvent
+  ): "new" | "duplicate" | "conflict" {
+    const signature = serializeInjectedDirectEvent(event);
+    if (!signature) {
+      return "conflict";
+    }
+    const existing = this.injectedDirectEventSignatures.get(event.seq);
+    if (existing === signature) {
+      return "duplicate";
+    }
+    if (existing !== undefined) {
+      this.injectedDirectConflictedSequences.add(event.seq);
+      return "conflict";
+    }
+    if (signature.length * 2 > INJECTED_DIRECT_SIGNATURE_CACHE_MAX_BYTES) {
+      return "conflict";
+    }
+    this.storeInjectedDirectEventSignature(event.seq, signature);
+    return "new";
+  }
+
+  private storeInjectedDirectEventSignature(seq: number, signature: string): void {
+    const previous = this.injectedDirectEventSignatures.get(seq);
+    if (previous !== undefined) {
+      this.injectedDirectSignatureBytes -= previous.length * 2;
+    }
+    this.injectedDirectEventSignatures.set(seq, signature);
+    this.injectedDirectSignatureBytes += signature.length * 2;
+    while (
+      this.injectedDirectEventSignatures.size > INJECTED_DIRECT_SEQUENCE_CACHE_MAX ||
+      this.injectedDirectSignatureBytes > INJECTED_DIRECT_SIGNATURE_CACHE_MAX_BYTES
+    ) {
+      const oldest = this.injectedDirectEventSignatures.keys().next().value as number | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      this.injectedDirectSignatureBytes -=
+        (this.injectedDirectEventSignatures.get(oldest)?.length ?? 0) * 2;
+      this.injectedDirectEventSignatures.delete(oldest);
+      this.injectedDirectConflictedSequences.delete(oldest);
+    }
+  }
+
   private queueInjectedRawEvent(
-    event: { rawType: string; payload: Record<string, unknown> },
+    event: { activationId: string; rawType: string; payload: Record<string, unknown> },
     receivedAt = Date.now(),
     receivedMono = monotonicTime()
   ): void {
+    if (event.activationId !== this.activationId || !this.recordingActive) {
+      return;
+    }
+
     this.queueRawEvent({
       source: "content",
       rawType: event.rawType,
@@ -1045,19 +1378,55 @@ export class LiteCaptureAgent {
       this.installPerformanceCapture();
     }
 
-    this.installInjectedMessageBridge();
+    if (this.mode !== "full") {
+      this.installInjectedMessageBridge();
+    }
     this.captureInstalled = true;
     this.emitLifecycleEvent("visibilitychange", { state: document.visibilityState });
   }
 
-  private teardownCapture(): void {
-    if (!this.captureInstalled) {
-      return;
+  private teardownCapture(options: { preserveInjectedBridge?: boolean } = {}): void {
+    if (this.captureInstalled) {
+      this.captureInstalled = false;
+      this.runCleanupCallbacks();
+      this.clearPendingTargetEnrichmentTimers();
     }
 
-    this.captureInstalled = false;
-    this.runCleanupCallbacks();
-    this.clearPendingTargetEnrichmentTimers();
+    if (options.preserveInjectedBridge !== true) {
+      this.teardownInjectedMessageBridge();
+    }
+  }
+
+  private teardownInjectedMessageBridge(): void {
+    this.injectedBridgeCleanup?.();
+  }
+
+  private dropPendingActivation(): void {
+    this.cancelBufferedFlush();
+    this.recordingActive = false;
+    this.clearScopeExpiryTimer();
+    this.stopMutationAndSnapshots();
+    this.teardownCapture();
+    this.removeIndicator();
+    this.clearActivationBuffers();
+    this.activationId = null;
+    this.resetInjectedBridgeBudget();
+  }
+
+  private clearActivationBuffers(): void {
+    this.cancelBufferedFlush();
+    this.eventBuffer.length = 0;
+    this.preRecordingBuffer.length = 0;
+    this.eventBufferActivationId = null;
+    this.pendingScrollPayload = null;
+    this.mutationSummary = createEmptyMutationSummary();
+  }
+
+  private cancelBufferedFlush(): void {
+    if (this.flushTimer > 0) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = 0;
+    }
   }
 
   private runCleanupCallbacks(): void {
@@ -1133,7 +1502,7 @@ export class LiteCaptureAgent {
     });
   }
 
-  private emitDomSnapshot(reason: string): void {
+  private emitDomSnapshot(reason: string): boolean {
     const nodeCount = document.getElementsByTagName("*").length;
     const summaryMode = this.resolveDomSnapshotSummaryMode(nodeCount);
     const html = buildDomSnapshotSummaryHtml({
@@ -1147,9 +1516,7 @@ export class LiteCaptureAgent {
     const truncated = true;
     const sampledHtml = html.slice(0, DOM_SNAPSHOT_MAX_HTML_CHARS);
 
-    this.hasDomSnapshot = true;
-
-    this.queueEvent("snapshot", {
+    const queued = this.queueEvent("snapshot", {
       reason,
       href: readCurrentPageUrl(),
       title: document.title,
@@ -1160,6 +1527,8 @@ export class LiteCaptureAgent {
       summaryOnly: true,
       summaryMode
     });
+    this.hasDomSnapshot ||= queued;
+    return queued;
   }
 
   private emitStorageSnapshots(reason: string): void {
@@ -1190,18 +1559,17 @@ export class LiteCaptureAgent {
     });
   }
 
-  private emitLocalStorageSnapshot(reason: string): void {
+  private emitLocalStorageSnapshot(reason: string): boolean {
     const count = localStorage.length;
-
-    this.hasLocalStorageSnapshot = true;
-
-    this.queueEvent("localStorageSnapshot", {
+    const queued = this.queueEvent("localStorageSnapshot", {
       reason,
       count,
       truncated: false,
       mode: "schema-only",
       redacted: true
     });
+    this.hasLocalStorageSnapshot ||= queued;
+    return queued;
   }
 
   private async emitIndexedDbSnapshot(reason: string): Promise<void> {
@@ -1209,8 +1577,14 @@ export class LiteCaptureAgent {
       return;
     }
 
+    const expectedActivationId = this.activationId;
+
     try {
       const rows = await indexedDB.databases();
+
+      if (!expectedActivationId || this.activationId !== expectedActivationId) {
+        return;
+      }
 
       this.queueEvent("indexedDbSnapshot", {
         reason,
@@ -1356,7 +1730,14 @@ export class LiteCaptureAgent {
   }
 
   private async captureScreenshot(reason: string): Promise<void> {
-    if (!this.recordingActive || !this.shouldCaptureScreenshots()) {
+    const expectedActivationId = this.activationId;
+
+    if (
+      !expectedActivationId ||
+      this.activationId !== expectedActivationId ||
+      !this.recordingActive ||
+      !this.shouldCaptureScreenshots()
+    ) {
       return;
     }
 
@@ -1397,13 +1778,15 @@ export class LiteCaptureAgent {
 
       if (
         !screenshot ||
+        this.activationId !== expectedActivationId ||
+        !this.recordingActive ||
         typeof screenshot.dataUrl !== "string" ||
         screenshot.dataUrl.length > SCREENSHOT_MAX_DATA_URL_LENGTH
       ) {
         return;
       }
 
-      this.queueEvent("screenshot", {
+      const queued = this.queueEvent("screenshot", {
         reason,
         dataUrl: screenshot.dataUrl,
         format: screenshot.format,
@@ -1417,6 +1800,9 @@ export class LiteCaptureAgent {
         },
         pointer: this.readPointerSnapshot()
       });
+      if (reason === "stop" && queued) {
+        this.stopScreenshotCaptured = true;
+      }
     } catch {
       void 0;
     } finally {
@@ -1881,8 +2267,8 @@ export class LiteCaptureAgent {
     };
   }
 
-  private queueEvent(rawType: string, payload: Record<string, unknown>): void {
-    this.queueRawEvent({
+  private queueEvent(rawType: string, payload: Record<string, unknown>): boolean {
+    return this.queueRawEvent({
       source: "content",
       rawType,
       tabId: this.tabId,
@@ -1894,17 +2280,21 @@ export class LiteCaptureAgent {
     });
   }
 
-  private queueRawEvent(event: RawRecorderEvent): void {
+  private queueRawEvent(event: RawRecorderEvent): boolean {
     if (this.mode === "full" && FULL_MODE_SKIPPED_RAW_TYPES.has(event.rawType)) {
-      return;
+      return false;
     }
 
     if (this.recordingActive && !this.isDocumentWithinScope()) {
       this.deactivateForScope();
-      return;
+      return false;
     }
 
     if (!this.recordingActive) {
+      if (!this.activationId) {
+        return false;
+      }
+
       if (shouldBufferBeforeRecording(event)) {
         this.preRecordingBuffer.push(event);
 
@@ -1914,19 +2304,37 @@ export class LiteCaptureAgent {
             this.preRecordingBuffer.length - PRE_RECORDING_BUFFER_MAX
           );
         }
+
+        return true;
       }
 
-      return;
+      return false;
+    }
+
+    const eventActivationId = this.activationId;
+
+    if (!eventActivationId) {
+      return false;
     }
 
     if (this.shouldDropEventForBackpressure(event)) {
-      return;
+      return false;
     }
 
+    if (
+      this.eventBufferActivationId !== null &&
+      this.eventBufferActivationId !== eventActivationId
+    ) {
+      this.clearActivationBuffers();
+    }
+
+    this.eventBufferActivationId = eventActivationId;
     this.eventBuffer.push(event);
     this.scheduleBufferedFlush(
-      this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE ? 0 : EVENT_BUFFER_FLUSH_DELAY_MS
+      this.eventBuffer.length >= EVENT_BUFFER_FORCE_FLUSH_SIZE ? 0 : EVENT_BUFFER_FLUSH_DELAY_MS,
+      eventActivationId
     );
+    return true;
   }
 
   private isDocumentWithinScope(policy: CapturePolicy = this.capturePolicy): boolean {
@@ -1981,13 +2389,17 @@ export class LiteCaptureAgent {
       return;
     }
 
+    const stoppingActivationId = this.activationId;
+    this.cancelBufferedFlush();
     this.recordingActive = false;
     this.clearScopeExpiryTimer();
     this.stopMutationAndSnapshots();
     this.teardownCapture();
     this.removeIndicator();
-    this.flush();
-    this.preRecordingBuffer.length = 0;
+    this.drainBufferedEvents(stoppingActivationId, true);
+    this.clearActivationBuffers();
+    this.activationId = null;
+    this.resetInjectedBridgeBudget();
   }
 
   private createClickPayload(event: MouseEvent): Record<string, unknown> {
@@ -2116,37 +2528,30 @@ export class LiteCaptureAgent {
     return payload;
   }
 
-  private flushPreRecordingBuffer(): void {
-    if (!this.recordingActive || this.preRecordingBuffer.length === 0) {
-      return;
-    }
-
-    this.eventBuffer.push(...this.preRecordingBuffer.splice(0, this.preRecordingBuffer.length));
-    this.scheduleBufferedFlush(0);
-  }
-
-  private flushEvents(): void {
-    if (this.flushTimer > 0) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = 0;
-    }
-
-    if (this.eventBuffer.length === 0) {
+  private flushEvents(expectedActivationId: string): void {
+    if (
+      !this.recordingActive ||
+      this.activationId !== expectedActivationId ||
+      this.eventBufferActivationId !== expectedActivationId ||
+      this.eventBuffer.length === 0
+    ) {
       return;
     }
 
     const events = this.eventBuffer.splice(0, EVENT_BUFFER_EMIT_CHUNK_SIZE);
 
     if (events.length > 0) {
-      this.options.emitBatch(events);
+      this.options.emitBatch(events, expectedActivationId);
     }
 
     if (this.eventBuffer.length > 0) {
-      this.scheduleBufferedFlush(0);
+      this.scheduleBufferedFlush(0, expectedActivationId);
+    } else {
+      this.eventBufferActivationId = null;
     }
   }
 
-  private scheduleBufferedFlush(delayMs: number): void {
+  private scheduleBufferedFlush(delayMs: number, expectedActivationId: string): void {
     if (this.flushTimer > 0) {
       if (delayMs > 0) {
         return;
@@ -2156,21 +2561,30 @@ export class LiteCaptureAgent {
       this.flushTimer = 0;
     }
 
-    this.flushTimer = window.setTimeout(
+    const timer = window.setTimeout(
       () => {
-        this.flushEvents();
+        if (this.flushTimer !== timer) {
+          return;
+        }
+
+        this.flushTimer = 0;
+        this.flushEvents(expectedActivationId);
       },
       Math.max(0, delayMs)
     );
+    this.flushTimer = timer;
   }
 
-  private drainBufferedEvents(): void {
-    if (this.flushTimer > 0) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = 0;
-    }
+  private drainBufferedEvents(expectedActivationId: string | null, allowInactive = false): void {
+    this.cancelBufferedFlush();
 
-    if (this.eventBuffer.length === 0) {
+    if (
+      !expectedActivationId ||
+      (!allowInactive && !this.recordingActive) ||
+      this.activationId !== expectedActivationId ||
+      this.eventBufferActivationId !== expectedActivationId ||
+      this.eventBuffer.length === 0
+    ) {
       return;
     }
 
@@ -2181,8 +2595,10 @@ export class LiteCaptureAgent {
         break;
       }
 
-      this.options.emitBatch(events);
+      this.options.emitBatch(events, expectedActivationId);
     }
+
+    this.eventBufferActivationId = null;
   }
 
   private shouldDropEventForBackpressure(event: RawRecorderEvent): boolean {
@@ -2203,7 +2619,9 @@ export class LiteCaptureAgent {
     if (buffered >= EVENT_BUFFER_HARD_LIMIT || this.mode === "full") {
       if (buffered >= EVENT_BUFFER_HARD_LIMIT && this.mode !== "full") {
         this.dropBufferedLowPriorityEvents(buffered - EVENT_BUFFER_SOFT_LIMIT + 1);
-        this.scheduleBufferedFlush(0);
+        if (this.activationId) {
+          this.scheduleBufferedFlush(0, this.activationId);
+        }
       }
 
       this.droppedLowPriorityEvents += 1;
@@ -2299,6 +2717,23 @@ export class LiteCaptureAgent {
       target.removeEventListener(type, wrapped, options);
     });
   }
+}
+
+function createStopCaptureResult(
+  expectedArtifacts: readonly LiteStopCaptureArtifact[],
+  emittedArtifacts: readonly LiteStopCaptureArtifact[],
+  degradationReason: LiteStopCaptureDegradationReason | null
+): LiteStopCaptureResult {
+  const emitted = new Set(emittedArtifacts);
+  const omittedArtifacts = expectedArtifacts.filter((artifact) => !emitted.has(artifact));
+
+  return {
+    expectedArtifacts: [...expectedArtifacts],
+    emittedArtifacts: expectedArtifacts.filter((artifact) => emitted.has(artifact)),
+    omittedArtifacts,
+    degraded: degradationReason !== null || omittedArtifacts.length > 0,
+    degradationReason
+  };
 }
 
 function sanitizeSamplingConfig(raw: unknown): LiteCaptureSampling {
@@ -2909,6 +3344,21 @@ function safeCanvasToDataUrl(
     return typeof quality === "number"
       ? canvas.toDataURL(format, quality)
       : canvas.toDataURL(format);
+  } catch {
+    return null;
+  }
+}
+
+function serializeInjectedDirectEvent(event: InjectedDirectCaptureEvent): string | null {
+  try {
+    return JSON.stringify([
+      event.activationId,
+      event.seq,
+      event.rawType,
+      event.payload,
+      event.t,
+      event.mono
+    ]);
   } catch {
     return null;
   }

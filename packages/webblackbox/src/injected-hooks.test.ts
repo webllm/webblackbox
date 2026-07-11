@@ -5,20 +5,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
 
 import {
+  createAuthenticatedInjectedCaptureConfig,
+  createAuthenticatedInjectedCaptureDrainRequest,
+  createInjectedLiteCaptureDirectController,
   INJECTED_CAPTURE_CONFIG_EVENT,
+  INJECTED_CAPTURE_DRAIN_EVENT,
   INJECTED_MESSAGE_SOURCE,
+  parseInjectedCaptureArmedMessage,
+  parseInjectedCaptureConfig,
+  parseInjectedCaptureDrainedMessage,
   parseInjectedCaptureWindowMessage,
+  type InjectedCaptureArmedMessage,
   type InjectedCaptureConfig,
   type InjectedCaptureWindowMessage,
-  installInjectedLiteCaptureHooks
+  type InjectedDirectDrainResult,
+  installInjectedLiteCaptureHooks,
+  verifyAuthenticatedInjectedCaptureControlAck
 } from "./injected-hooks.js";
 
 type CaptureEventMessage = {
+  activationId: string;
   rawType: string;
   payload: Record<string, unknown>;
   t: number;
   mono: number;
 };
+
+const ACTIVATION_A = `a1_${"a".repeat(64)}`;
+const ACTIVATION_B = `a1_${"b".repeat(64)}`;
 
 const DETAILED_TEST_CAPTURE_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
@@ -40,21 +54,29 @@ function delay(ms: number): Promise<void> {
 describe("injected-hooks", () => {
   const originalFetch = window.fetch;
   const captured: CaptureEventMessage[] = [];
+  const armed: string[] = [];
 
   beforeEach(() => {
     captured.length = 0;
+    armed.length = 0;
     vi.spyOn(console, "info").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     vi.spyOn(window, "postMessage").mockImplementation((message: unknown) => {
-      const row = message as InjectedCaptureWindowMessage;
+      const row = message as InjectedCaptureWindowMessage | InjectedCaptureArmedMessage;
 
       if (row?.source !== INJECTED_MESSAGE_SOURCE) {
         return;
       }
 
+      if (row.kind === "injected-armed") {
+        armed.push(row.activationId);
+        return;
+      }
+
       if (row.kind === "capture-event") {
         captured.push({
+          activationId: row.activationId,
           rawType: row.rawType,
           payload: row.payload,
           t: row.t,
@@ -79,6 +101,7 @@ describe("injected-hooks", () => {
 
   it("accepts only bounded observation messages from the page-world bridge", () => {
     const validEvent = {
+      activationId: ACTIVATION_A,
       rawType: "console",
       payload: { method: "info", redacted: true },
       t: Date.now(),
@@ -89,6 +112,7 @@ describe("injected-hooks", () => {
       parseInjectedCaptureWindowMessage({
         source: INJECTED_MESSAGE_SOURCE,
         kind: "capture-events",
+        activationId: ACTIVATION_A,
         events: [validEvent]
       })
     ).toEqual([validEvent]);
@@ -116,6 +140,7 @@ describe("injected-hooks", () => {
       parseInjectedCaptureWindowMessage({
         source: INJECTED_MESSAGE_SOURCE,
         kind: "capture-events",
+        activationId: ACTIVATION_A,
         events: Array.from({ length: 25 }, () => validEvent)
       })
     ).toBeNull();
@@ -145,6 +170,287 @@ describe("injected-hooks", () => {
         )
       )
     ).toBeNull();
+  });
+
+  it("strictly binds configs, acknowledgements, and batches to one activation", () => {
+    const event = {
+      activationId: ACTIVATION_A,
+      rawType: "console",
+      payload: { method: "info", redacted: true },
+      t: 1,
+      mono: 1
+    };
+
+    expect(
+      parseInjectedCaptureConfig({
+        active: true,
+        activationId: ACTIVATION_A,
+        bodyCaptureMaxBytes: 4_096,
+        capturePolicy: DEFAULT_CAPTURE_POLICY
+      })
+    ).toMatchObject({ active: true, activationId: ACTIVATION_A });
+    expect(
+      parseInjectedCaptureConfig({
+        active: true,
+        activationId: ACTIVATION_A,
+        unexpected: true
+      })
+    ).toBeNull();
+    expect(parseInjectedCaptureConfig({ active: true, activationId: "a1_short" })).toBeNull();
+
+    expect(
+      parseInjectedCaptureArmedMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "injected-armed",
+        activationId: ACTIVATION_A
+      })
+    ).toBe(ACTIVATION_A);
+    expect(
+      parseInjectedCaptureArmedMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "injected-armed",
+        activationId: ACTIVATION_A,
+        events: []
+      })
+    ).toBeNull();
+
+    expect(
+      parseInjectedCaptureWindowMessage({
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "capture-events",
+        activationId: ACTIVATION_A,
+        events: [event, { ...event, activationId: ACTIVATION_B }]
+      })
+    ).toBeNull();
+  });
+
+  it("flushes queued events on deactivation but drops stale replacement flushes", async () => {
+    vi.useFakeTimers();
+    const flag = "__WB_TEST_INJECTED_ACTIVATION_RESET__";
+
+    try {
+      installInjectedLiteCaptureHooks({ flag, active: false });
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: { active: true, activationId: ACTIVATION_A }
+        })
+      );
+      console.info("queued-under-a");
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: { active: false, activationId: ACTIVATION_A }
+        })
+      );
+      await vi.runAllTimersAsync();
+
+      expect(captured.some((event) => event.activationId === ACTIVATION_A)).toBe(true);
+      captured.length = 0;
+
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: { active: true, activationId: ACTIVATION_A }
+        })
+      );
+      console.info("replaced-a");
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: { active: true, activationId: ACTIVATION_B }
+        })
+      );
+      console.info("active-b");
+      await vi.runAllTimersAsync();
+
+      expect(captured.some((event) => event.activationId === ACTIVATION_A)).toBe(false);
+      expect(captured.some((event) => event.activationId === ACTIVATION_B)).toBe(true);
+      expect(armed).toEqual(expect.arrayContaining([ACTIVATION_A, ACTIVATION_B]));
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("flushes MAIN events before emitting the close-only drain barrier", async () => {
+    vi.useFakeTimers();
+    const flag = "__WB_TEST_INJECTED_DRAIN__";
+
+    try {
+      installInjectedLiteCaptureHooks({ flag, active: false });
+      window.dispatchEvent(
+        new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+          detail: { active: true, activationId: ACTIVATION_A }
+        })
+      );
+      console.info("queued-before-drain");
+      window.dispatchEvent(
+        new CustomEvent(INJECTED_CAPTURE_DRAIN_EVENT, {
+          detail: { activationId: ACTIVATION_A }
+        })
+      );
+      await vi.runAllTimersAsync();
+
+      expect(captured.some((event) => event.activationId === ACTIVATION_A)).toBe(true);
+      expect(window.postMessage).toHaveBeenCalledWith(
+        {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "injected-drained",
+          activationId: ACTIVATION_A
+        },
+        "*"
+      );
+      expect(
+        parseInjectedCaptureDrainedMessage({
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "injected-drained",
+          activationId: ACTIVATION_A
+        })
+      ).toBe(ACTIVATION_A);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a page-preempted drain and accepts only the HMAC-authenticated barrier", async () => {
+    const secret = "c".repeat(64);
+    const flag = "__WB_TEST_AUTHENTICATED_DRAIN__";
+    let forgedAck: unknown;
+    const preempt = (event: Event) => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail;
+      forgedAck = {
+        source: INJECTED_MESSAGE_SOURCE,
+        kind: "injected-drained-authenticated",
+        activationId: detail.activationId,
+        nonce: detail.nonce,
+        proof: "0".repeat(64)
+      };
+      window.postMessage(forgedAck, "*");
+    };
+    window.addEventListener(INJECTED_CAPTURE_DRAIN_EVENT, preempt);
+
+    try {
+      expect(
+        installInjectedLiteCaptureHooks({
+          flag,
+          active: false,
+          captureNetwork: false,
+          controlSecret: secret
+        })
+      ).toBe(secret);
+      const config = await createAuthenticatedInjectedCaptureConfig(secret, {
+        active: true,
+        activationId: ACTIVATION_A,
+        bodyCaptureMaxBytes: 0,
+        capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+      });
+      window.dispatchEvent(new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, { detail: config }));
+      await delay(10);
+      console.info("authenticated-tail");
+      const drain = await createAuthenticatedInjectedCaptureDrainRequest(secret, ACTIVATION_A);
+      window.dispatchEvent(new CustomEvent(INJECTED_CAPTURE_DRAIN_EVENT, { detail: drain }));
+      await delay(10);
+
+      expect(
+        await verifyAuthenticatedInjectedCaptureControlAck(forgedAck, secret, {
+          kind: "injected-drained-authenticated",
+          activationId: ACTIVATION_A,
+          nonce: drain.nonce
+        })
+      ).toBe(false);
+      const authenticatedAck = vi
+        .mocked(window.postMessage)
+        .mock.calls.map(([message]) => message)
+        .filter(
+          (message) => (message as { kind?: unknown }).kind === "injected-drained-authenticated"
+        )
+        .at(-1);
+      expect(
+        await verifyAuthenticatedInjectedCaptureControlAck(authenticatedAck, secret, {
+          kind: "injected-drained-authenticated",
+          activationId: ACTIVATION_A,
+          nonce: drain.nonce
+        })
+      ).toBe(true);
+      expect(captured.some((event) => event.activationId === ACTIVATION_A)).toBe(true);
+    } finally {
+      window.removeEventListener(INJECTED_CAPTURE_DRAIN_EVENT, preempt);
+    }
+  });
+
+  it("locks control closed at the nonce limit and never accepts an evicted active replay", async () => {
+    const secret = "d".repeat(64);
+    installInjectedLiteCaptureHooks({
+      flag: "__WB_TEST_CONTROL_NONCE_LIMIT__",
+      active: false,
+      captureNetwork: false,
+      controlSecret: secret,
+      controlNonceLimit: 2
+    });
+    const first = await createAuthenticatedInjectedCaptureConfig(secret, {
+      active: true,
+      activationId: ACTIVATION_A
+    });
+    const second = await createAuthenticatedInjectedCaptureConfig(secret, {
+      active: false,
+      activationId: ACTIVATION_A
+    });
+    const overflow = await createAuthenticatedInjectedCaptureConfig(secret, {
+      active: true,
+      activationId: ACTIVATION_B
+    });
+
+    for (const detail of [first, second, overflow, first]) {
+      window.dispatchEvent(new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, { detail }));
+      await delay(5);
+    }
+    captured.length = 0;
+    console.info("must-remain-locked");
+    await delay(10);
+
+    expect(captured).toEqual([]);
+  });
+
+  it("keeps asynchronous network completions bound to their producing activation", async () => {
+    let resolveFetch!: (response: Response) => void;
+    window.fetch = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    ) as typeof fetch;
+    installInjectedLiteCaptureHooks({
+      flag: "__WB_TEST_INJECTED_ASYNC_ACTIVATION__",
+      active: true,
+      activationId: ACTIVATION_A,
+      capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+    });
+
+    const request = window.fetch("https://example.test/deferred");
+    window.dispatchEvent(
+      new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
+        detail: {
+          active: true,
+          activationId: ACTIVATION_B,
+          capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+        }
+      })
+    );
+    resolveFetch(
+      new Response("ok", {
+        status: 200,
+        headers: { "content-type": "text/plain" }
+      })
+    );
+    await request;
+    await delay(10);
+
+    expect(
+      captured.some(
+        (event) =>
+          event.rawType === "fetch" ||
+          event.rawType === "fetchError" ||
+          event.rawType === "networkBody"
+      )
+    ).toBe(false);
   });
 
   it("omits IndexedDB names when policy is counts-only", async () => {
@@ -242,6 +548,7 @@ describe("injected-hooks", () => {
       installInjectedLiteCaptureHooks({
         flag,
         active: true,
+        activationId: ACTIVATION_A,
         bodyCaptureMaxBytes: 64 * 1024,
         capturePolicy: DETAILED_TEST_CAPTURE_POLICY
       });
@@ -251,6 +558,7 @@ describe("injected-hooks", () => {
       installInjectedLiteCaptureHooks({
         flag,
         active: false,
+        activationId: ACTIVATION_B,
         bodyCaptureMaxBytes: 0,
         capturePolicy: DEFAULT_CAPTURE_POLICY,
         captureNetwork: false
@@ -291,6 +599,7 @@ describe("injected-hooks", () => {
         new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
           detail: {
             active: false,
+            activationId: ACTIVATION_A,
             bodyCaptureMaxBytes: 0
           }
         })
@@ -310,6 +619,7 @@ describe("injected-hooks", () => {
         new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
           detail: {
             active: true,
+            activationId: ACTIVATION_A,
             bodyCaptureMaxBytes: 64 * 1024
           }
         })
@@ -437,7 +747,7 @@ describe("injected-hooks", () => {
       });
     }) as typeof fetch;
 
-    installInjectedLiteCaptureHooks({ flag });
+    installInjectedLiteCaptureHooks({ flag, activationId: ACTIVATION_A });
 
     await window.fetch("https://example.test/api/disabled");
     await delay(20);
@@ -447,6 +757,8 @@ describe("injected-hooks", () => {
     window.dispatchEvent(
       new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
         detail: {
+          active: true,
+          activationId: ACTIVATION_A,
           bodyCaptureMaxBytes: 64 * 1024,
           capturePolicy: DETAILED_TEST_CAPTURE_POLICY
         }
@@ -486,7 +798,8 @@ describe("injected-hooks", () => {
     window.dispatchEvent(
       new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
         detail: {
-          active: true
+          active: true,
+          activationId: ACTIVATION_A
         }
       })
     );
@@ -500,7 +813,8 @@ describe("injected-hooks", () => {
     window.dispatchEvent(
       new CustomEvent<InjectedCaptureConfig>(INJECTED_CAPTURE_CONFIG_EVENT, {
         detail: {
-          active: false
+          active: false,
+          activationId: ACTIVATION_A
         }
       })
     );
@@ -631,5 +945,290 @@ describe("injected-hooks", () => {
       "demo-user",
       "demo-pass"
     ]);
+  });
+
+  it("keeps direct control privileged, monotonic, replayable, and free of DOM crypto control", () => {
+    const secret = "e".repeat(64);
+    const wrongSecret = "f".repeat(64);
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const getRandomValues = vi
+      .spyOn(globalThis.crypto, "getRandomValues")
+      .mockImplementation(() => {
+        throw new Error("page crypto must not be used by direct control");
+      });
+    const jsonStringify = vi.spyOn(JSON, "stringify");
+    const OriginalTextEncoder = globalThis.TextEncoder;
+    const textEncoder = vi.fn(() => {
+      throw new Error("page TextEncoder must not be used by direct control");
+    });
+    vi.stubGlobal("TextEncoder", textEncoder);
+
+    const controller = createInjectedLiteCaptureDirectController({ replayEventLimit: 2 });
+    expect(controller.bootstrap(secret)).toEqual({
+      kind: "installed",
+      phase: "inactive",
+      revision: 0
+    });
+    expect(controller.bootstrap(secret)).toEqual({
+      kind: "existing",
+      phase: "inactive",
+      revision: 0
+    });
+    expect(controller.bootstrap(wrongSecret)).toEqual({ kind: "rejected" });
+    expect(
+      addEventListener.mock.calls.some(
+        ([type]) =>
+          String(type) === INJECTED_CAPTURE_CONFIG_EVENT ||
+          String(type) === INJECTED_CAPTURE_DRAIN_EVENT
+      )
+    ).toBe(false);
+
+    const poisonCommand: Record<string, unknown> = {};
+    Object.defineProperty(poisonCommand, "kind", {
+      get(): never {
+        throw new Error("wrong capability must not inspect the command");
+      }
+    });
+    expect(() => controller.control(wrongSecret, poisonCommand)).not.toThrow();
+    expect(controller.control(wrongSecret, poisonCommand)).toEqual({
+      kind: "rejected",
+      reason: "capability"
+    });
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 1,
+        config: { active: true, activationId: ACTIVATION_A },
+        extra: true
+      })
+    ).toEqual({ kind: "rejected", reason: "invalid-command" });
+
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 1,
+        config: {
+          active: true,
+          activationId: ACTIVATION_A,
+          bodyCaptureMaxBytes: 0,
+          capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+        }
+      })
+    ).toEqual({ kind: "activated", activationId: ACTIVATION_A, revision: 1 });
+    expect(controller.control(secret, { kind: "probe" })).toMatchObject({
+      kind: "probed",
+      phase: "active",
+      revision: 1,
+      activationId: ACTIVATION_A
+    });
+    expect(getRandomValues).not.toHaveBeenCalled();
+    expect(textEncoder).not.toHaveBeenCalled();
+    expect(jsonStringify).not.toHaveBeenCalled();
+
+    getRandomValues.mockRestore();
+    vi.stubGlobal("TextEncoder", OriginalTextEncoder);
+    console.info("direct-tail-1");
+    console.info("direct-tail-2");
+    const firstDrain = controller.control(secret, {
+      kind: "drain",
+      revision: 2,
+      activationId: ACTIVATION_A
+    }) as InjectedDirectDrainResult;
+    expect(firstDrain).toMatchObject({
+      kind: "drained",
+      activationId: ACTIVATION_A,
+      revision: 2,
+      producedThrough: 2,
+      truncatedBefore: 0,
+      degraded: false,
+      replayed: false
+    });
+    expect(firstDrain.events.map((event) => event.seq)).toEqual([1, 2]);
+    expect(firstDrain.events.every((event) => event.activationId === ACTIVATION_A)).toBe(true);
+
+    expect(
+      controller.control(secret, {
+        kind: "drain",
+        revision: 2,
+        activationId: ACTIVATION_A
+      })
+    ).toEqual({ kind: "rejected", reason: "stale" });
+    expect(
+      controller.control(secret, {
+        kind: "drain",
+        revision: 3,
+        activationId: ACTIVATION_A
+      })
+    ).toMatchObject({
+      kind: "drained",
+      replayed: true,
+      producedThrough: 2,
+      truncatedBefore: 0
+    });
+
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 4,
+        config: {
+          active: true,
+          activationId: ACTIVATION_B,
+          bodyCaptureMaxBytes: 0,
+          capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+        }
+      })
+    ).toEqual({ kind: "activated", activationId: ACTIVATION_B, revision: 4 });
+    expect(
+      controller.control(secret, {
+        kind: "drain",
+        revision: 5,
+        activationId: ACTIVATION_A
+      })
+    ).toEqual({ kind: "rejected", reason: "activation-mismatch" });
+    expect(controller.control(secret, { kind: "probe" })).toMatchObject({
+      kind: "probed",
+      phase: "active",
+      revision: 4,
+      activationId: ACTIVATION_B
+    });
+
+    console.info("direct-overflow-1");
+    console.info("direct-overflow-2");
+    console.info("direct-overflow-3");
+    const overflowDrain = controller.control(secret, {
+      kind: "drain",
+      revision: 5,
+      activationId: ACTIVATION_B
+    }) as InjectedDirectDrainResult;
+    expect(overflowDrain).toMatchObject({
+      producedThrough: 3,
+      truncatedBefore: 1,
+      degraded: true,
+      replayed: false
+    });
+    expect(overflowDrain.events.map((event) => event.seq)).toEqual([2, 3]);
+
+    let nextRevision = 6;
+    for (let lifecycle = 0; lifecycle < 520; lifecycle += 1) {
+      const activationId = `a1_${lifecycle.toString(16).padStart(64, "0")}`;
+      expect(
+        controller.control(secret, {
+          kind: "activate",
+          revision: nextRevision,
+          config: { active: true, activationId }
+        })
+      ).toMatchObject({ kind: "activated", activationId });
+      nextRevision += 1;
+      expect(
+        controller.control(secret, {
+          kind: "drain",
+          revision: nextRevision,
+          activationId
+        })
+      ).toMatchObject({ kind: "drained", activationId, degraded: false });
+      nextRevision += 1;
+    }
+
+    expect(controller.control(secret, { kind: "probe" })).toMatchObject({
+      kind: "probed",
+      phase: "drained",
+      revision: nextRevision - 1
+    });
+  });
+
+  it("clears the controlled activation on direct deactivation", () => {
+    const secret = "8".repeat(64);
+    const controller = createInjectedLiteCaptureDirectController();
+    expect(controller.bootstrap(secret)).toMatchObject({ kind: "installed" });
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 1,
+        config: { active: true, activationId: ACTIVATION_A }
+      })
+    ).toMatchObject({ kind: "activated" });
+    expect(
+      controller.control(secret, {
+        kind: "deactivate",
+        revision: 2,
+        activationId: ACTIVATION_A
+      })
+    ).toMatchObject({ kind: "deactivated" });
+    expect(controller.control(secret, { kind: "probe" })).toMatchObject({
+      kind: "probed",
+      phase: "inactive",
+      revision: 2,
+      activationId: null
+    });
+  });
+
+  it("atomically replaces an active activation at a higher revision", () => {
+    const secret = "7".repeat(64);
+    const controller = createInjectedLiteCaptureDirectController();
+    controller.bootstrap(secret);
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 1,
+        config: { active: true, activationId: ACTIVATION_A }
+      })
+    ).toMatchObject({ kind: "activated", activationId: ACTIVATION_A });
+    console.info("old-activation-tail");
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 2,
+        config: { active: true, activationId: ACTIVATION_B }
+      })
+    ).toMatchObject({ kind: "activated", activationId: ACTIVATION_B });
+    expect(
+      controller.control(secret, {
+        kind: "drain",
+        revision: 3,
+        activationId: ACTIVATION_A
+      })
+    ).toEqual({ kind: "rejected", reason: "activation-mismatch" });
+    expect(controller.control(secret, { kind: "probe" })).toMatchObject({
+      phase: "active",
+      activationId: ACTIVATION_B,
+      producedThrough: 0,
+      truncatedBefore: 0
+    });
+  });
+
+  it("bounds direct replay by estimated serialized bytes as well as event count", () => {
+    const secret = "9".repeat(64);
+    const controller = createInjectedLiteCaptureDirectController({
+      replayByteLimit: 128,
+      replayEventLimit: 256
+    });
+
+    expect(controller.bootstrap(secret)).toMatchObject({ kind: "installed" });
+    expect(
+      controller.control(secret, {
+        kind: "activate",
+        revision: 1,
+        config: {
+          active: true,
+          activationId: ACTIVATION_A,
+          capturePolicy: DETAILED_TEST_CAPTURE_POLICY
+        }
+      })
+    ).toMatchObject({ kind: "activated" });
+
+    console.info("x".repeat(1_000));
+    const result = controller.control(secret, {
+      kind: "drain",
+      revision: 2,
+      activationId: ACTIVATION_A
+    }) as InjectedDirectDrainResult;
+
+    expect(result).toMatchObject({
+      kind: "drained",
+      producedThrough: 1,
+      truncatedBefore: 1,
+      degraded: true
+    });
+    expect(result.events).toEqual([]);
   });
 });

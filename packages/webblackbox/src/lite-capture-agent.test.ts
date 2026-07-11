@@ -18,6 +18,9 @@ import type { LiteCaptureAgentOptions, LiteCaptureState } from "./types.js";
 import { DEFAULT_CAPTURE_POLICY, type CapturePolicy } from "@webblackbox/protocol";
 import type { RawRecorderEvent } from "@webblackbox/recorder";
 
+const ACTIVATION_A = `a1_${"a".repeat(64)}`;
+const ACTIVATION_B = `a1_${"b".repeat(64)}`;
+
 const SCREENSHOT_TEST_CAPTURE_POLICY: CapturePolicy = {
   ...DEFAULT_CAPTURE_POLICY,
   mode: "debug",
@@ -66,6 +69,7 @@ function createAgent(
 
   agent.setRecordingStatus({
     active: true,
+    activationId: ACTIVATION_A,
     sid: "S-lite-agent-test",
     tabId: 7,
     mode: "lite",
@@ -343,7 +347,13 @@ describe("LiteCaptureAgent", () => {
     expect(state.screenshotInFlight).toBe(false);
     expect(state.screenshotCaptureBlocked).toBe(true);
 
-    await agent.prepareStopCapture();
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot", "screenshot"],
+      emittedArtifacts: ["snapshot", "localStorageSnapshot"],
+      omittedArtifacts: ["screenshot"],
+      degraded: true,
+      degradationReason: "artifact-error"
+    });
 
     expect(snapdomToBlobMock).toHaveBeenCalledTimes(1);
 
@@ -361,19 +371,204 @@ describe("LiteCaptureAgent", () => {
         screenshotIdleMs: 1_000
       }
     });
+    const internal = agent as unknown as {
+      captureScreenshot: (reason: string) => Promise<void>;
+      queueEvent: (rawType: string, payload: Record<string, unknown>) => boolean;
+      stopScreenshotCaptured: boolean;
+    };
     const captureScreenshotSpy = vi
-      .spyOn(
-        agent as unknown as {
-          captureScreenshot: (reason: string) => Promise<void>;
-        },
-        "captureScreenshot"
-      )
-      .mockResolvedValue();
+      .spyOn(internal, "captureScreenshot")
+      .mockImplementation(async (reason) => {
+        internal.stopScreenshotCaptured = internal.queueEvent("screenshot", { reason });
+      });
 
-    await agent.prepareStopCapture();
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot", "screenshot"],
+      emittedArtifacts: ["snapshot", "localStorageSnapshot", "screenshot"],
+      omittedArtifacts: [],
+      degraded: false,
+      degradationReason: null
+    });
 
     expect(captureScreenshotSpy).toHaveBeenCalledWith("stop");
 
+    agent.dispose();
+  });
+
+  it("reports every configured artifact as omitted for an inactive agent", async () => {
+    const { agent, emitBatch } = createInactiveAgent();
+
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot"],
+      emittedArtifacts: [],
+      omittedArtifacts: ["snapshot", "localStorageSnapshot"],
+      degraded: true,
+      degradationReason: "inactive"
+    });
+    expect(emitBatch).not.toHaveBeenCalled();
+
+    agent.dispose();
+  });
+
+  it("reports every configured artifact as omitted after disposal", async () => {
+    const { agent, emitBatch } = createAgent();
+    emitBatch.mockClear();
+    agent.dispose();
+
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot"],
+      emittedArtifacts: [],
+      omittedArtifacts: ["snapshot", "localStorageSnapshot"],
+      degraded: true,
+      degradationReason: "disposed"
+    });
+    expect(emitBatch).not.toHaveBeenCalled();
+  });
+
+  it("reports every configured artifact as omitted when the document is out of scope", async () => {
+    const excludedPolicy: CapturePolicy = {
+      ...DEFAULT_CAPTURE_POLICY,
+      scope: {
+        ...DEFAULT_CAPTURE_POLICY.scope,
+        excludedUrlPatterns: ["*"]
+      }
+    };
+    const { agent, emitBatch } = createAgent({ capturePolicy: excludedPolicy });
+
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot"],
+      emittedArtifacts: [],
+      omittedArtifacts: ["snapshot", "localStorageSnapshot"],
+      degraded: true,
+      degradationReason: "out-of-scope"
+    });
+    expect(emitBatch).not.toHaveBeenCalled();
+
+    agent.dispose();
+  });
+
+  it("continues final artifact capture after a localStorage SecurityError", async () => {
+    const { agent } = createAgent({
+      capturePolicy: SCREENSHOT_TEST_CAPTURE_POLICY,
+      sampling: {
+        screenshotIdleMs: 1_000
+      }
+    });
+    const internal = agent as unknown as {
+      captureScreenshot: (reason: string) => Promise<void>;
+      queueEvent: (rawType: string, payload: Record<string, unknown>) => boolean;
+      stopScreenshotCaptured: boolean;
+    };
+    vi.spyOn(window, "localStorage", "get").mockImplementation(() => {
+      throw new DOMException("Storage is unavailable", "SecurityError");
+    });
+    vi.spyOn(internal, "captureScreenshot").mockImplementation(async (reason) => {
+      internal.stopScreenshotCaptured = internal.queueEvent("screenshot", { reason });
+    });
+
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot", "screenshot"],
+      emittedArtifacts: ["snapshot", "screenshot"],
+      omittedArtifacts: ["localStorageSnapshot"],
+      degraded: true,
+      degradationReason: "artifact-error"
+    });
+
+    agent.dispose();
+  });
+
+  it("captures localStorage when the final DOM snapshot throws", async () => {
+    const { agent } = createAgent();
+    const internal = agent as unknown as {
+      emitDomSnapshot: (reason: string) => boolean;
+    };
+    vi.spyOn(internal, "emitDomSnapshot").mockImplementation(() => {
+      throw new Error("DOM snapshot failed");
+    });
+
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot"],
+      emittedArtifacts: ["localStorageSnapshot"],
+      omittedArtifacts: ["snapshot"],
+      degraded: true,
+      degradationReason: "artifact-error"
+    });
+
+    agent.dispose();
+  });
+
+  it("freezes ordinary listeners while retaining the activation for final artifacts", async () => {
+    const { agent, emitBatch } = createAgent();
+    const internal = agent as unknown as {
+      activationId: string | null;
+      captureInstalled: boolean;
+      recordingActive: boolean;
+    };
+
+    agent.freezeOrdinaryCapture();
+    emitBatch.mockClear();
+
+    expect(internal.recordingActive).toBe(true);
+    expect(internal.activationId).toBe(ACTIVATION_A);
+    expect(internal.captureInstalled).toBe(false);
+
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    agent.flush();
+    expect(emittedEvents(emitBatch).some((event) => event.rawType === "click")).toBe(false);
+
+    await expect(agent.prepareStopCapture()).resolves.toEqual({
+      expectedArtifacts: ["snapshot", "localStorageSnapshot"],
+      emittedArtifacts: ["snapshot", "localStorageSnapshot"],
+      omittedArtifacts: [],
+      degraded: false,
+      degradationReason: null
+    });
+    agent.dispose();
+  });
+
+  it("quiesces ordinary producers while retaining the MAIN-world tail bridge", () => {
+    const { agent, emitBatch } = createAgent();
+
+    agent.quiesceOrdinaryCapture();
+    emitBatch.mockClear();
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          activationId: ACTIVATION_A,
+          rawType: "console",
+          payload: { method: "info", redacted: true },
+          t: 1,
+          mono: 1
+        },
+        source: window
+      })
+    );
+    agent.flush();
+
+    expect(emittedRawTypes(emitBatch)).toContain("console");
+    expect(emittedRawTypes(emitBatch)).not.toContain("click");
+
+    agent.freezeOrdinaryCapture();
+    emitBatch.mockClear();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          activationId: ACTIVATION_A,
+          rawType: "console",
+          payload: { method: "warn", redacted: true },
+          t: 2,
+          mono: 2
+        },
+        source: window
+      })
+    );
+    agent.flush();
+    expect(emitBatch).not.toHaveBeenCalled();
     agent.dispose();
   });
 
@@ -388,15 +583,22 @@ describe("LiteCaptureAgent", () => {
       hasDomSnapshot: boolean;
       hasLocalStorageSnapshot: boolean;
       captureScreenshot: (reason: string) => Promise<void>;
+      queueEvent: (rawType: string, payload: Record<string, unknown>) => boolean;
+      stopScreenshotCaptured: boolean;
     };
     internal.hasDomSnapshot = true;
     internal.hasLocalStorageSnapshot = true;
-    const captureScreenshotSpy = vi.spyOn(internal, "captureScreenshot").mockResolvedValue();
+    const captureScreenshotSpy = vi
+      .spyOn(internal, "captureScreenshot")
+      .mockImplementation(async (reason) => {
+        internal.stopScreenshotCaptured = internal.queueEvent("screenshot", { reason });
+      });
 
-    await agent.prepareStopCapture();
-    await agent.prepareStopCapture();
+    const firstResult = await agent.prepareStopCapture();
+    const secondResult = await agent.prepareStopCapture();
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"
@@ -406,8 +608,10 @@ describe("LiteCaptureAgent", () => {
 
     expect(stopEvents.filter((event) => event.rawType === "snapshot")).toHaveLength(1);
     expect(stopEvents.filter((event) => event.rawType === "localStorageSnapshot")).toHaveLength(1);
+    expect(stopEvents.filter((event) => event.rawType === "screenshot")).toHaveLength(1);
     expect(captureScreenshotSpy).toHaveBeenCalledTimes(1);
     expect(captureScreenshotSpy).toHaveBeenCalledWith("stop");
+    expect(secondResult).toEqual(firstResult);
 
     agent.dispose();
   });
@@ -421,6 +625,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: true,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"
@@ -434,6 +639,7 @@ describe("LiteCaptureAgent", () => {
     emitBatch.mockClear();
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"
@@ -468,6 +674,7 @@ describe("LiteCaptureAgent", () => {
         data: {
           source: INJECTED_MESSAGE_SOURCE,
           kind: "capture-event",
+          activationId: ACTIVATION_A,
           rawType: "mutation",
           payload: { count: 999 },
           t: 1,
@@ -488,6 +695,7 @@ describe("LiteCaptureAgent", () => {
         data: {
           source: INJECTED_MESSAGE_SOURCE,
           kind: "capture-event",
+          activationId: ACTIVATION_A,
           rawType: "console",
           payload: { method: "info", redacted: true },
           t: 1,
@@ -507,6 +715,175 @@ describe("LiteCaptureAgent", () => {
     agent.dispose();
   });
 
+  it("binds MAIN observations and armed acknowledgements to the exact activation", () => {
+    const onInjectedBridgeArmed = vi.fn();
+    const { agent, emitBatch } = createAgent({}, { onInjectedBridgeArmed });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "injected-armed",
+          activationId: ACTIVATION_B
+        },
+        source: window
+      })
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "injected-armed",
+          activationId: ACTIVATION_A
+        },
+        source: window
+      })
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "injected-armed",
+          activationId: ACTIVATION_A
+        },
+        source: window
+      })
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          activationId: ACTIVATION_B,
+          rawType: "console",
+          payload: { method: "info", redacted: true },
+          t: 1,
+          mono: 1
+        },
+        source: window
+      })
+    );
+    agent.flush();
+
+    expect(onInjectedBridgeArmed).toHaveBeenCalledOnce();
+    expect(onInjectedBridgeArmed).toHaveBeenCalledWith(ACTIVATION_A);
+    expect(emitBatch).not.toHaveBeenCalled();
+    agent.dispose();
+  });
+
+  it("deduplicates streamed MAIN events against the privileged replay window", () => {
+    const { agent, emitBatch } = createAgent();
+    const first = {
+      activationId: ACTIVATION_A,
+      seq: 1,
+      rawType: "console",
+      payload: { method: "info", marker: "streamed" },
+      t: 10,
+      mono: 11
+    };
+    const second = {
+      activationId: ACTIVATION_A,
+      seq: 2,
+      rawType: "pageError",
+      payload: { message: "tail" },
+      t: 12,
+      mono: 13
+    };
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          ...first
+        },
+        source: window
+      })
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          ...first
+        },
+        source: window
+      })
+    );
+    agent.flush();
+
+    expect(
+      agent.mergeInjectedDirectReplay({
+        kind: "drained",
+        activationId: ACTIVATION_A,
+        revision: 2,
+        events: [first, second],
+        producedThrough: 2,
+        truncatedBefore: 0,
+        degraded: false,
+        replayed: false
+      })
+    ).toEqual({ confirmed: true, conflict: false, replayedEvents: 1 });
+    const events = emittedEvents(emitBatch);
+    expect(events.filter((event) => event.rawType === "console")).toHaveLength(1);
+    expect(events.filter((event) => event.rawType === "pageError")).toHaveLength(1);
+
+    expect(
+      agent.mergeInjectedDirectReplay({
+        kind: "drained",
+        activationId: ACTIVATION_A,
+        revision: 3,
+        events: [{ ...first, payload: { method: "error", marker: "forged-conflict" } }],
+        producedThrough: 1,
+        truncatedBefore: 0,
+        degraded: false,
+        replayed: true
+      })
+    ).toEqual({ confirmed: false, conflict: true, replayedEvents: 1 });
+
+    agent.dispose();
+  });
+
+  it("drops an old activation buffer and timer before accepting its replacement", async () => {
+    const { agent, emitBatch } = createAgent();
+    const queueRawEvent = (
+      agent as unknown as { queueRawEvent(event: RawRecorderEvent): void }
+    ).queueRawEvent.bind(agent);
+
+    queueRawEvent({
+      source: "content",
+      rawType: "old-activation",
+      tabId: 7,
+      sid: "S-old",
+      t: 1,
+      mono: 1,
+      payload: {}
+    });
+    agent.setRecordingStatus({
+      active: true,
+      activationId: ACTIVATION_B,
+      sid: "S-new",
+      tabId: 7,
+      mode: "lite"
+    });
+    queueRawEvent({
+      source: "content",
+      rawType: "new-activation",
+      tabId: 7,
+      sid: "S-new",
+      t: 2,
+      mono: 2,
+      payload: {}
+    });
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    const events = emitBatch.mock.calls.flatMap((call) => call[0] as RawRecorderEvent[]);
+    expect(events.some((event) => event.rawType === "old-activation")).toBe(false);
+    expect(events.some((event) => event.rawType === "new-activation")).toBe(true);
+    expect(emitBatch.mock.calls.every((call) => call[1] === ACTIVATION_B)).toBe(true);
+    agent.dispose();
+  });
+
   it("rate-limits untrusted page-world observation batches", () => {
     const { agent, emitBatch } = createAgent();
 
@@ -516,7 +893,9 @@ describe("LiteCaptureAgent", () => {
           data: {
             source: INJECTED_MESSAGE_SOURCE,
             kind: "capture-events",
+            activationId: ACTIVATION_A,
             events: Array.from({ length: 24 }, (_, index) => ({
+              activationId: ACTIVATION_A,
               rawType: "console",
               payload: { method: "info", batch, index, redacted: true },
               t: Date.now(),
@@ -550,6 +929,36 @@ describe("LiteCaptureAgent", () => {
     expect(PerformanceObserverMock).not.toHaveBeenCalled();
     expect(requestAnimationFrame).not.toHaveBeenCalled();
 
+    agent.dispose();
+  });
+
+  it("keeps Full interaction capture isolated without installing a window bridge", () => {
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const onInjectedBridgeArmed = vi.fn();
+    const { agent, emitBatch } = createAgent({ mode: "full" }, { onInjectedBridgeArmed });
+
+    expect(addEventListener.mock.calls.some(([type]) => type === "message")).toBe(false);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          source: INJECTED_MESSAGE_SOURCE,
+          kind: "capture-event",
+          activationId: ACTIVATION_A,
+          rawType: "console",
+          payload: { method: "error" },
+          t: 1,
+          mono: 1
+        },
+        source: window
+      })
+    );
+    clickTarget();
+    agent.flush();
+
+    expect(emittedRawTypes(emitBatch)).toContain("click");
+    expect(emittedRawTypes(emitBatch)).not.toContain("console");
+    expect(onInjectedBridgeArmed).not.toHaveBeenCalled();
     agent.dispose();
   });
 
@@ -615,6 +1024,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"
@@ -644,6 +1054,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"
@@ -686,6 +1097,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite",
@@ -756,6 +1168,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: true,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 8,
       mode: "lite",
@@ -812,6 +1225,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"
@@ -938,6 +1352,7 @@ describe("LiteCaptureAgent", () => {
 
     agent.setRecordingStatus({
       active: false,
+      activationId: ACTIVATION_A,
       sid: "S-lite-agent-test",
       tabId: 7,
       mode: "lite"

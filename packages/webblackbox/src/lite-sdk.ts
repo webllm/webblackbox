@@ -85,6 +85,10 @@ export class WebBlackboxLiteSdk {
 
   private recording = false;
 
+  private activeActivationId: string | null = null;
+
+  private injectedBridgeArmedActivationId: string | null = null;
+
   private disposed = false;
 
   /**
@@ -128,8 +132,11 @@ export class WebBlackboxLiteSdk {
     );
 
     this.captureAgent = new LiteCaptureAgent({
-      emitBatch: (events) => {
-        this.ingestRawEvents(events);
+      emitBatch: (events, activationId) => {
+        this.ingestCaptureAgentBatch(events, activationId);
+      },
+      onInjectedBridgeArmed: (activationId) => {
+        this.handleInjectedBridgeArmed(activationId);
       },
       showIndicator: options.showIndicator
     });
@@ -189,6 +196,12 @@ export class WebBlackboxLiteSdk {
   public async start(): Promise<void> {
     this.assertNotDisposed();
 
+    if (this.recording) {
+      return;
+    }
+
+    const activationId = createLiteActivationId();
+
     if (!this.started) {
       await this.pipeline.start();
       this.started = true;
@@ -198,16 +211,47 @@ export class WebBlackboxLiteSdk {
       return;
     }
 
+    this.activeActivationId = activationId;
+    this.injectedBridgeArmedActivationId = null;
     this.recording = true;
-    this.syncInjectedHookConfig(true);
-    this.captureAgent.setRecordingStatus({
-      active: true,
-      sid: this.sid,
-      tabId: this.tabId,
-      mode: "lite",
-      sampling: this.config.sampling,
-      capturePolicy: this.config.capturePolicy
-    });
+
+    try {
+      this.captureAgent.setRecordingStatus({
+        active: true,
+        activationId,
+        sid: this.sid,
+        tabId: this.tabId,
+        mode: "lite",
+        sampling: this.config.sampling,
+        capturePolicy: this.config.capturePolicy
+      });
+      this.syncInjectedHookConfig(true, activationId);
+    } catch (error) {
+      try {
+        this.syncInjectedHookConfig(false, activationId);
+      } catch {
+        // Preserve the activation failure that triggered rollback.
+      }
+
+      try {
+        this.captureAgent.setRecordingStatus({
+          active: false,
+          activationId,
+          sid: this.sid,
+          tabId: this.tabId,
+          mode: "lite",
+          sampling: this.config.sampling,
+          capturePolicy: this.config.capturePolicy
+        });
+      } catch {
+        // Preserve the activation failure that triggered rollback.
+      }
+
+      this.recording = false;
+      this.activeActivationId = null;
+      this.injectedBridgeArmedActivationId = null;
+      throw error;
+    }
   }
 
   /** Stops active capture and flushes all queued raw/normalized events. */
@@ -218,17 +262,32 @@ export class WebBlackboxLiteSdk {
       return;
     }
 
-    if (this.recording) {
+    const stoppingActivationId = this.activeActivationId;
+
+    if (this.recording && stoppingActivationId) {
+      try {
+        try {
+          this.syncInjectedHookConfig(false, stoppingActivationId);
+        } finally {
+          this.captureAgent.setRecordingStatus({
+            active: false,
+            activationId: stoppingActivationId,
+            sid: this.sid,
+            tabId: this.tabId,
+            mode: "lite",
+            sampling: this.config.sampling,
+            capturePolicy: this.config.capturePolicy
+          });
+        }
+      } finally {
+        this.recording = false;
+        this.activeActivationId = null;
+        this.injectedBridgeArmedActivationId = null;
+      }
+    } else {
       this.recording = false;
-      this.syncInjectedHookConfig(false);
-      this.captureAgent.setRecordingStatus({
-        active: false,
-        sid: this.sid,
-        tabId: this.tabId,
-        mode: "lite",
-        sampling: this.config.sampling,
-        capturePolicy: this.config.capturePolicy
-      });
+      this.activeActivationId = null;
+      this.injectedBridgeArmedActivationId = null;
     }
 
     this.captureAgent.flush();
@@ -354,9 +413,35 @@ export class WebBlackboxLiteSdk {
         await this.stop();
       }
     } finally {
-      this.captureAgent.dispose();
-      this.disposed = true;
+      try {
+        this.captureAgent.dispose();
+      } finally {
+        this.recording = false;
+        this.activeActivationId = null;
+        this.injectedBridgeArmedActivationId = null;
+        this.disposed = true;
+      }
     }
+  }
+
+  private ingestCaptureAgentBatch(rawEvents: RawRecorderEvent[], activationId: string): void {
+    if (!this.recording || this.activeActivationId !== activationId) {
+      return;
+    }
+
+    this.ingestRawEvents(rawEvents);
+  }
+
+  private handleInjectedBridgeArmed(activationId: string): void {
+    if (
+      !this.recording ||
+      this.activeActivationId !== activationId ||
+      this.injectedBridgeArmedActivationId === activationId
+    ) {
+      return;
+    }
+
+    this.injectedBridgeArmedActivationId = activationId;
   }
 
   private async ingestOne(rawEvent: RawRecorderEvent): Promise<void> {
@@ -489,7 +574,7 @@ export class WebBlackboxLiteSdk {
     throw new Error("WebBlackboxLiteSdk has been disposed.");
   }
 
-  private syncInjectedHookConfig(active: boolean): void {
+  private syncInjectedHookConfig(active: boolean, activationId: string): void {
     if (typeof window === "undefined") {
       return;
     }
@@ -498,12 +583,32 @@ export class WebBlackboxLiteSdk {
       new CustomEvent(INJECTED_CAPTURE_CONFIG_EVENT, {
         detail: {
           active,
+          activationId,
           bodyCaptureMaxBytes: active ? this.config.sampling.bodyCaptureMaxBytes : 0,
           capturePolicy: this.config.capturePolicy
         }
       })
     );
   }
+}
+
+function createLiteActivationId(): string {
+  const cryptoApi = globalThis.crypto;
+
+  if (!cryptoApi || typeof cryptoApi.getRandomValues !== "function") {
+    throw new Error("WebBlackbox Lite SDK requires secure cryptographic randomness to start.");
+  }
+
+  const bytes = new Uint8Array(32);
+  cryptoApi.getRandomValues(bytes);
+
+  let hex = "";
+
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+
+  return `a1_${hex}`;
 }
 
 function normalizeSessionId(value: string | undefined): string {

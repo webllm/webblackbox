@@ -22,6 +22,8 @@ export type LiteCaptureSampling = Pick<
  */
 export type LiteCaptureState = {
   active: boolean;
+  /** Exact activation identity; active states fail closed unless this is `a1_` plus 64 hex. */
+  activationId?: string;
   sid?: string;
   tabId?: number;
   mode?: SessionMetadata["mode"] | "freeze";
@@ -34,7 +36,9 @@ export type LiteCaptureState = {
  */
 export type LiteCaptureAgentOptions = {
   /** Emits a normalized batch of raw recorder events. */
-  emitBatch: (events: RawRecorderEvent[]) => void;
+  emitBatch: (events: RawRecorderEvent[], activationId: string) => void;
+  /** Receives the strict MAIN-world acknowledgement for the current Lite activation. */
+  onInjectedBridgeArmed?: (activationId: string) => void;
   /** Optional marker callback used by custom hosts. */
   onMarker?: (message: string) => void;
   /** Toggles in-page recording indicator UI. */
@@ -42,6 +46,23 @@ export type LiteCaptureAgentOptions = {
   /** Overrides frame-role detection for tests or custom embedding. */
   frameScope?: "auto" | "top" | "child";
 };
+
+export type LiteStopCaptureArtifact = "snapshot" | "localStorageSnapshot" | "screenshot";
+
+export type LiteStopCaptureDegradationReason =
+  | "artifact-error"
+  | "disposed"
+  | "inactive"
+  | "out-of-scope";
+
+/** Exact accounting for the final Lite artifacts requested at stop time. */
+export type LiteStopCaptureResult = Readonly<{
+  expectedArtifacts: readonly LiteStopCaptureArtifact[];
+  emittedArtifacts: readonly LiteStopCaptureArtifact[];
+  omittedArtifacts: readonly LiteStopCaptureArtifact[];
+  degraded: boolean;
+  degradationReason: LiteStopCaptureDegradationReason | null;
+}>;
 
 /**
  * Byte limits for payload materialization in lite mode.

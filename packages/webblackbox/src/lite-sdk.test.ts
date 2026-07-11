@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   IndexedDbPipelineStorage,
@@ -16,7 +16,8 @@ const mockRuntime = vi.hoisted(() => {
     statusHistory: Array<Record<string, unknown>>;
     flushCalls: number;
     disposeCalls: number;
-    emitBatch: (events: unknown[]) => void;
+    emitBatch: (events: unknown[], activationId: string) => void;
+    emitInjectedBridgeArmed: (activationId: string) => void;
   }> = [];
 
   class MockLiteCaptureAgent {
@@ -28,7 +29,8 @@ const mockRuntime = vi.hoisted(() => {
 
     public constructor(
       private readonly options: {
-        emitBatch: (events: unknown[]) => void;
+        emitBatch: (events: unknown[], activationId: string) => void;
+        onInjectedBridgeArmed?: (activationId: string) => void;
         onMarker?: (message: string) => void;
       }
     ) {
@@ -43,8 +45,12 @@ const mockRuntime = vi.hoisted(() => {
       this.options.onMarker?.(message);
     }
 
-    public emitBatch(events: unknown[]): void {
-      this.options.emitBatch(events);
+    public emitBatch(events: unknown[], activationId: string): void {
+      this.options.emitBatch(events, activationId);
+    }
+
+    public emitInjectedBridgeArmed(activationId: string): void {
+      this.options.onInjectedBridgeArmed?.(activationId);
     }
 
     public flush(): void {
@@ -81,6 +87,56 @@ vi.mock("./lite-capture-agent.js", () => {
 });
 
 import { WebBlackboxLiteSdk } from "./lite-sdk.js";
+
+const ACTIVATION_ID_PATTERN = /^a1_[0-9a-f]{64}$/;
+
+type InjectedConfigDetail = {
+  active: boolean;
+  activationId: string;
+  bodyCaptureMaxBytes: number;
+  capturePolicy: CapturePolicy;
+};
+
+type LiteSdkActivationState = {
+  activeActivationId: string | null;
+  injectedBridgeArmedActivationId: string | null;
+};
+
+function captureInjectedConfigEvents(): InjectedConfigDetail[] {
+  const details: InjectedConfigDetail[] = [];
+
+  vi.stubGlobal("window", {
+    dispatchEvent: (event: { detail?: InjectedConfigDetail; type?: string }) => {
+      if (event.type === "webblackbox:injected-config" && event.detail) {
+        details.push(event.detail);
+      }
+
+      return true;
+    }
+  });
+  vi.stubGlobal(
+    "CustomEvent",
+    class<T> {
+      public readonly detail: T;
+
+      public constructor(
+        public readonly type: string,
+        init: { detail: T }
+      ) {
+        this.detail = init.detail;
+      }
+    }
+  );
+
+  return details;
+}
+
+function readLatestActivationId(agent: { statusHistory: Array<Record<string, unknown>> }): string {
+  const activationId = agent.statusHistory.at(-1)?.activationId;
+
+  expect(activationId).toEqual(expect.stringMatching(ACTIVATION_ID_PATTERN));
+  return activationId as string;
+}
 
 function createRawEvent(
   rawType: string,
@@ -146,7 +202,12 @@ describe("WebBlackboxLiteSdk", () => {
     mockRuntime.installInjectedLiteCaptureHooksMock.mockReset();
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("starts and stops recording with injected hooks wired", async () => {
+    const injectedConfigs = captureInjectedConfigEvents();
     const sdk = new WebBlackboxLiteSdk({
       sid: "S-sdk-start-stop",
       injectHookFlag: "__WB_TEST_FLAG__",
@@ -168,19 +229,165 @@ describe("WebBlackboxLiteSdk", () => {
     await sdk.start();
     const agent = mockRuntime.instances.at(-1);
     expect(agent).toBeDefined();
+    const activationId = readLatestActivationId(agent!);
     expect(agent?.statusHistory.at(-1)).toMatchObject({
       active: true,
+      activationId,
       sid: "S-sdk-start-stop",
       mode: "lite"
     });
+    expect(injectedConfigs).toEqual([
+      expect.objectContaining({
+        active: true,
+        activationId,
+        bodyCaptureMaxBytes: 0
+      })
+    ]);
 
     await sdk.stop();
     expect(agent?.statusHistory.at(-1)).toMatchObject({
       active: false,
+      activationId,
       sid: "S-sdk-start-stop",
       mode: "lite"
     });
+    expect(injectedConfigs.at(-1)).toMatchObject({
+      active: false,
+      activationId,
+      bodyCaptureMaxBytes: 0
+    });
+    expect(sdk.isRecording).toBe(false);
+    expect((sdk as unknown as LiteSdkActivationState).activeActivationId).toBeNull();
+    expect((sdk as unknown as LiteSdkActivationState).injectedBridgeArmedActivationId).toBeNull();
     expect(agent?.flushCalls).toBeGreaterThan(0);
+
+    await sdk.dispose();
+    expect(agent?.disposeCalls).toBe(1);
+  });
+
+  it("rotates activation identity for the same sid and rejects stale armed and batch callbacks", async () => {
+    const injectedConfigs = captureInjectedConfigEvents();
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-same-sid-restart",
+      injectHooks: false,
+      useDefaultPlugins: false,
+      trustedPlaintextExemptionEvidenceRefs: [TRUSTED_LOCAL_DEBUG_EVIDENCE_REF],
+      config: {
+        capturePolicy: LOCAL_DEBUG_TEST_POLICY
+      }
+    });
+
+    await sdk.start();
+    const agent = mockRuntime.instances.at(-1);
+    expect(agent).toBeDefined();
+    const firstActivationId = readLatestActivationId(agent!);
+
+    agent?.emitInjectedBridgeArmed(firstActivationId);
+    expect((sdk as unknown as LiteSdkActivationState).injectedBridgeArmedActivationId).toBe(
+      firstActivationId
+    );
+
+    await sdk.stop();
+    expect((sdk as unknown as LiteSdkActivationState).activeActivationId).toBeNull();
+    expect((sdk as unknown as LiteSdkActivationState).injectedBridgeArmedActivationId).toBeNull();
+
+    agent?.emitBatch(
+      [
+        createRawEvent("marker", {
+          message: "stale-after-stop"
+        })
+      ],
+      firstActivationId
+    );
+
+    await sdk.start();
+    const secondActivationId = readLatestActivationId(agent!);
+    expect(secondActivationId).not.toBe(firstActivationId);
+    expect(sdk.sessionId).toBe("S-sdk-same-sid-restart");
+
+    agent?.emitInjectedBridgeArmed(firstActivationId);
+    expect((sdk as unknown as LiteSdkActivationState).injectedBridgeArmedActivationId).toBeNull();
+    agent?.emitBatch(
+      [
+        createRawEvent("marker", {
+          message: "stale-after-restart"
+        })
+      ],
+      firstActivationId
+    );
+
+    agent?.emitInjectedBridgeArmed(secondActivationId);
+    agent?.emitBatch(
+      [
+        createRawEvent("marker", {
+          message: "current-activation"
+        })
+      ],
+      secondActivationId
+    );
+    expect((sdk as unknown as LiteSdkActivationState).injectedBridgeArmedActivationId).toBe(
+      secondActivationId
+    );
+
+    const exported = await sdk.export({ stopCapture: false });
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+    const markerMessages = parsed.events
+      .filter((event) => event.type === "user.marker")
+      .map((event) => (event.data as { message?: unknown }).message);
+
+    expect(markerMessages).toEqual(["current-activation"]);
+    expect(agent?.statusHistory).toEqual([
+      expect.objectContaining({
+        active: true,
+        activationId: firstActivationId,
+        sid: "S-sdk-same-sid-restart"
+      }),
+      expect.objectContaining({
+        active: false,
+        activationId: firstActivationId,
+        sid: "S-sdk-same-sid-restart"
+      }),
+      expect.objectContaining({
+        active: true,
+        activationId: secondActivationId,
+        sid: "S-sdk-same-sid-restart"
+      })
+    ]);
+    expect(injectedConfigs).toEqual([
+      expect.objectContaining({ active: true, activationId: firstActivationId }),
+      expect.objectContaining({ active: false, activationId: firstActivationId }),
+      expect.objectContaining({ active: true, activationId: secondActivationId })
+    ]);
+
+    await sdk.dispose();
+    expect(sdk.isRecording).toBe(false);
+    expect((sdk as unknown as LiteSdkActivationState).activeActivationId).toBeNull();
+    expect((sdk as unknown as LiteSdkActivationState).injectedBridgeArmedActivationId).toBeNull();
+    expect(agent?.statusHistory.at(-1)).toMatchObject({
+      active: false,
+      activationId: secondActivationId
+    });
+    expect(injectedConfigs.at(-1)).toMatchObject({
+      active: false,
+      activationId: secondActivationId
+    });
+  });
+
+  it("fails closed when secure activation-id randomness is unavailable", async () => {
+    const injectedConfigs = captureInjectedConfigEvents();
+    vi.stubGlobal("crypto", undefined);
+    const sdk = new WebBlackboxLiteSdk({
+      sid: "S-sdk-no-secure-randomness",
+      injectHooks: false,
+      useDefaultPlugins: false
+    });
+    const agent = mockRuntime.instances.at(-1);
+
+    await expect(sdk.start()).rejects.toThrow(/requires secure cryptographic randomness/i);
+    expect(sdk.isRecording).toBe(false);
+    expect(agent?.statusHistory).toEqual([]);
+    expect(injectedConfigs).toEqual([]);
+    expect((sdk as unknown as LiteSdkActivationState).activeActivationId).toBeNull();
 
     await sdk.dispose();
     expect(agent?.disposeCalls).toBe(1);
@@ -443,13 +650,17 @@ describe("WebBlackboxLiteSdk", () => {
 
     const agent = mockRuntime.instances.at(-1);
     expect(agent).toBeDefined();
+    const activationId = readLatestActivationId(agent!);
 
-    agent?.emitBatch([
-      createRawEvent("keydown", {
-        key: "Enter",
-        code: "Enter"
-      })
-    ]);
+    agent?.emitBatch(
+      [
+        createRawEvent("keydown", {
+          key: "Enter",
+          code: "Enter"
+        })
+      ],
+      activationId
+    );
 
     const exported = await sdk.export({ stopCapture: false });
     const parsed = await readWebBlackboxArchive(exported.bytes);
@@ -479,15 +690,21 @@ describe("WebBlackboxLiteSdk", () => {
     });
 
     await sdk.start();
-    mockRuntime.instances.at(-1)?.emitBatch([
-      createRawEvent("networkBody", {
-        reqId: "R-forged-agent",
-        url: "https://example.test/api/private",
-        mimeType: "application/json",
-        encoding: "utf8",
-        body: '{"secret":"must-not-reach-storage"}'
-      })
-    ]);
+    const agent = mockRuntime.instances.at(-1);
+    expect(agent).toBeDefined();
+    const activationId = readLatestActivationId(agent!);
+    agent?.emitBatch(
+      [
+        createRawEvent("networkBody", {
+          reqId: "R-forged-agent",
+          url: "https://example.test/api/private",
+          mimeType: "application/json",
+          encoding: "utf8",
+          body: '{"secret":"must-not-reach-storage"}'
+        })
+      ],
+      activationId
+    );
     await sdk.flush();
 
     expect(putBlob).not.toHaveBeenCalled();
