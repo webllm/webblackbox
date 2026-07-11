@@ -11,6 +11,19 @@
 
 ### Patch Changes
 
+- Replaced page-visible MAIN-world lifecycle control with a per-document 256-bit capability and
+  dynamically addressed ESM bootstrap, kept observation messages bounded and untrusted, recovered
+  surviving controllers after service-worker restarts, and reconciled a bounded replay tail during
+  exact stop drain without injecting MAIN-world hooks in Full mode.
+- Made Lite content delivery recoverable and exactly acknowledged across content/SW/offscreen
+  reconnects, activation replacement, same-document navigation, and stop drain by persisting
+  provenance receipts, retaining predecessor queues until their delivery barrier completes, and
+  reporting bounded replay truncation as explicit degradation.
+- Hardened remaining MV3 crash windows around same-document supersession, stopped-session removal,
+  annotation checkpoints, runtime snapshot capacity, transient boot reads, offscreen creation/close,
+  surviving pipeline policy identity, and screen-recording quiesce/chunk/finalization durability.
+- Required dynamically addressed injected-module packages with the exact bootstrap/control export
+  surface and made Chrome ZIP output byte-for-byte reproducible without timestamped directory entries.
 - Removed the unreachable `tabCapture` permission from the store-safe Web Store profile; tab recording remains an explicit development/enterprise capability alongside CDP.
 - Bound stop, purge, consent-expiry, and late raw-event work to the exact runtime identity: active
   runtime failures no longer cancel a pending same-tab replacement start, stop and purge tasks only

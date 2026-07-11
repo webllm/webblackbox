@@ -1,6 +1,6 @@
 # WebBlackbox Chrome Extension
 
-Chrome Manifest V3 extension that continuously records web session data using the Chrome DevTools Protocol and content script injection.
+Chrome Manifest V3 extension that records web sessions through scope-gated Lite page instrumentation or, in the explicit development/enterprise profile, the Chrome DevTools Protocol.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ The extension consists of multiple main components:
 
 #### Content Script (`content.js`)
 
-- Injected at `document_start` on all URLs
+- Programmatically injected only into exact documents authorized for the user-started capture
 - Captures user interaction events (click, input, scroll, keydown, etc.)
 - Captures DOM mutations via MutationObserver
 - Takes DOM snapshots at configured intervals
@@ -48,10 +48,10 @@ The extension consists of multiple main components:
 
 #### Injected Script (`injected.js`)
 
-- Web-accessible resource injected into the page context
+- Dynamically addressed web-accessible ESM module bootstrapped in the page context through an exact service-worker operation
 - Intercepts console API calls (log, warn, error, etc.)
 - Monitors storage operations (localStorage, sessionStorage, IndexedDB, cookies)
-- Communicates with the content script via `window.postMessage`
+- Sends bounded, untrusted observation batches to the content script via `window.postMessage`; activation and drain control remain on the extension-owned direct module path
 
 #### Offscreen Document
 
@@ -92,29 +92,31 @@ The extension consists of multiple main components:
 
 The Chrome Web Store package uses the `store-safe` profile:
 
-| Permission  | Purpose                                                |
-| ----------- | ------------------------------------------------------ |
-| `activeTab` | Temporary page access after the user starts recording  |
-| `alarms`    | Restart-safe local session retention cleanup           |
-| `scripting` | Programmatic capture injection after that user gesture |
-| `storage`   | Extension settings and session data                    |
-| `offscreen` | Pipeline processing in the background                  |
-| `downloads` | Archive file download                                  |
+| Permission      | Purpose                                                         |
+| --------------- | --------------------------------------------------------------- |
+| `activeTab`     | Temporary page access after the user starts recording           |
+| `alarms`        | Restart-safe local session retention cleanup                    |
+| `scripting`     | Programmatic capture injection after that user gesture          |
+| `storage`       | Extension settings and session data                             |
+| `offscreen`     | Pipeline processing in the background                           |
+| `downloads`     | Archive file download                                           |
+| `webNavigation` | Exact frame/document navigation identity and lifecycle tracking |
 
 The separately packaged development/enterprise profile adds the following broader capabilities and is not the Web Store artifact:
 
-| Permission   | Purpose                                          |
-| ------------ | ------------------------------------------------ |
-| `debugger`   | CDP access for network, runtime, and page events |
-| `alarms`     | Restart-safe local session retention cleanup     |
-| `tabs`       | Tab information and URL access                   |
-| `scripting`  | Content script injection                         |
-| `storage`    | Extension settings and session data              |
-| `offscreen`  | Pipeline processing in background                |
-| `tabCapture` | User-initiated tab media capture                 |
-| `webRequest` | Network request monitoring                       |
-| `downloads`  | Archive file download                            |
-| `<all_urls>` | Content script injection on any page             |
+| Permission      | Purpose                                                         |
+| --------------- | --------------------------------------------------------------- |
+| `debugger`      | CDP access for network, runtime, and page events                |
+| `alarms`        | Restart-safe local session retention cleanup                    |
+| `tabs`          | Tab information and URL access                                  |
+| `scripting`     | Content script injection                                        |
+| `storage`       | Extension settings and session data                             |
+| `offscreen`     | Pipeline processing in background                               |
+| `tabCapture`    | User-initiated tab media capture                                |
+| `webRequest`    | Network request monitoring                                      |
+| `downloads`     | Archive file download                                           |
+| `webNavigation` | Exact frame/document navigation identity and lifecycle tracking |
+| `<all_urls>`    | Content script injection on any page                            |
 
 ## Keyboard Shortcuts
 
@@ -138,19 +140,20 @@ pnpm verify
 
 The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local `pnpm build` runs keep the stable development `key`, while `pnpm build:release` generates an unpacked, keyless `store-safe` build for store-parity checks. `pnpm package:chrome` always rebuilds with `--release --profile store-safe`, writes `dist/webblackbox-<version>-chrome.zip`, then reopens the ZIP and validates its release manifest. That Web Store artifact contains no `debugger`, `tabs`, `webRequest`, or `tabCapture` permission, no persistent host permissions, and no static content script registration. Tab recording remains available only in the explicit enterprise profile because it also requires that profile's CDP capability.
 
-The broader profile is an explicit opt-in: `pnpm package:chrome:enterprise` writes `dist/webblackbox-<version>-enterprise-chrome.zip` with `--profile dev`. Do not upload that archive to the Chrome Web Store. A raw `node scripts/build-extension.mjs --package` invocation also defaults to a release `store-safe` package; producing the broader archive requires `--profile dev`. Packaging is pure Node.js, so it does not depend on a system `zip` binary. `pnpm verify` runs lint, typecheck, tests, and the store-safe packaging pipeline. You can override the ZIP path with `node scripts/build-extension.mjs --package --output ./dist/custom-name.zip`.
+The broader profile is an explicit opt-in: `pnpm package:chrome:enterprise` writes `dist/webblackbox-<version>-enterprise-chrome.zip` with `--profile dev`. Do not upload that archive to the Chrome Web Store. The `pnpm package:*` commands are the source-hermetic release entrypoints because they clean and compile before packaging. A lower-level `node scripts/build-extension.mjs --package` invocation validates and packages an already compiled, closed-set `build/` directory; it defaults to `store-safe`, rejects unexpected residual files, and requires `--profile dev` for the broader archive. Packaging is pure Node.js, so it does not depend on a system `zip` binary. `pnpm verify` runs lint, typecheck, tests, and the store-safe packaging pipeline. You can override the ZIP path with `node scripts/build-extension.mjs --package --output ./dist/custom-name.zip`.
 
 Build entries:
 
-| Entry          | Output               | Description          |
-| -------------- | -------------------- | -------------------- |
-| `sw.ts`        | `build/sw.js`        | Service worker       |
-| `content.ts`   | `build/content.js`   | Content script       |
-| `offscreen.ts` | `build/offscreen.js` | Offscreen document   |
-| `popup.ts`     | `build/popup.js`     | Popup UI             |
-| `options.ts`   | `build/options.js`   | Options page         |
-| `sessions.ts`  | `build/sessions.js`  | Sessions page        |
-| `injected.ts`  | `build/injected.js`  | Injected page script |
+| Entry                          | Output                   | Description                      |
+| ------------------------------ | ------------------------ | -------------------------------- |
+| `src/sw/index.ts`              | `build/sw.js`            | Service worker                   |
+| `src/content/index.ts`         | `build/content.js`       | Isolated-world content runtime   |
+| `src/content/content-agent.ts` | `build/content-agent.js` | Scope-checking content bootstrap |
+| `src/offscreen/index.ts`       | `build/offscreen.js`     | Offscreen document               |
+| `src/popup/index.ts`           | `build/popup.js`         | Popup UI                         |
+| `src/options/index.ts`         | `build/options.js`       | Options page                     |
+| `src/sessions/index.ts`        | `build/sessions.js`      | Sessions page                    |
+| `src/injected/index.ts`        | `build/injected.js`      | Direct MAIN-world ESM controller |
 
 ## E2E
 
@@ -175,14 +178,14 @@ Build entries:
 ### Recording
 
 1. User clicks **Start** in popup
-2. Service worker creates session, attaches CDP debugger, initializes recorder
-3. `content.js` is already present as a manifest `document_start` content script across frames
-4. Injected content capture begins streaming user events and DOM summaries
-5. In `lite` mode, injected script captures console/network/storage events
-6. CDP provides network, runtime exception, and page navigation events
+2. Service worker creates the session and initializes the recorder/pipeline, attaching CDP only when the selected profile and installed capability require it
+3. Service worker authorizes and programmatically injects `content.js` into each exact in-scope document
+4. In `lite` mode, the worker seeds a per-document capability and bootstraps the dynamic MAIN-world ESM module before activation commits
+5. Content capture streams user events and DOM summaries; the MAIN-world module adds bounded console/network/storage observations and retains a bounded replay tail for exact stop drain
+6. In capable development/enterprise installs, CDP provides network, runtime exception, page-navigation, and requested visual events
 7. Service worker normalizes all events through the recorder
-8. Normalized events are batched and sent to the offscreen pipeline
-9. Pipeline chunks, indexes, and stores events
+8. Delivery-aware batches are committed by the offscreen pipeline before the content sender is acknowledged
+9. Pipeline chunks, indexes, encrypts, and stores events
 
 ### Export
 
@@ -212,7 +215,7 @@ The extension uses `@webblackbox/protocol`'s `RecorderConfig` for all settings. 
   - page-side response-body sampling is disabled (`bodyCaptureMaxBytes=0`)
   - idle screenshots are disabled by default; enable `screenshotIdleMs` explicitly when needed
   - initial DOM/storage/screenshot capture is deferred briefly after start so the tab does not stall at record activation
-  - hot listeners, observers, and page-side capture loops stay inactive until recording is enabled, even though `content.js` is loaded at `document_start`
+  - content bootstrap is injected only after authorization, and hot listeners, observers, and page-side capture loops remain inactive until the exact activation commits
 - `full`: same perf-freeze disable + stricter sampling/body-capture limits
   - page-side heavy capture loops (SnapDOM screenshots, outerHTML snapshots, storage snapshots) are skipped to reduce main-thread impact
   - `injected` fetch/xhr/console patching is not enabled (CDP is the primary source in full mode)

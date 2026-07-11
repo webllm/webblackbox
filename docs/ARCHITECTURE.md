@@ -254,7 +254,7 @@ Page World          Extension World         Background
 │ Injected │       │   Content    │        │   Service    │
 │  Script  │──────→│   Script     │───────→│   Worker     │
 │          │       │              │        │              │
-│ window.  │       │ chrome.      │        │ CDP Router   │
+│ bounded  │       │ chrome.      │        │ CDP Router   │
 │ postMsg  │       │ runtime.     │        │ Recorder     │
 │          │       │ connect/port │        │              │
 └──────────┘       └──────────────┘        └──────┬───────┘
@@ -266,7 +266,7 @@ Page World          Extension World         Background
                                            └──────────────┘
 ```
 
-- **Page World** → Extension: `window.postMessage` (injected → content)
+- **Page World** → Extension: bounded, allowlisted `window.postMessage` observations (injected → content); privileged activation/drain uses an exact service-worker `chrome.scripting.executeScript` call into the dynamically addressed ESM module and never accepts page-originated control
 - **Extension** → Background: `chrome.runtime.connect` + `port.postMessage` (content → SW)
 - **Background** → Offscreen: `chrome.runtime.connect` + `port.postMessage` (SW ↔ offscreen)
 - **CDP**: `chrome.debugger.sendCommand/onEvent` (SW ↔ browser)
@@ -290,6 +290,6 @@ Page World          Extension World         Background
 
 ### Permission Model
 
-- The extension requires `debugger` permission for CDP access
-- `<all_urls>` host permission is needed for content script injection
-- Users must explicitly grant permissions during installation
+- The store-safe profile uses `activeTab` plus programmatic injection and does not request `debugger`, `tabs`, `webRequest`, `tabCapture`, persistent host permissions, or static content scripts.
+- The explicit development/enterprise profile may request `debugger`, `tabs`, `webRequest`, `tabCapture`, and host access for CDP/browser-network diagnostics and recording.
+- Every profile still applies the runtime scope and exact-document authorization gates before capture activation.
