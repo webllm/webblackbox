@@ -92,15 +92,14 @@ The extension consists of multiple main components:
 
 The Chrome Web Store package uses the `store-safe` profile:
 
-| Permission   | Purpose                                                |
-| ------------ | ------------------------------------------------------ |
-| `activeTab`  | Temporary page access after the user starts recording  |
-| `alarms`     | Restart-safe local session retention cleanup           |
-| `scripting`  | Programmatic capture injection after that user gesture |
-| `storage`    | Extension settings and session data                    |
-| `offscreen`  | Pipeline processing in the background                  |
-| `tabCapture` | User-initiated tab media capture                       |
-| `downloads`  | Archive file download                                  |
+| Permission  | Purpose                                                |
+| ----------- | ------------------------------------------------------ |
+| `activeTab` | Temporary page access after the user starts recording  |
+| `alarms`    | Restart-safe local session retention cleanup           |
+| `scripting` | Programmatic capture injection after that user gesture |
+| `storage`   | Extension settings and session data                    |
+| `offscreen` | Pipeline processing in the background                  |
+| `downloads` | Archive file download                                  |
 
 The separately packaged development/enterprise profile adds the following broader capabilities and is not the Web Store artifact:
 
@@ -112,6 +111,7 @@ The separately packaged development/enterprise profile adds the following broade
 | `scripting`  | Content script injection                         |
 | `storage`    | Extension settings and session data              |
 | `offscreen`  | Pipeline processing in background                |
+| `tabCapture` | User-initiated tab media capture                 |
 | `webRequest` | Network request monitoring                       |
 | `downloads`  | Archive file download                            |
 | `<all_urls>` | Content script injection on any page             |
@@ -136,7 +136,7 @@ pnpm package:chrome:enterprise
 pnpm verify
 ```
 
-The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local `pnpm build` runs keep the stable development `key`, while `pnpm build:release` generates an unpacked, keyless `store-safe` build for store-parity checks. `pnpm package:chrome` always rebuilds with `--release --profile store-safe`, writes `dist/webblackbox-<version>-chrome.zip`, then reopens the ZIP and validates its release manifest. That Web Store artifact contains no `debugger`, `tabs`, or `webRequest` permission, no persistent host permissions, and no static content script registration.
+The build output is in the `build/` directory. The manifest is generated from `apps/extension/package.json` during the build, so there is no source `public/manifest.json` to keep in sync. Local `pnpm build` runs keep the stable development `key`, while `pnpm build:release` generates an unpacked, keyless `store-safe` build for store-parity checks. `pnpm package:chrome` always rebuilds with `--release --profile store-safe`, writes `dist/webblackbox-<version>-chrome.zip`, then reopens the ZIP and validates its release manifest. That Web Store artifact contains no `debugger`, `tabs`, `webRequest`, or `tabCapture` permission, no persistent host permissions, and no static content script registration. Tab recording remains available only in the explicit enterprise profile because it also requires that profile's CDP capability.
 
 The broader profile is an explicit opt-in: `pnpm package:chrome:enterprise` writes `dist/webblackbox-<version>-enterprise-chrome.zip` with `--profile dev`. Do not upload that archive to the Chrome Web Store. A raw `node scripts/build-extension.mjs --package` invocation also defaults to a release `store-safe` package; producing the broader archive requires `--profile dev`. Packaging is pure Node.js, so it does not depend on a system `zip` binary. `pnpm verify` runs lint, typecheck, tests, and the store-safe packaging pipeline. You can override the ZIP path with `node scripts/build-extension.mjs --package --output ./dist/custom-name.zip`.
 

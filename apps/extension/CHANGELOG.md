@@ -11,6 +11,7 @@
 
 ### Patch Changes
 
+- Removed the unreachable `tabCapture` permission from the store-safe Web Store profile; tab recording remains an explicit development/enterprise capability alongside CDP.
 - Bound stop, purge, consent-expiry, and late raw-event work to the exact runtime identity: active
   runtime failures no longer cancel a pending same-tab replacement start, stop and purge tasks only
   coalesce for the same runtime object, supplied event session ids are authoritative, and an old

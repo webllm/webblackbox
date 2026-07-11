@@ -68,7 +68,7 @@ describe("extension build manifest", () => {
     expect(manifest).not.toHaveProperty("key");
     expect(manifest.permissions).toContain("activeTab");
     expect(manifest.permissions).toContain("alarms");
-    expect(manifest.permissions).toContain("tabCapture");
+    expect(manifest.permissions).not.toContain("tabCapture");
     expect(manifest.permissions).toContain("webNavigation");
     expect(manifest.permissions).not.toContain("debugger");
     expect(manifest.permissions).not.toContain("tabs");
@@ -113,7 +113,8 @@ describe("extension build manifest", () => {
     ["dev", "management"],
     ["store-safe", "history"],
     ["store-safe", "cookies"],
-    ["store-safe", "management"]
+    ["store-safe", "management"],
+    ["store-safe", "tabCapture"]
   ])("rejects undeclared %s permission %s", (profile, permission) => {
     const release = profile === "store-safe";
     const manifest = createExtensionManifest({ version: "1.2.3", release, profile });
@@ -377,7 +378,7 @@ describe("extension build manifest", () => {
       const packagedManifest = JSON.parse(await zip.file("manifest.json").async("text"));
 
       expect(packagedManifest).not.toHaveProperty("key");
-      expect(packagedManifest.permissions).toContain("tabCapture");
+      expect(packagedManifest.permissions).not.toContain("tabCapture");
       expect(packagedManifest.permissions).toContain("webNavigation");
       expect(packagedManifest.permissions).not.toContain("debugger");
       expect(packagedManifest.permissions).not.toContain("tabs");
