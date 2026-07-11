@@ -1,34 +1,46 @@
-import type { ContentStopDrainedMessage, RecordingStatusMessage } from "../shared/messages.js";
+import {
+  parseContentActivationId,
+  type ContentActivationId
+} from "../shared/content-activation-protocol.js";
+import type { ContentDrainMessage, ContentStopDrainedMessage } from "../shared/messages.js";
+import type {
+  ContentStopDrainArtifact,
+  ContentStopDrainDegradationReason
+} from "../shared/messages.js";
 import { isStopDrainToken } from "../shared/stop-drain-token.js";
 
 export type ContentStopDrainContext = {
+  activationId: ContentActivationId;
+  sid: string;
   token: string;
   deadline: number;
   documentUrl: string;
 };
 
 export function resolveContentStopDrainContext(
-  message: RecordingStatusMessage,
-  topLevel: boolean,
+  message: ContentDrainMessage,
   now = Date.now()
 ): ContentStopDrainContext | null {
-  const drain = message.stopDrain;
+  const activationId = parseContentActivationId(message.activationId);
 
   if (
-    message.active ||
-    !topLevel ||
-    !isStopDrainToken(drain?.token) ||
-    !Number.isFinite(drain.deadline) ||
-    drain.deadline < now ||
-    !isAbsoluteUrl(drain.documentUrl)
+    !activationId ||
+    !isStopDrainToken(message.token) ||
+    !Number.isFinite(message.deadline) ||
+    message.deadline < now ||
+    !isAbsoluteUrl(message.documentUrl) ||
+    typeof message.sid !== "string" ||
+    message.sid.length === 0
   ) {
     return null;
   }
 
   return {
-    token: drain.token,
-    deadline: drain.deadline,
-    documentUrl: drain.documentUrl
+    activationId,
+    sid: message.sid,
+    token: message.token,
+    deadline: message.deadline,
+    documentUrl: message.documentUrl
   };
 }
 
@@ -44,18 +56,33 @@ export function stopDrainEventFields(
 }
 
 export function buildContentStopDrainedMessage(
-  sid: string | undefined,
-  context: ContentStopDrainContext | null
+  context: ContentStopDrainContext | null,
+  evidence: Readonly<{
+    expectedArtifacts: readonly ContentStopDrainArtifact[];
+    emittedArtifacts: readonly ContentStopDrainArtifact[];
+    omittedArtifacts: readonly ContentStopDrainArtifact[];
+    degradationReasons: readonly ContentStopDrainDegradationReason[];
+  }> = {
+    expectedArtifacts: [],
+    emittedArtifacts: [],
+    omittedArtifacts: [],
+    degradationReasons: []
+  }
 ): ContentStopDrainedMessage | null {
-  if (!context || typeof sid !== "string" || sid.length === 0) {
+  if (!context) {
     return null;
   }
 
   return {
     kind: "content.stop-drained",
-    sid,
+    activationId: context.activationId,
+    sid: context.sid,
     token: context.token,
-    documentUrl: context.documentUrl
+    documentUrl: context.documentUrl,
+    expectedArtifacts: [...new Set(evidence.expectedArtifacts)],
+    emittedArtifacts: [...new Set(evidence.emittedArtifacts)],
+    omittedArtifacts: [...new Set(evidence.omittedArtifacts)],
+    degradationReasons: [...new Set(evidence.degradationReasons)]
   };
 }
 

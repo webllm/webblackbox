@@ -137,6 +137,15 @@ export type ChromeApi = {
     sendMessage(message: unknown): Promise<unknown>;
   };
   webNavigation?: {
+    getAllFrames?: (details: { tabId: number }) => Promise<
+      Array<{
+        frameId: number;
+        parentFrameId: number;
+        documentId?: string;
+        parentDocumentId?: string;
+        url: string;
+      }>
+    >;
     onCommitted: {
       addListener(
         callback: (details: {
@@ -158,6 +167,54 @@ export type ChromeApi = {
           documentId?: string;
           documentLifecycle?: "prerender" | "active" | "cached" | "pending_deletion";
           frameType?: "outermost_frame" | "fenced_frame" | "sub_frame";
+          parentDocumentId?: string;
+          parentFrameId?: number;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
+    };
+    onHistoryStateUpdated?: {
+      addListener(
+        callback: (details: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
+          parentDocumentId?: string;
+          parentFrameId?: number;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
+      removeListener(
+        callback: (details: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
+          parentDocumentId?: string;
+          parentFrameId?: number;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
+    };
+    onReferenceFragmentUpdated?: {
+      addListener(
+        callback: (details: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
+          parentDocumentId?: string;
+          parentFrameId?: number;
+          url: string;
+          timeStamp?: number;
+        }) => void
+      ): void;
+      removeListener(
+        callback: (details: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
           parentDocumentId?: string;
           parentFrameId?: number;
           url: string;
@@ -262,6 +319,9 @@ export type ChromeApi = {
       target: ScriptInjectionTarget;
       world?: "MAIN" | "ISOLATED";
       files?: string[];
+      func?: (...args: never[]) => unknown;
+      args?: unknown[];
+      injectImmediately?: boolean;
     }): Promise<InjectionResult<TResult>[]>;
   };
   storage?: {

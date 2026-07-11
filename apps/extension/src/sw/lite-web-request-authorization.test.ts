@@ -4,9 +4,21 @@ import {
   ContentDocumentAuthorization,
   type ContentNavigationAuthorization
 } from "./content-document-authorization.js";
-import { authorizeLiteWebRequest } from "./lite-web-request-authorization.js";
+import {
+  authorizeLiteWebRequest,
+  isLiteWebRequestDocumentUrlUnambiguous
+} from "./lite-web-request-authorization.js";
 
 const TAB_ID = 7;
+
+describe("Lite webRequest document URL sufficiency", () => {
+  it("disables subresource capture for path-sensitive policy but keeps document navigation", () => {
+    expect(isLiteWebRequestDocumentUrlUnambiguous([], "fetch")).toBe(true);
+    expect(isLiteWebRequestDocumentUrlUnambiguous(["/private/*"], "fetch")).toBe(false);
+    expect(isLiteWebRequestDocumentUrlUnambiguous(["/private/*"], "main_frame")).toBe(true);
+    expect(isLiteWebRequestDocumentUrlUnambiguous(["/private/*"], "sub_frame")).toBe(true);
+  });
+});
 
 describe("authorizeLiteWebRequest", () => {
   it("requires ordinary child requests to match the exact active document", () => {
@@ -162,6 +174,56 @@ describe("authorizeLiteWebRequest", () => {
       }).allowed
     ).toBe(false);
     expect(authorization.get(4)?.documentId).toBe("document-a");
+  });
+
+  it("rejects pending and preparing documents as subframe parents", async () => {
+    const pendingParent = authorizedTop("top-document-a", "https://app.example/a");
+    await pendingParent.prepareCommittedNavigation(
+      {
+        tabId: TAB_ID,
+        frameId: 0,
+        documentId: "top-document-b",
+        url: "https://app.example/b"
+      },
+      () => true
+    );
+
+    expect(
+      decide(pendingParent, {
+        frameId: 4,
+        parentFrameId: 0,
+        parentDocumentId: "top-document-b",
+        type: "sub_frame",
+        url: "https://widgets.example/pending-child"
+      }).allowed
+    ).toBe(false);
+
+    const preparingParent = authorizedTop("top-document-a", "https://app.example/a");
+    let release!: (allowed: boolean) => void;
+    const policy = new Promise<boolean>((resolve) => {
+      release = resolve;
+    });
+    const preparation = preparingParent.prepareCommittedNavigation(
+      {
+        tabId: TAB_ID,
+        frameId: 0,
+        documentId: "top-document-c",
+        url: "https://app.example/c"
+      },
+      () => policy
+    );
+
+    expect(
+      decide(preparingParent, {
+        frameId: 5,
+        parentFrameId: 0,
+        parentDocumentId: "top-document-c",
+        type: "sub_frame",
+        url: "https://widgets.example/preparing-child"
+      }).allowed
+    ).toBe(false);
+    release(true);
+    await preparation;
   });
 
   it("closes A synchronously when top navigation B starts", () => {

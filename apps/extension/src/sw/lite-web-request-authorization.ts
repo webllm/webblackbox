@@ -23,6 +23,18 @@ export type LiteWebRequestAuthorizationDecision = Readonly<{
   navigationCurrent?: boolean;
 }>;
 
+/** Browser webRequest exposes documentId/origin but not the live SPA path. */
+export function isLiteWebRequestDocumentUrlUnambiguous(
+  excludedUrlPatterns: readonly string[],
+  resourceType: string | undefined
+): boolean {
+  return (
+    resourceType === "main_frame" ||
+    resourceType === "sub_frame" ||
+    excludedUrlPatterns.length === 0
+  );
+}
+
 export function authorizeLiteWebRequest(input: {
   authorization: ContentDocumentAuthorization;
   details: LiteWebRequestAuthorizationDetails;
@@ -87,13 +99,11 @@ export function authorizeLiteWebRequest(input: {
 
   if (input.details.type === "sub_frame") {
     if (input.phase === "before") {
-      if (
-        input.details.parentFrameId === undefined ||
-        !input.authorization.matchesKnownDocument({
-          frameId: input.details.parentFrameId,
-          documentId: input.details.parentDocumentId
-        })
-      ) {
+      const parentDocument =
+        input.details.parentFrameId === undefined
+          ? null
+          : input.authorization.get(input.details.parentFrameId);
+      if (!parentDocument || parentDocument.documentId !== input.details.parentDocumentId) {
         return {
           allowed: false,
           frameId,

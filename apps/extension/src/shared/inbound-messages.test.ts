@@ -10,6 +10,9 @@ import { CONTENT_EVENT_BATCH_MAX, PORT_NAMES } from "./messages.js";
 
 const EXTENSION_BASE_URL = "chrome-extension://webblackbox-test/";
 const STOP_DRAIN_TOKEN = "a".repeat(64);
+const READY_ID = `r1_${"b".repeat(64)}`;
+const ACTIVATION_ID = `a1_${"c".repeat(64)}`;
+const BATCH_ID = `b1_${"d".repeat(64)}`;
 
 const POPUP_SENDER: MessageSenderLike = {
   url: `${EXTENSION_BASE_URL}popup.html`,
@@ -22,6 +25,7 @@ const SESSIONS_SENDER: MessageSenderLike = {
 };
 
 const CONTENT_SENDER: MessageSenderLike = {
+  documentId: "document-42",
   frameId: 0,
   url: "https://app.example.test/dashboard",
   origin: "https://app.example.test",
@@ -52,8 +56,8 @@ function validRawEvent(overrides: Record<string, unknown> = {}): Record<string, 
   return {
     source: "content",
     rawType: "click",
-    tabId: -1,
-    sid: "",
+    tabId: 42,
+    sid: "S-content",
     t: 1_720_000_000_000,
     mono: 123.5,
     payload: {
@@ -70,6 +74,8 @@ function validRawEvent(overrides: Record<string, unknown> = {}): Record<string, 
 function contentBatch(events: unknown[]): Record<string, unknown> {
   return {
     kind: "content.events",
+    activationId: ACTIVATION_ID,
+    batchId: BATCH_ID,
     events,
     documentUrl: "https://app.example.test/dashboard"
   };
@@ -164,10 +170,54 @@ describe("extension inbound source authorization", () => {
     ).toBeNull();
     expect(
       parseExtensionInboundMessage(
-        { kind: "content.ready", documentUrl: CONTENT_SENDER.url },
+        {
+          kind: "content.ready",
+          readyId: READY_ID,
+          reason: "recovery",
+          mainWorldController: null,
+          documentUrl: CONTENT_SENDER.url
+        },
         runtimeContext(CONTENT_SENDER)
       )
-    ).toEqual({ kind: "content.ready", documentUrl: CONTENT_SENDER.url });
+    ).toEqual({
+      kind: "content.ready",
+      readyId: READY_ID,
+      reason: "recovery",
+      mainWorldController: null,
+      documentUrl: CONTENT_SENDER.url
+    });
+    expect(
+      parseExtensionInboundMessage(
+        {
+          kind: "content.armed",
+          readyId: READY_ID,
+          activationId: ACTIVATION_ID,
+          documentUrl: CONTENT_SENDER.url
+        },
+        runtimeContext(CONTENT_SENDER)
+      )
+    ).not.toBeNull();
+    expect(
+      parseExtensionInboundMessage(
+        {
+          kind: "content.main-world-control",
+          activationId: ACTIVATION_ID,
+          documentUrl: CONTENT_SENDER.url,
+          operation: "drain"
+        },
+        runtimeContext(CONTENT_SENDER)
+      )
+    ).not.toBeNull();
+    expect(
+      parseExtensionInboundMessage(
+        {
+          kind: "content.bind",
+          activationId: ACTIVATION_ID,
+          documentUrl: CONTENT_SENDER.url
+        },
+        runtimeContext(CONTENT_SENDER)
+      )
+    ).toBeNull();
     expect(
       parseExtensionInboundMessage(contentBatch([validRawEvent()]), runtimeContext(CONTENT_SENDER))
     ).toBeNull();
@@ -340,13 +390,49 @@ describe("extension inbound schema validation", () => {
     };
     const acknowledgement = {
       kind: "content.stop-drained",
+      activationId: ACTIVATION_ID,
       sid: "S-stop-drain",
       token: STOP_DRAIN_TOKEN,
-      documentUrl: CONTENT_SENDER.url
+      documentUrl: CONTENT_SENDER.url,
+      expectedArtifacts: [],
+      emittedArtifacts: [],
+      omittedArtifacts: [],
+      degradationReasons: []
     };
 
     expect(parseExtensionInboundMessage(stopBatch, context)).toEqual(stopBatch);
     expect(parseExtensionInboundMessage(acknowledgement, context)).toEqual(acknowledgement);
+    expect(
+      parseExtensionInboundMessage(
+        {
+          ...acknowledgement,
+          expectedArtifacts: ["screenshot", "main-world-tail"],
+          omittedArtifacts: ["screenshot", "main-world-tail"],
+          degradationReasons: ["artifact-error"]
+        },
+        context
+      )
+    ).not.toBeNull();
+    expect(
+      parseExtensionInboundMessage(
+        {
+          ...acknowledgement,
+          expectedArtifacts: ["screenshot"],
+          omittedArtifacts: ["screenshot", "screenshot"]
+        },
+        context
+      )
+    ).toBeNull();
+    expect(
+      parseExtensionInboundMessage(
+        {
+          ...acknowledgement,
+          expectedArtifacts: ["dom-secret"],
+          omittedArtifacts: ["dom-secret"]
+        },
+        context
+      )
+    ).toBeNull();
     expect(parseExtensionInboundMessage({ ...acknowledgement, token: "" }, context)).toBeNull();
     expect(
       parseExtensionInboundMessage({ ...acknowledgement, token: "a".repeat(63) }, context)
@@ -371,6 +457,12 @@ describe("extension inbound schema validation", () => {
     const oversizedBatch = [...maximumBatch, validRawEvent({ mono: CONTENT_EVENT_BATCH_MAX })];
 
     expect(parseExtensionInboundMessage(contentBatch(maximumBatch), context)).not.toBeNull();
+    expect(
+      parseExtensionInboundMessage(
+        { ...contentBatch(maximumBatch), batchId: `b1_${"D".repeat(64)}` },
+        context
+      )
+    ).toBeNull();
     expect(parseExtensionInboundMessage(contentBatch(oversizedBatch), context)).toBeNull();
     expect(parseExtensionInboundMessage(contentBatch([]), context)).toBeNull();
   });
@@ -381,7 +473,8 @@ describe("extension inbound schema validation", () => {
     for (const event of [
       validRawEvent({ source: "system" }),
       validRawEvent({ rawType: "session-start" }),
-      validRawEvent({ tabId: 1.5 }),
+      validRawEvent({ tabId: -1 }),
+      validRawEvent({ sid: "" }),
       validRawEvent({ t: Number.NaN }),
       validRawEvent({ mono: Number.POSITIVE_INFINITY }),
       validRawEvent({ payload: new Date() }),
@@ -433,7 +526,25 @@ describe("extension inbound schema validation", () => {
     expect(parseExtensionInboundMessage(["content.ready"], context)).toBeNull();
     expect(parseExtensionInboundMessage(getterMessage, context)).toBeNull();
     expect(
-      parseExtensionInboundMessage({ kind: "content.ready", documentUrl: "not a url" }, context)
+      parseExtensionInboundMessage(
+        {
+          kind: "content.ready",
+          readyId: READY_ID,
+          reason: "requested",
+          documentUrl: "not a url"
+        },
+        context
+      )
+    ).toBeNull();
+    expect(
+      parseExtensionInboundMessage(
+        {
+          kind: "content.bind",
+          activationId: `a1_${"A".repeat(64)}`,
+          documentUrl: CONTENT_SENDER.url
+        },
+        context
+      )
     ).toBeNull();
   });
 });

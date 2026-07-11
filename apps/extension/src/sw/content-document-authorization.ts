@@ -6,6 +6,20 @@ export type AuthorizedContentDocument = Readonly<{
   url: string;
 }>;
 
+export type ExactContentDocumentIdentity = Readonly<{
+  frameId: number;
+  documentId: string;
+}>;
+
+export type KnownContentDocument = AuthorizedContentDocument &
+  Readonly<{
+    state: "active" | "pending" | "preparing";
+  }>;
+
+export type ContentDocumentParentResolver = (
+  document: AuthorizedContentDocument
+) => ExactContentDocumentIdentity | null | undefined;
+
 export type ContentDocumentAuthorizationInput = {
   tabId: number;
   frameId: number;
@@ -144,13 +158,11 @@ export class ContentDocumentAuthorization {
     const current = this.documents.get(normalized.frameId);
 
     if (current) {
-      if (current.documentId !== normalized.documentId) {
+      if (current.documentId !== normalized.documentId || current.url !== normalized.url) {
         return null;
       }
 
-      // A same-document history/navigation URL update keeps child identities;
-      // callers have already evaluated the new sender URL against policy.
-      return current.url === normalized.url ? { ...current } : this.store(normalized);
+      return { ...current };
     }
 
     const pending = this.pendingDocuments.get(normalized.frameId);
@@ -227,6 +239,7 @@ export class ContentDocumentAuthorization {
 
       if (
         (current && current.documentId !== normalized.documentId) ||
+        (current && current.url !== normalized.url) ||
         (!current && options.currentCaptureUrl !== normalized.url)
       ) {
         this.reset({ url: normalized.url });
@@ -278,6 +291,178 @@ export class ContentDocumentAuthorization {
     return true;
   }
 
+  /**
+   * Removes an exact child document while keeping its frame closed until a
+   * later committed navigation establishes a new trusted parent chain.
+   */
+  blockDocument(frameId: number, documentId: string): boolean {
+    const normalizedFrameId = normalizeFrameId(frameId);
+    const normalizedDocumentId = normalizeDocumentId(documentId);
+
+    if (
+      normalizedFrameId === null ||
+      normalizedFrameId === TOP_CONTENT_FRAME_ID ||
+      normalizedDocumentId === null
+    ) {
+      return false;
+    }
+
+    const activeMatches =
+      this.documents.get(normalizedFrameId)?.documentId === normalizedDocumentId;
+    const pendingMatches =
+      this.pendingDocuments.get(normalizedFrameId)?.document.documentId === normalizedDocumentId;
+    const preparingMatches =
+      this.preparingDocuments.get(normalizedFrameId)?.document.documentId === normalizedDocumentId;
+
+    if (!activeMatches && !pendingMatches && !preparingMatches) {
+      return false;
+    }
+
+    if (activeMatches) {
+      this.documents.delete(normalizedFrameId);
+    }
+    if (pendingMatches) {
+      this.rejectPendingDocument(normalizedFrameId);
+    }
+    if (preparingMatches) {
+      this.rejectPreparingDocument(normalizedFrameId);
+    }
+    this.navigationStarts.delete(normalizedFrameId);
+    this.navigationBlockedFrames.add(normalizedFrameId);
+    this.bumpFrameRevision(normalizedFrameId);
+    return true;
+  }
+
+  /**
+   * Synchronously blocks an exact document and every known descendant across
+   * active, pending, and preparing state. Parentage comes exclusively from the
+   * supplied exact-identity resolver; non-top documents with missing, invalid,
+   * or cyclic ancestry are also removed fail closed.
+   *
+   * The returned snapshots let callers remove companion state keyed by the
+   * same identities without retaining a stale document as a future parent.
+   */
+  blockKnownDocumentSubtree(
+    root: ExactContentDocumentIdentity,
+    resolveParent: ContentDocumentParentResolver
+  ): KnownContentDocument[] {
+    const rootFrameId = normalizeFrameId(root.frameId);
+    const rootDocumentId = normalizeDocumentId(root.documentId);
+
+    if (rootFrameId === null || rootDocumentId === null) {
+      return [];
+    }
+
+    const rootKey = exactDocumentIdentityKey({
+      frameId: rootFrameId,
+      documentId: rootDocumentId
+    });
+    const known = this.snapshotKnownDocuments();
+    const documentsByKey = new Map(
+      known.map((document) => [exactDocumentIdentityKey(document), document] as const)
+    );
+    const parentsByKey = new Map<string, ExactContentDocumentIdentity | null | "invalid">();
+
+    for (const document of known) {
+      const key = exactDocumentIdentityKey(document);
+
+      if (key === rootKey || document.frameId === TOP_CONTENT_FRAME_ID) {
+        parentsByKey.set(key, null);
+        continue;
+      }
+
+      try {
+        const parent = resolveParent(document);
+        const parentFrameId = parent ? normalizeFrameId(parent.frameId) : null;
+        const parentDocumentId = parent ? normalizeDocumentId(parent.documentId) : null;
+
+        parentsByKey.set(
+          key,
+          parentFrameId === null || parentDocumentId === null
+            ? "invalid"
+            : { frameId: parentFrameId, documentId: parentDocumentId }
+        );
+      } catch {
+        parentsByKey.set(key, "invalid");
+      }
+    }
+
+    type Ancestry = "descendant" | "unrelated" | "invalid";
+    const ancestryByKey = new Map<string, Ancestry>();
+    const visiting = new Set<string>();
+    const classify = (key: string): Ancestry => {
+      if (key === rootKey) {
+        return "descendant";
+      }
+
+      const classified = ancestryByKey.get(key);
+      if (classified) {
+        return classified;
+      }
+
+      if (visiting.has(key)) {
+        return "invalid";
+      }
+
+      const document = documentsByKey.get(key);
+      if (!document) {
+        return "invalid";
+      }
+
+      if (document.frameId === TOP_CONTENT_FRAME_ID) {
+        ancestryByKey.set(key, "unrelated");
+        return "unrelated";
+      }
+
+      const parent = parentsByKey.get(key);
+      if (!parent || parent === "invalid") {
+        ancestryByKey.set(key, "invalid");
+        return "invalid";
+      }
+
+      const parentKey = exactDocumentIdentityKey(parent);
+      visiting.add(key);
+      const result = parentKey === rootKey ? "descendant" : classify(parentKey);
+      visiting.delete(key);
+      ancestryByKey.set(key, result);
+      return result;
+    };
+
+    const removed = known.filter((document) => {
+      const ancestry = classify(exactDocumentIdentityKey(document));
+      return ancestry === "descendant" || ancestry === "invalid";
+    });
+
+    for (const document of removed) {
+      if (this.documents.get(document.frameId)?.documentId === document.documentId) {
+        this.documents.delete(document.frameId);
+      }
+
+      if (
+        this.pendingDocuments.get(document.frameId)?.document.documentId === document.documentId
+      ) {
+        this.rejectPendingDocument(document.frameId);
+      }
+
+      if (
+        this.preparingDocuments.get(document.frameId)?.document.documentId === document.documentId
+      ) {
+        this.rejectPreparingDocument(document.frameId);
+      }
+
+      this.navigationStarts.delete(document.frameId);
+      this.navigationBlockedFrames.add(document.frameId);
+      this.bumpFrameRevision(document.frameId);
+    }
+
+    if (removed.some((document) => document.frameId === TOP_CONTENT_FRAME_ID)) {
+      this.topBootstrapUrl = null;
+      this.requireCommittedChildNavigation = true;
+    }
+
+    return removed.map((document) => ({ ...document }));
+  }
+
   /** Clears all identities and seeds the URL that an exact top sender must prove. */
   reset(topDocument?: { url: string }): void {
     this.invalidateAll();
@@ -295,6 +480,106 @@ export class ContentDocumentAuthorization {
     const pending =
       normalizedFrameId === null ? undefined : this.pendingDocuments.get(normalizedFrameId);
     return pending ? { ...pending.document } : null;
+  }
+
+  getKnownDocument(frameId: number, documentId: string): AuthorizedContentDocument | null {
+    const normalizedFrameId = normalizeFrameId(frameId);
+    const normalizedDocumentId = normalizeDocumentId(documentId);
+
+    if (normalizedFrameId === null || normalizedDocumentId === null) {
+      return null;
+    }
+
+    const candidates = [
+      this.documents.get(normalizedFrameId),
+      this.pendingDocuments.get(normalizedFrameId)?.document,
+      this.preparingDocuments.get(normalizedFrameId)?.document
+    ];
+    const document = candidates.find((candidate) => candidate?.documentId === normalizedDocumentId);
+    return document ? { ...document } : null;
+  }
+
+  /** Returns the single current exact identity regardless of activation stage. */
+  getKnownFrameDocument(frameId: number): KnownContentDocument | null {
+    const normalizedFrameId = normalizeFrameId(frameId);
+
+    if (normalizedFrameId === null) {
+      return null;
+    }
+
+    const active = this.documents.get(normalizedFrameId);
+    if (active) {
+      return { ...active, state: "active" };
+    }
+
+    const pending = this.pendingDocuments.get(normalizedFrameId)?.document;
+    if (pending) {
+      return { ...pending, state: "pending" };
+    }
+
+    const preparing = this.preparingDocuments.get(normalizedFrameId)?.document;
+    return preparing ? { ...preparing, state: "preparing" } : null;
+  }
+
+  /**
+   * Lets a committed child wait for its exact parent to finish policy,
+   * injection, and sender promotion instead of dropping the child commit while
+   * the parent is still preparing or pending.
+   */
+  waitForKnownDocumentActivation(input: ExactContentDocumentIdentity): Promise<boolean> | null {
+    const frameId = normalizeFrameId(input.frameId);
+    const documentId = normalizeDocumentId(input.documentId);
+
+    if (frameId === null || documentId === null) {
+      return null;
+    }
+
+    if (this.documents.get(frameId)?.documentId === documentId) {
+      return Promise.resolve(true);
+    }
+
+    const pending = this.pendingDocuments.get(frameId);
+    if (pending?.document.documentId === documentId) {
+      return pending.outcome.promise;
+    }
+
+    const preparing = this.preparingDocuments.get(frameId);
+    return preparing?.document.documentId === documentId ? preparing.outcome.promise : null;
+  }
+
+  /**
+   * Refreshes only the URL of an already-known exact document. This preserves
+   * pending injection gates during early SPA bootstrap without authorizing a
+   * new document or frame identity.
+   */
+  refreshKnownDocumentUrl(input: ContentDocumentAuthorizationInput): boolean {
+    const normalized = normalizeAuthorizationInput(this.tabId, input);
+
+    if (!normalized) {
+      return false;
+    }
+
+    const current = this.documents.get(normalized.frameId);
+    if (current?.documentId === normalized.documentId) {
+      this.store(normalized);
+      return true;
+    }
+
+    const pending = this.pendingDocuments.get(normalized.frameId);
+    if (pending?.document.documentId === normalized.documentId) {
+      pending.document = Object.freeze({ ...normalized });
+      this.navigationStarts.get(normalized.frameId)?.urls.add(normalized.url);
+      return true;
+    }
+
+    const preparing = this.preparingDocuments.get(normalized.frameId);
+    if (preparing?.document.documentId === normalized.documentId) {
+      preparing.document = Object.freeze({ ...normalized });
+      this.navigationStarts.get(normalized.frameId)?.urls.add(normalized.url);
+      return true;
+    }
+
+    return false;
   }
 
   waitForPreparingAuthorization(input: ContentDocumentAuthorizationInput): Promise<boolean> | null {
@@ -374,6 +659,34 @@ export class ContentDocumentAuthorization {
     return authorized ? sameDocument(authorized, identity) : false;
   }
 
+  /**
+   * Chrome may retain MessageSender.url from document creation after a
+   * history/hash navigation. Exact webNavigation ownership can accept that
+   * lag only for the same active document and same origin.
+   */
+  matchesSameDocumentSender(
+    input: ContentDocumentAuthorizationInput,
+    senderUrl: string | undefined
+  ): boolean {
+    const normalized = normalizeAuthorizationInput(this.tabId, input);
+
+    if (
+      !normalized ||
+      typeof senderUrl !== "string" ||
+      senderUrl.length === 0 ||
+      senderUrl === normalized.url
+    ) {
+      return false;
+    }
+
+    const authorized = this.documents.get(normalized.frameId);
+    return Boolean(
+      authorized &&
+      sameDocument(authorized, normalized) &&
+      haveSameUrlOrigin(senderUrl, normalized.url)
+    );
+  }
+
   /** WebRequest access always requires an exact active documentId match. */
   matchesWebRequest(input: ContentDocumentIdentityInput): boolean {
     const identity = normalizeIdentityInput(this.tabId, input, false);
@@ -395,7 +708,8 @@ export class ContentDocumentAuthorization {
 
     return (
       this.documents.get(frameId)?.documentId === documentId ||
-      this.pendingDocuments.get(frameId)?.document.documentId === documentId
+      this.pendingDocuments.get(frameId)?.document.documentId === documentId ||
+      this.preparingDocuments.get(frameId)?.document.documentId === documentId
     );
   }
 
@@ -523,10 +837,6 @@ export class ContentDocumentAuthorization {
       if (currentStart.urls.size === 0 && isNonEmptyString(input.url)) {
         currentStart.urls.add(input.url);
       } else if (!currentStart.urls.has(input.url)) {
-        if (currentStart.source === "request") {
-          return denied("stale-navigation");
-        }
-
         const authorization = this.beginNavigationWithSource(frameId, input.url, "commit");
         if (!authorization) {
           return denied("invalid-navigation");
@@ -557,28 +867,44 @@ export class ContentDocumentAuthorization {
     };
     this.preparingDocuments.set(frameId, preparing);
 
-    let scopeDecision: ContentDocumentScopeDecision;
+    let scopeDecision: ContentDocumentScopeDecision | null = null;
 
-    try {
-      scopeDecision = await evaluateScope({
-        tabId: this.tabId,
-        frameId,
-        documentId: normalized.documentId,
-        url: normalized.url,
-        topLevel: frameId === TOP_CONTENT_FRAME_ID
-      });
-    } catch {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const evaluatedDocument = preparing.document;
+
+      try {
+        scopeDecision = await evaluateScope({
+          tabId: this.tabId,
+          frameId,
+          documentId: evaluatedDocument.documentId,
+          url: evaluatedDocument.url,
+          topLevel: frameId === TOP_CONTENT_FRAME_ID
+        });
+      } catch {
+        if (!this.isCurrentPreparing(frameId, preparing)) {
+          return denied("stale-navigation");
+        }
+
+        this.preparingDocuments.delete(frameId);
+        preparing.outcome.resolve(false);
+        return denied("scope-error");
+      }
+
       if (!this.isCurrentPreparing(frameId, preparing)) {
         return denied("stale-navigation");
       }
 
+      if (preparing.document.url === evaluatedDocument.url) {
+        break;
+      }
+
+      scopeDecision = null;
+    }
+
+    if (scopeDecision === null) {
       this.preparingDocuments.delete(frameId);
       preparing.outcome.resolve(false);
       return denied("scope-error");
-    }
-
-    if (!this.isCurrentPreparing(frameId, preparing)) {
-      return denied("stale-navigation");
     }
 
     if (!isScopeAllowed(scopeDecision)) {
@@ -589,8 +915,9 @@ export class ContentDocumentAuthorization {
 
     this.preparingDocuments.delete(frameId);
 
+    const preparedDocument = preparing.document;
     this.pendingDocuments.set(frameId, {
-      document: normalized,
+      document: preparedDocument,
       revision,
       ready: preparing.ready,
       injectionComplete: false,
@@ -600,10 +927,10 @@ export class ContentDocumentAuthorization {
     return {
       prepared: true,
       reason: "prepared",
-      document: { ...normalized },
+      document: { ...preparedDocument },
       target: {
         tabId: this.tabId,
-        documentIds: [normalized.documentId]
+        documentIds: [preparedDocument.documentId]
       }
     };
   }
@@ -806,6 +1133,23 @@ export class ContentDocumentAuthorization {
     this.documents.set(stored.frameId, stored);
     return { ...stored };
   }
+
+  private snapshotKnownDocuments(): KnownContentDocument[] {
+    return [
+      ...[...this.documents.values()].map((document) => ({
+        ...document,
+        state: "active" as const
+      })),
+      ...[...this.pendingDocuments.values()].map(({ document }) => ({
+        ...document,
+        state: "pending" as const
+      })),
+      ...[...this.preparingDocuments.values()].map(({ document }) => ({
+        ...document,
+        state: "preparing" as const
+      }))
+    ];
+  }
 }
 
 function normalizeAuthorizationInput(
@@ -861,6 +1205,18 @@ function sameDocument(left: AuthorizedContentDocument, right: AuthorizedContentD
   return (
     left.frameId === right.frameId && left.documentId === right.documentId && left.url === right.url
   );
+}
+
+function haveSameUrlOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
+function exactDocumentIdentityKey(document: ExactContentDocumentIdentity): string {
+  return JSON.stringify([document.frameId, document.documentId]);
 }
 
 function sameNavigationAuthorization(

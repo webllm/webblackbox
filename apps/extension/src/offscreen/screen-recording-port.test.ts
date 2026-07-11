@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ScreenRecordingChunkDeliveryRegistry,
   parseActiveScreenRecordingSessionIds,
   pauseScreenRecordingForPortDisconnect,
+  quiesceExpectedScreenRecordingForStop,
+  quiesceScreenRecordingForStop,
   reconcileScreenRecordingsWithWorkerSessions,
   resumeScreenRecordingAfterPortReconnect,
   type PortBoundScreenRecording
 } from "./screen-recording-port.js";
+
+const CHUNK_HASH = "a".repeat(64);
 
 function createRecording(): PortBoundScreenRecording & {
   recorder: PortBoundScreenRecording["recorder"] & { state: RecordingState };
@@ -33,6 +38,73 @@ function createRecording(): PortBoundScreenRecording & {
 }
 
 describe("screen recording port lifecycle", () => {
+  it("retains and replays an exact chunk until the worker durably acknowledges it", async () => {
+    const registry = new ScreenRecordingChunkDeliveryRegistry();
+    const message = {
+      kind: "offscreen.screen-recording-chunk" as const,
+      sid: "S-durable",
+      recordingId: "VR-durable",
+      index: 3,
+      mime: "video/webm",
+      bytes: new Uint8Array([1, 2, 3]),
+      size: 3,
+      startOffsetMs: 10,
+      endOffsetMs: 20,
+      durationMs: 10
+    };
+    const delivery = registry.track(message);
+    const post = vi.fn(() => true);
+
+    expect(registry.replay(post)).toBe(1);
+    expect(registry.replay(post)).toBe(1);
+    expect(post).toHaveBeenNthCalledWith(1, message);
+    expect(post).toHaveBeenNthCalledWith(2, message);
+    expect(registry.size).toBe(1);
+    expect(
+      registry.acknowledge({
+        kind: "sw.screen-recording-chunk-ack",
+        sid: message.sid,
+        recordingId: message.recordingId,
+        index: message.index,
+        size: 4,
+        chunkId: CHUNK_HASH
+      })
+    ).toBe(false);
+    expect(registry.size).toBe(1);
+
+    expect(
+      registry.acknowledge({
+        kind: "sw.screen-recording-chunk-ack",
+        sid: message.sid,
+        recordingId: message.recordingId,
+        index: message.index,
+        size: message.size,
+        chunkId: CHUNK_HASH
+      })
+    ).toBe(true);
+    await expect(delivery).resolves.toMatchObject({ chunkId: CHUNK_HASH });
+    expect(registry.size).toBe(0);
+  });
+
+  it("rejects retained chunks explicitly when durable delivery times out", async () => {
+    const registry = new ScreenRecordingChunkDeliveryRegistry();
+    const delivery = registry.track({
+      kind: "offscreen.screen-recording-chunk",
+      sid: "S-timeout",
+      recordingId: "VR-timeout",
+      index: 0,
+      mime: "video/webm",
+      bytes: new Uint8Array([9]),
+      size: 1
+    });
+
+    expect(
+      registry.failRecording("S-timeout", "VR-timeout", new Error("durable ack timeout"))
+    ).toBe(1);
+    await expect(delivery).rejects.toThrow("durable ack timeout");
+    expect(registry.size).toBe(0);
+  });
+
   it("accepts only an authoritative bounded list of active session ids", () => {
     expect(
       parseActiveScreenRecordingSessionIds({
@@ -81,6 +153,31 @@ describe("screen recording port lifecycle", () => {
 
     expect(pauseScreenRecordingForPortDisconnect(recording)).toBe(false);
     expect(recording.stream.getTracks().every((track) => !track.enabled)).toBe(true);
+  });
+
+  it("quiesces pixel production without destroying the recorder before durable stop", () => {
+    const recording = { ...createRecording(), quiescedForStop: false };
+
+    expect(quiesceScreenRecordingForStop(recording)).toBe(true);
+    expect(recording.quiescedForStop).toBe(true);
+    expect(recording.recorder.state).toBe("paused");
+    expect(recording.stream.getTracks().every((track) => !track.enabled)).toBe(true);
+  });
+
+  it("quiesces the actual recorder before rejecting a stale expected identity", () => {
+    const recording = {
+      ...createRecording(),
+      recordingId: "VR-actual",
+      quiescedForStop: false
+    };
+
+    expect(() => quiesceExpectedScreenRecordingForStop(recording, "VR-stale")).toThrow(
+      "identity changed"
+    );
+    expect(recording.quiescedForStop).toBe(true);
+    expect(recording.recorder.state).toBe("paused");
+    expect(recording.stream.getTracks().every((track) => !track.enabled)).toBe(true);
+    expect(quiesceExpectedScreenRecordingForStop(undefined, "VR-missing")).toBe(true);
   });
 
   it("resumes only recordings claimed by the restored worker handshake", () => {

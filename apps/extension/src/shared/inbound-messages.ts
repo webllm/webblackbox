@@ -2,6 +2,11 @@ import type { RawRecorderEvent } from "@webblackbox/recorder";
 
 import type { MessageSenderLike, PortLike } from "./chrome-api.js";
 import {
+  parseContentActivationId,
+  parseContentEventBatchId,
+  parseContentReadyId
+} from "./content-activation-protocol.js";
+import {
   CONTENT_EVENT_BATCH_MAX,
   PORT_NAMES,
   type ContentEventBatchMessage,
@@ -10,6 +15,7 @@ import {
   type UiExportSessionMessage,
   type UiStartSessionMessage
 } from "./messages.js";
+import { parseMainWorldControllerHint } from "./main-world-controller.js";
 import { isStopDrainToken } from "./stop-drain-token.js";
 
 export type ExtensionInboundContext =
@@ -104,10 +110,42 @@ const UI_EXPORT_KEYS = new Set(["kind", "passphrase", "policy", "saveAs", "sid"]
 const UI_DELETE_KEYS = new Set(["kind", "sid"]);
 const UI_ANNOTATE_KEYS = new Set(["kind", "note", "sid", "tags"]);
 const KIND_ONLY_KEYS = new Set(["kind"]);
-const CONTENT_EVENTS_KEYS = new Set(["documentUrl", "events", "kind", "stopDrainToken"]);
-const CONTENT_MARKER_KEYS = new Set(["documentUrl", "kind", "message"]);
-const CONTENT_READY_KEYS = new Set(["documentUrl", "kind"]);
-const CONTENT_STOP_DRAINED_KEYS = new Set(["documentUrl", "kind", "sid", "token"]);
+const CONTENT_EVENTS_KEYS = new Set([
+  "activationId",
+  "batchId",
+  "documentUrl",
+  "events",
+  "kind",
+  "stopDrainToken"
+]);
+const CONTENT_MARKER_KEYS = new Set(["activationId", "documentUrl", "kind", "message"]);
+const CONTENT_READY_KEYS = new Set([
+  "currentActivationId",
+  "documentUrl",
+  "kind",
+  "mainWorldController",
+  "readyId",
+  "reason"
+]);
+const CONTENT_MAIN_WORLD_CONTROL_KEYS = new Set([
+  "activationId",
+  "documentUrl",
+  "kind",
+  "operation"
+]);
+const CONTENT_ARMED_KEYS = new Set(["activationId", "documentUrl", "kind", "readyId"]);
+const CONTENT_BIND_KEYS = new Set(["activationId", "documentUrl", "kind"]);
+const CONTENT_STOP_DRAINED_KEYS = new Set([
+  "activationId",
+  "degradationReasons",
+  "documentUrl",
+  "emittedArtifacts",
+  "expectedArtifacts",
+  "kind",
+  "omittedArtifacts",
+  "sid",
+  "token"
+]);
 const EXPORT_POLICY_KEYS = new Set([
   "includeScreenRecordings",
   "includeScreenshots",
@@ -188,6 +226,12 @@ export function parseExtensionInboundMessage(
         return parseContentMarker(row);
       case "content.ready":
         return parseContentReady(row);
+      case "content.main-world-control":
+        return parseContentMainWorldControl(row);
+      case "content.armed":
+        return parseContentArmed(row);
+      case "content.bind":
+        return parseContentBind(row);
       case "content.stop-drained":
         return parseContentStopDrained(row);
       default:
@@ -325,13 +369,17 @@ function isKindAllowed(
 ): boolean {
   if (principal === "content") {
     if (transport === "runtime") {
-      return kind === "content.ready";
+      return (
+        kind === "content.ready" ||
+        kind === "content.armed" ||
+        kind === "content.main-world-control"
+      );
     }
 
     return (
+      kind === "content.bind" ||
       kind === "content.events" ||
       kind === "content.marker" ||
-      kind === "content.ready" ||
       kind === "content.stop-drained"
     );
   }
@@ -468,10 +516,14 @@ function parseContentEvents(row: Record<string, unknown>): ContentEventBatchMess
   }
 
   const documentUrl = parseDocumentUrl(row.documentUrl);
+  const activationId = parseContentActivationId(row.activationId);
+  const batchId = parseContentEventBatchId(row.batchId);
   const stopDrainToken = parseOptionalStopDrainToken(row.stopDrainToken);
 
   if (
-    documentUrl === null ||
+    typeof documentUrl !== "string" ||
+    !activationId ||
+    !batchId ||
     stopDrainToken === null ||
     !isDenseArray(row.events, CONTENT_EVENT_BATCH_MAX, 1)
   ) {
@@ -496,8 +548,10 @@ function parseContentEvents(row: Record<string, unknown>): ContentEventBatchMess
 
   return {
     kind: "content.events",
+    activationId,
+    batchId,
     events,
-    ...(documentUrl === undefined ? {} : { documentUrl }),
+    documentUrl,
     ...(stopDrainToken === undefined ? {} : { stopDrainToken })
   };
 }
@@ -513,15 +567,17 @@ function parseContentMarker(row: Record<string, unknown>): ExtensionInboundMessa
   }
 
   const documentUrl = parseDocumentUrl(row.documentUrl);
+  const activationId = parseContentActivationId(row.activationId);
 
-  if (documentUrl === null) {
+  if (typeof documentUrl !== "string" || !activationId) {
     return null;
   }
 
   return {
     kind: "content.marker",
+    activationId,
     message: row.message,
-    ...(documentUrl === undefined ? {} : { documentUrl })
+    documentUrl
   };
 }
 
@@ -531,22 +587,104 @@ function parseContentReady(row: Record<string, unknown>): ExtensionInboundMessag
   }
 
   const documentUrl = parseDocumentUrl(row.documentUrl);
+  const readyId = parseContentReadyId(row.readyId);
+  const currentActivationId =
+    row.currentActivationId === undefined
+      ? undefined
+      : parseContentActivationId(row.currentActivationId);
+  const mainWorldController =
+    row.mainWorldController === null
+      ? null
+      : (parseMainWorldControllerHint(row.mainWorldController) ?? undefined);
 
-  if (documentUrl === null) {
+  if (
+    typeof documentUrl !== "string" ||
+    !readyId ||
+    mainWorldController === undefined ||
+    currentActivationId === null ||
+    (row.reason !== "requested" && row.reason !== "pageshow" && row.reason !== "recovery")
+  ) {
     return null;
   }
 
   return {
     kind: "content.ready",
-    ...(documentUrl === undefined ? {} : { documentUrl })
+    readyId,
+    reason: row.reason,
+    ...(currentActivationId === undefined ? {} : { currentActivationId }),
+    documentUrl,
+    mainWorldController
   };
 }
 
+function parseContentMainWorldControl(
+  row: Record<string, unknown>
+): ExtensionInboundMessage | null {
+  if (!hasExactKeys(row, CONTENT_MAIN_WORLD_CONTROL_KEYS)) {
+    return null;
+  }
+  const activationId = parseContentActivationId(row.activationId);
+  const documentUrl = parseDocumentUrl(row.documentUrl);
+  return activationId &&
+    typeof documentUrl === "string" &&
+    (row.operation === "activate" || row.operation === "deactivate" || row.operation === "drain")
+    ? {
+        kind: "content.main-world-control",
+        activationId,
+        documentUrl,
+        operation: row.operation
+      }
+    : null;
+}
+
+function parseContentArmed(row: Record<string, unknown>): ExtensionInboundMessage | null {
+  if (!hasExactKeys(row, CONTENT_ARMED_KEYS)) {
+    return null;
+  }
+
+  const readyId = parseContentReadyId(row.readyId);
+  const activationId = parseContentActivationId(row.activationId);
+  const documentUrl = parseDocumentUrl(row.documentUrl);
+
+  return readyId && activationId && typeof documentUrl === "string"
+    ? { kind: "content.armed", readyId, activationId, documentUrl }
+    : null;
+}
+
+function parseContentBind(row: Record<string, unknown>): ExtensionInboundMessage | null {
+  if (!hasExactKeys(row, CONTENT_BIND_KEYS)) {
+    return null;
+  }
+
+  const activationId = parseContentActivationId(row.activationId);
+  const documentUrl = parseDocumentUrl(row.documentUrl);
+
+  return activationId && typeof documentUrl === "string"
+    ? { kind: "content.bind", activationId, documentUrl }
+    : null;
+}
+
 function parseContentStopDrained(row: Record<string, unknown>): ExtensionInboundMessage | null {
+  const expectedArtifacts = parseStopDrainArtifactList(row.expectedArtifacts);
+  const emittedArtifacts = parseStopDrainArtifactList(row.emittedArtifacts);
+  const omittedArtifacts = parseStopDrainArtifactList(row.omittedArtifacts);
+  const degradationReasons = parseStopDrainDegradationReasonList(row.degradationReasons);
+
   if (
     !hasExactKeys(row, CONTENT_STOP_DRAINED_KEYS) ||
+    !parseContentActivationId(row.activationId) ||
     !isIdentifier(row.sid, false) ||
-    !isStopDrainToken(row.token)
+    !isStopDrainToken(row.token) ||
+    !expectedArtifacts ||
+    !emittedArtifacts ||
+    !omittedArtifacts ||
+    !degradationReasons ||
+    emittedArtifacts.some((artifact) => !expectedArtifacts.includes(artifact)) ||
+    omittedArtifacts.some((artifact) => !expectedArtifacts.includes(artifact)) ||
+    emittedArtifacts.some((artifact) => omittedArtifacts.includes(artifact)) ||
+    expectedArtifacts.some(
+      (artifact) => !emittedArtifacts.includes(artifact) && !omittedArtifacts.includes(artifact)
+    )
   ) {
     return null;
   }
@@ -559,10 +697,54 @@ function parseContentStopDrained(row: Record<string, unknown>): ExtensionInbound
 
   return {
     kind: "content.stop-drained",
+    activationId: parseContentActivationId(row.activationId)!,
     sid: row.sid,
     token: row.token,
-    documentUrl
+    documentUrl,
+    expectedArtifacts,
+    emittedArtifacts,
+    omittedArtifacts,
+    degradationReasons
   };
+}
+
+const CONTENT_STOP_DRAIN_ARTIFACTS = [
+  "main-world-tail",
+  "snapshot",
+  "localStorageSnapshot",
+  "screenshot"
+] as const;
+const CONTENT_STOP_DRAIN_DEGRADATION_REASONS = [
+  "artifact-error",
+  "disposed",
+  "inactive",
+  "out-of-scope",
+  "main-world-tail-timeout",
+  "content-drain-error"
+] as const;
+
+function parseStopDrainArtifactList(
+  value: unknown
+): Array<(typeof CONTENT_STOP_DRAIN_ARTIFACTS)[number]> | null {
+  return Array.isArray(value) &&
+    value.length <= CONTENT_STOP_DRAIN_ARTIFACTS.length &&
+    new Set(value).size === value.length &&
+    value.every((artifact) => CONTENT_STOP_DRAIN_ARTIFACTS.some((known) => known === artifact))
+    ? (value as Array<(typeof CONTENT_STOP_DRAIN_ARTIFACTS)[number]>)
+    : null;
+}
+
+function parseStopDrainDegradationReasonList(
+  value: unknown
+): Array<(typeof CONTENT_STOP_DRAIN_DEGRADATION_REASONS)[number]> | null {
+  return Array.isArray(value) &&
+    value.length <= CONTENT_STOP_DRAIN_DEGRADATION_REASONS.length &&
+    new Set(value).size === value.length &&
+    value.every((reason) =>
+      CONTENT_STOP_DRAIN_DEGRADATION_REASONS.some((known) => known === reason)
+    )
+    ? (value as Array<(typeof CONTENT_STOP_DRAIN_DEGRADATION_REASONS)[number]>)
+    : null;
 }
 
 function parseOptionalStopDrainToken(value: unknown): string | undefined | null {
@@ -583,8 +765,8 @@ function parseRawContentEvent(value: unknown, budget: PayloadBudget): RawRecorde
     typeof row.rawType !== "string" ||
     !CONTENT_RAW_TYPES.has(row.rawType) ||
     !Number.isSafeInteger(row.tabId) ||
-    (row.tabId as number) < -1 ||
-    !isIdentifier(row.sid, true) ||
+    (row.tabId as number) < 0 ||
+    !isIdentifier(row.sid, false) ||
     !isNonNegativeFiniteNumber(row.t) ||
     !isNonNegativeFiniteNumber(row.mono) ||
     (row.frame !== undefined && !isIdentifier(row.frame, false)) ||

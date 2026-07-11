@@ -3,22 +3,28 @@ import { WebBlackboxRecorder } from "@webblackbox/recorder";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DurableRuntimeRecoveryCheckpoint,
+  MAX_PERSISTED_RUNTIME_SESSIONS,
   RuntimeCleanupScheduler,
   RuntimeStartCancelledError,
   RuntimeStartCoordinator,
   RuntimeStartToken,
+  beginVolatileCaptureQuiescence,
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
   createVolatileCaptureFence,
   createRuntimeCleanupAlarmName,
   createRuntimeStateSnapshot,
+  createStoppedRuntimeTombstone,
   createStoppingRuntimeTombstone,
   compactScreenRecordingChunkHashes,
   commitRestoredRuntimeActivation,
   deleteMapEntryIfSame,
   deriveDurableScreenRecordingChunkCount,
   disposeListenersBeforeTeardown,
+  establishDurableRuntimeRestorationReadiness,
   evaluateActiveRuntimeRestoration,
+  extractPersistedRuntimeIdentities,
   isMapEntrySame,
   isRuntimeActivationProvisional,
   isRuntimeCaptureAdmitted,
@@ -29,11 +35,14 @@ import {
   parseRuntimeStateSnapshot,
   persistDurableStopTombstone,
   planRuntimeRestoration,
+  preserveRuntimeRowsAfterGlobalRestoreFailure,
   reconcileScreenRecordingResumeState,
   recoverStoppingRuntimeFailClosed,
+  recoverStoppingRuntimeForRetention,
   restoreScreenRecordingChunkHashes,
   runActiveRuntimeRestorationTransaction,
   runDurableFailedRuntimeCleanup,
+  runDurableFailedRuntimeRetention,
   runDurableRuntimeStopWorkflow,
   runProvisionalRuntimeStartTransaction,
   runVolatileCaptureOperation,
@@ -143,10 +152,74 @@ describe("runtime state checkpoint", () => {
     expect(JSON.stringify(parsed)).not.toMatch(/"events"|"encryptionKey"|"passphrase":/);
   });
 
+  it("never writes a checkpoint that its own parser rejects at session capacity", () => {
+    const sessions = Array.from({ length: MAX_PERSISTED_RUNTIME_SESSIONS }, (_, index) =>
+      createRuntime("stopped", {
+        sid: `S-1767225600000-capacity-${index}`,
+        tabId: index,
+        config: createConfig(index)
+      })
+    );
+    const snapshot = createRuntimeStateSnapshot(sessions, 123);
+
+    expect(parseRuntimeStateSnapshot(snapshot)?.sessions).toHaveLength(
+      MAX_PERSISTED_RUNTIME_SESSIONS
+    );
+    expect(() =>
+      createRuntimeStateSnapshot([
+        ...sessions,
+        createRuntime("stopped", {
+          sid: "S-1767225600000-capacity-overflow",
+          tabId: MAX_PERSISTED_RUNTIME_SESSIONS,
+          config: createConfig(MAX_PERSISTED_RUNTIME_SESSIONS)
+        })
+      ])
+    ).toThrow(/capacity exceeded/);
+  });
+
+  it("extracts every valid identity from an oversized corrupt checkpoint for fail-closed purge", () => {
+    const sessions = Array.from({ length: MAX_PERSISTED_RUNTIME_SESSIONS + 1 }, (_, index) => ({
+      sid: `S-1767225600000-overflow-${index}`,
+      tabId: index,
+      startedAt: 1_767_225_600_000 + index
+    }));
+    const oversized = {
+      schemaVersion: 1,
+      savedAt: 1_767_225_600_000,
+      sessions
+    };
+
+    expect(parseRuntimeStateSnapshot(oversized)).toBeNull();
+    expect(extractPersistedRuntimeIdentities(oversized)).toHaveLength(
+      MAX_PERSISTED_RUNTIME_SESSIONS + 1
+    );
+  });
+
   it("never plans active restoration for a durable stopping tombstone", () => {
     expect(planRuntimeRestoration(createRuntime("active")).kind).toBe("resume-active");
-    expect(planRuntimeRestoration(createRuntime("stopping")).kind).toBe("purge-stopping");
+    expect(planRuntimeRestoration(createRuntime("stopping")).kind).toBe("finalize-stopping");
     expect(planRuntimeRestoration(createRuntime("stopped")).kind).toBe("retain-stopped");
+  });
+
+  it("promotes a stopping row to stopped without retaining stop-intent fields", () => {
+    const active = createRuntime("active") as PersistedActiveRuntime;
+    const stopping = createStoppingRuntimeTombstone(
+      active,
+      active.startedAt + 1_000,
+      active.startedAt + 10_000
+    );
+    const stopped = createStoppedRuntimeTombstone(
+      stopping,
+      active.startedAt + 2_000,
+      active.startedAt + 10_000
+    );
+
+    expect(stopped).toMatchObject({
+      state: "stopped",
+      stoppedAt: active.startedAt + 2_000,
+      cleanupDeadline: active.startedAt + 10_000
+    });
+    expect(stopped).not.toHaveProperty("stopRequestedAt");
   });
 
   it("retains a failed recovery tombstone across later active checkpoint writes", () => {
@@ -162,7 +235,48 @@ describe("runtime state checkpoint", () => {
       state: "stopping",
       stopRequestedAt: tombstone.stopRequestedAt
     });
-    expect(planRuntimeRestoration(merged[0]!)).toMatchObject({ kind: "purge-stopping" });
+    expect(planRuntimeRestoration(merged[0]!)).toMatchObject({ kind: "finalize-stopping" });
+  });
+
+  it("preserves every sid and converts active rows to stopping after a global restore crash", () => {
+    const active = createRuntime("active") as PersistedActiveRuntime;
+    const stopping = createRuntime("stopping", {
+      sid: "S-1767225600001-stopping",
+      tabId: 8,
+      config: createConfig(8)
+    });
+    const stopped = createRuntime("stopped", {
+      sid: "S-1767225600002-stopped",
+      tabId: 9,
+      config: createConfig(9)
+    });
+    const failedAt = active.startedAt + 5_000;
+    const rows = preserveRuntimeRowsAfterGlobalRestoreFailure({
+      rows: [active, stopping, stopped],
+      failedAt,
+      resolveLocalTtlMs: () => 60_000
+    });
+
+    expect(rows.map((runtime) => runtime.sid)).toEqual([active.sid, stopping.sid, stopped.sid]);
+    expect(rows[0]).toMatchObject({
+      state: "stopping",
+      stopRequestedAt: failedAt,
+      cleanupDeadline: failedAt + 60_000
+    });
+    expect(rows[1]).toEqual(stopping);
+    expect(rows[2]).toEqual(stopped);
+  });
+
+  it("uses the latest same-sid row without reviving it after a global restore crash", () => {
+    const active = createRuntime("active") as PersistedActiveRuntime;
+    const stopping = createRuntime("stopping", { sid: active.sid });
+    const rows = preserveRuntimeRowsAfterGlobalRestoreFailure({
+      rows: [active, stopping],
+      failedAt: active.startedAt + 5_000,
+      resolveLocalTtlMs: () => 60_000
+    });
+
+    expect(rows).toEqual([stopping]);
   });
 
   it("keeps unrelated pending sessions beside a restoration-failure tombstone", () => {
@@ -265,6 +379,25 @@ describe("runtime state checkpoint", () => {
     await stopTask;
     expect(teardown).toHaveBeenCalledTimes(1);
     expect(persistStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("quiesces volatile producers before a deferred stopping checkpoint", async () => {
+    const captureFence = createVolatileCaptureFence();
+    const quiesce = vi.fn();
+    const checkpoint = createDeferred();
+
+    beginVolatileCaptureQuiescence(captureFence, quiesce);
+    const stopTask = runDurableRuntimeStopWorkflow({
+      captureFence,
+      persistStopping: () => checkpoint.promise,
+      teardownSteps: [],
+      persistStopped: vi.fn()
+    });
+
+    expect(quiesce).toHaveBeenCalledOnce();
+    expect(isVolatileCaptureOpen(captureFence)).toBe(false);
+    checkpoint.resolve(undefined);
+    await stopTask;
   });
 
   it("keeps capture blocked and does not begin teardown when the tombstone write fails", async () => {
@@ -436,6 +569,90 @@ describe("runtime state checkpoint", () => {
     expect(purge).toHaveBeenCalledTimes(1);
   });
 
+  it("retains a stopping session only after its surviving recorder is stopped", async () => {
+    const order: string[] = [];
+
+    await recoverStoppingRuntimeForRetention({
+      getScreenRecordingStatus: async () => {
+        order.push("status");
+        return { active: true, recordingId: "VR-retained", mime: "video/webm" };
+      },
+      stopScreenRecording: async (status) => {
+        order.push(`stop:${status.recordingId}`);
+      },
+      retain: async () => {
+        order.push("retain");
+      }
+    });
+
+    expect(order).toEqual(["status", "stop:VR-retained", "retain"]);
+  });
+
+  it("claims the stopping runtime before a surviving recorder can deliver its final chunk", async () => {
+    const order: string[] = [];
+    let claimedRecordingId: string | undefined;
+    const durableChunks: string[] = [];
+    const terminalEvents: string[] = [];
+
+    await recoverStoppingRuntimeForRetention({
+      getScreenRecordingStatus: async () => {
+        order.push("status");
+        return { active: true, recordingId: "VR-final", mime: "video/webm" };
+      },
+      claimRuntime: async (status) => {
+        order.push(`claim:${status.active ? status.recordingId : "none"}`);
+        claimedRecordingId = status.active ? status.recordingId : undefined;
+      },
+      stopScreenRecording: async (status) => {
+        order.push(`stop:${status.recordingId}`);
+        if (claimedRecordingId !== status.recordingId) {
+          throw new Error("final chunk arrived without an exact runtime claim");
+        }
+        durableChunks.push("final-chunk");
+        terminalEvents.push("screen.recording.end");
+      },
+      retain: async () => {
+        order.push("retain");
+        expect(durableChunks).toEqual(["final-chunk"]);
+        expect(terminalEvents).toEqual(["screen.recording.end"]);
+      },
+      releaseRuntimeClaim: async (status) => {
+        order.push(`release:${status.active ? status.recordingId : "none"}`);
+        claimedRecordingId = undefined;
+      }
+    });
+
+    expect(order).toEqual([
+      "status",
+      "claim:VR-final",
+      "stop:VR-final",
+      "retain",
+      "release:VR-final"
+    ]);
+    expect(claimedRecordingId).toBeUndefined();
+  });
+
+  it("keeps the stopping tombstone retryable when the surviving recorder cannot stop", async () => {
+    const retain = vi.fn();
+    const releaseRuntimeClaim = vi.fn();
+
+    await expect(
+      recoverStoppingRuntimeForRetention({
+        getScreenRecordingStatus: () => ({
+          active: true,
+          recordingId: "VR-retained",
+          mime: "video/webm"
+        }),
+        claimRuntime: vi.fn(),
+        stopScreenRecording: () => Promise.reject(new Error("recorder stop failed")),
+        retain,
+        releaseRuntimeClaim
+      })
+    ).rejects.toThrow(/recorder stop failed/);
+    expect(retain).not.toHaveBeenCalled();
+    expect(releaseRuntimeClaim).toHaveBeenCalledOnce();
+  });
+
   it("rejects the entire checkpoint on unknown fields, invalid policy, or duplicate active tabs", () => {
     const valid = createRuntimeStateSnapshot([createRuntime()]);
     expect(
@@ -597,7 +814,20 @@ describe("runtime state checkpoint", () => {
         recordingId: "VR-live",
         mime: "video/webm"
       })
-    ).toEqual({ active: true, recordingId: "VR-live", mime: "video/webm" });
+    ).toEqual({
+      active: true,
+      recordingId: "VR-live",
+      mime: "video/webm",
+      quiescedForStop: false
+    });
+    expect(
+      normalizeOffscreenScreenRecordingStatus({
+        active: true,
+        recordingId: "VR-stopping",
+        mime: "video/webm",
+        quiescedForStop: true
+      })
+    ).toMatchObject({ active: true, quiescedForStop: true });
     expect(() =>
       normalizeOffscreenScreenRecordingStatus({ active: true, recordingId: "", extra: true })
     ).toThrow(/invalid offscreen/i);
@@ -667,6 +897,14 @@ describe("runtime state checkpoint", () => {
         sizeBytes: 0
       })
     ]);
+    expect(
+      buildInterruptedScreenRecordingRecoveries({
+        persisted: undefined,
+        resumeState: { sequenceWatermark: { event: 3, action: 0 }, screenRecordings: [] },
+        status: { active: false },
+        claimedRecordingId: undefined
+      })
+    ).toEqual([]);
   });
 });
 
@@ -1055,6 +1293,145 @@ describe("active runtime restoration transaction", () => {
             ? ["stopping", "purge"]
             : ["stopping", "purge", "clear"]
       );
+    }
+  );
+
+  it("keeps a failed active restoration as stopping after a non-purge pipeline close", async () => {
+    const order: string[] = [];
+    let durableState: "active" | "stopping" = "active";
+    const closePipeline = vi.fn(async (options: { purge: boolean }) => {
+      order.push(`close:${options.purge ? "purge" : "retain"}`);
+    });
+
+    await runDurableFailedRuntimeRetention({
+      persistStopping: () => {
+        order.push("stopping");
+        durableState = "stopping";
+      },
+      retain: () => closePipeline({ purge: false })
+    });
+
+    expect(order).toEqual(["stopping", "close:retain"]);
+    expect(durableState).toBe("stopping");
+    expect(closePipeline).toHaveBeenCalledWith({ purge: false });
+  });
+
+  it("withholds readiness across two failed recovery checkpoints and never replays active restore", async () => {
+    let restoreCalls = 0;
+    let failClosedCalls = 0;
+    let ready = false;
+    let durableState: "active" | "stopping" = "active";
+    const retryResolvers: Array<() => void> = [];
+    const task = establishDurableRuntimeRestorationReadiness({
+      restore: () => {
+        restoreCalls += 1;
+        throw new Error("active restore crashed");
+      },
+      failClosed: () => {
+        failClosedCalls += 1;
+        if (failClosedCalls <= 2) {
+          throw new Error(`checkpoint ${failClosedCalls} failed`);
+        }
+        durableState = "stopping";
+      },
+      waitForRetry: () =>
+        new Promise<void>((resolve) => {
+          retryResolvers.push(resolve);
+        }),
+      markReady: () => {
+        ready = true;
+      }
+    });
+
+    await vi.waitFor(() => expect(failClosedCalls).toBe(1));
+    expect(ready).toBe(false);
+    expect(durableState).toBe("active");
+    expect(restoreCalls).toBe(1);
+
+    retryResolvers.shift()!();
+    await vi.waitFor(() => expect(failClosedCalls).toBe(2));
+    expect(ready).toBe(false);
+    expect(durableState).toBe("active");
+    expect(restoreCalls).toBe(1);
+
+    retryResolvers.shift()!();
+    await task;
+    expect(failClosedCalls).toBe(3);
+    expect(durableState).toBe("stopping");
+    expect(ready).toBe(true);
+    expect(restoreCalls).toBe(1);
+  });
+
+  it("retries a transient checkpoint read only while no restoration state was acquired", async () => {
+    let restoreCalls = 0;
+    let failClosedCalls = 0;
+    let ready = false;
+    const retry = createDeferred();
+    const task = establishDurableRuntimeRestorationReadiness({
+      restore: () => {
+        restoreCalls += 1;
+        if (restoreCalls === 1) {
+          throw new Error("storage get failed");
+        }
+      },
+      failClosed: () => {
+        failClosedCalls += 1;
+        throw new Error("no durable identities were acquired");
+      },
+      shouldRetryRestore: () => true,
+      waitForRetry: () => retry.promise,
+      markReady: () => {
+        ready = true;
+      }
+    });
+
+    await vi.waitFor(() => expect(failClosedCalls).toBe(1));
+    expect(restoreCalls).toBe(1);
+    expect(ready).toBe(false);
+    retry.resolve();
+    await task;
+    expect(restoreCalls).toBe(2);
+    expect(failClosedCalls).toBe(1);
+    expect(ready).toBe(true);
+  });
+
+  it("requires at least one of two fail-closed checkpoint writes to become durable", async () => {
+    const checkpoint = new DurableRuntimeRecoveryCheckpoint();
+
+    expect(
+      await checkpoint.attempt(() => Promise.reject(new Error("pre-teardown write failed")))
+    ).toBe(false);
+    expect(
+      await checkpoint.attempt(() => Promise.reject(new Error("post-teardown write failed")))
+    ).toBe(false);
+    expect(() => checkpoint.requirePersisted()).toThrow("no durable recovery checkpoint");
+
+    expect(await checkpoint.attempt(() => undefined)).toBe(true);
+    expect(() => checkpoint.requirePersisted()).not.toThrow();
+  });
+
+  it.each(["checkpoint", "partially-constructed-pipeline"] as const)(
+    "never clears the stopping row when retained restoration fails at %s",
+    async (fault) => {
+      let durableState: "active" | "stopping" = "active";
+      const retain = vi.fn(async () => {
+        throw new Error("pipeline unavailable");
+      });
+      const task = runDurableFailedRuntimeRetention({
+        persistStopping: () => {
+          if (fault === "checkpoint") {
+            throw new Error("checkpoint unavailable");
+          }
+          durableState = "stopping";
+        },
+        retain
+      });
+
+      await expect(task).rejects.toThrow(
+        fault === "checkpoint" ? "checkpoint unavailable" : "pipeline unavailable"
+      );
+      expect(durableState).toBe(fault === "checkpoint" ? "active" : "stopping");
+      expect(retain).toHaveBeenCalledTimes(fault === "checkpoint" ? 0 : 1);
     }
   );
 

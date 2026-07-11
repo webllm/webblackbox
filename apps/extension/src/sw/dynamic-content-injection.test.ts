@@ -8,7 +8,7 @@ const TAB_ID = 7;
 const FRAME_ID = 4;
 
 describe("injectPendingContentDocument", () => {
-  it("injects MAIN then ISOLATED by exact documentId and leaves authorization pending", async () => {
+  it("injects ISOLATED, seeds its singleton, then bootstraps MAIN by exact documentId", async () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     const document = await pending(authorization, "document-a");
     const executeScript = vi.fn(async (options: { target: { documentIds?: string[] } }) => [
@@ -23,17 +23,38 @@ describe("injectPendingContentDocument", () => {
         isRuntimeActive: () => true,
         mode: "lite"
       })
-    ).resolves.toEqual({ status: "injected" });
+    ).resolves.toMatchObject({
+      status: "injected",
+      mainWorldController: {
+        revision: 0,
+        phase: "inactive",
+        activationId: null
+      }
+    });
 
     expect(executeScript).toHaveBeenNthCalledWith(1, {
       target: { tabId: TAB_ID, documentIds: ["document-a"] },
-      world: "MAIN",
-      files: ["injected.js"]
+      world: "ISOLATED",
+      files: ["content.js"]
     });
     expect(executeScript).toHaveBeenNthCalledWith(2, {
       target: { tabId: TAB_ID, documentIds: ["document-a"] },
-      world: "ISOLATED",
-      files: ["content.js"]
+      world: "MAIN",
+      func: expect.any(Function),
+      args: [
+        expect.stringMatching(/injected\.js#m1_[0-9a-f]{64}$/u),
+        expect.stringMatching(/^[0-9a-f]{64}$/u)
+      ]
+    });
+    expect(executeScript).toHaveBeenNthCalledWith(3, {
+      target: { tabId: TAB_ID, documentIds: ["document-a"] },
+      world: "MAIN",
+      func: expect.any(Function),
+      args: [
+        expect.stringMatching(/injected\.js#m1_[0-9a-f]{64}$/u),
+        expect.stringMatching(/^[0-9a-f]{64}$/u),
+        { kind: "probe" }
+      ]
     });
     expect(authorization.get(FRAME_ID)).toBeNull();
     expect(authorization.getPending(FRAME_ID)?.documentId).toBe("document-a");
@@ -42,15 +63,9 @@ describe("injectPendingContentDocument", () => {
   it("does not let a late B failure cancel C or inject B content", async () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     const documentB = await pending(authorization, "document-b");
-    const bMain = deferred<InjectionResult[]>();
     const executeScript = vi.fn(
       async (options: { target: { documentIds?: string[] }; world?: string }) => {
         const documentId = options.target.documentIds?.[0] ?? "";
-
-        if (documentId === "document-b" && options.world === "MAIN") {
-          return bMain.promise;
-        }
-
         return [result(documentId)];
       }
     );
@@ -73,21 +88,19 @@ describe("injectPendingContentDocument", () => {
         isRuntimeActive: () => true,
         mode: "lite"
       })
-    ).resolves.toEqual({ status: "injected" });
+    ).resolves.toMatchObject({ status: "injected", mainWorldController: { revision: 0 } });
 
-    const bError = new Error("document B was replaced");
-    bMain.reject(bError);
-    await expect(injectionB).resolves.toEqual({
-      status: "failed",
-      failedCurrentNavigation: false,
-      error: bError
-    });
+    await expect(injectionB).resolves.toEqual({ status: "stale" });
 
     expect(authorization.getPending(FRAME_ID)?.documentId).toBe("document-c");
     expect(
+      executeScript.mock.calls.filter(
+        ([options]) => options.target.documentIds?.[0] === "document-b"
+      )
+    ).toHaveLength(1);
+    expect(
       executeScript.mock.calls.some(
-        ([options]) =>
-          options.world === "ISOLATED" && options.target.documentIds?.[0] === "document-b"
+        ([options]) => options.world === "MAIN" && options.target.documentIds?.[0] === "document-b"
       )
     ).toBe(false);
   });
@@ -138,6 +151,74 @@ describe("injectPendingContentDocument", () => {
       })
     ).resolves.toEqual({ status: "stale" });
     expect(executeScript).not.toHaveBeenCalled();
+  });
+
+  it("stops after an exact seed when the document is replaced before MAIN bootstrap", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    const document = await pending(authorization, "document-seed-old");
+    const executeScript = vi.fn(async () => [result("document-seed-old")]);
+    const chromeApi = {
+      runtime: { getURL: () => "chrome-extension://dynamic-id/injected.js" },
+      scripting: { executeScript },
+      tabs: {
+        sendMessage: vi.fn(async (_tabId: number, message: { controller: unknown }) => {
+          await pending(authorization, "document-seed-new");
+          return {
+            kind: "content.main-world-controller-seeded",
+            controller: message.controller
+          };
+        })
+      }
+    } as unknown as ChromeApi;
+
+    await expect(
+      injectPendingContentDocument({
+        chromeApi,
+        authorization,
+        document,
+        isRuntimeActive: () => true,
+        mode: "lite"
+      })
+    ).resolves.toEqual({ status: "stale" });
+    expect(executeScript).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not probe an old module after replacement during MAIN bootstrap", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    const document = await pending(authorization, "document-main-old");
+    const executeScript = vi.fn(async (options: { world?: string }) => {
+      if (options.world === "MAIN") {
+        await pending(authorization, "document-main-new");
+        return [
+          {
+            ...result("document-main-old"),
+            result: { kind: "installed", phase: "inactive", revision: 0 }
+          }
+        ];
+      }
+      return [result("document-main-old")];
+    });
+    const chromeApi = {
+      runtime: { getURL: () => "chrome-extension://dynamic-id/injected.js" },
+      scripting: { executeScript },
+      tabs: {
+        sendMessage: vi.fn(async (_tabId: number, message: { controller: unknown }) => ({
+          kind: "content.main-world-controller-seeded",
+          controller: message.controller
+        }))
+      }
+    } as unknown as ChromeApi;
+
+    await expect(
+      injectPendingContentDocument({
+        chromeApi,
+        authorization,
+        document,
+        isRuntimeActive: () => true,
+        mode: "lite"
+      })
+    ).resolves.toEqual({ status: "stale" });
+    expect(executeScript).toHaveBeenCalledTimes(2);
   });
 
   it("injects only the isolated content agent in Full without touching page globals", async () => {
@@ -222,19 +303,48 @@ function chromeWithExecuteScript(
     target: { documentIds?: string[] };
     world?: "MAIN" | "ISOLATED";
     files?: string[];
+    func?: (...args: never[]) => unknown;
+    args?: unknown[];
   }) => Promise<InjectionResult[]>
 ) {
   return {
-    scripting: { executeScript }
-  } as ChromeApi;
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
+    runtime: {
+      getURL: () => "chrome-extension://dynamic-id/injected.js"
+    },
+    tabs: {
+      sendMessage: async (_tabId: number, message: unknown) => ({
+        kind: "content.main-world-controller-seeded",
+        controller: (message as { controller: unknown }).controller
+      })
+    },
+    scripting: {
+      executeScript: async (options: {
+        target: { documentIds?: string[] };
+        world?: "MAIN" | "ISOLATED";
+        files?: string[];
+        func?: (...args: never[]) => unknown;
+        args?: unknown[];
+      }) => {
+        const results = await executeScript(options);
+        if (options.world === "MAIN" && options.func) {
+          for (const result of results) {
+            if (result.result === undefined) {
+              result.result =
+                options.args?.length === 3
+                  ? {
+                      kind: "probed",
+                      phase: "inactive",
+                      revision: 0,
+                      activationId: null,
+                      producedThrough: 0,
+                      truncatedBefore: 0
+                    }
+                  : { kind: "installed", phase: "inactive", revision: 0 };
+            }
+          }
+        }
+        return results;
+      }
+    }
+  } as unknown as ChromeApi;
 }

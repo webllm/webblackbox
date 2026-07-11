@@ -1,7 +1,4 @@
-import { installInjectedLiteCaptureHooks } from "webblackbox/injected-hooks";
-
-installInjectedLiteCaptureHooks({
-  active: false,
-  bodyCaptureMaxBytes: 0,
-  captureNetwork: false
-});
+export {
+  bootstrapInjectedLiteCaptureDirect as bootstrap,
+  controlInjectedLiteCaptureDirect as control
+} from "webblackbox/injected-hooks";

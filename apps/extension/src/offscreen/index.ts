@@ -1,4 +1,9 @@
-import { FlightRecorderPipeline } from "@webblackbox/pipeline";
+import {
+  FlightRecorderPipeline,
+  type PipelineDeliveryEventProvenance,
+  type PipelineDeliveryNoOutputChange,
+  type PipelineDeliveryReceiptQuery
+} from "@webblackbox/pipeline";
 import type {
   CapturePolicy,
   PrivacyScannerResult,
@@ -9,18 +14,29 @@ import type {
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
-import { PORT_NAMES } from "../shared/messages.js";
+import { PORT_NAMES, type OffscreenScreenRecordingChunkMessage } from "../shared/messages.js";
 import {
   IngestIdempotencyRegistry,
   executeIngestOperation,
   normalizeOptionalIngestOperationId
 } from "./ingest-idempotency.js";
 import { closeOffscreenPipelineSession } from "./pipeline-close.js";
+import {
+  PipelineRequestCoordinator,
+  runAfterPipelineClose,
+  runTwoPhasePipelineClose
+} from "./pipeline-request-coordinator.js";
+import {
+  assertMatchingPipelineStartIdentity,
+  createPipelineStartIdentity
+} from "./pipeline-start-identity.js";
 import { getExtensionPipelineStorage } from "./pipeline-storage.js";
 import { ResilientRuntimePort } from "./runtime-port.js";
 import {
+  ScreenRecordingChunkDeliveryRegistry,
   parseActiveScreenRecordingSessionIds,
   pauseScreenRecordingForPortDisconnect,
+  quiesceExpectedScreenRecordingForStop,
   reconcileScreenRecordingsWithWorkerSessions
 } from "./screen-recording-port.js";
 import { ScreenRecordingTerminalResultRegistry } from "./screen-recording-terminal-results.js";
@@ -32,12 +48,17 @@ type OffscreenPipelineRequest = {
     | "start"
     | "ingest"
     | "ingestBatch"
+    | "ingestBatchDurably"
+    | "ingestBatchWithDelivery"
     | "flush"
     | "getResumeState"
+    | "getDeliveryReceipt"
+    | "commitDeliveryProgress"
     | "putBlob"
     | "exportDownload"
     | "close"
     | "getScreenRecordingStatus"
+    | "quiesceScreenRecording"
     | "startScreenRecording"
     | "stopScreenRecording";
   sid: string;
@@ -47,8 +68,15 @@ type OffscreenPipelineRequest = {
   capturePolicy?: CapturePolicy;
   event?: WebBlackboxEvent;
   events?: WebBlackboxEvent[];
+  deliverySidecar?: Array<{
+    eventId: string;
+    provenance: PipelineDeliveryEventProvenance;
+  }>;
+  deliveryProgress?: PipelineDeliveryNoOutputChange[];
+  deliveryQuery?: PipelineDeliveryReceiptQuery;
   mime?: string;
   bytes?: Uint8Array;
+  screenRecordingFinalization?: boolean;
   passphrase?: string;
   includeScreenshots?: boolean;
   includeScreenRecordings?: boolean;
@@ -90,6 +118,10 @@ type OffscreenScreenRecordingStopResult = {
   mime: string;
   chunkCount: number;
   size: number;
+  durableChunkCount: number;
+  durableSize: number;
+  degraded: boolean;
+  degradationReason?: "screen-chunk-durability-mismatch";
   durationMs: number;
   width?: number;
   height?: number;
@@ -108,11 +140,15 @@ type OffscreenScreenRecordingState = {
   height?: number;
   frameRate?: number;
   nextChunkIndex: number;
-  postedChunkCount: number;
-  sizeBytes: number;
+  producedChunkCount: number;
+  producedSizeBytes: number;
+  durableChunkCount: number;
+  durableSizeBytes: number;
+  durabilityFailed: boolean;
   pendingChunks: Set<Promise<void>>;
   stopping: boolean;
   pausedForPortDisconnect: boolean;
+  quiescedForStop: boolean;
   stopPromise: Promise<OffscreenScreenRecordingStopResult> | null;
 };
 
@@ -121,14 +157,20 @@ createExtensionI18n({
   pageTitleKey: "pageTitleOffscreen"
 });
 const pipelines = new Map<string, FlightRecorderPipeline>();
+const pipelineStartIdentities = new Map<string, string>();
+const pipelineRequestCoordinator = new PipelineRequestCoordinator();
+const mediaControlCoordinator = new PipelineRequestCoordinator();
+const pendingPipelineCloseTasks = new Map<string, Promise<unknown>>();
 const ingestIdempotencyRegistry = new IngestIdempotencyRegistry();
 const screenRecordings = new Map<string, OffscreenScreenRecordingState>();
+const screenRecordingChunkDeliveries = new ScreenRecordingChunkDeliveryRegistry();
 const screenRecordingTerminalResults =
   new ScreenRecordingTerminalResultRegistry<OffscreenScreenRecordingStopResult>();
 const EXPORT_OBJECT_URL_TTL_MS = 90_000;
 const SERVICE_WORKER_KEEPALIVE_INTERVAL_MS = 20_000;
 const SCREEN_RECORDING_TIMESLICE_MS = 1_000;
 const SCREEN_RECORDING_STOP_TIMEOUT_MS = 10_000;
+const SCREEN_RECORDING_CHUNK_RETRY_MS = 500;
 const SCREEN_RECORDING_MAX_FRAME_RATE = 30;
 const SCREEN_RECORDING_VIDEO_BITS_PER_SECOND = 3_500_000;
 const OFFSCREEN_PORT_RECONNECT_INITIAL_MS = 250;
@@ -148,6 +190,7 @@ const state: OffscreenState = {
 
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 let screenRecordingHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
+let screenRecordingChunkRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let runtimePort: ResilientRuntimePort | null = null;
 
 console.info("[WebBlackbox] offscreen pipeline initialized");
@@ -155,6 +198,13 @@ console.info("[WebBlackbox] offscreen pipeline initialized");
 function handleRuntimePortMessage(message: unknown): void {
   if (message && typeof message === "object") {
     const kind = (message as { kind?: unknown }).kind;
+
+    if (kind === "sw.screen-recording-chunk-ack") {
+      if (screenRecordingChunkDeliveries.acknowledge(message)) {
+        syncScreenRecordingChunkRetry();
+      }
+      return;
+    }
 
     if (kind === "sw.recording-status") {
       const active = (message as { active?: unknown }).active;
@@ -215,6 +265,7 @@ function handleRuntimePortReconnect(): void {
     kind: "offscreen.ready",
     t: Date.now()
   });
+  replayPendingScreenRecordingChunks();
   syncServiceWorkerKeepalive();
 }
 
@@ -223,7 +274,9 @@ function reconcileScreenRecordingsAfterWorkerHandshake(
 ): void {
   clearScreenRecordingHandshakeDeadline();
   const failures = reconcileScreenRecordingsWithWorkerSessions(
-    screenRecordings.values(),
+    [...screenRecordings.values()].filter(
+      (recording) => !recording.quiescedForStop || !activeSessionIds.has(recording.sid)
+    ),
     activeSessionIds
   );
   for (const { recording, reason } of failures) {
@@ -279,7 +332,12 @@ if (chromeApi?.runtime) {
 
 async function handlePipelineRequest(message: OffscreenPipelineRequest): Promise<void> {
   try {
-    const result = await processPipelineRequest(message);
+    const result =
+      message.op === "close"
+        ? await processTwoPhasePipelineClose(message)
+        : isScreenRecordingControl(message.op)
+          ? await processMediaControlRequest(message)
+          : await processSerializedPipelineRequest(message);
     postPipelineResponse({
       kind: "offscreen.pipeline-response",
       requestId: message.requestId,
@@ -296,6 +354,89 @@ async function handlePipelineRequest(message: OffscreenPipelineRequest): Promise
   }
 }
 
+function isScreenRecordingControl(op: OffscreenPipelineRequest["op"]): boolean {
+  return (
+    op === "getScreenRecordingStatus" ||
+    op === "quiesceScreenRecording" ||
+    op === "startScreenRecording" ||
+    op === "stopScreenRecording"
+  );
+}
+
+function processSerializedPipelineRequest(message: OffscreenPipelineRequest): Promise<unknown> {
+  const pendingClose = pendingPipelineCloseTasks.get(message.sid);
+  if (
+    pendingClose &&
+    message.screenRecordingFinalization === true &&
+    (message.op === "putBlob" ||
+      message.op === "ingestBatchDurably" ||
+      message.op === "ingestBatchWithDelivery")
+  ) {
+    return pipelineRequestCoordinator.run(message.sid, () => processPipelineRequest(message));
+  }
+
+  return runAfterPipelineClose({
+    coordinator: pipelineRequestCoordinator,
+    sid: message.sid,
+    pendingClose,
+    operation: () => processPipelineRequest(message)
+  });
+}
+
+function processMediaControlRequest(message: OffscreenPipelineRequest): Promise<unknown> {
+  return mediaControlCoordinator.run(message.sid, async () => {
+    if (message.op === "startScreenRecording") {
+      await runAfterPipelineClose({
+        coordinator: pipelineRequestCoordinator,
+        sid: message.sid,
+        pendingClose: pendingPipelineCloseTasks.get(message.sid),
+        operation: async () => {
+          if (!pipelines.has(message.sid)) {
+            throw new Error(`Pipeline session not found: ${message.sid}`);
+          }
+        }
+      });
+    }
+    return processPipelineRequest(message);
+  });
+}
+
+async function processTwoPhasePipelineClose(message: OffscreenPipelineRequest): Promise<unknown> {
+  const existing = pendingPipelineCloseTasks.get(message.sid);
+  if (existing) {
+    return existing;
+  }
+
+  const task = runTwoPhasePipelineClose({
+    coordinator: pipelineRequestCoordinator,
+    sid: message.sid,
+    stopScreenRecording: () =>
+      mediaControlCoordinator.run(message.sid, async () => {
+        const recording = screenRecordings.get(message.sid);
+        if (recording) {
+          await stopOffscreenScreenRecording(
+            message.sid,
+            recording.recordingId,
+            message.purge === true ? "pipeline-purge" : "pipeline-close",
+            false
+          );
+        }
+      }),
+    closePipeline: () => processPipelineRequest(message),
+    onScreenRecordingStopError: (error) => {
+      console.warn("[WebBlackbox] failed to stop offscreen screen recording", error);
+    }
+  });
+  const clearTask = () => {
+    if (pendingPipelineCloseTasks.get(message.sid) === task) {
+      pendingPipelineCloseTasks.delete(message.sid);
+    }
+  };
+  pendingPipelineCloseTasks.set(message.sid, task);
+  void task.then(clearTask, clearTask);
+  return task;
+}
+
 async function processPipelineRequest(message: OffscreenPipelineRequest): Promise<unknown> {
   const operationId = normalizeOptionalIngestOperationId(message.operationId);
 
@@ -304,7 +445,20 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       throw new Error("Missing session metadata for pipeline start.");
     }
 
+    const startIdentity = createPipelineStartIdentity({
+      sid: message.sid,
+      session: message.session,
+      redactionProfile: message.redactionProfile,
+      capturePolicy: message.capturePolicy
+    });
+
     if (pipelines.has(message.sid)) {
+      assertMatchingPipelineStartIdentity(
+        message.sid,
+        pipelineStartIdentities.get(message.sid),
+        startIdentity
+      );
+      await pipelines.get(message.sid)!.rebindSessionMetadata(message.session);
       return null;
     }
 
@@ -319,6 +473,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 
     await pipeline.start();
     pipelines.set(message.sid, pipeline);
+    pipelineStartIdentities.set(message.sid, startIdentity);
     return null;
   }
 
@@ -327,19 +482,16 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       sid: message.sid,
       purge: message.purge === true,
       pipelines,
-      stopScreenRecording: () =>
-        stopOffscreenScreenRecording(
-          message.sid,
-          undefined,
-          message.purge === true ? "pipeline-purge" : "pipeline-close",
-          false
-        ),
+      stopScreenRecording: () => undefined,
       ingestIdempotencyRegistry,
       screenRecordingTerminalResults,
       onScreenRecordingStopError: (error) => {
         console.warn("[WebBlackbox] failed to stop offscreen screen recording", error);
       }
     });
+    if (!pipelines.has(message.sid)) {
+      pipelineStartIdentities.delete(message.sid);
+    }
     return null;
   }
 
@@ -353,6 +505,21 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     return pipeline.getResumeState();
   }
 
+  if (message.op === "getDeliveryReceipt") {
+    if (!message.deliveryQuery) {
+      throw new Error("Missing delivery receipt query.");
+    }
+    return pipeline.getDeliveryReceipt(message.deliveryQuery);
+  }
+
+  if (message.op === "commitDeliveryProgress") {
+    if (!Array.isArray(message.deliveryProgress) || message.deliveryProgress.length === 0) {
+      throw new Error("Missing metadata-only delivery progress.");
+    }
+    await pipeline.commitDeliveryProgress(message.deliveryProgress);
+    return null;
+  }
+
   if (message.op === "getScreenRecordingStatus") {
     const recording = screenRecordings.get(message.sid);
 
@@ -364,6 +531,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       active: true,
       recordingId: recording.recordingId,
       mime: recording.mime,
+      quiescedForStop: recording.quiescedForStop,
       ...(recording.width === undefined ? {} : { width: recording.width }),
       ...(recording.height === undefined ? {} : { height: recording.height }),
       ...(recording.frameRate === undefined ? {} : { frameRate: recording.frameRate })
@@ -372,6 +540,13 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
 
   if (message.op === "startScreenRecording") {
     return startOffscreenScreenRecording(message);
+  }
+
+  if (message.op === "quiesceScreenRecording") {
+    const recording = screenRecordings.get(message.sid);
+    return {
+      quiesced: quiesceExpectedScreenRecordingForStop(recording, message.recordingId)
+    };
   }
 
   if (message.op === "stopScreenRecording") {
@@ -399,7 +574,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
     return null;
   }
 
-  if (message.op === "ingestBatch") {
+  if (message.op === "ingestBatch" || message.op === "ingestBatchDurably") {
     if (!Array.isArray(message.events) || message.events.length === 0) {
       return null;
     }
@@ -409,6 +584,41 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       op: message.op,
       operationId,
       events: message.events,
+      pipeline,
+      registry: ingestIdempotencyRegistry
+    });
+    return null;
+  }
+
+  if (message.op === "ingestBatchWithDelivery") {
+    if (!Array.isArray(message.events) || message.events.length === 0) {
+      throw new Error("Missing delivery-aware ingest events.");
+    }
+    if (!Array.isArray(message.deliverySidecar) || message.deliverySidecar.length === 0) {
+      throw new Error("Missing delivery-aware ingest sidecar.");
+    }
+
+    const deliveryByEventId = new Map<string, PipelineDeliveryEventProvenance>();
+    for (const entry of message.deliverySidecar) {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        typeof entry.eventId !== "string" ||
+        entry.eventId.length === 0 ||
+        !entry.provenance ||
+        deliveryByEventId.has(entry.eventId)
+      ) {
+        throw new Error("Invalid delivery-aware ingest sidecar.");
+      }
+      deliveryByEventId.set(entry.eventId, entry.provenance);
+    }
+
+    await executeIngestOperation({
+      sid: message.sid,
+      op: message.op,
+      operationId,
+      events: message.events,
+      deliveryByEventId,
       pipeline,
       registry: ingestIdempotencyRegistry
     });
@@ -459,6 +669,28 @@ function postPipelineResponse(message: OffscreenPipelineResponse): void {
 
 function postToSw(message: unknown): boolean {
   return runtimePort?.post(message) ?? false;
+}
+
+function replayPendingScreenRecordingChunks(): void {
+  screenRecordingChunkDeliveries.replay((message) => postToSw(message));
+  syncScreenRecordingChunkRetry();
+}
+
+function syncScreenRecordingChunkRetry(): void {
+  if (screenRecordingChunkDeliveries.size === 0) {
+    if (screenRecordingChunkRetryTimer !== null) {
+      clearTimeout(screenRecordingChunkRetryTimer);
+      screenRecordingChunkRetryTimer = null;
+    }
+    return;
+  }
+  if (screenRecordingChunkRetryTimer !== null) {
+    return;
+  }
+  screenRecordingChunkRetryTimer = setTimeout(() => {
+    screenRecordingChunkRetryTimer = null;
+    replayPendingScreenRecordingChunks();
+  }, SCREEN_RECORDING_CHUNK_RETRY_MS);
 }
 
 function syncServiceWorkerKeepalive(): void {
@@ -547,11 +779,15 @@ async function startOffscreenScreenRecording(
       height: normalizePositiveInteger(settings.height),
       frameRate: normalizePositiveNumber(settings.frameRate),
       nextChunkIndex: 0,
-      postedChunkCount: 0,
-      sizeBytes: 0,
+      producedChunkCount: 0,
+      producedSizeBytes: 0,
+      durableChunkCount: 0,
+      durableSizeBytes: 0,
+      durabilityFailed: false,
       pendingChunks: new Set(),
       stopping: false,
       pausedForPortDisconnect: false,
+      quiescedForStop: false,
       stopPromise: null
     };
 
@@ -638,6 +874,7 @@ async function stopActiveOffscreenScreenRecording(
 
   return new Promise((resolve) => {
     let finished = false;
+    const stopDeadline = Date.now() + SCREEN_RECORDING_STOP_TIMEOUT_MS;
     const timeout = setTimeout(() => {
       void finish();
     }, SCREEN_RECORDING_STOP_TIMEOUT_MS);
@@ -649,7 +886,17 @@ async function stopActiveOffscreenScreenRecording(
 
       finished = true;
       clearTimeout(timeout);
-      await waitForOffscreenScreenRecordingChunks(recording);
+      const durable = await waitForOffscreenScreenRecordingChunks(recording, stopDeadline);
+      if (!durable) {
+        recording.durabilityFailed = true;
+        screenRecordingChunkDeliveries.failRecording(
+          recording.sid,
+          recording.recordingId,
+          new Error("Timed out waiting for durable screen recording chunk acknowledgements.")
+        );
+        syncScreenRecordingChunkRetry();
+        await Promise.allSettled([...recording.pendingChunks]);
+      }
       const result = toScreenRecordingStopResult(recording, reason);
       cleanupOffscreenScreenRecording(recording);
       screenRecordingTerminalResults.remember(recording.sid, recording.recordingId, result);
@@ -693,7 +940,7 @@ function handleScreenRecordingData(
   const task = (async () => {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const endOffsetMs = Math.max(0, Math.round(performance.now() - recording.startedAt));
-    const posted = postToSw({
+    const message: OffscreenScreenRecordingChunkMessage = {
       kind: "offscreen.screen-recording-chunk",
       sid: recording.sid,
       recordingId: recording.recordingId,
@@ -704,12 +951,15 @@ function handleScreenRecordingData(
       startOffsetMs,
       endOffsetMs,
       durationMs: Math.max(0, endOffsetMs - startOffsetMs)
-    });
-    if (!posted) {
-      throw new Error("Offscreen screen-recording chunk could not reach the service worker.");
-    }
-    recording.postedChunkCount += 1;
-    recording.sizeBytes += bytes.byteLength;
+    };
+    recording.producedChunkCount += 1;
+    recording.producedSizeBytes += bytes.byteLength;
+    const acknowledgement = screenRecordingChunkDeliveries.track(message);
+    postToSw(message);
+    syncScreenRecordingChunkRetry();
+    await acknowledgement;
+    recording.durableChunkCount += 1;
+    recording.durableSizeBytes += bytes.byteLength;
   })();
 
   recording.pendingChunks.add(task);
@@ -719,17 +969,30 @@ function handleScreenRecordingData(
     },
     (error) => {
       recording.pendingChunks.delete(task);
+      recording.durabilityFailed = true;
       postScreenRecordingError(recording.sid, recording.recordingId, error, "chunk");
     }
   );
 }
 
 async function waitForOffscreenScreenRecordingChunks(
-  recording: OffscreenScreenRecordingState
-): Promise<void> {
+  recording: OffscreenScreenRecordingState,
+  deadline: number
+): Promise<boolean> {
   while (recording.pendingChunks.size > 0) {
-    await Promise.allSettled([...recording.pendingChunks]);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return false;
+    }
+    const settled = Promise.allSettled([...recording.pendingChunks]).then(() => true);
+    const timedOut = new Promise<false>((resolve) => {
+      setTimeout(() => resolve(false), remaining);
+    });
+    if (!(await Promise.race([settled, timedOut]))) {
+      return false;
+    }
   }
+  return true;
 }
 
 function cleanupOffscreenScreenRecording(recording: OffscreenScreenRecordingState): void {
@@ -794,11 +1057,19 @@ function toScreenRecordingStopResult(
   recording: OffscreenScreenRecordingState,
   reason: string
 ): OffscreenScreenRecordingStopResult {
+  const degraded =
+    recording.durabilityFailed ||
+    recording.producedChunkCount !== recording.durableChunkCount ||
+    recording.producedSizeBytes !== recording.durableSizeBytes;
   return {
     recordingId: recording.recordingId,
     mime: recording.mime,
-    chunkCount: recording.postedChunkCount,
-    size: recording.sizeBytes,
+    chunkCount: recording.producedChunkCount,
+    size: recording.producedSizeBytes,
+    durableChunkCount: recording.durableChunkCount,
+    durableSize: recording.durableSizeBytes,
+    degraded,
+    ...(degraded ? { degradationReason: "screen-chunk-durability-mismatch" as const } : {}),
     durationMs: Math.max(0, Math.round(performance.now() - recording.startedAt)),
     width: recording.width,
     height: recording.height,

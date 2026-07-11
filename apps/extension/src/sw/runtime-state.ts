@@ -10,7 +10,7 @@ import {
 export const RUNTIME_STATE_SCHEMA_VERSION = 1;
 export const RUNTIME_CLEANUP_ALARM_PREFIX = "webblackbox.runtime.cleanup:";
 
-const MAX_PERSISTED_SESSIONS = 512;
+export const MAX_PERSISTED_RUNTIME_SESSIONS = 512;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const MAX_SCREEN_RECORDING_CHUNKS = 500_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -87,7 +87,7 @@ export type ActiveRuntimeRestorationDecision =
 
 export type RuntimeRestorationPlan =
   | { kind: "resume-active"; runtime: PersistedActiveRuntime }
-  | { kind: "purge-stopping"; runtime: PersistedStoppingRuntime }
+  | { kind: "finalize-stopping"; runtime: PersistedStoppingRuntime }
   | { kind: "retain-stopped"; runtime: PersistedStoppedRuntime };
 
 export type PersistedRuntimeIdentity = {
@@ -118,6 +118,7 @@ export type RuntimeOffscreenScreenRecordingStatus =
       active: true;
       recordingId: string;
       mime: string;
+      quiescedForStop?: boolean;
       width?: number;
       height?: number;
       frameRate?: number;
@@ -215,6 +216,18 @@ export type StoppingRuntimeRecoveryOptions = {
   purge: () => void | Promise<void>;
 };
 
+export type StoppingRuntimeRetentionRecoveryOptions = {
+  getScreenRecordingStatus: () =>
+    | RuntimeOffscreenScreenRecordingStatus
+    | Promise<RuntimeOffscreenScreenRecordingStatus>;
+  claimRuntime?: (status: RuntimeOffscreenScreenRecordingStatus) => void | Promise<void>;
+  stopScreenRecording: (
+    status: Extract<RuntimeOffscreenScreenRecordingStatus, { active: true }>
+  ) => void | Promise<void>;
+  retain: () => void | Promise<void>;
+  releaseRuntimeClaim?: (status: RuntimeOffscreenScreenRecordingStatus) => void | Promise<void>;
+};
+
 export type ActiveRuntimeRestorationTransactionOptions<TRuntime extends object> = {
   startPipeline: () => void | Promise<void>;
   prepareRuntime: () => TRuntime | Promise<TRuntime>;
@@ -239,6 +252,49 @@ export type DurableFailedRuntimeCleanupOptions = {
   cleanup: () => void | Promise<void>;
   clearStopping: () => void | Promise<void>;
 };
+
+export type DurableFailedRuntimeRetentionOptions = {
+  persistStopping: () => void | Promise<void>;
+  retain: () => void | Promise<void>;
+};
+
+export type DurableRuntimeRestorationReadinessOptions = {
+  restore: () => void | Promise<void>;
+  failClosed: () => void | Promise<void>;
+  waitForRetry: () => void | Promise<void>;
+  markReady: () => void;
+  shouldRetryRestore?: () => boolean;
+  onRestoreFailure?: (error: unknown) => void;
+  onFailClosedRetry?: (error: unknown) => void;
+};
+
+/** Tracks multiple checkpoint opportunities separated by teardown work and
+ * rejects readiness unless at least one of them reached durable storage. */
+export class DurableRuntimeRecoveryCheckpoint {
+  private persisted = false;
+
+  private readonly errors: unknown[] = [];
+
+  public async attempt(persist: () => void | Promise<void>): Promise<boolean> {
+    try {
+      await persist();
+      this.persisted = true;
+      return true;
+    } catch (error) {
+      this.errors.push(error);
+      return false;
+    }
+  }
+
+  public requirePersisted(): void {
+    if (!this.persisted) {
+      throw new AggregateError(
+        this.errors,
+        "Fail-closed runtime restoration has no durable recovery checkpoint."
+      );
+    }
+  }
+}
 
 export type ProvisionalRuntimeStartTransactionOptions<TTombstone, TRuntime extends object> = {
   token: RuntimeStartToken;
@@ -433,6 +489,48 @@ export async function runDurableFailedRuntimeCleanup(
   await options.clearStopping();
 }
 
+/** Converts a failed active restoration into a durable, non-revivable row
+ * before closing whatever portion of its pipeline was constructed. The
+ * stopping row deliberately remains after `retain` succeeds. */
+export async function runDurableFailedRuntimeRetention(
+  options: DurableFailedRuntimeRetentionOptions
+): Promise<void> {
+  await options.persistStopping();
+  await options.retain();
+}
+
+/** Marks restoration ready only after normal restoration or a fail-closed
+ * recovery checkpoint has become durable. The read phase may be replayed only
+ * while the caller proves that no trusted snapshot or restoration mutation was
+ * acquired; otherwise an old active snapshot is never replayed. */
+export async function establishDurableRuntimeRestorationReadiness(
+  options: DurableRuntimeRestorationReadinessOptions
+): Promise<void> {
+  let attemptRestore = true;
+
+  while (true) {
+    if (attemptRestore) {
+      try {
+        await options.restore();
+        break;
+      } catch (restoreError) {
+        options.onRestoreFailure?.(restoreError);
+      }
+    }
+
+    try {
+      await options.failClosed();
+      break;
+    } catch (recoveryError) {
+      options.onFailClosedRetry?.(recoveryError);
+      await options.waitForRetry();
+      attemptRestore = options.shouldRetryRestore?.() === true;
+    }
+  }
+
+  options.markReady();
+}
+
 /** Prevents teardown callbacks from observing or acting on a replacement runtime. */
 export async function disposeListenersBeforeTeardown(
   listeners: readonly (() => void)[],
@@ -474,6 +572,15 @@ export function createVolatileCaptureFence(blocked = false): VolatileCaptureFenc
 /** Closes capture synchronously. There is intentionally no corresponding reopen operation. */
 export function blockVolatileCapture(fence: VolatileCaptureFence): void {
   fence.blocked = true;
+}
+
+/** Closes admission and synchronously quiesces volatile producers at stop intent. */
+export function beginVolatileCaptureQuiescence(
+  fence: VolatileCaptureFence,
+  quiesce: () => void
+): void {
+  blockVolatileCapture(fence);
+  quiesce();
 }
 
 export function isVolatileCaptureOpen(fence: VolatileCaptureFence): boolean {
@@ -522,10 +629,69 @@ export function planRuntimeRestoration(runtime: PersistedRuntime): RuntimeRestor
   }
 
   if (runtime.state === "stopping") {
-    return { kind: "purge-stopping", runtime };
+    return { kind: "finalize-stopping", runtime };
   }
 
   return { kind: "retain-stopped", runtime };
+}
+
+/**
+ * Finishes volatile recorder ownership before closing the retained pipeline.
+ * A failed status/stop operation deliberately withholds `retain`, leaving the
+ * durable stopping row available for another fail-closed recovery attempt.
+ */
+export async function recoverStoppingRuntimeForRetention(
+  options: StoppingRuntimeRetentionRecoveryOptions
+): Promise<void> {
+  const status = await options.getScreenRecordingStatus();
+  await options.claimRuntime?.(status);
+
+  try {
+    if (status.active) {
+      await options.stopScreenRecording(status);
+    }
+    await options.retain();
+  } finally {
+    await options.releaseRuntimeClaim?.(status);
+  }
+}
+
+/**
+ * Builds a non-revivable snapshot after a global restoration failure. Later
+ * rows for the same sid win, and every active row becomes a stopping row while
+ * existing stopping/stopped retention deadlines remain unchanged.
+ */
+export function preserveRuntimeRowsAfterGlobalRestoreFailure(input: {
+  rows: readonly PersistedRuntime[];
+  failedAt: number;
+  resolveLocalTtlMs: (runtime: PersistedActiveRuntime) => number;
+}): PersistedRuntime[] {
+  if (!isFiniteNonNegativeNumber(input.failedAt)) {
+    throw new Error("Runtime restoration failure time must be finite and non-negative.");
+  }
+
+  const bySid = new Map<string, PersistedRuntime>();
+  for (const runtime of input.rows) {
+    bySid.set(runtime.sid, runtime);
+  }
+
+  return [...bySid.values()].map((runtime) => {
+    if (runtime.state !== "active") {
+      return clonePersistedRuntime(runtime);
+    }
+
+    const localTtlMs = input.resolveLocalTtlMs(runtime);
+    if (!Number.isSafeInteger(localTtlMs) || localTtlMs <= 0) {
+      throw new Error("Runtime restoration recovery TTL must be a positive safe integer.");
+    }
+
+    const stopRequestedAt = Math.max(runtime.startedAt, input.failedAt);
+    return createStoppingRuntimeTombstone(
+      clonePersistedRuntime(runtime) as PersistedActiveRuntime,
+      stopRequestedAt,
+      stopRequestedAt + localTtlMs
+    );
+  });
 }
 
 /** Stops any recorder that survived the worker before purging its stopped session. */
@@ -556,7 +722,7 @@ export function parseRuntimeStateSnapshot(input: unknown): RuntimeStateSnapshot 
     record.schemaVersion !== RUNTIME_STATE_SCHEMA_VERSION ||
     !isFiniteNonNegativeNumber(record.savedAt) ||
     !Array.isArray(record.sessions) ||
-    record.sessions.length > MAX_PERSISTED_SESSIONS
+    record.sessions.length > MAX_PERSISTED_RUNTIME_SESSIONS
   ) {
     return null;
   }
@@ -594,6 +760,12 @@ export function createRuntimeStateSnapshot(
   sessions: readonly PersistedRuntime[],
   savedAt = Date.now()
 ): RuntimeStateSnapshot {
+  if (sessions.length > MAX_PERSISTED_RUNTIME_SESSIONS) {
+    throw new Error(
+      `Runtime checkpoint capacity exceeded (${MAX_PERSISTED_RUNTIME_SESSIONS} sessions).`
+    );
+  }
+
   return {
     schemaVersion: RUNTIME_STATE_SCHEMA_VERSION,
     savedAt,
@@ -610,6 +782,33 @@ export function createStoppingRuntimeTombstone(
     ...runtime,
     state: "stopping",
     stopRequestedAt,
+    cleanupDeadline
+  };
+}
+
+export function createStoppedRuntimeTombstone(
+  runtime: PersistedActiveRuntime | PersistedStoppingRuntime,
+  stoppedAt: number,
+  cleanupDeadline: number
+): PersistedStoppedRuntime {
+  if (runtime.state === "stopping") {
+    const { state, stopRequestedAt, ...base } = runtime;
+    void state;
+    void stopRequestedAt;
+    return {
+      ...base,
+      state: "stopped",
+      stoppedAt,
+      cleanupDeadline
+    };
+  }
+
+  const { state, ...base } = runtime;
+  void state;
+  return {
+    ...base,
+    state: "stopped",
+    stoppedAt,
     cleanupDeadline
   };
 }
@@ -643,7 +842,7 @@ export function extractPersistedRuntimeIdentities(input: unknown): PersistedRunt
   const identities: PersistedRuntimeIdentity[] = [];
   const seen = new Set<string>();
 
-  for (const value of values.slice(0, MAX_PERSISTED_SESSIONS)) {
+  for (const value of values) {
     const record = asRecord(value);
 
     if (
@@ -809,7 +1008,9 @@ export function normalizeOffscreenScreenRecordingStatus(
   if (
     row.active &&
     Object.keys(row).every((key) =>
-      ["active", "recordingId", "mime", "width", "height", "frameRate"].includes(key)
+      ["active", "recordingId", "mime", "quiescedForStop", "width", "height", "frameRate"].includes(
+        key
+      )
     ) &&
     typeof row.recordingId === "string" &&
     row.recordingId.length > 0 &&
@@ -817,6 +1018,7 @@ export function normalizeOffscreenScreenRecordingStatus(
     typeof row.mime === "string" &&
     row.mime.length > 0 &&
     row.mime.length <= 256 &&
+    (row.quiescedForStop === undefined || typeof row.quiescedForStop === "boolean") &&
     isOptionalPositiveNumber(row.width) &&
     isOptionalPositiveNumber(row.height) &&
     isOptionalPositiveNumber(row.frameRate)
@@ -825,6 +1027,7 @@ export function normalizeOffscreenScreenRecordingStatus(
       active: true,
       recordingId: row.recordingId,
       mime: row.mime,
+      quiescedForStop: row.quiescedForStop === true,
       ...(row.width === undefined ? {} : { width: row.width as number }),
       ...(row.height === undefined ? {} : { height: row.height as number }),
       ...(row.frameRate === undefined ? {} : { frameRate: row.frameRate as number })

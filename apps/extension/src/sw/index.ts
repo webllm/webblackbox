@@ -3,7 +3,15 @@ import {
   createChromeDebuggerTransport,
   type CdpRouter
 } from "@webblackbox/cdp-router";
-import type { PipelineResumeState, ScreenRecordingChunkReference } from "@webblackbox/pipeline";
+import type {
+  PipelineDeliveryEventProvenance,
+  PipelineDeliveryNoOutputChange,
+  PipelineDeliveryReceipt,
+  PipelineDeliveryReceiptQuery,
+  PipelineDeliverySidecar,
+  PipelineResumeState,
+  ScreenRecordingChunkReference
+} from "@webblackbox/pipeline";
 import {
   createSessionId,
   DEFAULT_CAPTURE_POLICY,
@@ -31,16 +39,24 @@ import {
 
 import { normalizeOptionalIngestOperationId } from "../offscreen/ingest-idempotency.js";
 import { getChromeApi, type MessageSenderLike, type PortLike } from "../shared/chrome-api.js";
+import type {
+  ContentActivationId,
+  ContentEventBatchId
+} from "../shared/content-activation-protocol.js";
 import {
   isAuthorizedExtensionPort,
   parseExtensionInboundMessage
 } from "../shared/inbound-messages.js";
 import {
+  CONTENT_EVENT_BATCH_MAX,
   PORT_NAMES,
+  type ContentSameDocumentTransition,
   type ExportPrivacyWarning,
   type ExtensionInboundMessage,
   type ExtensionOutboundMessage,
   type FullModeVisualCapture,
+  type OffscreenScreenRecordingChunkMessage,
+  type ScreenRecordingChunkAckMessage,
   type SessionListMessage,
   type SessionListItem
 } from "../shared/messages.js";
@@ -53,10 +69,7 @@ import {
   assertRuntimeStartRequirements,
   resolveInstalledRuntimeCapabilities
 } from "../shared/runtime-capabilities.js";
-import {
-  shouldInjectIsolatedContentForMode,
-  shouldInjectMainWorldHooksForMode
-} from "../shared/mode-profile.js";
+import { shouldInjectIsolatedContentForMode } from "../shared/mode-profile.js";
 import {
   applyEnterprisePolicyToRecorderConfig,
   ENTERPRISE_POLICY_STORAGE_KEY,
@@ -110,19 +123,54 @@ import {
   type CdpRootFrameTreePrime
 } from "./cdp-root-bootstrap.js";
 import { ContentDocumentAuthorization } from "./content-document-authorization.js";
+import {
+  ContentActivationRegistry,
+  type ContentActivationSnapshot,
+  type ContentActivationState
+} from "./content-activation-registry.js";
+import {
+  canFinalizeMainWorldRevocation,
+  runBoundedMainWorldDeactivation
+} from "./content-main-world-revocation.js";
+import {
+  ContentEventBatchLedger,
+  classifyContentEventBatchReceipt,
+  fingerprintContentEventBatch,
+  isContentEventBatchAdmissionLive,
+  processContentEventBatchAttempt,
+  readContentEventBatchReceiptAfterBarrier,
+  type ContentEventBatchAdmissionIdentity,
+  type ContentEventBatchRecord
+} from "./content-event-batch-ledger.js";
 import { disconnectContentPort } from "./content-port-lifecycle.js";
+import { commitDurableRemoval } from "./durable-removal.js";
 import { injectPendingContentDocument } from "./dynamic-content-injection.js";
 import {
   buildLiteNetworkFailureRawEvent,
   buildLiteNetworkRequestRawEvent,
   buildLiteNetworkResponseRawEvent
 } from "./lite-network-baseline.js";
-import { authorizeLiteWebRequest } from "./lite-web-request-authorization.js";
 import {
+  authorizeLiteWebRequest,
+  isLiteWebRequestDocumentUrlUnambiguous,
+  type LiteWebRequestAuthorizationDecision
+} from "./lite-web-request-authorization.js";
+import {
+  advanceCdpRestoreEpoch,
+  cancelExactWebNavigationCommitObservation,
   canUseExactLiteTopDocumentAuthorization,
   classifyActiveCommittedDocument,
+  createExactTopNavigationObservationState,
+  isCdpRestoreEpochCurrent,
+  observeExactCdpTopNavigation,
+  observeExactWebNavigationCommit,
   resolveCurrentTabUrlPolicyDecision,
-  shouldUpdateSessionMetadataFromNavigation
+  resolveCdpRestorePredecessor,
+  resolveCdpTopNavigationOwnership,
+  resolveExactInitialContentParent,
+  shouldContentSenderClaimCaptureUrl,
+  shouldUpdateSessionMetadataFromNavigation,
+  type ExactTopNavigationObservationState
 } from "./navigation-metadata.js";
 import { runRootNavigationInstrumentationTransaction } from "./root-navigation-instrumentation.js";
 import {
@@ -135,6 +183,7 @@ import {
 import {
   canOperateOnExpectedNavigationResource,
   didGuardedNavigationOperationRun,
+  launchDetachedNavigationTask,
   reconcileAmbiguousNavigationResourceStart,
   resolveCdpNavigationPrimeOutcome,
   resolveTabNavigationSignal,
@@ -143,6 +192,10 @@ import {
 } from "./runtime-navigation-operations.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
 import {
+  sameMainWorldControllerCapability,
+  type MainWorldControllerHint
+} from "../shared/main-world-controller.js";
+import {
   acknowledgePipelineBatch,
   acquirePipelineBatch,
   shouldRecoverOffscreenPipeline,
@@ -150,13 +203,31 @@ import {
   type PipelineBatchInFlight
 } from "./pipeline-batch.js";
 import {
+  ScreenRecordingChunkWriteLedger,
+  ScreenRecordingFinalizationGate,
+  retryScreenRecordingFinalization,
+  runDurableScreenRecordingFinalization
+} from "./screen-recording-chunk-write.js";
+import { OffscreenDocumentLifecycle } from "./offscreen-document-lifecycle.js";
+import { SameDocumentTransitionLedger } from "./same-document-transition-ledger.js";
+import {
+  commitSessionAnnotationMutation,
+  mergePersistedSessionAnnotation,
+  SessionAnnotationMutationCoordinator
+} from "./session-annotation-state.js";
+import {
   buildRequestMetaKey,
   deleteRequestMeta,
   getRequestMeta,
   upsertRequestMeta,
   type RequestMetaEntry
 } from "./request-meta.js";
-import { injectMainWorldHook, injectRootPageAgentsForMode } from "./script-injection.js";
+import {
+  advanceControllerFromControl,
+  bootstrapMainWorldDirectController,
+  controlMainWorldDirectController,
+  injectRootPageAgentsForMode
+} from "./script-injection.js";
 import {
   FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS,
   buildLocalStorageSnapshotExpression,
@@ -165,19 +236,29 @@ import {
 } from "./storage-snapshot.js";
 import {
   acknowledgeStopDrain,
+  canAdmitStopDrainBatch,
   claimStopDrainEvent,
   closeStopDrain,
+  commitStopDrainBatchClaims,
+  commitStopDrainClaim,
   createStopDrainCapability,
+  dropUnclaimableStopDrainOrdinaryEvent,
+  getCommittedStopDrainArtifactTypes,
   isStopDrainClaimValid,
+  releaseStopDrainClaim,
+  resolveStopDrainTimeoutEvidence,
   runStopDrainBlobOperation,
   type StopDrainCapability,
   type StopDrainClaim
 } from "./stop-drain.js";
 import {
   RuntimeCleanupScheduler,
+  DurableRuntimeRecoveryCheckpoint,
+  MAX_PERSISTED_RUNTIME_SESSIONS,
   RuntimeStartCancelledError,
   RuntimeStartCoordinator,
   type RuntimeStartToken,
+  beginVolatileCaptureQuiescence,
   blockVolatileCapture,
   buildInterruptedScreenRecordingRecoveries,
   capCleanupDeadline,
@@ -185,9 +266,11 @@ import {
   commitRestoredRuntimeActivation,
   createVolatileCaptureFence,
   createRuntimeStateSnapshot,
+  createStoppedRuntimeTombstone,
   createStoppingRuntimeTombstone,
   deleteMapEntryIfSame,
   disposeListenersBeforeTeardown,
+  establishDurableRuntimeRestorationReadiness,
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
   isMapEntrySame,
@@ -199,12 +282,14 @@ import {
   normalizeOffscreenScreenRecordingStatus,
   parseRuntimeStateSnapshot,
   planRuntimeRestoration,
+  preserveRuntimeRowsAfterGlobalRestoreFailure,
   persistDurableStopTombstone,
   reconcileScreenRecordingResumeState,
   recoverStoppingRuntimeFailClosed,
+  recoverStoppingRuntimeForRetention,
   restoreScreenRecordingChunkHashes,
   runActiveRuntimeRestorationTransaction,
-  runDurableFailedRuntimeCleanup,
+  runDurableFailedRuntimeRetention,
   runDurableRuntimeStopWorkflow,
   runProvisionalRuntimeStartTransaction,
   runVolatileCaptureOperation,
@@ -241,6 +326,12 @@ type SessionRuntime = {
   cdpRouter: CdpRouter | null;
   cdpScope: CdpCaptureScopeState;
   contentDocuments: ContentDocumentAuthorization;
+  contentActivationParents: Map<string, { frameId: number; documentId: string }>;
+  contentMainWorldProofs: Map<string, MainWorldControllerHint>;
+  contentNavigationRevisions: Map<string, number>;
+  sameDocumentTransitions: SameDocumentTransitionLedger;
+  pendingContentPolicyRevisions: Map<string, number>;
+  pendingLiteNetworkPolicyRevisions: Map<string, number>;
   authorizedContentFrames: Set<number>;
   requestMeta: Map<string, RequestMetaEntry>;
   screenshotInterval: ReturnType<typeof setInterval> | null;
@@ -253,11 +344,25 @@ type SessionRuntime = {
   navigationRevision: number;
   queueDepth: number;
   droppedBestEffortTasks: number;
-  pipelineEventBuffer: WebBlackboxEvent[];
-  pipelineBatchInFlight: PipelineBatchInFlight<WebBlackboxEvent> | null;
+  pipelineEventBuffer: BufferedPipelineEvent[];
+  pipelineBatchInFlight: PipelineBatchInFlight<BufferedPipelineEvent> | null;
+  activePipelineDelivery: PipelineDeliveryEventProvenance | null;
   pipelineFlushTimer: ReturnType<typeof setTimeout> | null;
   pipelineFlushQueued: boolean;
   captureFence: VolatileCaptureFence;
+  cdpPayloadAdmissionBlocked: boolean;
+  cdpRestoreCheckpoint: {
+    navigationRevision: number;
+    captureUrl: string;
+    childMutationRevision: number;
+    restoreEpoch: number;
+    generation: number;
+  } | null;
+  cdpRestoreEpoch: number;
+  cdpRestoreTail: Promise<void>;
+  cdpRestoreTailEpoch: number;
+  exactTopNavigationObservations: ExactTopNavigationObservationState;
+  exactWebNavigationTransactions: Map<number, ExactWebNavigationCommitTransaction>;
   activationState: RuntimeActivationState;
   startToken: RuntimeStartToken | null;
   stopping: boolean;
@@ -284,6 +389,15 @@ type SessionRuntime = {
 
 type SessionNavigationClaim = RuntimeNavigationClaim<SessionRuntime>;
 
+type ExactWebNavigationCommitTransaction = {
+  token: number;
+  restoreEpoch: number;
+  claim: SessionNavigationClaim;
+  phase: "running" | "restoring" | "completed";
+  cdpObserved: boolean;
+  detachedRestorePending: boolean;
+};
+
 type ScreenRecordingRuntime = {
   recordingId: string;
   cdpScopeGeneration: number | null;
@@ -299,7 +413,12 @@ type ScreenRecordingRuntime = {
   chunkCount: number;
   sizeBytes: number;
   pendingWrites: Set<Promise<void>>;
+  chunkWrites: ScreenRecordingChunkWriteLedger;
   stopPromise: Promise<void> | null;
+  finalization: ScreenRecordingFinalizationGate;
+  finalizing: boolean;
+  durabilityEvidenceQueued: boolean;
+  terminalEvidenceQueued: boolean;
 };
 
 type PointerState = {
@@ -352,6 +471,11 @@ type SessionAnnotation = {
   note?: string;
 };
 
+type BufferedPipelineEvent = Readonly<{
+  event: WebBlackboxEvent;
+  delivery?: PipelineDeliveryEventProvenance;
+}>;
+
 type SessionPipelineClient = {
   start: (
     session: SessionMetadata,
@@ -359,10 +483,28 @@ type SessionPipelineClient = {
     capturePolicy?: CapturePolicy
   ) => Promise<void>;
   ingest: (event: WebBlackboxEvent, operationId?: string) => Promise<void>;
-  ingestBatch: (events: readonly WebBlackboxEvent[], operationId?: string) => Promise<void>;
+  ingestBatch: (
+    events: readonly WebBlackboxEvent[],
+    operationId?: string,
+    options?: { screenRecordingFinalization?: boolean }
+  ) => Promise<void>;
+  ingestBatchWithDelivery: (
+    events: readonly WebBlackboxEvent[],
+    deliveryByEventId: PipelineDeliverySidecar,
+    operationId?: string,
+    options?: { screenRecordingFinalization?: boolean }
+  ) => Promise<void>;
+  getDeliveryReceipt: (
+    query: PipelineDeliveryReceiptQuery
+  ) => Promise<PipelineDeliveryReceipt | undefined>;
+  commitDeliveryProgress: (changes: readonly PipelineDeliveryNoOutputChange[]) => Promise<void>;
   flush: () => Promise<void>;
   getResumeState: () => Promise<PipelineResumeState>;
-  putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
+  putBlob: (
+    mime: string,
+    bytes: Uint8Array,
+    options?: { screenRecordingFinalization?: boolean }
+  ) => Promise<string>;
   exportAndDownload: (options?: {
     passphrase?: string;
     includeScreenshots?: boolean;
@@ -380,12 +522,17 @@ type OffscreenPipelineRequest = {
     | "start"
     | "ingest"
     | "ingestBatch"
+    | "ingestBatchDurably"
+    | "ingestBatchWithDelivery"
     | "flush"
     | "getResumeState"
+    | "getDeliveryReceipt"
+    | "commitDeliveryProgress"
     | "putBlob"
     | "exportDownload"
     | "close"
     | "getScreenRecordingStatus"
+    | "quiesceScreenRecording"
     | "startScreenRecording"
     | "stopScreenRecording";
   sid: string;
@@ -395,8 +542,15 @@ type OffscreenPipelineRequest = {
   capturePolicy?: CapturePolicy;
   event?: WebBlackboxEvent;
   events?: readonly WebBlackboxEvent[];
+  deliverySidecar?: Array<{
+    eventId: string;
+    provenance: PipelineDeliveryEventProvenance;
+  }>;
+  deliveryProgress?: readonly PipelineDeliveryNoOutputChange[];
+  deliveryQuery?: PipelineDeliveryReceiptQuery;
   mime?: string;
   bytes?: Uint8Array;
+  screenRecordingFinalization?: boolean;
   passphrase?: string;
   includeScreenshots?: boolean;
   includeScreenRecordings?: boolean;
@@ -432,23 +586,14 @@ type OffscreenScreenRecordingStopResult = {
   mime: string;
   chunkCount: number;
   size: number;
+  durableChunkCount?: number;
+  durableSize?: number;
+  degraded?: boolean;
+  degradationReason?: string;
   durationMs: number;
   width?: number;
   height?: number;
   reason?: string;
-};
-
-type OffscreenScreenRecordingChunkMessage = {
-  kind: "offscreen.screen-recording-chunk";
-  sid: string;
-  recordingId: string;
-  index: number;
-  mime: string;
-  bytes: unknown;
-  size?: number;
-  startOffsetMs?: number;
-  endOffsetMs?: number;
-  durationMs?: number;
 };
 
 type OffscreenScreenRecordingEndedMessage = {
@@ -475,6 +620,38 @@ type RecordingSampling = {
   bodyCaptureMaxBytes: number;
 };
 
+type SessionContentActivation = ContentActivationSnapshot<
+  SessionRuntime,
+  VolatileCaptureFence,
+  CaptureMode
+>;
+
+type StopDrainNotice = Extract<ExtensionOutboundMessage, { kind: "sw.content-drain" }>;
+
+type PendingStopDrainAck = {
+  sid: string;
+  runtime: SessionRuntime;
+  capabilities: Map<ContentActivationId, StopDrainCapability>;
+  acknowledged: Set<ContentActivationId>;
+  settling: boolean;
+  timeoutFinalizing: boolean;
+  timeoutNoticeQueued: boolean;
+  resolve: () => void;
+  timeout: ReturnType<typeof setTimeout>;
+  retryTimer: ReturnType<typeof setInterval>;
+};
+
+type ContentEventBatchAdmission = ContentEventBatchAdmissionIdentity<
+  SessionRuntime,
+  VolatileCaptureFence,
+  CaptureMode
+> & {
+  readonly kind: "content-event-batch";
+  readonly activationId: ContentActivationId;
+  readonly batchId: ContentEventBatchId;
+  valid: boolean;
+};
+
 type LiteBodyCaptureRule = {
   enabled: boolean;
   maxBytes: number;
@@ -486,27 +663,55 @@ const extensionBaseUrl = chromeApi?.runtime?.getURL("") ?? "";
 
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
+const offscreenDocumentLifecycle = new OffscreenDocumentLifecycle();
 const sessionStartCoordinator = new RuntimeStartCoordinator();
 const runtimeStopTasks = new RuntimeTaskCoordinator<SessionRuntime>();
 const runtimeDisposeTasks = new RuntimeTaskCoordinator<SessionRuntime>();
+const contentActivations = new ContentActivationRegistry<
+  SessionRuntime,
+  VolatileCaptureFence,
+  PortLike,
+  CaptureMode
+>();
 const retainedStoppingRuntimesBySid = new Map<string, PersistedStoppingRuntime>();
 const pendingRuntimeRestorationsBySid = new Map<string, PersistedRuntime>();
+const runtimeRestorationSourceRowsBySid = new Map<string, PersistedRuntime>();
+let runtimeRestorationCheckpointRewriteAllowed = false;
 const sessionAnnotations = new Map<string, SessionAnnotation>();
+const sessionAnnotationMutations = new SessionAnnotationMutationCoordinator();
 const connectedPorts = new Set<PortLike>();
 let offscreenPort: PortLike | null = null;
-const pendingStopDrainAcks = new Map<
-  string,
+const pendingStopDrainAcks = new Map<string, PendingStopDrainAck>();
+const preparedStopDrainPlans = new WeakMap<
+  SessionRuntime,
   {
-    sid: string;
-    tabId: number;
-    capability: StopDrainCapability;
-    ackReceived: boolean;
-    settling: boolean;
-    resolve: () => void;
-    timeout: ReturnType<typeof setTimeout>;
+    wait: Promise<void>;
+    notification: Promise<void>;
   }
 >();
-const inFlightContentMessagesByTab = new Map<number, number>();
+const inFlightContentMessagesByActivation = new Map<ContentActivationId, number>();
+const contentEventBatchLedger = new ContentEventBatchLedger<PortLike>();
+const contentEventBatchAdmissionsByActivation = new Map<
+  ContentActivationId,
+  Set<ContentEventBatchAdmission>
+>();
+const pendingContentRevocations = new Map<ContentActivationId, Promise<void>>();
+const contentRevocationControllers = new Map<
+  ContentActivationId,
+  { key: string; controller: MainWorldControllerHint }
+>();
+const contentRevocationRetryTimers = new Map<ContentActivationId, ReturnType<typeof setTimeout>>();
+const pendingContentArmWaiters = new Set<{
+  runtime: SessionRuntime;
+  fence: VolatileCaptureFence;
+  frameId: number;
+  documentId?: string;
+  excludedDocumentId?: string;
+  awaitingCommittedDocument?: boolean;
+  resolve: (activation: SessionContentActivation) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}>();
 const pendingOffscreenRequests = new Map<
   string,
   {
@@ -596,6 +801,7 @@ const SESSION_ANNOTATIONS_STORAGE_KEY = "webblackbox.runtime.sessionAnnotations"
 const EXPORT_AUDIT_STORAGE_KEY = "webblackbox.audit.exports";
 const EXPORT_AUDIT_MAX_EVENTS = 200;
 const RUNTIME_STATE_PERSIST_DEBOUNCE_MS = 500;
+const RUNTIME_RESTORATION_RETRY_MS = 1_000;
 const RETAINED_STOPPING_RETRY_DELAY_MS = 30_000;
 const ACTION_SCREENSHOT_RAW_TYPES = new Set(["click", "dblclick", "submit", "marker"]);
 const PERF_LOG_FLAG = "__WEBBLACKBOX_PERF__";
@@ -605,7 +811,15 @@ const OFFSCREEN_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
 const OFFSCREEN_REQUEST_TIMEOUT_EXPORT_MS = 12 * 60_000;
 const OFFSCREEN_PORT_READY_MAX_ATTEMPTS = 200;
 const OFFSCREEN_PORT_READY_WAIT_MS = 25;
-const STOP_DRAIN_ACK_TIMEOUT_MS = 6_000;
+const STOP_DRAIN_ACK_TIMEOUT_MS = 15_000;
+const STOP_DRAIN_NOTIFICATION_TIMEOUT_MS = 2_000;
+const STOP_DRAIN_NOTIFICATION_RETRY_MS = 500;
+const STOP_DRAIN_QUEUE_SETTLE_TIMEOUT_MS = 1_500;
+const MAIN_WORLD_REVOCATION_TIMEOUT_MS = 2_000;
+const MAIN_WORLD_REVOCATION_RETRY_MS = 500;
+const SCREEN_RECORDING_FINALIZATION_MAX_ATTEMPTS = 5;
+const SCREEN_RECORDING_FINALIZATION_RETRY_INITIAL_MS = 250;
+const CONTENT_ARM_TIMEOUT_MS = 5_000;
 const CDP_ARTIFACT_TIMEOUT_MS = 5_000;
 const CDP_HEAP_SNAPSHOT_TIMEOUT_MS = 8_000;
 const CDP_CHILD_SETTLE_TIMEOUT_MS = 15_000;
@@ -624,6 +838,13 @@ const runtimeCleanupScheduler = new RuntimeCleanupScheduler({
       return;
     }
 
+    const retainedStopped = pendingRuntimeRestorationsBySid.get(sid);
+
+    if (retainedStopped?.state === "stopped") {
+      await retryRetainedStoppedRuntimeRecovery(retainedStopped);
+      return;
+    }
+
     const runtime = sessionsBySid.get(sid);
 
     if (runtime?.stoppedAt) {
@@ -632,15 +853,27 @@ const runtimeCleanupScheduler = new RuntimeCleanupScheduler({
   }
 });
 let runtimeStateRestored = false;
-const runtimeStateRestorePromise = restoreRuntimeState()
-  .catch(async (error) => {
-    console.warn("[WebBlackbox] runtime state restoration failed closed", error);
-    await failClosedRuntimeRestoration();
-  })
-  .finally(() => {
+const runtimeStateRestorePromise = establishDurableRuntimeRestorationReadiness({
+  restore: restoreRuntimeState,
+  failClosed: failClosedRuntimeRestoration,
+  waitForRetry: () => wait(RUNTIME_RESTORATION_RETRY_MS),
+  shouldRetryRestore: () =>
+    !runtimeRestorationCheckpointRewriteAllowed &&
+    runtimeRestorationSourceRowsBySid.size === 0 &&
+    pendingRuntimeRestorationsBySid.size === 0 &&
+    retainedStoppingRuntimesBySid.size === 0 &&
+    sessionsBySid.size === 0,
+  markReady: () => {
     runtimeStateRestored = true;
     notifyOffscreenPipelineStatus();
-  });
+  },
+  onRestoreFailure: (error) => {
+    console.warn("[WebBlackbox] runtime state restoration failed closed", error);
+  },
+  onFailClosedRetry: (error) => {
+    console.warn("[WebBlackbox] durable fail-closed checkpoint retry scheduled", error);
+  }
+});
 
 chromeApi?.alarms?.onAlarm.addListener((alarm) => {
   void runtimeCleanupScheduler.handleAlarm(alarm.name).catch((error) => {
@@ -663,12 +896,6 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   if (port.name === PORT_NAMES.offscreen) {
     offscreenPort = port;
     notifyOffscreenPipelineStatus();
-  }
-
-  if (port.name === PORT_NAMES.content) {
-    void syncContentPortStateOnConnect(port).catch((error) => {
-      logInboundMessageFailure("content.connect", error, port);
-    });
   }
 
   pushSessionList();
@@ -694,6 +921,7 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
 
   const onDisconnect = () => {
     if (port.name === PORT_NAMES.content) {
+      contentActivations.unbindPort(port);
       disconnectContentPort(connectedPorts, port);
     } else {
       connectedPorts.delete(port);
@@ -717,116 +945,6 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   port.onMessage.addListener(onMessage);
   port.onDisconnect.addListener(onDisconnect);
 });
-
-async function syncContentPortStateOnConnect(port: PortLike): Promise<void> {
-  const tabId = port.sender?.tab?.id;
-
-  if (typeof tabId !== "number") {
-    sendInactiveContentPortState(port);
-    return;
-  }
-
-  const runtime = sessionsByTab.get(tabId);
-
-  if (
-    !runtime ||
-    !isVolatileCaptureOpen(runtime.captureFence) ||
-    runtime.stopping ||
-    runtime.stoppedAt
-  ) {
-    sendInactiveContentPortState(port);
-    return;
-  }
-
-  if (!(await authorizeContentSenderForReady(runtime, port.sender))) {
-    sendContentPortRecordingState(port, runtime, false);
-    await deactivateDeniedContentFrame(runtime, port.sender, port);
-
-    return;
-  }
-
-  if (!isRuntimeCaptureAdmitted(runtime.activationState)) {
-    sendContentPortRecordingState(port, runtime, false);
-    return;
-  }
-
-  syncContentPortRecordingState(port);
-}
-
-function syncContentPortRecordingState(port: PortLike): void {
-  const tabId = port.sender?.tab?.id;
-
-  if (typeof tabId !== "number") {
-    sendInactiveContentPortState(port);
-    return;
-  }
-
-  const runtime = sessionsByTab.get(tabId);
-
-  if (
-    !runtime ||
-    !isRuntimeCaptureAdmitted(runtime.activationState) ||
-    !isVolatileCaptureOpen(runtime.captureFence) ||
-    runtime.stopping ||
-    runtime.stoppedAt
-  ) {
-    sendInactiveContentPortState(port);
-    return;
-  }
-
-  if (!authorizeContentSender(runtime, port.sender)) {
-    sendContentPortRecordingState(port, runtime, false);
-
-    if (shouldStopRuntimeForDeniedContentSender(runtime, port.sender)) {
-      requestStopRuntimeIfCurrent(runtime, "content-port-denied");
-    } else {
-      failContentSender(runtime, port.sender);
-    }
-    return;
-  }
-
-  sendContentPortRecordingState(port, runtime, true);
-}
-
-function sendInactiveContentPortState(port: PortLike): void {
-  try {
-    port.postMessage({
-      kind: "sw.recording-status",
-      active: false
-    });
-  } catch (error) {
-    logPortSendFailure("sw.recording-status", error, {
-      tabId: port.sender?.tab?.id,
-      frameId: port.sender?.frameId
-    });
-  }
-}
-
-function sendContentPortRecordingState(
-  port: PortLike,
-  runtime: SessionRuntime,
-  active: boolean
-): void {
-  const sampling = toStatusSampling(runtime);
-
-  try {
-    port.postMessage({
-      kind: "sw.recording-status",
-      active,
-      tabId: runtime.tabId,
-      sid: runtime.sid,
-      mode: runtime.mode,
-      sampling,
-      capturePolicy: runtime.config.capturePolicy
-    });
-  } catch (error) {
-    logPortSendFailure("sw.recording-status", error, {
-      tabId: runtime.tabId,
-      sid: runtime.sid,
-      mode: runtime.mode
-    });
-  }
-}
 
 chromeApi?.runtime?.onMessage.addListener((rawMessage, sender, sendResponse) => {
   const message = parseExtensionInboundMessage(rawMessage, {
@@ -888,7 +1006,13 @@ chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
 
   if (usesExactLiteTopDocumentAuthorization(runtime)) {
     if (signal.candidateUrl) {
-      void handleExactLiteTabUrlChanged(runtime, signal.candidateUrl).catch((error) => {
+      const hintClaim = claimCurrentRuntimeNavigation(runtime, signal.source, signal.candidateUrl);
+
+      if (!hintClaim) {
+        return;
+      }
+
+      void handleExactLiteTabUrlChanged(hintClaim, signal.candidateUrl).catch((error) => {
         console.warn("[WebBlackbox] failed to apply exact Lite tab URL change", {
           tabId,
           error: error instanceof Error ? error.message : String(error)
@@ -904,6 +1028,10 @@ chromeApi?.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
         });
       });
     }
+    return;
+  }
+
+  if (runtime.mode === "full" && hasExactWebNavigationTracking()) {
     return;
   }
 
@@ -930,15 +1058,110 @@ chromeApi?.tabs?.onRemoved?.addListener((tabId) => {
 });
 
 chromeApi?.webNavigation?.onCommitted.addListener((details) => {
-  void handleCommittedContentDocument(details).catch((error) => {
+  const owner = sessionsByTab.get(details.tabId);
+  const task = handleCommittedContentDocument(details);
+  // The handler claims top-level ownership synchronously before its first
+  // policy await. Snapshot afterward so the catch path is fenced from later
+  // same-URL commits and replacement runtimes.
+  const navigationClaim = owner
+    ? snapshotCurrentRuntimeNavigation(owner, "web-navigation-commit", details.url)
+    : null;
+  const exactTransaction =
+    owner && navigationClaim
+      ? [...owner.exactWebNavigationTransactions.values()].find(
+          (candidate) => candidate.claim.revision === navigationClaim.revision
+        )
+      : undefined;
+  const documentRevisionKey =
+    owner && typeof details.documentId === "string" && details.documentId.length > 0
+      ? contentActivationParentKey(details.frameId, details.documentId)
+      : null;
+  const failureClaim = navigationClaim
+    ? {
+        navigation: navigationClaim,
+        documentRevisionKey,
+        documentRevision: documentRevisionKey
+          ? (owner?.contentNavigationRevisions.get(documentRevisionKey) ?? 0)
+          : 0,
+        cdpRestoreEpoch: owner?.cdpRestoreEpoch ?? 0,
+        ...(exactTransaction ? { exactTransaction } : {})
+      }
+    : null;
+
+  void task.catch((error) => {
     console.warn("[WebBlackbox] committed document handling failed closed", {
       tabId: details.tabId,
       frameId: details.frameId,
       documentId: details.documentId,
       error: error instanceof Error ? error.message : String(error)
     });
+    if (failureClaim) {
+      void failCommittedContentDocument(details, failureClaim);
+    }
   });
 });
+
+chromeApi?.webNavigation?.onHistoryStateUpdated?.addListener((details) => {
+  const runtime = sessionsByTab.get(details.tabId);
+  if (details.frameId === 0 && runtime?.mode === "full" && runtime.cdpRouter) {
+    return;
+  }
+
+  dispatchSameDocumentNavigation(details, "history-state");
+});
+
+chromeApi?.webNavigation?.onReferenceFragmentUpdated?.addListener((details) => {
+  const runtime = sessionsByTab.get(details.tabId);
+  if (details.frameId === 0 && runtime?.mode === "full" && runtime.cdpRouter) {
+    return;
+  }
+
+  dispatchSameDocumentNavigation(details, "fragment");
+});
+
+function dispatchSameDocumentNavigation(
+  details: { tabId: number; frameId: number; documentId?: string; url: string },
+  source: "history-state" | "fragment"
+): void {
+  const owner = sessionsByTab.get(details.tabId);
+  const task = handleSameDocumentNavigation(details);
+  const revisionKey =
+    typeof details.documentId === "string" && details.documentId.length > 0
+      ? contentActivationParentKey(details.frameId, details.documentId)
+      : null;
+  // Async functions run synchronously until their first await, so this
+  // snapshots the exact revision installed by handleSameDocumentNavigation.
+  const contentRevision = revisionKey
+    ? owner?.contentNavigationRevisions.get(revisionKey)
+    : undefined;
+  const navigationRevision = owner?.navigationRevision;
+  const cdpRestoreEpoch = owner?.cdpRestoreEpoch;
+
+  void task.catch((error) => {
+    console.warn(`[WebBlackbox] ${source} activation refresh failed closed`, {
+      tabId: details.tabId,
+      frameId: details.frameId,
+      documentId: details.documentId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+
+    if (
+      owner &&
+      revisionKey &&
+      contentRevision !== undefined &&
+      navigationRevision !== undefined &&
+      cdpRestoreEpoch !== undefined
+    ) {
+      void failSameDocumentNavigationIfCurrent(details, {
+        runtime: owner,
+        revisionKey,
+        contentRevision,
+        navigationRevision,
+        cdpRestoreEpoch
+      });
+    }
+  });
+}
 
 async function handleInboundMessage(
   message: ExtensionInboundMessage,
@@ -1005,194 +1228,1515 @@ async function handleInboundMessage(
   }
 
   if (message.kind === "content.marker") {
-    const tabId = sender?.tab?.id;
-    const frame = normalizeContentFrameId(sender?.frameId);
-    const runtime = typeof tabId === "number" ? sessionsByTab.get(tabId) : undefined;
+    const activation = resolveBoundContentActivation(
+      message.activationId,
+      message.documentUrl,
+      port,
+      sender,
+      ["active"]
+    );
 
-    if (
-      runtime &&
-      isRuntimeCaptureAdmitted(runtime.activationState) &&
-      authorizeContentSender(runtime, sender, message.documentUrl)
-    ) {
-      ingestRawEvent({
-        source: "content",
-        rawType: "marker",
-        tabId: runtime.tabId,
-        sid: runtime.sid,
-        t: Date.now(),
-        mono: monotonicTime(),
-        frame,
-        payload: {
-          message: message.message
-        }
-      });
-    } else if (runtime) {
-      await deactivateDeniedContentFrame(runtime, sender, port);
+    if (!activation) {
+      return;
     }
+
+    ingestRawEvent({
+      source: "content",
+      rawType: "marker",
+      tabId: activation.tabId,
+      sid: activation.sid,
+      t: Date.now(),
+      mono: monotonicTime(),
+      frame: normalizeContentFrameId(activation.frameId),
+      payload: {
+        message: message.message
+      }
+    });
 
     return;
   }
 
   if (message.kind === "content.ready") {
-    const tabId = sender?.tab?.id;
+    return prepareContentActivation(message, sender);
+  }
 
-    if (typeof tabId !== "number") {
-      return {
-        kind: "sw.recording-status",
-        active: false
-      };
-    }
+  if (message.kind === "content.main-world-control") {
+    return controlContentMainWorld(message, sender);
+  }
 
-    const runtime = sessionsByTab.get(tabId);
+  if (message.kind === "content.armed") {
+    return armContentActivation(message, sender);
+  }
 
-    if (
-      !runtime ||
-      !isVolatileCaptureOpen(runtime.captureFence) ||
-      runtime.stopping ||
-      runtime.stoppedAt
-    ) {
-      return {
-        kind: "sw.recording-status",
-        active: false
-      };
-    }
-
-    if (!(await authorizeContentSenderForReady(runtime, sender, message.documentUrl))) {
-      await deactivateDeniedContentFrame(runtime, sender, port);
-
-      return {
-        kind: "sw.recording-status",
-        active: false,
-        tabId: runtime.tabId,
-        sid: runtime.sid,
-        mode: runtime.mode,
-        capturePolicy: runtime.config.capturePolicy
-      };
-    }
-
-    if (!isRuntimeCaptureAdmitted(runtime.activationState)) {
-      return {
-        kind: "sw.recording-status",
-        active: false,
-        tabId: runtime.tabId,
-        sid: runtime.sid,
-        mode: runtime.mode,
-        capturePolicy: runtime.config.capturePolicy
-      };
-    }
-
-    const sampling = toStatusSampling(runtime);
-
-    if (port?.name === PORT_NAMES.content) {
-      syncContentPortRecordingState(port);
-      return {
-        ok: true
-      };
-    }
-
-    return {
-      kind: "sw.recording-status",
-      active: true,
-      tabId: runtime.tabId,
-      sid: runtime.sid,
-      mode: runtime.mode,
-      sampling,
-      capturePolicy: runtime.config.capturePolicy
-    };
+  if (message.kind === "content.bind") {
+    bindContentActivationPort(message, port, sender);
+    return;
   }
 
   if (message.kind === "content.stop-drained") {
-    markStopDrainAckReceived(message, sender);
+    await markStopDrainAckReceived(message, port, sender);
     return;
   }
 
   if (message.kind === "content.events") {
-    const tabId = sender?.tab?.id;
-    const frame = normalizeContentFrameId(sender?.frameId);
+    const activeActivation = resolveBoundContentActivation(
+      message.activationId,
+      message.documentUrl,
+      port,
+      sender,
+      ["active"]
+    );
+    const drainingActivation = activeActivation
+      ? null
+      : resolveBoundContentActivation(message.activationId, message.documentUrl, port, sender, [
+          "draining"
+        ]);
+    const activation = activeActivation ?? drainingActivation;
+
+    if (!activation || message.events.length === 0) {
+      return;
+    }
+
+    const runtime = activation.runtime;
+    if (activeActivation && runtime.stopRequestedAt !== undefined) {
+      return;
+    }
+
+    const stopDrain = drainingActivation
+      ? getStopDrainCapability(runtime.sid, activation.activationId)
+      : undefined;
 
     if (
-      typeof tabId !== "number" ||
-      !Array.isArray(message.events) ||
-      message.events.length === 0
+      drainingActivation &&
+      (!stopDrain ||
+        !canAdmitStopDrainBatch(stopDrain, {
+          runtime,
+          fence: runtime.captureFence,
+          activationId: activation.activationId,
+          token: message.stopDrainToken,
+          sid: activation.sid,
+          tabId: activation.tabId,
+          frameId: activation.frameId,
+          documentId: activation.documentId,
+          documentUrl: message.documentUrl
+        }))
     ) {
-      return;
-    }
-
-    const runtime = sessionsByTab.get(tabId);
-
-    if (!runtime) {
-      return;
-    }
-
-    const activeCapture =
-      isRuntimeCaptureAdmitted(runtime.activationState) &&
-      isVolatileCaptureOpen(runtime.captureFence) &&
-      !runtime.stopping &&
-      !runtime.stoppedAt;
-    const activeSenderAuthorized =
-      activeCapture && authorizeContentSender(runtime, sender, message.documentUrl);
-    const stopDrain = pendingStopDrainAcks.get(runtime.sid)?.capability;
-
-    if (!activeSenderAuthorized && !stopDrain) {
-      if (activeCapture) {
-        await deactivateDeniedContentFrame(runtime, sender, port);
+      if (stopDrain) {
+        sendStopDrainNotice(port!, stopDrain);
       }
-
       return;
     }
 
-    const acceptedEvents: Array<{
-      rawEvent: RawRecorderEvent;
-      stopDrainClaim: StopDrainClaim | null;
-    }> = [];
-
-    for (const rawEvent of message.events) {
-      const stopDrainClaim = activeSenderAuthorized
-        ? null
-        : claimStopDrainEvent(stopDrain!, {
-            runtime,
-            fence: runtime.captureFence,
-            token: message.stopDrainToken ?? "",
-            sid: rawEvent.sid,
-            tabId,
-            frameId: normalizeSenderFrameId(sender),
-            documentUrl: message.documentUrl ?? "",
-            rawType: rawEvent.rawType,
-            reason: asRecord(rawEvent.payload)?.reason
-          });
-
-      if (activeSenderAuthorized || stopDrainClaim) {
-        acceptedEvents.push({ rawEvent, stopDrainClaim });
+    const isDeliveryOwnerCurrent = (): boolean => {
+      const current = resolveBoundContentActivation(
+        message.activationId,
+        message.documentUrl,
+        port,
+        sender,
+        activeActivation ? ["active"] : ["draining"]
+      );
+      if (
+        !current ||
+        current.runtime !== runtime ||
+        current.fence !== activation.fence ||
+        current.sid !== activation.sid ||
+        current.tabId !== activation.tabId ||
+        current.frameId !== activation.frameId ||
+        current.documentId !== activation.documentId ||
+        current.url !== activation.url ||
+        current.mode !== activation.mode
+      ) {
+        return false;
       }
+      if (activeActivation) {
+        return runtime.stopRequestedAt === undefined;
+      }
+      return Boolean(
+        stopDrain &&
+        canAdmitStopDrainBatch(stopDrain, {
+          runtime,
+          fence: runtime.captureFence,
+          activationId: activation.activationId,
+          token: message.stopDrainToken,
+          sid: activation.sid,
+          tabId: activation.tabId,
+          frameId: activation.frameId,
+          documentId: activation.documentId,
+          documentUrl: message.documentUrl
+        })
+      );
+    };
+    const fingerprint = await fingerprintContentEventBatch(message.events);
+    if (!isDeliveryOwnerCurrent()) {
+      return;
     }
-
-    if (acceptedEvents.length === 0) {
+    // Serialize behind any delivery output admitted by a predecessor activation. Its receipt
+    // must become durable before a replacement activation decides which raw indexes to replay.
+    const deliveryBatch = {
+      tabId: activation.tabId,
+      frameId: activation.frameId,
+      documentId: activation.documentId,
+      batchId: message.batchId,
+      fingerprint,
+      eventCount: message.events.length
+    } as const;
+    const deliveryQuery: PipelineDeliveryReceiptQuery = {
+      tabId: deliveryBatch.tabId,
+      frameId: deliveryBatch.frameId,
+      documentId: deliveryBatch.documentId,
+      batchId: deliveryBatch.batchId
+    };
+    const receiptRead = await readContentEventBatchReceiptAfterBarrier({
+      flushPendingDelivery: () => flushContentEventBatchDurably(runtime),
+      isOwnerCurrent: isDeliveryOwnerCurrent,
+      readReceipt: () => runtime.pipeline.getDeliveryReceipt(deliveryQuery)
+    });
+    if (receiptRead.kind === "stale") {
+      return;
+    }
+    const durableReceipt = receiptRead.receipt;
+    const durableReceiptDecision = classifyContentEventBatchReceipt(durableReceipt, deliveryBatch);
+    if (durableReceiptDecision.kind === "mismatch") {
+      await revokeContentActivationSnapshots([activation], "content-delivery-mismatch");
+      return;
+    }
+    if (durableReceiptDecision.kind === "complete") {
+      if (
+        stopDrain &&
+        !commitStopDrainBatchClaims(stopDrain, message.batchId, runtime, runtime.captureFence)
+      ) {
+        logInboundMessageFailure(
+          "content.events",
+          new Error("Stop-drain claims remain incomplete for a durable content batch."),
+          port,
+          { activationId: activation.activationId, batchId: message.batchId }
+        );
+        return;
+      }
+      sendContentEventBatchAck(port!, activation.activationId, message.batchId);
       return;
     }
 
-    adjustInFlightContentMessages(tabId, 1);
+    const batchLookup = getOrCreateContentEventBatchRecord(
+      activation.activationId,
+      message.batchId,
+      fingerprint,
+      port!
+    );
+    const batchRecord = batchLookup.record;
+
+    if (batchRecord.fingerprint !== fingerprint) {
+      return;
+    }
+
+    if (batchRecord.status === "completed") {
+      await revokeContentActivationSnapshots([activation], "content-delivery-inconsistent");
+      return;
+    }
+
+    if (!batchLookup.process) {
+      return;
+    }
+
+    for (const eventIndex of durableReceiptDecision.committedEventIndexes) {
+      batchRecord.completedEventIndexes.add(eventIndex);
+    }
+
+    const batchAdmission: ContentEventBatchAdmission | null = activeActivation
+      ? {
+          kind: "content-event-batch",
+          runtime,
+          fence: runtime.captureFence,
+          activationId: activation.activationId,
+          batchId: message.batchId,
+          sid: activation.sid,
+          tabId: activation.tabId,
+          documentUrl: message.documentUrl,
+          frameId: activation.frameId,
+          documentId: activation.documentId,
+          mode: activation.mode,
+          valid: true
+        }
+      : null;
+    if (batchAdmission) {
+      let admissions = contentEventBatchAdmissionsByActivation.get(activation.activationId);
+      if (!admissions) {
+        admissions = new Set();
+        contentEventBatchAdmissionsByActivation.set(activation.activationId, admissions);
+      }
+      admissions.add(batchAdmission);
+    }
+    adjustInFlightContentMessages(activation.activationId, 1);
     let sliceStartedAt = perfNow();
+    let completed = false;
+    const commitNoOutput = async (eventIndex: number): Promise<void> => {
+      if (!isDeliveryOwnerCurrent()) {
+        throw new Error("Content delivery owner changed before no-output commit.");
+      }
+      await runtime.pipeline.commitDeliveryProgress([
+        { ...deliveryBatch, eventIndex, outcome: "no-output" }
+      ]);
+      if (!isDeliveryOwnerCurrent()) {
+        throw new Error("Content delivery owner changed after no-output commit.");
+      }
+    };
 
     try {
-      for (const { rawEvent, stopDrainClaim } of acceptedEvents) {
-        ingestRawEvent(
-          {
-            ...rawEvent,
-            tabId,
-            sid: runtime.sid,
-            frame
-          },
-          stopDrainClaim
-        );
+      const attempt = await processContentEventBatchAttempt({
+        record: batchRecord,
+        eventCount: message.events.length,
+        processEvent: async (eventIndex) => {
+          const rawEvent = message.events[eventIndex]!;
+          if (rawEvent.sid !== activation.sid || rawEvent.tabId !== activation.tabId) {
+            if (drainingActivation) {
+              throw new Error("Stop-drain event identity does not match its activation.");
+            }
+            await commitNoOutput(eventIndex);
+            return;
+          }
 
-        if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
-          await wait(0);
-          sliceStartedAt = perfNow();
+          const stopDrainEventBinding = stopDrain
+            ? {
+                runtime,
+                fence: runtime.captureFence,
+                activationId: activation.activationId,
+                token: message.stopDrainToken,
+                sid: rawEvent.sid,
+                tabId: activation.tabId,
+                frameId: activation.frameId,
+                documentId: activation.documentId,
+                documentUrl: message.documentUrl,
+                batchId: message.batchId,
+                eventIndex,
+                rawType: rawEvent.rawType,
+                reason: asRecord(rawEvent.payload)?.reason,
+                capturedAt: rawEvent.t
+              }
+            : null;
+          const stopDrainClaim = activeActivation
+            ? null
+            : stopDrain && stopDrainEventBinding
+              ? claimStopDrainEvent(stopDrain, stopDrainEventBinding)
+              : null;
+
+          if (drainingActivation && !stopDrainClaim) {
+            if (
+              stopDrain &&
+              stopDrainEventBinding &&
+              dropUnclaimableStopDrainOrdinaryEvent(stopDrain, stopDrainEventBinding)
+            ) {
+              await commitNoOutput(eventIndex);
+              return;
+            }
+            throw new Error("Stop-drain event could not reserve its exact capability claim.");
+          }
+
+          if (activeActivation || stopDrainClaim) {
+            try {
+              const producedOutput = await ingestRawEvent(
+                {
+                  ...rawEvent,
+                  frame: normalizeContentFrameId(activation.frameId)
+                },
+                stopDrainClaim,
+                batchAdmission,
+                { ...deliveryBatch, eventIndex }
+              );
+              if (!producedOutput) {
+                if (
+                  (batchAdmission && !isContentEventBatchAdmissionValid(batchAdmission, runtime)) ||
+                  (stopDrainClaim &&
+                    !isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence))
+                ) {
+                  throw new Error("Content event admission changed before materialization.");
+                }
+                await commitNoOutput(eventIndex);
+              }
+            } catch (error) {
+              if (stopDrainClaim) {
+                releaseStopDrainClaim(stopDrainClaim);
+              }
+              throw error;
+            }
+          }
+
+          if (perfNow() - sliceStartedAt >= CONTENT_EVENT_SLICE_BUDGET_MS) {
+            await wait(0);
+            sliceStartedAt = perfNow();
+          }
+        },
+        flush: () => flushContentEventBatchDurably(runtime)
+      });
+
+      if (attempt.completed) {
+        const committedReceipt = await runtime.pipeline.getDeliveryReceipt(deliveryQuery);
+        const committedReceiptDecision = classifyContentEventBatchReceipt(
+          committedReceipt,
+          deliveryBatch
+        );
+        if (!isDeliveryOwnerCurrent() || committedReceiptDecision.kind !== "complete") {
+          throw new Error("Content event batch lacks a complete durable delivery receipt.");
+        }
+        if (
+          stopDrain &&
+          !commitStopDrainBatchClaims(stopDrain, message.batchId, runtime, runtime.captureFence)
+        ) {
+          throw new Error("Stop-drain batch claims could not be committed after durable flush.");
         }
       }
+      completed = attempt.completed;
+      for (const failure of attempt.failures) {
+        logInboundMessageFailure("content.events", failure.error, port, {
+          activationId: activation.activationId,
+          batchId: message.batchId,
+          ...(failure.eventIndex === undefined ? {} : { eventIndex: failure.eventIndex })
+        });
+      }
+    } catch (error) {
+      logInboundMessageFailure("content.events", error, port, {
+        activationId: activation.activationId,
+        batchId: message.batchId
+      });
     } finally {
-      adjustInFlightContentMessages(tabId, -1);
+      if (batchAdmission) {
+        batchAdmission.valid = false;
+        const admissions = contentEventBatchAdmissionsByActivation.get(activation.activationId);
+        admissions?.delete(batchAdmission);
+        if (admissions?.size === 0) {
+          contentEventBatchAdmissionsByActivation.delete(activation.activationId);
+        }
+      }
+      if (completed) {
+        completeContentEventBatch(activation.activationId, message.batchId, batchRecord);
+      } else {
+        retryContentEventBatch(activation.activationId, message.batchId, batchRecord);
+      }
+      adjustInFlightContentMessages(activation.activationId, -1);
     }
+
+    return;
+  }
+}
+
+async function prepareContentActivation(
+  message: Extract<ExtensionInboundMessage, { kind: "content.ready" }>,
+  sender: MessageSenderLike | undefined
+): Promise<unknown> {
+  const tabId = sender?.tab?.id;
+  const runtime = typeof tabId === "number" ? sessionsByTab.get(tabId) : undefined;
+
+  if (!runtime || !isRuntimeCurrentCaptureOpen(runtime)) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  const frameId = normalizeSenderFrameId(sender);
+  const documentId = sender?.documentId;
+
+  if (frameId < 0 || typeof documentId !== "string" || documentId.length === 0) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  if (
+    sender?.url !== message.documentUrl &&
+    !(
+      hasExactWebNavigationTracking() &&
+      runtime.contentDocuments.matchesSameDocumentSender(
+        {
+          tabId: runtime.tabId,
+          frameId,
+          documentId,
+          url: message.documentUrl
+        },
+        sender?.url
+      )
+    )
+  ) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  const policyRevisionKey = contentActivationParentKey(frameId, documentId);
+  if (runtime.pendingContentPolicyRevisions.has(policyRevisionKey)) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  if (runtime.mode === "full" && message.mainWorldController !== null) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  const parent = runtime.contentActivationParents.get(policyRevisionKey);
+  if (frameId > 0 && (!parent || !isContentParentReady(runtime, parent))) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  const currentActivation = message.currentActivationId
+    ? contentActivations.lookupByActivationId(message.currentActivationId)
+    : null;
+
+  if (currentActivation && !matchesContentActivationStableSender(currentActivation, sender)) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  const activeDocument = runtime.contentDocuments.get(frameId);
+  const awaitingExactSameDocumentPolicy =
+    hasExactWebNavigationTracking() &&
+    activeDocument?.documentId === documentId &&
+    activeDocument.url !== message.documentUrl;
+
+  if (!(await authorizeContentSenderForReady(runtime, sender, message.documentUrl))) {
+    if (awaitingExactSameDocumentPolicy) {
+      return { kind: "sw.content-inactive", readyId: message.readyId };
+    }
+    await deactivateDeniedContentFrame(runtime, sender);
+    rejectContentArmWaiters(runtime, sender, "Content document authorization was denied.");
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  if (!isRuntimeCurrentCaptureOpen(runtime)) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  if (runtime.pendingContentPolicyRevisions.has(policyRevisionKey)) {
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  if (runtime.mode === "lite") {
+    const controller = await resolveMainWorldControllerForReady(
+      runtime,
+      { tabId: runtime.tabId, frameId, documentId },
+      message.mainWorldController
+    );
+    if (!controller || !isRuntimeCurrentCaptureOpen(runtime)) {
+      return { kind: "sw.content-inactive", readyId: message.readyId };
+    }
+    if (!rememberMainWorldController(runtime, policyRevisionKey, controller)) {
+      return { kind: "sw.content-inactive", readyId: message.readyId };
+    }
+  }
+
+  if (frameId > 0 && (!parent || !isContentParentReady(runtime, parent))) {
+    runtime.contentDocuments.blockDocument(frameId, documentId);
+    syncAuthorizedContentFrames(runtime);
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  const existingForDocument = contentActivations
+    .listRuntime(runtime, runtime.captureFence)
+    .find((candidate) => candidate.frameId === frameId && candidate.documentId === documentId);
+  if (existingForDocument && existingForDocument.readyId !== message.readyId) {
+    await revokeContentFrameActivations(runtime, frameId, "activation-replaced", documentId);
+  }
+
+  const activation = contentActivations.prepare({
+    runtime,
+    fence: runtime.captureFence,
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    frameId,
+    documentId,
+    url: message.documentUrl,
+    mode: runtime.mode,
+    readyId: message.readyId,
+    ...(parent ? { parent } : {})
+  });
+
+  if (!activation) {
+    rejectContentArmWaiters(runtime, sender, "Content activation preparation failed closed.");
+    return { kind: "sw.content-inactive", readyId: message.readyId };
+  }
+
+  return {
+    kind: "sw.content-prepare",
+    readyId: activation.readyId,
+    activationId: activation.activationId,
+    sid: activation.sid,
+    tabId: activation.tabId,
+    mode: activation.mode,
+    sampling: toStatusSampling(runtime),
+    capturePolicy: runtime.config.capturePolicy,
+    mainWorldController:
+      runtime.mode === "lite"
+        ? (runtime.contentMainWorldProofs.get(policyRevisionKey) ?? null)
+        : null
+  };
+}
+
+async function resolveMainWorldControllerForReady(
+  runtime: SessionRuntime,
+  target: { tabId: number; frameId: number; documentId: string },
+  isolatedHint: MainWorldControllerHint | null
+): Promise<MainWorldControllerHint | null> {
+  if (!isolatedHint) {
+    return null;
+  }
+  const key = contentActivationParentKey(target.frameId, target.documentId);
+  const installed = runtime.contentMainWorldProofs.get(key);
+  if (installed && !sameMainWorldControllerCapability(installed, isolatedHint)) {
+    return null;
+  }
+  if (
+    installed &&
+    installed.revision === isolatedHint.revision &&
+    installed.phase === isolatedHint.phase &&
+    installed.activationId === isolatedHint.activationId
+  ) {
+    return installed;
+  }
+
+  try {
+    const bootstrap = await bootstrapMainWorldDirectController(chromeApi, target, isolatedHint);
+    if (bootstrap.kind !== "installed" && bootstrap.kind !== "existing") {
+      return null;
+    }
+    const probed = await controlMainWorldDirectController(chromeApi, target, isolatedHint, {
+      kind: "probe"
+    });
+    const recovered = advanceControllerFromControl(isolatedHint, probed);
+    return recovered && sameMainWorldControllerCapability(recovered, isolatedHint)
+      ? recovered
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberMainWorldController(
+  runtime: SessionRuntime,
+  key: string,
+  candidate: MainWorldControllerHint
+): boolean {
+  const current = runtime.contentMainWorldProofs.get(key);
+  if (!current) {
+    runtime.contentMainWorldProofs.set(key, candidate);
+    return true;
+  }
+  if (!sameMainWorldControllerCapability(current, candidate)) {
+    return false;
+  }
+  if (candidate.revision < current.revision) {
+    return true;
+  }
+  if (
+    candidate.revision === current.revision &&
+    (candidate.phase !== current.phase || candidate.activationId !== current.activationId)
+  ) {
+    return false;
+  }
+  runtime.contentMainWorldProofs.set(key, candidate);
+  return true;
+}
+
+async function controlContentMainWorld(
+  message: Extract<ExtensionInboundMessage, { kind: "content.main-world-control" }>,
+  sender: MessageSenderLike | undefined
+): Promise<unknown> {
+  const activation = contentActivations.lookupByActivationId(message.activationId, [
+    "prepared",
+    "active",
+    "draining"
+  ]);
+  const stopIntentOwnsActiveDrain =
+    activation?.state === "active" &&
+    message.operation === "drain" &&
+    activation.runtime.stopRequestedAt !== undefined &&
+    isMapEntrySame(sessionsByTab, activation.tabId, activation.runtime) &&
+    isMapEntrySame(sessionsBySid, activation.sid, activation.runtime);
+  if (
+    !activation ||
+    !matchesContentActivationSender(activation, sender, message.documentUrl) ||
+    (message.operation === "activate" && activation.state !== "prepared") ||
+    (message.operation === "drain" &&
+      activation.state !== "active" &&
+      activation.state !== "draining") ||
+    (activation.state === "draining"
+      ? getStopDrainCapability(activation.sid, activation.activationId) === undefined
+      : !stopIntentOwnsActiveDrain && !isRuntimeCurrentCaptureOpen(activation.runtime))
+  ) {
+    return null;
+  }
+
+  const key = contentActivationParentKey(activation.frameId, activation.documentId);
+  const controller = activation.runtime.contentMainWorldProofs.get(key);
+  if (!controller) {
+    return null;
+  }
+  const target = {
+    tabId: activation.tabId,
+    frameId: activation.frameId,
+    documentId: activation.documentId
+  };
+  const outcome = await runMainWorldControlWithRecovery(target, controller, (revision) =>
+    message.operation === "activate"
+      ? {
+          kind: "activate" as const,
+          revision,
+          config: {
+            active: true,
+            activationId: activation.activationId,
+            bodyCaptureMaxBytes: resolveMainWorldBodyCaptureBudget(activation.runtime),
+            capturePolicy: activation.runtime.config.capturePolicy ?? DEFAULT_CAPTURE_POLICY
+          }
+        }
+      : {
+          kind: message.operation,
+          revision,
+          activationId: activation.activationId
+        }
+  );
+  if (!outcome) {
+    return null;
+  }
+  const expectedKind =
+    message.operation === "activate"
+      ? "activated"
+      : message.operation === "deactivate"
+        ? "deactivated"
+        : "drained";
+  if (outcome.result.kind !== expectedKind) {
+    return null;
+  }
+  if (!rememberMainWorldController(activation.runtime, key, outcome.controller)) {
+    return null;
+  }
+  return {
+    kind: "sw.main-world-control-result",
+    activationId: activation.activationId,
+    operation: message.operation,
+    controller: outcome.controller,
+    result: outcome.result
+  };
+}
+
+async function runMainWorldControlWithRecovery(
+  target: { tabId: number; frameId: number; documentId: string },
+  initialController: MainWorldControllerHint,
+  createCommand: (revision: number) =>
+    | {
+        kind: "activate";
+        revision: number;
+        config: {
+          active: true;
+          activationId: ContentActivationId;
+          bodyCaptureMaxBytes: number;
+          capturePolicy: CapturePolicy;
+        };
+      }
+    | {
+        kind: "deactivate" | "drain";
+        revision: number;
+        activationId: ContentActivationId;
+      }
+): Promise<{
+  controller: MainWorldControllerHint;
+  result: Exclude<
+    Awaited<ReturnType<typeof controlMainWorldDirectController>>,
+    { kind: "rejected" | "unavailable" | "probed" }
+  >;
+} | null> {
+  let controller = initialController;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (controller.revision >= Number.MAX_SAFE_INTEGER) {
+      return null;
+    }
+    try {
+      const result = await controlMainWorldDirectController(
+        chromeApi,
+        target,
+        controller,
+        createCommand(controller.revision + 1)
+      );
+      const advanced = advanceControllerFromControl(controller, result);
+      if (
+        advanced &&
+        result.kind !== "rejected" &&
+        result.kind !== "unavailable" &&
+        result.kind !== "probed"
+      ) {
+        return { controller: advanced, result };
+      }
+      if (result.kind !== "rejected" || result.reason !== "stale") {
+        return null;
+      }
+    } catch {
+      // The command may have committed before executeScript lost its result.
+    }
+
+    try {
+      const probe = await controlMainWorldDirectController(chromeApi, target, controller, {
+        kind: "probe"
+      });
+      const recovered = advanceControllerFromControl(controller, probe);
+      if (!recovered) {
+        return null;
+      }
+      controller = recovered;
+      const intended = createCommand(
+        recovered.revision < Number.MAX_SAFE_INTEGER ? recovered.revision + 1 : recovered.revision
+      );
+      if (
+        intended.kind === "deactivate" &&
+        recovered.phase === "inactive" &&
+        recovered.activationId === null
+      ) {
+        return {
+          controller: recovered,
+          result: {
+            kind: "deactivated",
+            activationId: intended.activationId,
+            revision: recovered.revision
+          }
+        };
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function resolveMainWorldBodyCaptureBudget(runtime: SessionRuntime): number {
+  const value = toStatusSampling(runtime)?.bodyCaptureMaxBytes;
+  return runtime.mode === "lite" &&
+    (runtime.config.capturePolicy ?? DEFAULT_CAPTURE_POLICY).categories.network ===
+      "body-allowlist" &&
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 0
+    ? Math.max(4 * 1024, Math.min(8 * 1024 * 1024, Math.round(value)))
+    : 0;
+}
+
+function isContentParentReady(
+  runtime: SessionRuntime,
+  parent: { frameId: number; documentId: string }
+): boolean {
+  return contentActivations
+    .listRuntime(runtime, runtime.captureFence)
+    .some(
+      (candidate) =>
+        candidate.frameId === parent.frameId &&
+        candidate.documentId === parent.documentId &&
+        (isRuntimeCaptureAdmitted(runtime.activationState)
+          ? candidate.state === "active"
+          : candidate.state === "prepared" && candidate.armed)
+    );
+}
+
+function armContentActivation(
+  message: Extract<ExtensionInboundMessage, { kind: "content.armed" }>,
+  sender: MessageSenderLike | undefined
+): unknown {
+  const prepared = contentActivations.lookupByReadyId(message.readyId, ["prepared", "active"]);
+
+  if (
+    !prepared ||
+    prepared.activationId !== message.activationId ||
+    !isRuntimeCurrentCaptureOpen(prepared.runtime) ||
+    !matchesContentActivationSender(prepared, sender, message.documentUrl)
+  ) {
+    return { kind: "sw.content-revoked", activationId: message.activationId, reason: "stale" };
+  }
+
+  if (prepared.state === "active") {
+    return { kind: "sw.content-activated", activationId: prepared.activationId };
+  }
+
+  const armed = contentActivations.arm(prepared);
+
+  if (!armed) {
+    return { kind: "sw.content-revoked", activationId: message.activationId, reason: "invalid" };
+  }
+
+  resolveContentArmWaiters(armed);
+
+  if (!isRuntimeCaptureAdmitted(armed.runtime.activationState)) {
+    return { ok: true };
+  }
+
+  const active = contentActivations.activate(armed);
+  return active
+    ? { kind: "sw.content-activated", activationId: active.activationId }
+    : { kind: "sw.content-revoked", activationId: message.activationId, reason: "activation" };
+}
+
+function bindContentActivationPort(
+  message: Extract<ExtensionInboundMessage, { kind: "content.bind" }>,
+  port: PortLike | undefined,
+  sender: MessageSenderLike | undefined
+): void {
+  const activation = contentActivations.lookupByActivationId(message.activationId, [
+    "active",
+    "draining"
+  ]);
+  const activationOwnerCurrent = activation
+    ? activation.state === "active"
+      ? isRuntimeActiveContentOwner(activation.runtime)
+      : getStopDrainCapability(activation.sid, activation.activationId) !== undefined
+    : false;
+
+  if (
+    !port ||
+    port.name !== PORT_NAMES.content ||
+    !activation ||
+    !activationOwnerCurrent ||
+    !matchesContentActivationStableSender(activation, sender) ||
+    !contentActivations.bindPort(port, activation)
+  ) {
+    port?.disconnect?.();
+    return;
+  }
+
+  try {
+    if (message.documentUrl !== activation.url) {
+      port.postMessage({
+        kind: "sw.content-url",
+        activationId: activation.activationId,
+        documentUrl: activation.url,
+        revision:
+          activation.runtime.contentNavigationRevisions.get(
+            contentActivationParentKey(activation.frameId, activation.documentId)
+          ) ?? 0
+      });
+    }
+    port.postMessage({ kind: "sw.content-bound", activationId: activation.activationId });
+    if (activation.state === "draining") {
+      const capability = getStopDrainCapability(activation.sid, activation.activationId);
+      if (capability) {
+        sendStopDrainNotice(port, capability);
+      }
+    }
+  } catch (error) {
+    contentActivations.unbindPort(port, activation);
+    logPortSendFailure("sw.content-bound", error, {
+      sid: activation.sid,
+      tabId: activation.tabId,
+      frameId: activation.frameId
+    });
+  }
+}
+
+function resolveBoundContentActivation(
+  activationId: ContentActivationId,
+  documentUrl: string,
+  port: PortLike | undefined,
+  sender: MessageSenderLike | undefined,
+  allowedStates: readonly ContentActivationState[]
+): SessionContentActivation | null {
+  if (!port || port.name !== PORT_NAMES.content) {
+    return null;
+  }
+
+  const activation = contentActivations.lookupByActivationId(activationId, allowedStates);
+
+  if (!activation || !matchesContentActivationStableSender(activation, sender)) {
+    return null;
+  }
+
+  if (
+    !matchesContentActivationStableSender(activation, sender) ||
+    activation.url !== documentUrl ||
+    (activation.state === "active"
+      ? !isRuntimeActiveContentOwner(activation.runtime)
+      : getStopDrainCapability(activation.sid, activation.activationId) === undefined)
+  ) {
+    return null;
+  }
+
+  return contentActivations.validatePort(port, activation, allowedStates);
+}
+
+function matchesContentActivationStableSender(
+  activation: SessionContentActivation,
+  sender: MessageSenderLike | undefined
+): boolean {
+  return (
+    sender?.tab?.id === activation.tabId &&
+    normalizeSenderFrameId(sender) === activation.frameId &&
+    sender?.documentId === activation.documentId &&
+    activation.runtime.captureFence === activation.fence &&
+    activation.runtime.sid === activation.sid &&
+    activation.runtime.mode === activation.mode
+  );
+}
+
+function matchesContentActivationSender(
+  activation: SessionContentActivation,
+  sender: MessageSenderLike | undefined,
+  documentUrl: string
+): boolean {
+  return (
+    matchesContentActivationStableSender(activation, sender) &&
+    activation.url === documentUrl &&
+    (sender?.url === documentUrl ||
+      (hasExactWebNavigationTracking() &&
+        activation.runtime.contentDocuments.matchesSameDocumentSender(
+          {
+            tabId: activation.tabId,
+            frameId: activation.frameId,
+            documentId: activation.documentId,
+            url: documentUrl
+          },
+          sender?.url
+        )))
+  );
+}
+
+function isRuntimeActiveContentOwner(runtime: SessionRuntime): boolean {
+  return (
+    isRuntimeCurrentCaptureOpen(runtime) &&
+    isMapEntrySame(sessionsBySid, runtime.sid, runtime) &&
+    isRuntimeCaptureAdmitted(runtime.activationState)
+  );
+}
+
+function requireArmedRootContentActivation(runtime: SessionRuntime): SessionContentActivation {
+  const activeDocument = runtime.contentDocuments.get(0);
+  const roots = contentActivations
+    .listRuntime(runtime, runtime.captureFence, ["prepared"])
+    .filter(
+      (activation) =>
+        activation.frameId === 0 &&
+        activation.armed &&
+        activeDocument?.documentId === activation.documentId &&
+        activeDocument.url === activation.url
+    );
+
+  if (roots.length !== 1) {
+    throw new Error("The runtime has no unique armed root content activation.");
+  }
+
+  return roots[0]!;
+}
+
+function activateArmedRuntimeContent(
+  runtime: SessionRuntime,
+  requiredRootActivationId?: ContentActivationId
+): SessionContentActivation[] {
+  const prepared = contentActivations
+    .listRuntime(runtime, runtime.captureFence, ["prepared"])
+    .filter((activation) => activation.armed);
+  const preparedByDocument = new Map(
+    prepared.map((activation) => [
+      contentActivationParentKey(activation.frameId, activation.documentId),
+      activation
+    ])
+  );
+  const resolveDepth = (activation: SessionContentActivation): number => {
+    let depth = 0;
+    let parent = activation.parent;
+    const visited = new Set<string>();
+
+    while (parent) {
+      const key = contentActivationParentKey(parent.frameId, parent.documentId);
+      if (visited.has(key)) {
+        return Number.MAX_SAFE_INTEGER;
+      }
+      visited.add(key);
+      depth += 1;
+      parent = preparedByDocument.get(key)?.parent;
+    }
+
+    return depth;
+  };
+  prepared.sort((left, right) => resolveDepth(left) - resolveDepth(right));
+  const activated: SessionContentActivation[] = [];
+
+  for (const activation of prepared) {
+    const active = contentActivations.activate(activation);
+
+    if (active) {
+      activated.push(active);
+    }
+  }
+
+  if (
+    requiredRootActivationId &&
+    !activated.some(
+      (activation) =>
+        activation.frameId === 0 && activation.activationId === requiredRootActivationId
+    )
+  ) {
+    throw new Error("The armed root content activation changed at runtime commit.");
+  }
+
+  for (const activation of activated) {
+    void sendContentActivationMessage(activation, {
+      kind: "sw.content-activated",
+      activationId: activation.activationId
+    });
+  }
+
+  return activated;
+}
+
+function contentActivationParentKey(frameId: number, documentId: string): string {
+  return JSON.stringify([frameId, documentId]);
+}
+
+function revokeContentFrameActivations(
+  runtime: SessionRuntime,
+  frameId: number,
+  reason: string,
+  documentId?: string
+): Promise<void> {
+  const live = contentActivations.listRuntime(runtime, runtime.captureFence);
+  const revoked =
+    frameId === 0 && documentId === undefined
+      ? live
+      : collectContentActivationSubtree(
+          live,
+          live.filter(
+            (activation) =>
+              activation.frameId === frameId &&
+              (documentId === undefined || activation.documentId === documentId)
+          )
+        );
+
+  return revokeContentActivationSnapshots(revoked, reason);
+}
+
+function revokeRuntimeContent(runtime: SessionRuntime, reason: string): void {
+  cancelContentArmWaiters(runtime, `Content activation revoked: ${reason}.`);
+  void revokeContentActivationSnapshots(
+    contentActivations.listRuntime(runtime, runtime.captureFence),
+    reason
+  );
+}
+
+async function revokeContentActivationSnapshots(
+  snapshots: readonly SessionContentActivation[],
+  reason: string
+): Promise<void> {
+  const unique = new Map<ContentActivationId, SessionContentActivation>();
+  for (const root of snapshots) {
+    const live = contentActivations.listRuntime(root.runtime, root.fence);
+    for (const activation of collectContentActivationSubtree(live, [root])) {
+      unique.set(activation.activationId, activation);
+    }
+  }
+  const byDocument = new Map(
+    [...unique.values()].map((activation) => [
+      contentActivationParentKey(activation.frameId, activation.documentId),
+      activation
+    ])
+  );
+  const depth = (activation: SessionContentActivation): number => {
+    let parent = activation.parent;
+    let value = 0;
+    const visited = new Set<string>();
+    while (parent) {
+      const key = contentActivationParentKey(parent.frameId, parent.documentId);
+      if (visited.has(key)) {
+        return Number.MAX_SAFE_INTEGER;
+      }
+      visited.add(key);
+      value += 1;
+      parent = byDocument.get(key)?.parent;
+    }
+    return value;
+  };
+  const ordered = [...unique.values()].sort((left, right) => depth(right) - depth(left));
+  // Start every revocation synchronously before the first await. Callers such as runtime reset
+  // clear the shared proof map immediately after this function yields; eager start guarantees
+  // that each exact frame has already retained its controller authorization by then.
+  const tasks = ordered.map((activation) => revokeContentActivationOnce(activation, reason));
+  for (const task of tasks) {
+    await task;
+  }
+}
+
+function revokeContentActivationOnce(
+  activation: SessionContentActivation,
+  reason: string
+): Promise<void> {
+  const existing = pendingContentRevocations.get(activation.activationId);
+  if (existing) {
+    return existing;
+  }
+
+  const revoking = contentActivations.beginRevocation(activation);
+  if (!revoking) {
+    return Promise.resolve();
+  }
+  invalidateContentEventBatchAdmissions(revoking.activationId);
+  const controllerKey = contentActivationParentKey(revoking.frameId, revoking.documentId);
+  const controller = revoking.runtime.contentMainWorldProofs.get(controllerKey);
+  if (
+    controller?.phase === "active" &&
+    controller.activationId === revoking.activationId &&
+    !contentRevocationControllers.has(revoking.activationId)
+  ) {
+    contentRevocationControllers.set(revoking.activationId, {
+      key: controllerKey,
+      controller
+    });
+  }
+
+  const task = (async () => {
+    const outcome = await deactivateRevokingMainWorldController(revoking);
+    const documentReachable =
+      outcome.kind === "deactivated" ? false : await isExactContentDocumentReachable(revoking);
+    if (!canFinalizeMainWorldRevocation(outcome, documentReachable)) {
+      console.warn("[WebBlackbox] MAIN-world revocation did not confirm deactivation", {
+        sid: revoking.sid,
+        tabId: revoking.tabId,
+        frameId: revoking.frameId,
+        activationId: revoking.activationId,
+        reason,
+        outcome: outcome.kind,
+        ...(outcome.kind === "failed"
+          ? {
+              error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error)
+            }
+          : {})
+      });
+      scheduleContentRevocationRetry(revoking, reason);
+      return;
+    }
+
+    if (!contentActivations.finalizeRevocation(revoking)) {
+      if (contentActivations.lookupByActivationId(revoking.activationId, ["revoking"])) {
+        scheduleContentRevocationRetry(revoking, reason);
+      }
+      return;
+    }
+    contentRevocationControllers.delete(revoking.activationId);
+    const retryTimer = contentRevocationRetryTimers.get(revoking.activationId);
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      contentRevocationRetryTimers.delete(revoking.activationId);
+    }
+    await sendContentActivationMessage(revoking, {
+      kind: "sw.content-revoked",
+      activationId: revoking.activationId,
+      reason
+    });
+  })().finally(() => {
+    if (pendingContentRevocations.get(revoking.activationId) === task) {
+      pendingContentRevocations.delete(revoking.activationId);
+    }
+  });
+  pendingContentRevocations.set(revoking.activationId, task);
+  return task;
+}
+
+async function deactivateRevokingMainWorldController(
+  activation: SessionContentActivation
+): Promise<Awaited<ReturnType<typeof runBoundedMainWorldDeactivation>>> {
+  const authorization = contentRevocationControllers.get(activation.activationId);
+  const controller = authorization?.controller;
+  if (
+    activation.mode !== "lite" ||
+    !authorization ||
+    !controller ||
+    controller.phase !== "active" ||
+    controller.activationId !== activation.activationId
+  ) {
+    return { kind: "deactivated" };
+  }
+
+  const target = {
+    tabId: activation.tabId,
+    frameId: activation.frameId,
+    documentId: activation.documentId
+  };
+  return runBoundedMainWorldDeactivation({
+    timeoutMs: MAIN_WORLD_REVOCATION_TIMEOUT_MS,
+    deactivate: async () => {
+      const outcome = await runMainWorldControlWithRecovery(target, controller, (revision) => ({
+        kind: "deactivate",
+        revision,
+        activationId: activation.activationId
+      }));
+      if (!outcome || outcome.result.kind !== "deactivated") {
+        throw new Error("Exact MAIN-world controller did not confirm revocation deactivation.");
+      }
+
+      const stillRevoking = contentActivations.lookupByActivationId(activation.activationId, [
+        "revoking"
+      ]);
+      if (
+        stillRevoking &&
+        !rememberMainWorldController(activation.runtime, authorization.key, outcome.controller)
+      ) {
+        throw new Error("MAIN-world revocation controller conflicted with its exact proof.");
+      }
+      authorization.controller = outcome.controller;
+    }
+  });
+}
+
+async function isExactContentDocumentReachable(
+  activation: SessionContentActivation
+): Promise<boolean> {
+  const sendMessage = chromeApi?.tabs?.sendMessage;
+  if (!sendMessage) {
+    return true;
+  }
+
+  try {
+    await sendMessage.call(
+      chromeApi.tabs,
+      activation.tabId,
+      { kind: "sw.content-document-probe" },
+      { frameId: activation.frameId, documentId: activation.documentId }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function scheduleContentRevocationRetry(
+  activation: SessionContentActivation,
+  reason: string
+): void {
+  if (contentRevocationRetryTimers.has(activation.activationId)) {
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    contentRevocationRetryTimers.delete(activation.activationId);
+    const revoking = contentActivations.lookupByActivationId(activation.activationId, ["revoking"]);
+    if (revoking) {
+      void revokeContentActivationOnce(revoking, reason);
+    }
+  }, MAIN_WORLD_REVOCATION_RETRY_MS);
+  contentRevocationRetryTimers.set(activation.activationId, timer);
+}
+
+function collectContentActivationSubtree(
+  live: readonly SessionContentActivation[],
+  roots: readonly SessionContentActivation[]
+): SessionContentActivation[] {
+  const selected = new Set<SessionContentActivation>(roots);
+  const pending = roots.map((root) => ({ frameId: root.frameId, documentId: root.documentId }));
+
+  while (pending.length > 0) {
+    const parent = pending.shift();
+
+    if (!parent) {
+      break;
+    }
+
+    for (const activation of live) {
+      if (
+        !selected.has(activation) &&
+        activation.parent?.frameId === parent.frameId &&
+        activation.parent.documentId === parent.documentId
+      ) {
+        selected.add(activation);
+        pending.push({ frameId: activation.frameId, documentId: activation.documentId });
+      }
+    }
+  }
+
+  return [...selected];
+}
+
+async function sendContentActivationMessage(
+  activation: SessionContentActivation,
+  message: ExtensionOutboundMessage,
+  options: { required?: boolean } = {}
+): Promise<void> {
+  if (!chromeApi?.tabs?.sendMessage) {
+    if (options.required) {
+      throw new Error("Chrome tabs messaging is unavailable for exact content delivery.");
+    }
+    return;
+  }
+
+  try {
+    await chromeApi.tabs.sendMessage(activation.tabId, message, {
+      frameId: activation.frameId,
+      documentId: activation.documentId
+    });
+  } catch (error) {
+    if (options.required) {
+      throw error;
+    }
+  }
+}
+
+function waitForContentArm(
+  runtime: SessionRuntime,
+  input: {
+    frameId: number;
+    documentId?: string;
+    excludedDocumentId?: string;
+    awaitCommittedDocument?: boolean;
+  }
+): {
+  promise: Promise<SessionContentActivation>;
+  cancel: (reason?: Error) => void;
+} {
+  let waiter:
+    | (typeof pendingContentArmWaiters extends Set<infer Value> ? Value : never)
+    | undefined;
+  let settled = false;
+  const promise = new Promise<SessionContentActivation>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      if (!waiter || settled) {
+        return;
+      }
+
+      settled = true;
+      pendingContentArmWaiters.delete(waiter);
+      reject(new Error("Timed out waiting for exact content activation acknowledgement."));
+    }, CONTENT_ARM_TIMEOUT_MS);
+
+    waiter = {
+      runtime,
+      fence: runtime.captureFence,
+      frameId: input.frameId,
+      ...(input.documentId ? { documentId: input.documentId } : {}),
+      ...(input.excludedDocumentId ? { excludedDocumentId: input.excludedDocumentId } : {}),
+      ...(input.awaitCommittedDocument ? { awaitingCommittedDocument: true } : {}),
+      resolve: (activation) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        pendingContentArmWaiters.delete(waiter!);
+        resolve(activation);
+      },
+      reject: (error) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        pendingContentArmWaiters.delete(waiter!);
+        reject(error);
+      },
+      timeout
+    };
+    pendingContentArmWaiters.add(waiter);
+  });
+
+  return {
+    promise,
+    cancel: (reason = new Error("Content activation wait was cancelled.")) => waiter?.reject(reason)
+  };
+}
+
+function resolveContentArmWaiters(activation: SessionContentActivation): void {
+  for (const waiter of [...pendingContentArmWaiters]) {
+    if (
+      waiter.runtime === activation.runtime &&
+      waiter.fence === activation.fence &&
+      waiter.frameId === activation.frameId &&
+      waiter.awaitingCommittedDocument !== true &&
+      (waiter.documentId === undefined || waiter.documentId === activation.documentId) &&
+      (waiter.excludedDocumentId === undefined ||
+        waiter.excludedDocumentId !== activation.documentId)
+    ) {
+      waiter.resolve(activation);
+    }
+  }
+}
+
+function bindCommittedDocumentToContentArmWaiters(
+  runtime: SessionRuntime,
+  frameId: number,
+  documentId: string
+): void {
+  for (const waiter of pendingContentArmWaiters) {
+    if (
+      waiter.runtime === runtime &&
+      waiter.fence === runtime.captureFence &&
+      waiter.frameId === frameId &&
+      waiter.awaitingCommittedDocument === true
+    ) {
+      waiter.documentId = documentId;
+      waiter.awaitingCommittedDocument = false;
+    }
+  }
+}
+
+function rejectContentArmWaiters(
+  runtime: SessionRuntime,
+  sender: MessageSenderLike | undefined,
+  reason: string
+): void {
+  const frameId = normalizeSenderFrameId(sender);
+  const documentId = sender?.documentId;
+
+  for (const waiter of [...pendingContentArmWaiters]) {
+    if (
+      waiter.runtime === runtime &&
+      waiter.fence === runtime.captureFence &&
+      waiter.frameId === frameId &&
+      waiter.awaitingCommittedDocument !== true &&
+      (waiter.documentId === undefined || waiter.documentId === documentId)
+    ) {
+      waiter.reject(new Error(reason));
+    }
+  }
+}
+
+function cancelContentArmWaiters(runtime: SessionRuntime, reason: string): void {
+  for (const waiter of [...pendingContentArmWaiters]) {
+    if (waiter.runtime === runtime) {
+      waiter.reject(new Error(reason));
+    }
+  }
+}
+
+async function requestFreshContentActivation(
+  runtime: SessionRuntime,
+  input: {
+    frameId: number;
+    documentId?: string;
+    excludedDocumentId?: string;
+    assertCurrent?: () => void;
+    sendRequest?: boolean;
+    sameDocumentTransition?: ContentSameDocumentTransition;
+  }
+): Promise<SessionContentActivation> {
+  input.assertCurrent?.();
+  const waiter = waitForContentArm(runtime, input);
+
+  try {
+    if (input.sendRequest !== false) {
+      if (!chromeApi?.tabs?.sendMessage) {
+        throw new Error("Chrome tabs messaging is unavailable for content activation.");
+      }
+
+      const target = {
+        frameId: input.frameId,
+        ...(input.documentId ? { documentId: input.documentId } : {})
+      };
+      const acknowledgement = await chromeApi.tabs.sendMessage(
+        runtime.tabId,
+        {
+          kind: "sw.request-content-ready",
+          ...(input.sameDocumentTransition
+            ? { sameDocumentTransition: input.sameDocumentTransition }
+            : {})
+        },
+        target
+      );
+
+      if (
+        typeof acknowledgement !== "object" ||
+        acknowledgement === null ||
+        Array.isArray(acknowledgement) ||
+        (acknowledgement as { kind?: unknown }).kind !== "content.ready-requested"
+      ) {
+        throw new Error("Exact content document did not acknowledge activation request.");
+      }
+    }
+
+    const activation = await waiter.promise;
+    input.assertCurrent?.();
+    return activation;
+  } catch (error) {
+    waiter.cancel(error instanceof Error ? error : new Error(String(error)));
+    await waiter.promise.catch(() => undefined);
+    throw error;
   }
 }
 
@@ -1200,9 +2744,7 @@ async function deleteSessionBySid(sid: string): Promise<void> {
   const runtime = sessionsBySid.get(sid);
 
   if (!runtime) {
-    if (sessionAnnotations.delete(sid)) {
-      await persistSessionAnnotations().catch(() => undefined);
-    }
+    await deleteSessionAnnotationDurably(sid);
     return;
   }
 
@@ -1215,11 +2757,6 @@ async function deleteSessionBySid(sid: string): Promise<void> {
   }
 
   await disposeStoppedSession(runtime);
-
-  if (sessionAnnotations.delete(sid)) {
-    await persistSessionAnnotations().catch(() => undefined);
-    pushSessionList();
-  }
 }
 
 async function startSession(
@@ -1287,6 +2824,10 @@ async function startSessionUnlocked(
     screenRecording: screenRecordingRequested
   });
 
+  if (mode === "lite" && options.reloadPage === true && !hasExactWebNavigationTracking()) {
+    throw new Error("Reload-before-recording requires exact webNavigation document tracking.");
+  }
+
   const performanceBudget = await loadPerformanceBudgetConfig();
   startToken.assertActive();
   const annotation = getSessionAnnotation(sid);
@@ -1299,6 +2840,7 @@ async function startSessionUnlocked(
     title: tabMetadata.title,
     tags: [...annotation.tags]
   };
+  assertRuntimeCheckpointCapacityFor(sid);
 
   const pipeline = createOffscreenPipelineClient(sid);
   const provisionalActive = createInitialPersistedActiveRuntime({
@@ -1374,7 +2916,10 @@ async function startSessionUnlocked(
       startToken.assertActive();
       await candidate.pipeline.flush();
 
-      if (shouldInjectIsolatedContentForMode(mode)) {
+      if (
+        shouldInjectIsolatedContentForMode(mode) &&
+        !(mode === "lite" && options.reloadPage === true)
+      ) {
         startToken.assertActive();
         await ensureRootPageAgentsInjected(candidate, {
           assertCurrent: () => startToken.assertActive()
@@ -1406,7 +2951,7 @@ async function startSessionUnlocked(
 
       if (mode === "lite" && options.reloadPage === true) {
         startToken.assertActive();
-        await reloadRecordingTab(tabId);
+        await reloadRecordingTabAndWaitForContentActivation(candidate, startToken);
       }
     },
     commitRuntime: (candidate, tombstone) =>
@@ -1426,6 +2971,23 @@ async function startSessionUnlocked(
 
   scheduleFullModeSessionStartArtifacts(runtime);
   publishCommittedRuntimeStart(runtime);
+}
+
+function assertRuntimeCheckpointCapacityFor(sid: string): void {
+  const identities = new Set([
+    ...sessionsBySid.keys(),
+    ...retainedStoppingRuntimesBySid.keys(),
+    ...pendingRuntimeRestorationsBySid.keys(),
+    ...runtimeRestorationSourceRowsBySid.keys()
+  ]);
+  if (identities.has(sid)) {
+    throw new Error("The new session identity already exists in the runtime checkpoint.");
+  }
+  if (identities.size >= MAX_PERSISTED_RUNTIME_SESSIONS) {
+    throw new Error(
+      `Retained session capacity is full (${MAX_PERSISTED_RUNTIME_SESSIONS}); delete an older stopped session before starting another recording.`
+    );
+  }
 }
 
 function createInitialPersistedActiveRuntime(input: {
@@ -1491,6 +3053,7 @@ async function commitProvisionalRuntimeStart(
   startToken: RuntimeStartToken
 ): Promise<void> {
   startToken.assertActive();
+  const armedRoot = requireArmedRootContentActivation(runtime);
 
   if (
     runtime.activationState !== "starting" ||
@@ -1511,17 +3074,34 @@ async function commitProvisionalRuntimeStart(
     throw error;
   }
 
+  let armedRootStillCurrent = false;
+
+  try {
+    armedRootStillCurrent =
+      requireArmedRootContentActivation(runtime).activationId === armedRoot.activationId;
+  } catch {
+    armedRootStillCurrent = false;
+  }
+
   if (
     !startToken.isActive() ||
     !isMapEntrySame(sessionsByTab, runtime.tabId, runtime) ||
-    !isMapEntrySame(sessionsBySid, runtime.sid, runtime)
+    !isMapEntrySame(sessionsBySid, runtime.sid, runtime) ||
+    !armedRootStillCurrent
   ) {
     retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
     throw new RuntimeStartCancelledError();
   }
 
-  // The required storage write above is the only active-state commit point.
-  // Nothing below this assignment is allowed to reject the successful start.
+  try {
+    activateArmedRuntimeContent(runtime, armedRoot.activationId);
+  } catch (error) {
+    retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
+    throw error;
+  }
+
+  // The required storage write and the synchronous activation transition above
+  // are the only active-state commit point. Nothing below may reject it.
   runtime.activationState = "active";
   runtime.startToken = null;
 
@@ -1621,7 +3201,7 @@ function createSessionRuntime(input: {
         updateSessionMetadataFromEvent(runtime, event);
         trackSessionCounters(runtime, event);
         evaluatePerformanceBudget(runtime, event);
-        enqueuePipelineEvent(runtime, event);
+        enqueuePipelineEvent(runtime, event, runtime.activePipelineDelivery ?? undefined);
       },
       onFreeze: (reason) => {
         if (runtimeRef.current) {
@@ -1666,6 +3246,12 @@ function createSessionRuntime(input: {
     cdpRouter: null,
     cdpScope: createCdpCaptureScopeState(input.config.capturePolicy, input.tabId, input.captureUrl),
     contentDocuments,
+    contentActivationParents: new Map(),
+    contentMainWorldProofs: new Map(),
+    contentNavigationRevisions: new Map(),
+    sameDocumentTransitions: new SameDocumentTransitionLedger(),
+    pendingContentPolicyRevisions: new Map(),
+    pendingLiteNetworkPolicyRevisions: new Map(),
     authorizedContentFrames: new Set<number>(),
     requestMeta: new Map(),
     screenshotInterval: null,
@@ -1685,7 +3271,12 @@ function createSessionRuntime(input: {
           chunkCount: restoredScreenRecordingChunks?.length ?? input.screenRecording.chunkCount,
           sizeBytes: input.screenRecording.sizeBytes,
           pendingWrites: new Set(),
-          stopPromise: null
+          chunkWrites: new ScreenRecordingChunkWriteLedger(),
+          stopPromise: null,
+          finalization: new ScreenRecordingFinalizationGate(),
+          finalizing: false,
+          durabilityEvidenceQueued: false,
+          terminalEvidenceQueued: false
         }
       : null,
     lastPointer: null,
@@ -1698,9 +3289,17 @@ function createSessionRuntime(input: {
     droppedBestEffortTasks: counters.droppedBestEffortTasks,
     pipelineEventBuffer: [],
     pipelineBatchInFlight: null,
+    activePipelineDelivery: null,
     pipelineFlushTimer: null,
     pipelineFlushQueued: false,
     captureFence: createVolatileCaptureFence(input.stoppedAt !== undefined),
+    cdpPayloadAdmissionBlocked: false,
+    cdpRestoreCheckpoint: null,
+    cdpRestoreEpoch: 0,
+    cdpRestoreTail: Promise.resolve(),
+    cdpRestoreTailEpoch: 0,
+    exactTopNavigationObservations: createExactTopNavigationObservationState(),
+    exactWebNavigationTransactions: new Map(),
     activationState: input.activationState ?? "active",
     startToken: input.startToken ?? null,
     stopping: false,
@@ -1737,35 +3336,47 @@ async function reloadRecordingTab(tabId: number): Promise<void> {
   await chromeApi.tabs.reload(tabId);
 }
 
+async function reloadRecordingTabAndWaitForContentActivation(
+  runtime: SessionRuntime,
+  startToken: RuntimeStartToken
+): Promise<SessionContentActivation> {
+  const waiter = waitForContentArm(runtime, {
+    frameId: 0,
+    awaitCommittedDocument: true
+  });
+
+  try {
+    startToken.assertActive();
+    await reloadRecordingTab(runtime.tabId);
+    startToken.assertActive();
+    const activation = await waiter.promise;
+    startToken.assertActive();
+    return activation;
+  } catch (error) {
+    waiter.cancel(error instanceof Error ? error : new Error(String(error)));
+    await waiter.promise.catch(() => undefined);
+    throw error;
+  }
+}
+
 async function restoreExactLiteTabMetadataAfterNavigation(runtime: SessionRuntime): Promise<void> {
   if (!isRuntimeCurrentCaptureOpen(runtime) || !usesExactLiteTopDocumentAuthorization(runtime)) {
     return;
   }
 
   const tabMetadata = await resolveTabSessionMetadata(runtime.tabId);
+  const exactRoot = runtime.contentDocuments.get(0);
 
-  if (!isRuntimeCurrentCaptureOpen(runtime)) {
+  if (
+    !isRuntimeCurrentCaptureOpen(runtime) ||
+    exactRoot?.url !== tabMetadata.captureUrl ||
+    runtime.captureUrl !== exactRoot.url
+  ) {
     return;
   }
 
-  const decision = await resolveCurrentTabUrlPolicyDecision({
-    candidateUrl: tabMetadata.captureUrl,
-    evaluateAllowed: () => isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl),
-    resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(runtime.tabId)
-  });
-
-  if (!isRuntimeCurrentCaptureOpen(runtime) || decision === "stale") {
-    return;
-  }
-
-  if (decision === "denied") {
-    await stopRuntimeIfCurrent(runtime);
-    return;
-  }
-
-  runtime.captureUrl = tabMetadata.captureUrl;
-  runtime.cdpScope.captureUrl = tabMetadata.captureUrl;
   runtime.url = tabMetadata.url;
+  runtime.title = tabMetadata.title;
   pushSessionList();
   scheduleRuntimeStatePersist();
 }
@@ -1819,8 +3430,7 @@ async function restoreTabInstrumentationAfterNavigation(
       assertCurrent();
 
       if (runtime.mode === "full" && runtime.cdpRouter) {
-        await restoreCdpGlobalCaptureAfterNavigation(claim, true);
-        assertCurrent();
+        launchCdpNavigationRestore(claim);
       }
 
       await notifyAuthorizedContentFrames(runtime, true);
@@ -1840,6 +3450,430 @@ async function restoreTabInstrumentationAfterNavigation(
   }
 }
 
+async function handleSameDocumentNavigation(details: {
+  tabId: number;
+  frameId: number;
+  documentId?: string;
+  url: string;
+}): Promise<void> {
+  const runtime = sessionsByTab.get(details.tabId);
+  const documentId = details.documentId;
+  const currentDocument =
+    runtime && typeof documentId === "string" && documentId.length > 0
+      ? runtime.contentDocuments.getKnownDocument(details.frameId, documentId)
+      : null;
+  const activeDocument = runtime?.contentDocuments.get(details.frameId);
+
+  if (
+    !runtime ||
+    !isRuntimeCurrentCaptureOpen(runtime) ||
+    typeof documentId !== "string" ||
+    documentId.length === 0 ||
+    currentDocument?.documentId !== documentId
+  ) {
+    return;
+  }
+
+  if (
+    details.frameId === 0 &&
+    usesExactLiteTopDocumentAuthorization(runtime) &&
+    !claimCurrentRuntimeNavigation(runtime, "content-navigation", details.url)
+  ) {
+    return;
+  }
+
+  const revisionKey = contentActivationParentKey(details.frameId, documentId);
+  const revision = (runtime.contentNavigationRevisions.get(revisionKey) ?? 0) + 1;
+  runtime.contentNavigationRevisions.set(revisionKey, revision);
+  runtime.pendingContentPolicyRevisions.set(revisionKey, revision);
+  runtime.pendingLiteNetworkPolicyRevisions.set(revisionKey, revision);
+  const documentsToReactivate =
+    activeDocument?.documentId === documentId
+      ? collectAuthorizedContentDocumentSubtree(runtime, activeDocument)
+      : [];
+  const previousRootActivation = contentActivations.currentForDocument(
+    {
+      runtime,
+      fence: runtime.captureFence,
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      frameId: details.frameId,
+      documentId,
+      url: currentDocument.url,
+      mode: runtime.mode
+    },
+    ["active"]
+  );
+  const sameDocumentTransition = runtime.sameDocumentTransitions.begin({
+    frameId: details.frameId,
+    documentId,
+    currentDocumentUrl: currentDocument.url,
+    nextDocumentUrl: details.url,
+    revision,
+    ...(previousRootActivation ? { activeActivationId: previousRootActivation.activationId } : {})
+  });
+
+  // Close old identities before the first async policy operation. A delayed or
+  // lost renderer control message cannot keep them useful because registry
+  // admission is revoked synchronously in the service worker.
+  await revokeContentFrameActivations(
+    runtime,
+    details.frameId,
+    "same-document-policy-pending",
+    documentId
+  );
+
+  const decision =
+    details.frameId === 0
+      ? await isRuntimeTopDocumentAllowed(runtime, details.url)
+      : evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+          url: details.url,
+          tabId: runtime.tabId,
+          frameId: details.frameId
+        }).allowed;
+  const currentTopUrl =
+    details.frameId === 0 ? await resolveCurrentTabCaptureUrl(runtime.tabId) : details.url;
+
+  if (
+    details.frameId === 0 &&
+    runtime.contentNavigationRevisions.get(revisionKey) === revision &&
+    runtime.pendingContentPolicyRevisions.get(revisionKey) === revision &&
+    currentTopUrl !== details.url
+  ) {
+    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+    runtime.pendingContentPolicyRevisions.delete(revisionKey);
+    runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+    await stopRuntimeIfCurrent(runtime);
+    return;
+  }
+
+  if (
+    !isRuntimeCurrentCaptureOpen(runtime) ||
+    runtime.contentNavigationRevisions.get(revisionKey) !== revision ||
+    runtime.pendingContentPolicyRevisions.get(revisionKey) !== revision ||
+    runtime.contentDocuments.getKnownDocument(details.frameId, documentId)?.documentId !==
+      documentId
+  ) {
+    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+    return;
+  }
+
+  if (!decision) {
+    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+    runtime.pendingContentPolicyRevisions.delete(revisionKey);
+    runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+    if (details.frameId === 0) {
+      await stopRuntimeIfCurrent(runtime);
+    } else {
+      blockKnownContentSubtree(runtime, currentDocument, "same-document-scope-denied");
+    }
+    return;
+  }
+
+  const authorized = runtime.contentDocuments.refreshKnownDocumentUrl({
+    tabId: runtime.tabId,
+    frameId: details.frameId,
+    documentId: details.documentId,
+    url: details.url
+  });
+
+  if (!authorized) {
+    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+    runtime.pendingContentPolicyRevisions.delete(revisionKey);
+    runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+    await failSameDocumentReactivation(runtime, currentDocument);
+    return;
+  }
+
+  if (details.frameId === 0) {
+    runtime.captureUrl = details.url;
+    runtime.cdpScope.captureUrl = details.url;
+    runtime.url = sanitizeUrlForPrivacy(details.url);
+    pushSessionList();
+    scheduleRuntimeStatePersist();
+  }
+
+  if (activeDocument?.documentId !== documentId) {
+    runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+    runtime.pendingContentPolicyRevisions.delete(revisionKey);
+    runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+    return;
+  }
+
+  runtime.pendingContentPolicyRevisions.delete(revisionKey);
+
+  try {
+    const reactivated = await reactivateSameDocumentSubtree(
+      runtime,
+      documentsToReactivate,
+      revisionKey,
+      revision,
+      sameDocumentTransition
+    );
+
+    if (!reactivated && runtime.contentNavigationRevisions.get(revisionKey) === revision) {
+      runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+      runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+      await failSameDocumentReactivation(runtime, currentDocument);
+    } else if (reactivated) {
+      runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+      runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+    }
+  } catch (error) {
+    if (runtime.contentNavigationRevisions.get(revisionKey) === revision) {
+      runtime.sameDocumentTransitions.complete(details.frameId, documentId, revision);
+      runtime.pendingLiteNetworkPolicyRevisions.delete(revisionKey);
+      await failSameDocumentReactivation(runtime, currentDocument);
+      throw error;
+    }
+  }
+}
+
+function collectAuthorizedContentDocumentSubtree(
+  runtime: SessionRuntime,
+  root: { frameId: number; documentId: string; url: string }
+): Array<{ frameId: number; documentId: string; url: string }> {
+  const documents = runtime.contentDocuments.activeDocuments();
+  const selected = new Map<string, { frameId: number; documentId: string; url: string }>([
+    [contentActivationParentKey(root.frameId, root.documentId), root]
+  ]);
+  const pending = [{ frameId: root.frameId, documentId: root.documentId }];
+
+  while (pending.length > 0) {
+    const parent = pending.shift();
+
+    if (!parent) {
+      break;
+    }
+
+    for (const document of documents) {
+      const key = contentActivationParentKey(document.frameId, document.documentId);
+      const relationship = runtime.contentActivationParents.get(key);
+
+      if (
+        !selected.has(key) &&
+        relationship?.frameId === parent.frameId &&
+        relationship.documentId === parent.documentId
+      ) {
+        selected.set(key, document);
+        pending.push(document);
+      }
+    }
+  }
+
+  return [...selected.values()];
+}
+
+function blockKnownContentSubtree(
+  runtime: SessionRuntime,
+  root: { frameId: number; documentId: string },
+  reason: string
+): void {
+  const removed = runtime.contentDocuments.blockKnownDocumentSubtree(root, (document) =>
+    runtime.contentActivationParents.get(
+      contentActivationParentKey(document.frameId, document.documentId)
+    )
+  );
+
+  for (const document of removed) {
+    clearContentDocumentCompanionState(runtime, document, reason);
+  }
+
+  syncAuthorizedContentFrames(runtime);
+}
+
+function clearContentDocumentCompanionState(
+  runtime: SessionRuntime,
+  document: { frameId: number; documentId: string },
+  reason: string
+): void {
+  void revokeContentFrameActivations(runtime, document.frameId, reason, document.documentId);
+  const key = contentActivationParentKey(document.frameId, document.documentId);
+  runtime.contentMainWorldProofs.delete(key);
+  runtime.contentActivationParents.delete(key);
+  clearContentNavigationRevisions(runtime, document.frameId);
+}
+
+async function reactivateSameDocumentSubtree(
+  runtime: SessionRuntime,
+  documents: readonly { frameId: number; documentId: string; url: string }[],
+  revisionKey: string,
+  revision: number,
+  sameDocumentTransition?: ContentSameDocumentTransition
+): Promise<boolean> {
+  const pending = [...documents];
+  const isCurrent = () =>
+    isRuntimeCurrentCaptureOpen(runtime) &&
+    runtime.contentNavigationRevisions.get(revisionKey) === revision;
+
+  while (pending.length > 0) {
+    if (!isCurrent()) {
+      return false;
+    }
+
+    const live = contentActivations.listRuntime(runtime, runtime.captureFence);
+    const ready = pending.filter((document) => {
+      if (document.frameId === 0) {
+        return true;
+      }
+
+      const parent = runtime.contentActivationParents.get(
+        contentActivationParentKey(document.frameId, document.documentId)
+      );
+      return (
+        parent !== undefined &&
+        live.some(
+          (activation) =>
+            activation.frameId === parent.frameId &&
+            activation.documentId === parent.documentId &&
+            activation.state === "active"
+        )
+      );
+    });
+
+    if (ready.length === 0) {
+      return false;
+    }
+
+    for (const document of ready) {
+      pending.splice(pending.indexOf(document), 1);
+    }
+
+    await Promise.all(
+      ready.map((document) =>
+        requestFreshContentActivation(runtime, {
+          frameId: document.frameId,
+          documentId: document.documentId,
+          ...(sameDocumentTransition &&
+          document.frameId === sameDocumentTransition.frameId &&
+          document.documentId === sameDocumentTransition.documentId
+            ? { sameDocumentTransition }
+            : {}),
+          assertCurrent: () => {
+            if (
+              !isCurrent() ||
+              runtime.contentDocuments.get(document.frameId)?.documentId !== document.documentId
+            ) {
+              throw new Error("Same-document activation rotation became stale.");
+            }
+          }
+        })
+      )
+    );
+  }
+
+  return isCurrent();
+}
+
+async function failSameDocumentReactivation(
+  runtime: SessionRuntime,
+  root: { frameId: number; documentId: string }
+): Promise<void> {
+  if (root.frameId === 0) {
+    await stopRuntimeIfCurrent(runtime);
+    return;
+  }
+
+  blockKnownContentSubtree(runtime, root, "same-document-reactivation-failed");
+}
+
+async function failSameDocumentNavigationIfCurrent(
+  details: { tabId: number; frameId: number; documentId?: string; url: string },
+  claim: {
+    runtime: SessionRuntime;
+    revisionKey: string;
+    contentRevision: number;
+    navigationRevision: number;
+    cdpRestoreEpoch: number;
+  }
+): Promise<void> {
+  const runtime = claim.runtime;
+  const documentId = details.documentId;
+
+  if (
+    sessionsByTab.get(details.tabId) !== runtime ||
+    !isRuntimeCurrentCaptureOpen(runtime) ||
+    runtime.navigationRevision !== claim.navigationRevision ||
+    !isCdpRestoreEpochCurrent(runtime, claim.cdpRestoreEpoch) ||
+    runtime.contentNavigationRevisions.get(claim.revisionKey) !== claim.contentRevision ||
+    typeof documentId !== "string" ||
+    runtime.contentDocuments.getKnownDocument(details.frameId, documentId)?.documentId !==
+      documentId
+  ) {
+    return;
+  }
+
+  if (details.frameId === 0) {
+    const currentUrl = await resolveCurrentTabCaptureUrl(details.tabId);
+
+    if (
+      currentUrl === details.url &&
+      sessionsByTab.get(details.tabId) === runtime &&
+      runtime.navigationRevision === claim.navigationRevision &&
+      isCdpRestoreEpochCurrent(runtime, claim.cdpRestoreEpoch) &&
+      runtime.contentNavigationRevisions.get(claim.revisionKey) === claim.contentRevision
+    ) {
+      await stopRuntimeIfCurrent(runtime);
+    }
+    return;
+  }
+
+  const known = runtime.contentDocuments.getKnownDocument(details.frameId, documentId);
+  if (known) {
+    blockKnownContentSubtree(runtime, known, "same-document-policy-failed");
+  }
+}
+
+function clearContentNavigationRevisions(runtime: SessionRuntime, frameId: number): void {
+  if (frameId === 0) {
+    runtime.contentNavigationRevisions.clear();
+    runtime.pendingContentPolicyRevisions.clear();
+    runtime.pendingLiteNetworkPolicyRevisions.clear();
+    runtime.sameDocumentTransitions.clear();
+    return;
+  }
+
+  runtime.sameDocumentTransitions.clearFrame(frameId);
+
+  for (const revisions of [
+    runtime.contentNavigationRevisions,
+    runtime.pendingContentPolicyRevisions,
+    runtime.pendingLiteNetworkPolicyRevisions
+  ]) {
+    for (const key of revisions.keys()) {
+      try {
+        const parsed = JSON.parse(key) as unknown;
+        if (Array.isArray(parsed) && parsed[0] === frameId) {
+          revisions.delete(key);
+        }
+      } catch {
+        revisions.delete(key);
+      }
+    }
+  }
+}
+
+async function waitForLiveParentContentActivation(
+  runtime: SessionRuntime,
+  parent: { frameId: number; documentId: string }
+): Promise<boolean> {
+  const deadline = Date.now() + CONTENT_ARM_TIMEOUT_MS;
+
+  while (Date.now() <= deadline) {
+    if (!isRuntimeCurrentCaptureOpen(runtime)) {
+      return false;
+    }
+
+    if (isContentParentReady(runtime, parent)) {
+      return true;
+    }
+
+    await wait(25);
+  }
+
+  return false;
+}
+
 async function handleCommittedContentDocument(details: {
   tabId: number;
   frameId: number;
@@ -1851,165 +3885,373 @@ async function handleCommittedContentDocument(details: {
   url: string;
 }): Promise<void> {
   const runtime = sessionsByTab.get(details.tabId);
-  const committedKind = classifyActiveCommittedDocument(details);
-  const topLiteDocument =
-    committedKind === "top" &&
-    runtime !== undefined &&
-    usesExactLiteTopDocumentAuthorization(runtime);
-  const includedChildDocument =
-    committedKind === "child" &&
-    runtime?.config.capturePolicy?.scope.includeSubframes === true &&
-    details.parentFrameId !== undefined &&
-    runtime.contentDocuments.matchesKnownDocument({
-      frameId: details.parentFrameId,
-      documentId: details.parentDocumentId
-    });
+  let exactTransaction: ExactWebNavigationCommitTransaction | null = null;
+  let transactionFailed = false;
 
-  if (
-    !runtime ||
-    (!topLiteDocument && !includedChildDocument) ||
-    !isVolatileCaptureOpen(runtime.captureFence) ||
-    runtime.stopping ||
-    runtime.stoppedAt
-  ) {
-    return;
-  }
+  try {
+    const committedKind = classifyActiveCommittedDocument(details);
+    const topContentDocument =
+      committedKind === "top" &&
+      runtime !== undefined &&
+      (runtime.mode === "full"
+        ? hasExactWebNavigationTracking()
+        : usesExactLiteTopDocumentAuthorization(runtime));
+    const parentDocument =
+      committedKind === "child" &&
+      runtime &&
+      details.parentFrameId !== undefined &&
+      typeof details.parentDocumentId === "string" &&
+      details.parentDocumentId.length > 0
+        ? runtime.contentDocuments.getKnownDocument(details.parentFrameId, details.parentDocumentId)
+        : null;
+    const includedChildDocument = Boolean(
+      committedKind === "child" &&
+      runtime?.config.capturePolicy?.scope.includeSubframes === true &&
+      details.parentFrameId !== undefined &&
+      parentDocument !== null &&
+      parentDocument.documentId === details.parentDocumentId
+    );
 
-  const preparation = await runtime.contentDocuments
-    .prepareCommittedNavigation(details, async ({ url, frameId }) => {
-      if (frameId === 0) {
-        return isRuntimeTopDocumentAllowed(runtime, url);
-      }
-
-      return evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
-        url,
-        tabId: runtime.tabId,
-        frameId
-      });
-    })
-    .finally(() => {
-      syncAuthorizedContentFrames(runtime);
-    });
-
-  if (!isRuntimeCurrentCaptureOpen(runtime)) {
-    return;
-  }
-
-  if (!preparation.prepared) {
     if (
-      topLiteDocument &&
-      (preparation.reason === "invalid-navigation" ||
-        preparation.reason === "scope-denied" ||
-        preparation.reason === "scope-error")
+      !runtime ||
+      (!topContentDocument && !includedChildDocument) ||
+      !isVolatileCaptureOpen(runtime.captureFence) ||
+      runtime.stopping ||
+      runtime.stoppedAt
     ) {
-      await stopRuntimeIfCurrent(runtime);
+      return;
     }
-    return;
-  }
 
-  if (
-    !runtime.contentDocuments.isCurrentNavigation(
-      preparation.document.frameId,
-      preparation.document.documentId
-    )
-  ) {
-    return;
-  }
+    const exactObservation =
+      topContentDocument && runtime.mode === "full"
+        ? observeExactWebNavigationCommit(runtime.exactTopNavigationObservations, details.url, () =>
+            advanceCdpRestoreEpoch(runtime)
+          )
+        : null;
+    if (exactObservation) {
+      evictExactWebNavigationTransactions(runtime, exactObservation.evictedWebTokens);
+    }
 
-  if (topLiteDocument) {
-    runtime.captureUrl = preparation.document.url;
-    runtime.cdpScope.captureUrl = preparation.document.url;
-    runtime.url = sanitizeUrlForPrivacy(preparation.document.url);
-    pushSessionList();
-    scheduleRuntimeStatePersist();
-  }
+    const topCommitClaim = topContentDocument
+      ? claimCurrentRuntimeNavigation(runtime, "web-navigation-commit", details.url)
+      : null;
 
-  const result = await injectPendingContentDocument({
-    chromeApi,
-    authorization: runtime.contentDocuments,
-    document: preparation.document,
-    isRuntimeActive: () =>
-      isVolatileCaptureOpen(runtime.captureFence) &&
-      !runtime.stopping &&
-      !runtime.stoppedAt &&
-      sessionsByTab.get(runtime.tabId) === runtime,
-    mode: runtime.mode
-  });
-
-  if (result.status === "injected") {
-    try {
-      await requestExactContentRecordingStatus(runtime, preparation.document);
-    } catch (error) {
-      const failedCurrentNavigation = runtime.contentDocuments.failNavigation(
-        preparation.document.frameId,
-        preparation.document.documentId
+    if (exactObservation && topCommitClaim) {
+      exactTransaction = {
+        token: exactObservation.token,
+        restoreEpoch: exactObservation.restoreEpoch,
+        claim: topCommitClaim,
+        phase: "running",
+        cdpObserved: exactObservation.cdpObserved,
+        detachedRestorePending: false
+      };
+      runtime.exactWebNavigationTransactions.set(exactTransaction.token, exactTransaction);
+    } else if (exactObservation && !exactObservation.cdpObserved) {
+      cancelExactWebNavigationCommitObservation(
+        runtime.exactTopNavigationObservations,
+        exactObservation.token
       );
-      syncAuthorizedContentFrames(runtime);
-      console.warn("[WebBlackbox] prepared document status request failed closed", {
-        tabId: runtime.tabId,
-        frameId: preparation.document.frameId,
-        documentId: preparation.document.documentId,
-        error: error instanceof Error ? error.message : String(error)
+    }
+
+    if (topCommitClaim && runtime.mode === "full") {
+      suspendFullCaptureForNavigation(topCommitClaim);
+    }
+
+    clearContentNavigationRevisions(runtime, details.frameId);
+
+    if (
+      topContentDocument &&
+      runtime.mode === "lite" &&
+      typeof details.documentId === "string" &&
+      details.documentId.length > 0
+    ) {
+      bindCommittedDocumentToContentArmWaiters(runtime, 0, details.documentId);
+    }
+
+    const previousDocument = runtime.contentDocuments.get(details.frameId);
+    if (previousDocument) {
+      blockKnownContentSubtree(runtime, previousDocument, "navigation");
+    }
+
+    const preparation = await runtime.contentDocuments
+      .prepareCommittedNavigation(details, async ({ url, frameId }) => {
+        if (frameId === 0) {
+          return isRuntimeTopDocumentAllowed(runtime, url);
+        }
+
+        return evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+          url,
+          tabId: runtime.tabId,
+          frameId
+        });
+      })
+      .finally(() => {
+        syncAuthorizedContentFrames(runtime);
       });
 
-      if (topLiteDocument && failedCurrentNavigation) {
+    if (
+      !isRuntimeCurrentCaptureOpen(runtime) ||
+      (exactTransaction && !isExactWebNavigationTransactionCurrent(runtime, exactTransaction))
+    ) {
+      return;
+    }
+
+    if (!preparation.prepared) {
+      if (
+        topContentDocument &&
+        (preparation.reason === "invalid-navigation" ||
+          preparation.reason === "scope-denied" ||
+          preparation.reason === "scope-error")
+      ) {
         await stopRuntimeIfCurrent(runtime);
       }
       return;
     }
 
-    runtime.contentDocuments.completePendingInjection(
-      preparation.document.frameId,
-      preparation.document.documentId
-    );
-  } else if (result.status === "stale") {
-    runtime.contentDocuments.failNavigation(
-      preparation.document.frameId,
-      preparation.document.documentId
-    );
-  }
-  syncAuthorizedContentFrames(runtime);
+    if (
+      !runtime.contentDocuments.isCurrentNavigation(
+        preparation.document.frameId,
+        preparation.document.documentId
+      )
+    ) {
+      return;
+    }
 
-  if (result.status === "failed") {
-    console.warn("[WebBlackbox] dynamic document injection failed closed", {
-      tabId: runtime.tabId,
-      frameId: preparation.document.frameId,
-      documentId: preparation.document.documentId,
-      error: result.error instanceof Error ? result.error.message : String(result.error)
+    if (
+      preparation.document.frameId > 0 &&
+      details.parentFrameId !== undefined &&
+      typeof details.parentDocumentId === "string" &&
+      details.parentDocumentId.length > 0
+    ) {
+      runtime.contentActivationParents.set(
+        contentActivationParentKey(preparation.document.frameId, preparation.document.documentId),
+        {
+          frameId: details.parentFrameId,
+          documentId: details.parentDocumentId
+        }
+      );
+    }
+
+    const currentPreparedDocument = runtime.contentDocuments.getKnownDocument(
+      preparation.document.frameId,
+      preparation.document.documentId
+    );
+
+    if (!currentPreparedDocument) {
+      return;
+    }
+
+    if (
+      topContentDocument &&
+      (!exactTransaction || isExactWebNavigationTransactionCurrent(runtime, exactTransaction))
+    ) {
+      runtime.captureUrl = currentPreparedDocument.url;
+      runtime.cdpScope.captureUrl = currentPreparedDocument.url;
+      runtime.url = sanitizeUrlForPrivacy(currentPreparedDocument.url);
+      pushSessionList();
+      scheduleRuntimeStatePersist();
+    }
+
+    if (currentPreparedDocument.frameId > 0) {
+      const parent = runtime.contentActivationParents.get(
+        contentActivationParentKey(
+          currentPreparedDocument.frameId,
+          currentPreparedDocument.documentId
+        )
+      );
+
+      const parentActivation = parent
+        ? runtime.contentDocuments.waitForKnownDocumentActivation(parent)
+        : null;
+
+      if (
+        !parent ||
+        !parentActivation ||
+        !(await parentActivation) ||
+        !(await waitForLiveParentContentActivation(runtime, parent)) ||
+        (exactTransaction && !isExactWebNavigationTransactionCurrent(runtime, exactTransaction))
+      ) {
+        blockKnownContentSubtree(runtime, currentPreparedDocument, "committed-parent-missing");
+        return;
+      }
+    }
+
+    const result = await injectPendingContentDocument({
+      chromeApi,
+      authorization: runtime.contentDocuments,
+      document: currentPreparedDocument,
+      isRuntimeActive: () =>
+        isVolatileCaptureOpen(runtime.captureFence) &&
+        !runtime.stopping &&
+        !runtime.stoppedAt &&
+        sessionsByTab.get(runtime.tabId) === runtime &&
+        (!exactTransaction || isExactWebNavigationTransactionCurrent(runtime, exactTransaction)),
+      mode: runtime.mode
     });
 
-    if (topLiteDocument && result.failedCurrentNavigation) {
-      await stopRuntimeIfCurrent(runtime);
+    if (result.status === "injected") {
+      if (runtime.mode === "lite") {
+        if (!result.mainWorldController) {
+          throw new Error("Lite document injection omitted its MAIN-world controller.");
+        }
+        if (
+          !rememberMainWorldController(
+            runtime,
+            contentActivationParentKey(
+              preparation.document.frameId,
+              preparation.document.documentId
+            ),
+            result.mainWorldController
+          )
+        ) {
+          throw new Error("Lite document controller conflicted with its isolated singleton.");
+        }
+      }
+      runtime.contentDocuments.completePendingInjection(
+        preparation.document.frameId,
+        preparation.document.documentId
+      );
+      syncAuthorizedContentFrames(runtime);
+
+      try {
+        await requestFreshContentActivation(runtime, {
+          frameId: preparation.document.frameId,
+          documentId: preparation.document.documentId,
+          assertCurrent: () => {
+            if (
+              !isRuntimeCurrentCaptureOpen(runtime) ||
+              (exactTransaction &&
+                !isExactWebNavigationTransactionCurrent(runtime, exactTransaction)) ||
+              !runtime.contentDocuments.isCurrentNavigation(
+                preparation.document.frameId,
+                preparation.document.documentId
+              )
+            ) {
+              throw new Error("The prepared content document changed during activation.");
+            }
+          }
+        });
+      } catch (error) {
+        const failedCurrentNavigation = runtime.contentDocuments.isCurrentNavigation(
+          preparation.document.frameId,
+          preparation.document.documentId
+        );
+        blockKnownContentSubtree(runtime, preparation.document, "prepared-activation-failed");
+        syncAuthorizedContentFrames(runtime);
+        console.warn("[WebBlackbox] prepared document status request failed closed", {
+          tabId: runtime.tabId,
+          frameId: preparation.document.frameId,
+          documentId: preparation.document.documentId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+
+        if (
+          topContentDocument &&
+          failedCurrentNavigation &&
+          (!exactTransaction || isExactWebNavigationTransactionCurrent(runtime, exactTransaction))
+        ) {
+          await stopRuntimeIfCurrent(runtime);
+        }
+        return;
+      }
+    } else if (result.status === "stale") {
+      runtime.contentDocuments.failNavigation(
+        preparation.document.frameId,
+        preparation.document.documentId
+      );
+      clearContentDocumentCompanionState(runtime, preparation.document, "injection-stale");
+    }
+    syncAuthorizedContentFrames(runtime);
+
+    if (result.status === "failed") {
+      clearContentDocumentCompanionState(runtime, preparation.document, "injection-failed");
+      console.warn("[WebBlackbox] dynamic document injection failed closed", {
+        tabId: runtime.tabId,
+        frameId: preparation.document.frameId,
+        documentId: preparation.document.documentId,
+        error: result.error instanceof Error ? result.error.message : String(result.error)
+      });
+
+      if (
+        topContentDocument &&
+        result.failedCurrentNavigation &&
+        (!exactTransaction || isExactWebNavigationTransactionCurrent(runtime, exactTransaction))
+      ) {
+        await stopRuntimeIfCurrent(runtime);
+      }
+    }
+
+    if (
+      result.status === "injected" &&
+      topCommitClaim &&
+      isSessionNavigationClaimCurrent(topCommitClaim) &&
+      (!exactTransaction || isExactWebNavigationTransactionCurrent(runtime, exactTransaction)) &&
+      runtime.cdpRouter
+    ) {
+      if (exactTransaction) {
+        exactTransaction.phase = "restoring";
+      }
+      await restoreCdpGlobalCaptureAfterNavigation(topCommitClaim, true, {
+        ...(exactTransaction ? { expectedRestoreEpoch: exactTransaction.restoreEpoch } : {})
+      });
+    }
+  } catch (error) {
+    transactionFailed = true;
+    throw error;
+  } finally {
+    if (runtime && exactTransaction) {
+      finishExactWebNavigationTransaction(runtime, exactTransaction, transactionFailed);
     }
   }
 }
 
-async function requestExactContentRecordingStatus(
-  runtime: SessionRuntime,
-  document: { frameId: number; documentId: string }
-): Promise<void> {
-  if (!chromeApi?.tabs?.sendMessage) {
-    throw new Error("Chrome tabs messaging is unavailable for exact status request.");
+async function failCommittedContentDocument(
+  details: {
+    tabId: number;
+    frameId: number;
+    documentId?: string;
+    url: string;
+  },
+  claim: {
+    navigation: SessionNavigationClaim;
+    documentRevisionKey: string | null;
+    documentRevision: number;
+    cdpRestoreEpoch: number;
+    exactTransaction?: ExactWebNavigationCommitTransaction;
   }
-
-  const acknowledgement = await chromeApi.tabs.sendMessage(
-    runtime.tabId,
-    {
-      kind: "sw.request-recording-status"
-    },
-    {
-      frameId: document.frameId,
-      documentId: document.documentId
-    }
-  );
+): Promise<void> {
+  const runtime = claim.navigation.runtime;
+  const expectedRestoreEpoch = claim.exactTransaction?.restoreEpoch ?? claim.cdpRestoreEpoch;
 
   if (
-    typeof acknowledgement !== "object" ||
-    acknowledgement === null ||
-    Array.isArray(acknowledgement) ||
-    (acknowledgement as { kind?: unknown }).kind !== "content.recording-status-requested"
+    !isSessionNavigationClaimCurrent(claim.navigation) ||
+    !isCdpRestoreEpochCurrent(runtime, expectedRestoreEpoch) ||
+    (claim.documentRevisionKey !== null &&
+      (runtime.contentNavigationRevisions.get(claim.documentRevisionKey) ?? 0) !==
+        claim.documentRevision)
   ) {
-    throw new Error("Exact content document did not acknowledge the status request.");
+    return;
+  }
+
+  if (details.frameId === 0) {
+    const currentUrl = await resolveCurrentTabCaptureUrl(details.tabId);
+    if (
+      currentUrl === details.url &&
+      isSessionNavigationClaimCurrent(claim.navigation) &&
+      isCdpRestoreEpochCurrent(runtime, expectedRestoreEpoch)
+    ) {
+      await stopRuntimeIfNavigationClaimCurrent(claim.navigation);
+    }
+    return;
+  }
+
+  if (typeof details.documentId !== "string" || details.documentId.length === 0) {
+    return;
+  }
+
+  const known = runtime.contentDocuments.getKnownDocument(details.frameId, details.documentId);
+  if (known) {
+    blockKnownContentSubtree(runtime, known, "committed-navigation-failed");
   }
 }
 
@@ -2064,6 +4306,50 @@ function isSessionNavigationClaimCurrent(claim: SessionNavigationClaim): boolean
     sessionsByTab.get(claim.runtime.tabId),
     isRuntimeNavigationOpen
   );
+}
+
+function isExactWebNavigationTransactionCurrent(
+  runtime: SessionRuntime,
+  transaction: ExactWebNavigationCommitTransaction
+): boolean {
+  return (
+    runtime.exactWebNavigationTransactions.get(transaction.token) === transaction &&
+    isSessionNavigationClaimCurrent(transaction.claim) &&
+    isCdpRestoreEpochCurrent(runtime, transaction.restoreEpoch)
+  );
+}
+
+function finishExactWebNavigationTransaction(
+  runtime: SessionRuntime,
+  transaction: ExactWebNavigationCommitTransaction,
+  failed: boolean
+): void {
+  if (runtime.exactWebNavigationTransactions.get(transaction.token) !== transaction) {
+    return;
+  }
+
+  if (failed) {
+    cancelExactWebNavigationCommitObservation(
+      runtime.exactTopNavigationObservations,
+      transaction.token
+    );
+    runtime.exactWebNavigationTransactions.delete(transaction.token);
+    return;
+  }
+
+  transaction.phase = "completed";
+  if (transaction.cdpObserved && !transaction.detachedRestorePending) {
+    runtime.exactWebNavigationTransactions.delete(transaction.token);
+  }
+}
+
+function evictExactWebNavigationTransactions(
+  runtime: SessionRuntime,
+  tokens: readonly number[]
+): void {
+  for (const token of tokens) {
+    runtime.exactWebNavigationTransactions.delete(token);
+  }
 }
 
 async function stopRuntimeIfNavigationClaimCurrent(claim: SessionNavigationClaim): Promise<void> {
@@ -2124,6 +4410,8 @@ function suspendFullCaptureForNavigation(
   if (!isSessionNavigationClaimCurrent(claim) || runtime.mode !== "full" || !runtime.cdpRouter) {
     return;
   }
+
+  runtime.cdpPayloadAdmissionBlocked = true;
 
   if (options.cdpScopeAlreadyInvalidated !== true) {
     invalidateCdpCaptureFrameTree(runtime.cdpScope);
@@ -2197,9 +4485,22 @@ function enqueueCdpChildSessionControl(
       return;
     }
 
-    await restoreCdpGlobalCaptureAfterNavigation(navigationClaim, true, {
-      expectedChildMutationRevision: runtime.cdpScope.childMutationRevision
-    });
+    const expectedChildMutationRevision = runtime.cdpScope.childMutationRevision;
+    const expectedRestoreEpoch = runtime.cdpRestoreEpoch;
+
+    launchCdpNavigationRestore(
+      navigationClaim,
+      {
+        expectedChildMutationRevision,
+        expectedRestoreEpoch
+      },
+      undefined,
+      () =>
+        isSessionNavigationClaimCurrent(navigationClaim) &&
+        isCdpChildSessionClaimCurrent(runtime.cdpScope, childClaim) &&
+        runtime.cdpScope.childMutationRevision === expectedChildMutationRevision &&
+        isCdpRestoreEpochCurrent(runtime, expectedRestoreEpoch)
+    );
   });
 
   if (!accepted && isRuntimeCaptureAdmitted(runtime.activationState)) {
@@ -2317,11 +4618,23 @@ function requestRuntimeStop(runtime: SessionRuntime): Promise<void> {
     return Promise.resolve();
   }
 
-  blockVolatileCapture(runtime.captureFence);
-  runtime.contentDocuments.cancelPendingNavigations();
-  notifyOffscreenPipelineStatus();
+  runtime.stopRequestedAt ??= Date.now();
+  beginVolatileCaptureQuiescence(runtime.captureFence, () => {
+    runtime.contentDocuments.cancelPendingNavigations();
+    cancelContentArmWaiters(runtime, "Runtime stop cancelled pending content activation.");
+    quiesceRuntimeContentProducers(runtime);
+    if (runtime.activationState !== "starting") {
+      void quiesceScreenRecordingForStop(runtime).catch((error) => {
+        console.warn("[WebBlackbox] failed to quiesce screen recording at stop intent", {
+          sid: runtime.sid,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
+  });
 
   if (runtime.activationState === "starting") {
+    revokeRuntimeContent(runtime, "runtime-start-cancelled");
     cancelOwnedRuntimeStart(runtime.startToken);
     return Promise.resolve();
   }
@@ -2342,7 +4655,12 @@ async function stopSessionOnce(runtime: SessionRuntime): Promise<void> {
   const cleanupDeadline =
     runtime.cleanupDeadline ??
     stopRequestedAt + resolveRuntimeLocalTtlMs(runtime.config.capturePolicy);
-  let stopDrainAck: Promise<void> = Promise.resolve();
+  let stopDrainPlan:
+    | {
+        wait: Promise<void>;
+        notification: Promise<void>;
+      }
+    | undefined = preparedStopDrainPlans.get(runtime);
 
   try {
     await runDurableRuntimeStopWorkflow({
@@ -2351,6 +4669,17 @@ async function stopSessionOnce(runtime: SessionRuntime): Promise<void> {
         ? () => undefined
         : () => persistRuntimeStoppingTombstone(runtime, stopRequestedAt, cleanupDeadline),
       teardownSteps: [
+        async () => {
+          await runBestEffortStopStep(runtime, "screen-recording-quiesce", () =>
+            quiesceScreenRecordingForStop(runtime)
+          );
+          stopDrainPlan ??= prepareRuntimeStopDrain(runtime);
+          await runBestEffortStopStep(
+            runtime,
+            "content-notification",
+            () => stopDrainPlan!.notification
+          );
+        },
         () => stopScreenRecording(runtime, "session-stop"),
         () =>
           runBestEffortStopStep(runtime, "pipeline-buffer", () =>
@@ -2358,56 +4687,15 @@ async function stopSessionOnce(runtime: SessionRuntime): Promise<void> {
           ),
         () => teardownCaptureInstrumentation(runtime),
         async () => {
-          const drain = createStopDrainAck(runtime);
-          stopDrainAck = drain.wait;
-          await runBestEffortStopStep(runtime, "content-notification", () =>
-            notifyAuthorizedContentFrames(runtime, false, drain.notice)
-          );
-        },
-        async () => {
-          await stopDrainAck;
-          await runBestEffortStopStep(runtime, "final-pipeline-buffer", () =>
-            flushBufferedPipelineEvents(runtime)
-          );
-          await runBestEffortStopStep(runtime, "final-pipeline-flush", () =>
-            runtime.pipeline.flush()
-          );
-        },
-        async () => {
-          deleteMapEntryIfSame(sessionsByTab, runtime.tabId, runtime);
-          resetAuthorizedContentFrames(runtime);
-          uninstallLiteWebRequestCaptureIfUnused();
-          runtime.stoppedAt = stopRequestedAt;
-          runtime.stopRequestedAt = undefined;
-          runtime.cleanupDeadline = cleanupDeadline;
-          await scheduleStoppedRuntimeCleanup(runtime).catch((error) => {
-            console.warn("[WebBlackbox] alarm setup failed; restart recovery remains armed", {
-              sid: runtime.sid,
-              error: error instanceof Error ? error.message : String(error)
-            });
-          });
-
-          await runBestEffortStopStep(runtime, "badge", async () => {
-            if (sessionsByTab.size === 0) {
-              await setIdleBadge();
-            } else {
-              await setRecordingBadge();
-            }
-          });
-
-          broadcast({
-            kind: "sw.recording-status",
-            active: false,
-            tabId: runtime.tabId,
-            sid: runtime.sid,
-            mode: runtime.mode,
-            capturePolicy: runtime.config.capturePolicy
-          });
-          pushSessionList();
+          await stopDrainPlan?.wait;
+          await flushBufferedPipelineEvents(runtime);
+          await runtime.pipeline.flush();
         }
       ],
-      persistStopped: () => persistRuntimeState({ required: true })
+      persistStopped: () =>
+        persistRuntimeStoppedCheckpoint(runtime, stopRequestedAt, cleanupDeadline)
     });
+    await finalizeRuntimeStopped(runtime, stopRequestedAt, cleanupDeadline);
     runtime.stopping = false;
   } catch (error) {
     if (runtime.stopping) {
@@ -2424,6 +4712,44 @@ async function stopSessionOnce(runtime: SessionRuntime): Promise<void> {
     throw error;
   }
   notifyOffscreenPipelineStatus();
+}
+
+async function finalizeRuntimeStopped(
+  runtime: SessionRuntime,
+  stoppedAt: number,
+  cleanupDeadline: number
+): Promise<void> {
+  deleteMapEntryIfSame(sessionsByTab, runtime.tabId, runtime);
+  resetAuthorizedContentFrames(runtime);
+  uninstallLiteWebRequestCaptureIfUnused();
+  runtime.stoppedAt = stoppedAt;
+  runtime.stopRequestedAt = undefined;
+  runtime.cleanupDeadline = cleanupDeadline;
+  preparedStopDrainPlans.delete(runtime);
+  await scheduleStoppedRuntimeCleanup(runtime).catch((error) => {
+    console.warn("[WebBlackbox] alarm setup failed; restart recovery remains armed", {
+      sid: runtime.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+
+  await runBestEffortStopStep(runtime, "badge", async () => {
+    if (sessionsByTab.size === 0) {
+      await setIdleBadge();
+    } else {
+      await setRecordingBadge();
+    }
+  });
+
+  broadcast({
+    kind: "sw.recording-status",
+    active: false,
+    tabId: runtime.tabId,
+    sid: runtime.sid,
+    mode: runtime.mode,
+    capturePolicy: runtime.config.capturePolicy
+  });
+  pushSessionList();
 }
 
 async function runBestEffortStopStep(
@@ -2578,13 +4904,18 @@ function hasExportPassphrase(passphrase: string | undefined): passphrase is stri
 
 function ingestRawEvent(
   rawEvent: RawRecorderEvent,
-  stopDrainClaim: StopDrainClaim | null = null
-): void {
+  stopDrainClaim: StopDrainClaim | null = null,
+  batchAdmission: ContentEventBatchAdmission | null = null,
+  delivery: PipelineDeliveryEventProvenance | null = null
+): Promise<boolean> {
   const runtime = resolveRuntimeEventOwner(sessionsBySid, sessionsByTab, rawEvent);
   const stopDrainAuthorized = Boolean(
     runtime &&
     stopDrainClaim &&
     isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence)
+  );
+  const batchAuthorized = Boolean(
+    runtime && batchAdmission && isContentEventBatchAdmissionValid(batchAdmission, runtime)
   );
   const provisionalSystemEvent = Boolean(
     runtime &&
@@ -2600,15 +4931,19 @@ function ingestRawEvent(
       !isRuntimeCaptureAdmitted(runtime.activationState)) &&
       !provisionalSystemEvent &&
       !stopDrainAuthorized &&
+      !batchAuthorized &&
       !isCaptureClosureEvent(rawEvent))
   ) {
-    return;
+    return Promise.resolve(false);
   }
 
+  const admittedDocumentUrl =
+    batchAdmission?.documentUrl ?? stopDrainClaim?.capability.documentUrl ?? runtime.captureUrl;
+  const admittedFrameId = batchAdmission?.frameId ?? stopDrainClaim?.capability.frameId ?? 0;
   const runtimeScope = evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
-    url: runtime.captureUrl,
+    url: admittedDocumentUrl,
     tabId: runtime.tabId,
-    frameId: 0
+    frameId: admittedFrameId
   });
 
   if (!runtimeScope.allowed) {
@@ -2616,19 +4951,24 @@ function ingestRawEvent(
       requestStopRuntimeIfCurrent(runtime, "capture-scope-denied");
     }
 
-    return;
+    return Promise.resolve(false);
   }
 
   if (!isCaptureEventFrameAllowed(runtime.config.capturePolicy, rawEvent)) {
-    return;
+    return Promise.resolve(false);
   }
 
-  if (runtime.stopping && rawEvent.source !== "system" && !stopDrainAuthorized) {
-    return;
+  if (
+    runtime.stopping &&
+    rawEvent.source !== "system" &&
+    !stopDrainAuthorized &&
+    !batchAuthorized
+  ) {
+    return Promise.resolve(false);
   }
 
   if (shouldSkipFullModeContentRawEvent(runtime, rawEvent)) {
-    return;
+    return Promise.resolve(false);
   }
 
   const nextRawEvent: RawRecorderEvent = {
@@ -2639,21 +4979,27 @@ function ingestRawEvent(
   updateRuntimeInteractionState(runtime, nextRawEvent);
 
   if (shouldMaterializeLiteContentEvent(runtime, nextRawEvent)) {
-    enqueue(runtime, async () => {
-      if (!isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim)) {
-        return;
+    return enqueueWithResult(runtime, async () => {
+      if (!isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim, batchAdmission)) {
+        return false;
       }
 
-      const materialized = await materializeLiteContentEvent(runtime, nextRawEvent, stopDrainClaim);
+      const materialized = await materializeLiteContentEvent(
+        runtime,
+        nextRawEvent,
+        stopDrainClaim,
+        batchAdmission
+      );
 
-      if (!materialized || !isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim)) {
-        return;
+      if (
+        !materialized ||
+        !isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim, batchAdmission)
+      ) {
+        return false;
       }
 
-      runtime.recorder.ingest(materialized);
+      return ingestRecorderEvent(runtime, materialized, delivery);
     });
-
-    return;
   }
 
   if (runtime.mode === "full" && shouldCaptureActionScreenshot(nextRawEvent, runtime)) {
@@ -2667,7 +5013,21 @@ function ingestRawEvent(
     );
   }
 
-  runtime.recorder.ingest(nextRawEvent);
+  return Promise.resolve(ingestRecorderEvent(runtime, nextRawEvent, delivery));
+}
+
+function ingestRecorderEvent(
+  runtime: SessionRuntime,
+  rawEvent: RawRecorderEvent,
+  delivery: PipelineDeliveryEventProvenance | null
+): boolean {
+  const previous = runtime.activePipelineDelivery;
+  runtime.activePipelineDelivery = delivery;
+  try {
+    return runtime.recorder.ingest(rawEvent).event !== undefined;
+  } finally {
+    runtime.activePipelineDelivery = previous;
+  }
 }
 
 function isCaptureClosureEvent(rawEvent: RawRecorderEvent): boolean {
@@ -2740,18 +5100,19 @@ function shouldMaterializeLiteContentEvent(
 async function materializeLiteContentEvent(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent,
-  stopDrainClaim: StopDrainClaim | null = null
+  stopDrainClaim: StopDrainClaim | null = null,
+  batchAdmission: ContentEventBatchAdmission | null = null
 ): Promise<RawRecorderEvent | null> {
-  if (!isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim)) {
+  if (!isRuntimeEventMaterializationAllowed(runtime, stopDrainClaim, batchAdmission)) {
     return null;
   }
 
   if (rawEvent.rawType === "screenshot") {
-    return materializeLiteScreenshot(runtime, rawEvent, stopDrainClaim);
+    return materializeLiteScreenshot(runtime, rawEvent, stopDrainClaim, batchAdmission);
   }
 
   if (rawEvent.rawType === "snapshot") {
-    return materializeLiteDomSnapshot(runtime, rawEvent, stopDrainClaim);
+    return materializeLiteDomSnapshot(runtime, rawEvent, stopDrainClaim, batchAdmission);
   }
 
   if (
@@ -2759,11 +5120,11 @@ async function materializeLiteContentEvent(
     rawEvent.rawType === "indexedDbSnapshot" ||
     rawEvent.rawType === "cookieSnapshot"
   ) {
-    return materializeLiteStorageSnapshot(runtime, rawEvent, stopDrainClaim);
+    return materializeLiteStorageSnapshot(runtime, rawEvent, stopDrainClaim, batchAdmission);
   }
 
   if (rawEvent.rawType === "networkBody") {
-    return materializeLiteNetworkBody(runtime, rawEvent);
+    return materializeLiteNetworkBody(runtime, rawEvent, stopDrainClaim, batchAdmission);
   }
 
   return rawEvent;
@@ -2772,7 +5133,8 @@ async function materializeLiteContentEvent(
 async function materializeLiteScreenshot(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent,
-  stopDrainClaim: StopDrainClaim | null
+  stopDrainClaim: StopDrainClaim | null,
+  batchAdmission: ContentEventBatchAdmission | null
 ): Promise<RawRecorderEvent | null> {
   if (runtime.config.capturePolicy?.categories.screenshots !== "allow") {
     return null;
@@ -2795,7 +5157,13 @@ async function materializeLiteScreenshot(
     return null;
   }
 
-  const shotId = await putRuntimeCaptureBlob(runtime, decoded.mime, decoded.bytes, stopDrainClaim);
+  const shotId = await putRuntimeCaptureBlob(
+    runtime,
+    decoded.mime,
+    decoded.bytes,
+    stopDrainClaim,
+    batchAdmission
+  );
 
   if (!shotId) {
     return null;
@@ -2827,7 +5195,8 @@ async function materializeLiteScreenshot(
 async function materializeLiteDomSnapshot(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent,
-  stopDrainClaim: StopDrainClaim | null
+  stopDrainClaim: StopDrainClaim | null,
+  batchAdmission: ContentEventBatchAdmission | null
 ): Promise<RawRecorderEvent | null> {
   const payload = asRecord(rawEvent.payload);
   const html = asString(payload?.html);
@@ -2841,7 +5210,8 @@ async function materializeLiteDomSnapshot(
     runtime,
     "text/html",
     encoded.bytes,
-    stopDrainClaim
+    stopDrainClaim,
+    batchAdmission
   );
 
   if (!contentHash) {
@@ -2870,7 +5240,8 @@ async function materializeLiteDomSnapshot(
 async function materializeLiteStorageSnapshot(
   runtime: SessionRuntime,
   rawEvent: RawRecorderEvent,
-  stopDrainClaim: StopDrainClaim | null
+  stopDrainClaim: StopDrainClaim | null,
+  batchAdmission: ContentEventBatchAdmission | null
 ): Promise<RawRecorderEvent | null> {
   const payload = asRecord(rawEvent.payload);
 
@@ -2887,7 +5258,13 @@ async function materializeLiteStorageSnapshot(
       : null;
     const hash =
       encoded && encoded.bytes.byteLength > 0
-        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes, stopDrainClaim)
+        ? await putRuntimeCaptureBlob(
+            runtime,
+            "application/json",
+            encoded.bytes,
+            stopDrainClaim,
+            batchAdmission
+          )
         : undefined;
 
     if (encoded && encoded.bytes.byteLength > 0 && !hash) {
@@ -2914,7 +5291,13 @@ async function materializeLiteStorageSnapshot(
     const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
     const hash =
       encoded.bytes.byteLength > 0
-        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes)
+        ? await putRuntimeCaptureBlob(
+            runtime,
+            "application/json",
+            encoded.bytes,
+            stopDrainClaim,
+            batchAdmission
+          )
         : undefined;
 
     if (encoded.bytes.byteLength > 0 && !hash) {
@@ -2941,7 +5324,13 @@ async function materializeLiteStorageSnapshot(
     const encoded = encodeTextWithByteLimit(serialized, LITE_STORAGE_SNAPSHOT_MAX_BYTES);
     const hash =
       encoded.bytes.byteLength > 0
-        ? await putRuntimeCaptureBlob(runtime, "application/json", encoded.bytes)
+        ? await putRuntimeCaptureBlob(
+            runtime,
+            "application/json",
+            encoded.bytes,
+            stopDrainClaim,
+            batchAdmission
+          )
         : undefined;
 
     if (encoded.bytes.byteLength > 0 && !hash) {
@@ -2967,7 +5356,9 @@ async function materializeLiteStorageSnapshot(
 
 async function materializeLiteNetworkBody(
   runtime: SessionRuntime,
-  rawEvent: RawRecorderEvent
+  rawEvent: RawRecorderEvent,
+  stopDrainClaim: StopDrainClaim | null,
+  batchAdmission: ContentEventBatchAdmission | null
 ): Promise<RawRecorderEvent | null> {
   const payload = asRecord(rawEvent.payload);
 
@@ -3007,7 +5398,13 @@ async function materializeLiteNetworkBody(
 
   const size = normalizeNonNegativeInt(payload.size) ?? transformed.originalBytes.byteLength;
   const truncatedByInput = payload.truncated === true;
-  const contentHash = await putRuntimeCaptureBlob(runtime, mimeType, transformed.sampledBytes);
+  const contentHash = await putRuntimeCaptureBlob(
+    runtime,
+    mimeType,
+    transformed.sampledBytes,
+    stopDrainClaim,
+    batchAdmission
+  );
 
   if (!contentHash) {
     return null;
@@ -3032,12 +5429,22 @@ async function putRuntimeCaptureBlob(
   runtime: SessionRuntime,
   mime: string,
   bytes: Uint8Array,
-  stopDrainClaim: StopDrainClaim | null = null
+  stopDrainClaim: StopDrainClaim | null = null,
+  batchAdmission: ContentEventBatchAdmission | null = null
 ): Promise<string | null> {
   if (stopDrainClaim) {
     return runStopDrainBlobOperation(stopDrainClaim, runtime, runtime.captureFence, () =>
       runtime.pipeline.putBlob(mime, bytes)
     );
+  }
+
+  if (batchAdmission) {
+    if (!isContentEventBatchAdmissionValid(batchAdmission, runtime)) {
+      return null;
+    }
+
+    const hash = await runtime.pipeline.putBlob(mime, bytes);
+    return isContentEventBatchAdmissionValid(batchAdmission, runtime) ? hash : null;
   }
 
   if (!isRuntimeCaptureScopeActive(runtime)) {
@@ -3246,8 +5653,12 @@ function registerPerformanceBudgetBreach(
   return true;
 }
 
-function enqueuePipelineEvent(runtime: SessionRuntime, event: WebBlackboxEvent): void {
-  runtime.pipelineEventBuffer.push(event);
+function enqueuePipelineEvent(
+  runtime: SessionRuntime,
+  event: WebBlackboxEvent,
+  delivery?: PipelineDeliveryEventProvenance
+): void {
+  runtime.pipelineEventBuffer.push({ event, ...(delivery ? { delivery } : {}) });
 
   if (runtime.pipelineEventBuffer.length >= PIPELINE_BATCH_MAX_EVENTS) {
     queuePipelineBatchFlush(runtime);
@@ -3293,7 +5704,10 @@ function queuePipelineBatchFlush(runtime: SessionRuntime): void {
   });
 }
 
-async function flushBufferedPipelineEvents(runtime: SessionRuntime): Promise<void> {
+async function flushBufferedPipelineEvents(
+  runtime: SessionRuntime,
+  options: { screenRecordingFinalization?: boolean } = {}
+): Promise<void> {
   if (runtime.pipelineFlushTimer !== null) {
     clearTimeout(runtime.pipelineFlushTimer);
     runtime.pipelineFlushTimer = null;
@@ -3304,13 +5718,27 @@ async function flushBufferedPipelineEvents(runtime: SessionRuntime): Promise<voi
   }
 
   await enqueueWithResult(runtime, async () => {
+    await drainPipelineBufferBatches(runtime, "drain", options);
+  });
+}
+
+async function flushContentEventBatchDurably(runtime: SessionRuntime): Promise<void> {
+  if (runtime.pipelineFlushTimer !== null) {
+    clearTimeout(runtime.pipelineFlushTimer);
+    runtime.pipelineFlushTimer = null;
+  }
+
+  // Always enter the runtime queue, even when the buffer currently looks empty. A prior
+  // activation can still be finishing an admitted async materialization ahead of this barrier.
+  await enqueueWithResult(runtime, async () => {
     await drainPipelineBufferBatches(runtime, "drain");
   });
 }
 
 async function drainPipelineBufferBatches(
   runtime: SessionRuntime,
-  reason: "queue" | "drain"
+  reason: "queue" | "drain",
+  options: { screenRecordingFinalization?: boolean } = {}
 ): Promise<void> {
   let flushed = 0;
 
@@ -3328,7 +5756,24 @@ async function drainPipelineBufferBatches(
       break;
     }
 
-    await runtime.pipeline.ingestBatch(batch.events, batch.operationId);
+    const events = batch.events.map((entry) => entry.event);
+    const deliveryByEventId = new Map<string, PipelineDeliveryEventProvenance>();
+    for (const entry of batch.events) {
+      if (entry.delivery) {
+        deliveryByEventId.set(entry.event.id, entry.delivery);
+      }
+    }
+
+    if (deliveryByEventId.size > 0) {
+      await runtime.pipeline.ingestBatchWithDelivery(
+        events,
+        deliveryByEventId,
+        batch.operationId,
+        options
+      );
+    } else {
+      await runtime.pipeline.ingestBatch(events, batch.operationId, options);
+    }
     acknowledgePipelineBatch(runtime.pipelineEventBuffer, batch);
     runtime.pipelineBatchInFlight = null;
     flushed += batch.events.length;
@@ -3383,13 +5828,47 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         ...(normalizedOperationId === undefined ? {} : { operationId: normalizedOperationId })
       });
     },
-    ingestBatch: async (events, operationId) => {
+    ingestBatch: async (events, operationId, options = {}) => {
       const normalizedOperationId = normalizeOptionalIngestOperationId(operationId);
       await requestOffscreenPipeline<void>({
-        op: "ingestBatch",
+        op: "ingestBatchDurably",
         sid,
         events,
-        ...(normalizedOperationId === undefined ? {} : { operationId: normalizedOperationId })
+        ...(normalizedOperationId === undefined ? {} : { operationId: normalizedOperationId }),
+        ...(options.screenRecordingFinalization === true
+          ? { screenRecordingFinalization: true }
+          : {})
+      });
+    },
+    ingestBatchWithDelivery: async (events, deliveryByEventId, operationId, options = {}) => {
+      const normalizedOperationId = normalizeOptionalIngestOperationId(operationId);
+      await requestOffscreenPipeline<void>({
+        op: "ingestBatchWithDelivery",
+        sid,
+        events,
+        deliverySidecar: [...deliveryByEventId.entries()].map(([eventId, provenance]) => ({
+          eventId,
+          provenance
+        })),
+        ...(normalizedOperationId === undefined ? {} : { operationId: normalizedOperationId }),
+        ...(options.screenRecordingFinalization === true
+          ? { screenRecordingFinalization: true }
+          : {})
+      });
+    },
+    getDeliveryReceipt: async (deliveryQuery) => {
+      const result = await requestOffscreenPipeline<unknown>({
+        op: "getDeliveryReceipt",
+        sid,
+        deliveryQuery
+      });
+      return normalizePipelineDeliveryReceipt(result, deliveryQuery);
+    },
+    commitDeliveryProgress: async (deliveryProgress) => {
+      await requestOffscreenPipeline<void>({
+        op: "commitDeliveryProgress",
+        sid,
+        deliveryProgress
       });
     },
     flush: async () => {
@@ -3405,12 +5884,15 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
       });
       return normalizePipelineResumeState(result);
     },
-    putBlob: async (mime, bytes) => {
+    putBlob: async (mime, bytes, options = {}) => {
       return requestOffscreenPipeline<string>({
         op: "putBlob",
         sid,
         mime,
-        bytes
+        bytes,
+        ...(options.screenRecordingFinalization === true
+          ? { screenRecordingFinalization: true }
+          : {})
       });
     },
     exportAndDownload: async (options = {}) => {
@@ -3510,6 +5992,9 @@ function shouldRetryOffscreenRequest(
   request: Omit<OffscreenPipelineRequest, "kind" | "requestId">,
   error: unknown
 ): boolean {
+  if (request.op === "quiesceScreenRecording") {
+    return false;
+  }
   return shouldRetryOffscreenPipelineRequest(request.op, error);
 }
 
@@ -3561,7 +6046,8 @@ function handleOffscreenRuntimeMessage(rawMessage: unknown, port: PortLike): boo
 
   if (kind === "offscreen.screen-recording-chunk") {
     void handleOffscreenScreenRecordingChunk(
-      rawMessage as OffscreenScreenRecordingChunkMessage
+      rawMessage as OffscreenScreenRecordingChunkMessage,
+      port
     ).catch((error) => {
       console.warn("[WebBlackbox] failed to persist screen recording chunk", error);
     });
@@ -3702,6 +6188,49 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         event.params ?? {},
         runtime.config.capturePolicy?.categories.network
       );
+      const preliminaryFrame =
+        event.method === "Page.frameNavigated" && !event.sessionId
+          ? asRecord(asRecord(event.params)?.frame)
+          : null;
+      const preliminaryTopNavigationUrl =
+        preliminaryFrame &&
+        typeof preliminaryFrame.parentId !== "string" &&
+        typeof preliminaryFrame.parentFrameId !== "string"
+          ? asString(preliminaryFrame.url)
+          : null;
+      const preliminaryExactCdpObservation =
+        preliminaryTopNavigationUrl &&
+        hasExactWebNavigationTracking() &&
+        !isRuntimeActivationProvisional(runtime.activationState)
+          ? observeExactCdpTopNavigation(
+              runtime.exactTopNavigationObservations,
+              preliminaryTopNavigationUrl,
+              () => advanceCdpRestoreEpoch(runtime),
+              (token, restoreEpoch) => {
+                const transaction = runtime.exactWebNavigationTransactions.get(token);
+                return Boolean(
+                  transaction &&
+                  transaction.restoreEpoch === restoreEpoch &&
+                  isExactWebNavigationTransactionCurrent(runtime, transaction)
+                );
+              }
+            )
+          : null;
+
+      if (preliminaryExactCdpObservation) {
+        evictExactWebNavigationTransactions(
+          runtime,
+          preliminaryExactCdpObservation.evictedWebTokens
+        );
+        if (preliminaryExactCdpObservation.kind === "ignored-stale") {
+          if (preliminaryExactCdpObservation.ignoredWebToken !== undefined) {
+            runtime.exactWebNavigationTransactions.delete(
+              preliminaryExactCdpObservation.ignoredWebToken
+            );
+          }
+          return;
+        }
+      }
       const targetControlMethod =
         event.method === "Target.attachedToTarget" || event.method === "Target.detachedFromTarget"
           ? event.method
@@ -3745,37 +6274,158 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         return;
       }
 
+      const cdpFrameTreeMutated = scopeEvaluation.globalFrameTreeMutation === true;
+      if (scopeEvaluation.topNavigation || cdpFrameTreeMutated) {
+        runtime.cdpPayloadAdmissionBlocked = true;
+      }
+
       const scopeAllowed = scopeEvaluation.allowed;
       const captureAllowed =
         scopeAllowed &&
         isRuntimeCaptureAdmitted(runtime.activationState) &&
-        isVolatileCaptureOpen(runtime.captureFence);
-      const cdpFrameTreeMutated = scopeEvaluation.globalFrameTreeMutation === true;
+        isVolatileCaptureOpen(runtime.captureFence) &&
+        !runtime.cdpPayloadAdmissionBlocked &&
+        claimRuntimeGlobalCdpCapture(runtime) !== null;
       let frameTreeNavigationClaim: SessionNavigationClaim | null = null;
 
       if (scopeEvaluation.topNavigation) {
         const { url, decision } = scopeEvaluation.topNavigation;
-        const source: RuntimeNavigationSource =
-          event.method === "Page.navigatedWithinDocument"
-            ? "cdp-within-document"
-            : "cdp-frame-navigated";
-        const claim = claimCurrentRuntimeNavigation(runtime, source, url);
-        frameTreeNavigationClaim = claim;
+        const withinDocument = event.method === "Page.navigatedWithinDocument";
+        const exactCrossDocumentOwner = !withinDocument && hasExactWebNavigationTracking();
+        const exactCdpObservation = exactCrossDocumentOwner ? preliminaryExactCdpObservation : null;
 
-        if (!claim) {
-          // Root bootstrap has its own atomic transaction and is intentionally
-          // not folded into active-runtime navigation ownership.
-        } else if (!decision.allowed) {
-          requestStopRuntimeIfNavigationClaimCurrent(claim, "cdp-navigation-denied");
+        // A top-frame event starts a new URL-independent restore generation
+        // immediately. This lets the new owner bypass an older hung restore,
+        // while every continuation of that older task remains fenced out.
+        if (!exactCdpObservation) {
+          advanceCdpRestoreEpoch(runtime);
+        }
+
+        const matchedExactTransaction =
+          exactCdpObservation?.matchedWebToken === undefined
+            ? undefined
+            : runtime.exactWebNavigationTransactions.get(exactCdpObservation.matchedWebToken);
+        if (matchedExactTransaction) {
+          matchedExactTransaction.restoreEpoch = exactCdpObservation!.restoreEpoch;
+          matchedExactTransaction.cdpObserved = true;
+        }
+
+        const ownership = resolveCdpTopNavigationOwnership({
+          navigationKind: withinDocument ? "same-document" : "cross-document",
+          usesExactWebNavigationDocumentOwnership: hasExactWebNavigationTracking(),
+          childMutationRevision: runtime.cdpScope.childMutationRevision,
+          restoreEpoch: exactCdpObservation?.restoreEpoch ?? runtime.cdpRestoreEpoch
+        });
+
+        if (withinDocument) {
+          const document = runtime.contentDocuments.getKnownFrameDocument(0);
+          const claim = claimCurrentRuntimeNavigation(runtime, "cdp-within-document", url);
+          frameTreeNavigationClaim = claim;
+
+          if (!claim) {
+            // A provisional root is reconciled by its start/restore transaction.
+          } else if (!decision.allowed) {
+            requestStopRuntimeIfNavigationClaimCurrent(claim, "cdp-same-document-denied");
+          } else if (document) {
+            suspendFullCaptureForNavigation(claim, { cdpScopeAlreadyInvalidated: true });
+            enqueueNavigationClaim(claim, async () => {
+              await handleSameDocumentNavigation({
+                tabId: runtime.tabId,
+                frameId: 0,
+                documentId: document.documentId,
+                url
+              });
+
+              if (!isSessionNavigationClaimCurrent(claim) || runtime.captureUrl !== url) {
+                return;
+              }
+
+              const documentActivation = runtime.contentDocuments.waitForKnownDocumentActivation({
+                frameId: 0,
+                documentId: document.documentId
+              });
+
+              if (
+                !documentActivation ||
+                !(await documentActivation) ||
+                !(await waitForLiveParentContentActivation(runtime, {
+                  frameId: 0,
+                  documentId: document.documentId
+                }))
+              ) {
+                requestStopRuntimeIfNavigationClaimCurrent(
+                  claim,
+                  "cdp-same-document-root-activation-failed"
+                );
+                return;
+              }
+
+              if (!isSessionNavigationClaimCurrent(claim) || runtime.captureUrl !== url) {
+                return;
+              }
+
+              launchCdpNavigationRestore(claim, ownership.restore ?? {});
+            });
+          } else {
+            requestStopRuntimeIfNavigationClaimCurrent(
+              claim,
+              "cdp-same-document-without-active-root"
+            );
+          }
         } else {
-          suspendFullCaptureForNavigation(claim, { cdpScopeAlreadyInvalidated: true });
-          enqueueNavigationClaim(claim, async () => {
-            if (!(await handleTabUrlChanged(claim, url))) {
+          const source: RuntimeNavigationSource = "cdp-frame-navigated";
+          const exactDocumentOwner = ownership.urlOwner === "web-navigation";
+          const claim = exactDocumentOwner
+            ? (matchedExactTransaction?.claim ??
+              snapshotCurrentRuntimeNavigation(runtime, source, url))
+            : claimCurrentRuntimeNavigation(runtime, source, url);
+          frameTreeNavigationClaim = claim;
+
+          if (!claim) {
+            // Root bootstrap has its own atomic transaction and is intentionally
+            // not folded into active-runtime navigation ownership.
+          } else if (!decision.allowed) {
+            requestStopRuntimeIfNavigationClaimCurrent(claim, "cdp-navigation-denied");
+          } else {
+            suspendFullCaptureForNavigation(claim, { cdpScopeAlreadyInvalidated: true });
+            if (!ownership.restore) {
+              if (
+                matchedExactTransaction &&
+                matchedExactTransaction.phase !== "running" &&
+                isExactWebNavigationTransactionCurrent(runtime, matchedExactTransaction)
+              ) {
+                matchedExactTransaction.detachedRestorePending = true;
+                launchCdpNavigationRestore(
+                  claim,
+                  {
+                    expectedRestoreEpoch: matchedExactTransaction.restoreEpoch
+                  },
+                  () => {
+                    matchedExactTransaction.detachedRestorePending = false;
+                    if (
+                      matchedExactTransaction.phase === "completed" &&
+                      runtime.exactWebNavigationTransactions.get(matchedExactTransaction.token) ===
+                        matchedExactTransaction
+                    ) {
+                      runtime.exactWebNavigationTransactions.delete(matchedExactTransaction.token);
+                    }
+                  }
+                );
+              }
               return;
             }
+            enqueueNavigationClaim(claim, async () => {
+              if (!exactDocumentOwner) {
+                if (!(await handleTabUrlChanged(claim, url))) {
+                  return;
+                }
+              } else if (!isSessionNavigationClaimCurrent(claim)) {
+                return;
+              }
 
-            await restoreCdpGlobalCaptureAfterNavigation(claim, true);
-          });
+              launchCdpNavigationRestore(claim, ownership.restore);
+            });
+          }
         }
       } else if (cdpFrameTreeMutated) {
         const mutationGeneration = runtime.cdpScope.generation;
@@ -3810,7 +6460,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
               return;
             }
 
-            await restoreCdpGlobalCaptureAfterNavigation(claim, true, {
+            launchCdpNavigationRestore(claim, {
               expectedChildMutationRevision: childMutationRevision
             });
           });
@@ -4028,15 +6678,110 @@ async function primeCdpFrameTreeScopes(
   };
 }
 
+function launchCdpNavigationRestore(
+  claim: SessionNavigationClaim,
+  options: { expectedChildMutationRevision?: number; expectedRestoreEpoch?: number } = {},
+  onSettled: (() => void) | undefined = undefined,
+  isFailureCurrent: (() => boolean) | undefined = undefined
+): void {
+  const runtime = claim.runtime;
+  const restoreOptions = {
+    expectedChildMutationRevision:
+      options.expectedChildMutationRevision ?? runtime.cdpScope.childMutationRevision,
+    expectedRestoreEpoch: options.expectedRestoreEpoch ?? runtime.cdpRestoreEpoch
+  };
+  const failureCurrent =
+    isFailureCurrent ??
+    (() =>
+      isSessionNavigationClaimCurrent(claim) &&
+      runtime.cdpScope.childMutationRevision === restoreOptions.expectedChildMutationRevision &&
+      isCdpRestoreEpochCurrent(runtime, restoreOptions.expectedRestoreEpoch));
+
+  launchDetachedNavigationTask({
+    run: () => restoreCdpGlobalCaptureAfterNavigation(claim, true, restoreOptions),
+    onFailure: async (error) => {
+      if (failureCurrent()) {
+        await stopRuntimeIfNavigationClaimCurrent(claim);
+      }
+
+      console.warn("[WebBlackbox] detached CDP navigation restore failed closed", {
+        tabId: runtime.tabId,
+        sid: runtime.sid,
+        revision: claim.revision,
+        restoreEpoch: restoreOptions.expectedRestoreEpoch,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    },
+    ...(onSettled ? { onSettled } : {}),
+    onUnhandledFailure: (error) => {
+      console.warn("[WebBlackbox] detached CDP restore cleanup failed", {
+        tabId: runtime.tabId,
+        sid: runtime.sid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+}
+
 async function restoreCdpGlobalCaptureAfterNavigation(
   claim: SessionNavigationClaim,
-  forceRefresh = false,
-  options: { expectedChildMutationRevision?: number } = {}
+  _forceRefresh = false,
+  options: { expectedChildMutationRevision?: number; expectedRestoreEpoch?: number } = {}
+): Promise<void> {
+  const runtime = claim.runtime;
+  const restoreOptions = {
+    expectedChildMutationRevision:
+      options.expectedChildMutationRevision ?? runtime.cdpScope.childMutationRevision,
+    expectedRestoreEpoch: options.expectedRestoreEpoch ?? runtime.cdpRestoreEpoch
+  };
+  const previousTail = resolveCdpRestorePredecessor({
+    tail: runtime.cdpRestoreTail,
+    tailEpoch: runtime.cdpRestoreTailEpoch,
+    expectedRestoreEpoch: restoreOptions.expectedRestoreEpoch
+  });
+  const task = previousTail
+    .catch(() => undefined)
+    .then(() => restoreCdpGlobalCaptureAfterNavigationOnce(claim, _forceRefresh, restoreOptions));
+
+  if (isCdpRestoreEpochCurrent(runtime, restoreOptions.expectedRestoreEpoch)) {
+    runtime.cdpRestoreTailEpoch = restoreOptions.expectedRestoreEpoch;
+    runtime.cdpRestoreTail = task.catch(() => undefined);
+  }
+
+  try {
+    await task;
+  } catch (error) {
+    if (
+      !isSessionNavigationClaimCurrent(claim) ||
+      runtime.cdpScope.childMutationRevision !== restoreOptions.expectedChildMutationRevision ||
+      !isCdpRestoreEpochCurrent(runtime, restoreOptions.expectedRestoreEpoch)
+    ) {
+      return;
+    }
+
+    throw error;
+  }
+
+  if (
+    runtime.cdpScope.childMutationRevision === restoreOptions.expectedChildMutationRevision &&
+    isCdpRestoreEpochCurrent(runtime, restoreOptions.expectedRestoreEpoch) &&
+    canOpenFullCdpPayloadAdmission(claim, restoreOptions.expectedRestoreEpoch)
+  ) {
+    runtime.cdpPayloadAdmissionBlocked = false;
+  }
+}
+
+async function restoreCdpGlobalCaptureAfterNavigationOnce(
+  claim: SessionNavigationClaim,
+  forceRefresh: boolean,
+  options: { expectedChildMutationRevision?: number; expectedRestoreEpoch?: number } = {}
 ): Promise<void> {
   const runtime = claim.runtime;
   const expectedUrl = claim.candidateUrl ?? runtime.captureUrl;
+  const expectedRestoreEpoch = options.expectedRestoreEpoch ?? runtime.cdpRestoreEpoch;
   const isRestoreCurrent = () =>
     isSessionNavigationClaimCurrent(claim) &&
+    isCdpRestoreEpochCurrent(runtime, expectedRestoreEpoch) &&
     (options.expectedChildMutationRevision === undefined ||
       runtime.cdpScope.childMutationRevision === options.expectedChildMutationRevision);
   const stopRuntimeIfRestoreCurrent = async () => {
@@ -4056,13 +6801,25 @@ async function restoreCdpGlobalCaptureAfterNavigation(
   }
 
   const initialRecording = runtime.screenRecording;
-  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime);
+  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime, false, true);
+  const expectedChildMutationRevision =
+    options.expectedChildMutationRevision ?? runtime.cdpScope.childMutationRevision;
+  const checkpoint = runtime.cdpRestoreCheckpoint;
+  const checkpointCurrent =
+    currentGeneration !== null &&
+    checkpoint?.navigationRevision === claim.revision &&
+    checkpoint.captureUrl === expectedUrl &&
+    checkpoint.childMutationRevision === expectedChildMutationRevision &&
+    checkpoint.restoreEpoch === expectedRestoreEpoch &&
+    checkpoint.generation === currentGeneration;
+  const refreshRequired =
+    currentGeneration === null ||
+    (forceRefresh && !checkpointCurrent) ||
+    !isCdpCaptureFrameTreePrimedForRoot(runtime.cdpScope, runtime.captureUrl, currentGeneration);
 
   if (
     initialRecording &&
-    (forceRefresh ||
-      currentGeneration === null ||
-      initialRecording.cdpScopeGeneration !== currentGeneration)
+    (refreshRequired || initialRecording.cdpScopeGeneration !== currentGeneration)
   ) {
     try {
       await stopScreenRecording(runtime, "navigation-scope", initialRecording, () =>
@@ -4078,7 +6835,7 @@ async function restoreCdpGlobalCaptureAfterNavigation(
     }
   }
 
-  if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime) === null) {
+  if (refreshRequired || claimRuntimeGlobalCdpCapture(runtime, false, true) === null) {
     const prime = await runGuardedNavigationStep(isRestoreCurrent, () =>
       primeCdpFrameTreeScopes(runtime)
     );
@@ -4115,7 +6872,23 @@ async function restoreCdpGlobalCaptureAfterNavigation(
     }
   }
 
-  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime);
+  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime, false, true);
+
+  if (
+    finalGeneration !== null &&
+    isRestoreCurrent() &&
+    canOpenFullCdpPayloadAdmission(claim, expectedRestoreEpoch)
+  ) {
+    runtime.cdpRestoreCheckpoint = {
+      navigationRevision: claim.revision,
+      captureUrl: expectedUrl,
+      childMutationRevision: expectedChildMutationRevision,
+      restoreEpoch: expectedRestoreEpoch,
+      generation: finalGeneration
+    };
+    runtime.cdpPayloadAdmissionBlocked = false;
+  }
+
   const activeRecording = runtime.screenRecording;
 
   if (
@@ -4161,13 +6934,42 @@ async function restoreCdpGlobalCaptureAfterNavigation(
       // requested start is in flight without superseding the top navigation.
       // Its queued snapshot owns the next prime and decides whether the valid
       // root is merely global-blocked or actually invalid.
-      if (claimRuntimeGlobalCdpCapture(runtime) === null) {
+      if (claimRuntimeGlobalCdpCapture(runtime, false, true) === null) {
         return;
       }
 
       await stopRuntimeIfRestoreCurrent();
     }
   }
+}
+
+function canOpenFullCdpPayloadAdmission(
+  claim: SessionNavigationClaim,
+  expectedRestoreEpoch: number = claim.runtime.cdpRestoreEpoch
+): boolean {
+  const runtime = claim.runtime;
+  const rootDocument = runtime.contentDocuments.get(0);
+  const rootActivation = contentActivations
+    .listRuntime(runtime, runtime.captureFence, ["active"])
+    .find(
+      (activation) =>
+        activation.frameId === 0 &&
+        activation.documentId === rootDocument?.documentId &&
+        activation.url === runtime.captureUrl
+    );
+
+  return (
+    isSessionNavigationClaimCurrent(claim) &&
+    isCdpRestoreEpochCurrent(runtime, expectedRestoreEpoch) &&
+    runtime.mode === "full" &&
+    runtime.cdpRouter !== null &&
+    rootDocument?.url === runtime.captureUrl &&
+    rootActivation !== undefined &&
+    !runtime.pendingContentPolicyRevisions.has(
+      contentActivationParentKey(rootDocument.frameId, rootDocument.documentId)
+    ) &&
+    claimRuntimeGlobalCdpCapture(runtime, false, true) !== null
+  );
 }
 
 function evaluateRuntimeFrameDocument(
@@ -4193,7 +6995,8 @@ function isRuntimeCaptureScopeActive(runtime: SessionRuntime): boolean {
 
 function claimRuntimeGlobalCdpCapture(
   runtime: SessionRuntime,
-  allowStarting = false
+  allowStarting = false,
+  allowNavigationBlocked = false
 ): number | null {
   const provisionalIdentityCurrent =
     allowStarting &&
@@ -4203,6 +7006,7 @@ function claimRuntimeGlobalCdpCapture(
 
   if (
     (!isRuntimeCaptureAdmitted(runtime.activationState) && !provisionalIdentityCurrent) ||
+    (runtime.cdpPayloadAdmissionBlocked && !allowNavigationBlocked) ||
     !isRuntimeCaptureScopeActive(runtime) ||
     !canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl)
   ) {
@@ -4215,7 +7019,8 @@ function claimRuntimeGlobalCdpCapture(
 function isRuntimeGlobalCdpCaptureClaimValid(
   runtime: SessionRuntime,
   generation: number,
-  allowStarting = false
+  allowStarting = false,
+  allowNavigationBlocked = false
 ): boolean {
   const provisionalIdentityCurrent =
     allowStarting &&
@@ -4225,6 +7030,7 @@ function isRuntimeGlobalCdpCaptureClaimValid(
 
   return (
     (isRuntimeCaptureAdmitted(runtime.activationState) || provisionalIdentityCurrent) &&
+    (!runtime.cdpPayloadAdmissionBlocked || allowNavigationBlocked) &&
     isRuntimeCaptureScopeActive(runtime) &&
     canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl, generation)
   );
@@ -4232,12 +7038,47 @@ function isRuntimeGlobalCdpCaptureClaimValid(
 
 function isRuntimeEventMaterializationAllowed(
   runtime: SessionRuntime,
-  stopDrainClaim: StopDrainClaim | null
+  stopDrainClaim: StopDrainClaim | null,
+  batchAdmission: ContentEventBatchAdmission | null = null
 ): boolean {
-  return stopDrainClaim
-    ? isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence) &&
-        isRuntimeDocumentWithinScope(runtime)
-    : isRuntimeCaptureScopeActive(runtime);
+  if (stopDrainClaim) {
+    return (
+      isStopDrainClaimValid(stopDrainClaim, runtime, runtime.captureFence) &&
+      evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+        url: stopDrainClaim.capability.documentUrl,
+        tabId: runtime.tabId,
+        frameId: stopDrainClaim.capability.frameId
+      }).allowed
+    );
+  }
+
+  if (batchAdmission) {
+    return (
+      isContentEventBatchAdmissionValid(batchAdmission, runtime) &&
+      evaluateCaptureDocumentScope(runtime.config.capturePolicy, {
+        url: batchAdmission.documentUrl,
+        tabId: runtime.tabId,
+        frameId: batchAdmission.frameId
+      }).allowed
+    );
+  }
+
+  return (
+    isRuntimeCaptureScopeActive(runtime) &&
+    (runtime.mode !== "full" || !runtime.cdpPayloadAdmissionBlocked)
+  );
+}
+
+function isContentEventBatchAdmissionValid(
+  admission: ContentEventBatchAdmission,
+  runtime: SessionRuntime
+): boolean {
+  return isContentEventBatchAdmissionLive(
+    admission,
+    runtime,
+    runtime.captureFence,
+    (activationId) => contentActivations.lookupByActivationId(activationId, ["active", "draining"])
+  );
 }
 
 function isRuntimeDocumentWithinScope(runtime: SessionRuntime): boolean {
@@ -4253,6 +7094,8 @@ async function processFullModeEvent(
 ): Promise<void> {
   const isEventCurrent = () =>
     isRuntimeCaptureScopeActive(runtime) &&
+    !runtime.cdpPayloadAdmissionBlocked &&
+    claimRuntimeGlobalCdpCapture(runtime) !== null &&
     isCdpFollowupClaimCurrent(runtime.cdpScope, sessionId, childClaim);
 
   if (!isEventCurrent()) {
@@ -4698,7 +7541,8 @@ async function startScreenRecording(
   const isCurrentNavigation = () =>
     additionalCurrent() &&
     (navigationClaim === undefined || isSessionNavigationClaimCurrent(navigationClaim));
-  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime, provisional);
+  const navigationRestore = navigationClaim !== undefined;
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime, provisional, navigationRestore);
 
   if (!isCurrentNavigation() || runtime.screenRecording || cdpScopeGeneration === null) {
     return;
@@ -4720,7 +7564,12 @@ async function startScreenRecording(
   if (
     stream.status !== "current" ||
     runtime.screenRecording !== null ||
-    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)
+    !isRuntimeGlobalCdpCaptureClaimValid(
+      runtime,
+      cdpScopeGeneration,
+      provisional,
+      navigationRestore
+    )
   ) {
     return;
   }
@@ -4743,7 +7592,12 @@ async function startScreenRecording(
     chunkCount: 0,
     sizeBytes: 0,
     pendingWrites: new Set(),
-    stopPromise: null
+    chunkWrites: new ScreenRecordingChunkWriteLedger(),
+    stopPromise: null,
+    finalization: new ScreenRecordingFinalizationGate(),
+    finalizing: false,
+    durabilityEvidenceQueued: false,
+    terminalEvidenceQueued: false
   };
   runtime.screenRecording = recording;
 
@@ -4761,7 +7615,12 @@ async function startScreenRecording(
     if (
       offscreenStart.status !== "current" ||
       runtime.screenRecording !== recording ||
-      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, provisional)
+      !isRuntimeGlobalCdpCaptureClaimValid(
+        runtime,
+        cdpScopeGeneration,
+        provisional,
+        navigationRestore
+      )
     ) {
       if (didGuardedNavigationOperationRun(offscreenStart)) {
         await stopScreenRecording(runtime, "capture-fence", recording);
@@ -4833,6 +7692,11 @@ async function stopScreenRecording(
     return;
   }
 
+  if (reason !== "session-stop" && isRuntimeAwaitingDurableStop(runtime)) {
+    await quiesceScreenRecordingForStop(runtime).catch(() => undefined);
+    return;
+  }
+
   if (recording.stopPromise) {
     await recording.stopPromise;
     return;
@@ -4860,8 +7724,37 @@ async function stopScreenRecording(
   }
 }
 
+async function quiesceScreenRecordingForStop(runtime: SessionRuntime): Promise<void> {
+  const recording = runtime.screenRecording;
+
+  if (!recording) {
+    return;
+  }
+
+  const result = await requestOffscreenPipeline<{ quiesced: boolean }>({
+    op: "quiesceScreenRecording",
+    sid: runtime.sid,
+    recordingId: recording.recordingId
+  });
+  if (result.quiesced !== true) {
+    throw new Error("Offscreen screen recording did not confirm stop quiescence.");
+  }
+}
+
+function isRuntimeAwaitingDurableStop(runtime: SessionRuntime): boolean {
+  return (
+    runtime.activationState === "active" &&
+    runtime.stopRequestedAt !== undefined &&
+    !runtime.stopping &&
+    !runtime.stoppedAt &&
+    isMapEntrySame(sessionsByTab, runtime.tabId, runtime) &&
+    isMapEntrySame(sessionsBySid, runtime.sid, runtime)
+  );
+}
+
 async function handleOffscreenScreenRecordingChunk(
-  message: OffscreenScreenRecordingChunkMessage
+  message: OffscreenScreenRecordingChunkMessage,
+  port: PortLike
 ): Promise<void> {
   const runtime = sessionsBySid.get(message.sid);
   const recording = runtime?.screenRecording;
@@ -4870,95 +7763,160 @@ async function handleOffscreenScreenRecordingChunk(
     return;
   }
 
-  if (
-    recording.cdpScopeGeneration === null ||
-    !isRuntimeGlobalCdpCaptureClaimValid(
+  const activeAdmission =
+    recording.cdpScopeGeneration !== null &&
+    isRuntimeGlobalCdpCaptureClaimValid(
       runtime,
       recording.cdpScopeGeneration,
       recording.provisional
-    )
-  ) {
+    );
+  const stopAdmission = isRuntimeOwnedScreenRecordingStopAdmission(runtime, recording);
+  if (!activeAdmission && !stopAdmission) {
     await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
     return;
   }
 
   const bytes = asUint8Array(message.bytes);
 
-  if (!bytes || bytes.byteLength === 0) {
+  if (
+    !bytes ||
+    bytes.byteLength === 0 ||
+    message.size !== bytes.byteLength ||
+    !Number.isSafeInteger(message.index) ||
+    message.index < 0 ||
+    message.index >= PIPELINE_RESUME_MAX_SCREEN_CHUNKS ||
+    typeof message.mime !== "string" ||
+    message.mime.length === 0 ||
+    message.mime.length > 256
+  ) {
     return;
   }
 
-  const index = resolveScreenRecordingChunkIndex(message.index, recording.chunkCount);
-  const task = (async () => {
-    const cdpScopeGeneration = recording.cdpScopeGeneration;
-
-    if (
-      cdpScopeGeneration === null ||
-      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, recording.provisional)
-    ) {
-      return;
-    }
-
-    const mime = typeof message.mime === "string" && message.mime ? message.mime : recording.mime;
-    const hash = await putRuntimeCaptureBlob(runtime, mime, bytes);
-
-    if (
-      !hash ||
-      runtime.screenRecording !== recording ||
-      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration, recording.provisional)
-    ) {
-      return;
-    }
-
-    const size = bytes.byteLength;
-    recording.chunks[index] = hash;
-    recording.chunkCount = Math.max(recording.chunkCount, index + 1);
-    recording.sizeBytes += size;
-
-    ingestRawEvent({
-      source: "system",
-      rawType: "screen.recording.chunk",
-      sid: runtime.sid,
-      tabId: runtime.tabId,
-      t: Date.now(),
-      mono: monotonicTime(),
-      payload: {
-        recordingId: recording.recordingId,
-        chunkId: hash,
-        index,
-        mime,
-        size,
-        startOffsetMs: normalizeRecordingOffset(message.startOffsetMs),
-        endOffsetMs: normalizeRecordingOffset(message.endOffsetMs),
-        durationMs: normalizeRecordingOffset(message.durationMs)
+  const index = message.index;
+  const fingerprint = JSON.stringify([
+    message.mime,
+    message.size,
+    normalizeRecordingOffset(message.startOffsetMs),
+    normalizeRecordingOffset(message.endOffsetMs),
+    normalizeRecordingOffset(message.durationMs)
+  ]);
+  const task = recording.chunkWrites.execute({
+    index,
+    fingerprint,
+    putBlob: async () => {
+      const hash = stopAdmission
+        ? await runtime.pipeline.putBlob(message.mime, bytes, {
+            screenRecordingFinalization: true
+          })
+        : await putRuntimeCaptureBlob(runtime, message.mime, bytes);
+      if (!hash) {
+        throw new Error("Screen recording chunk blob was not admitted.");
       }
-    });
-  })();
-
-  recording.pendingWrites.add(task);
-  task.then(
-    () => {
-      recording.pendingWrites.delete(task);
+      return hash;
     },
-    (error) => {
-      recording.pendingWrites.delete(task);
-      ingestScreenRecordingError(runtime, recording, error, "chunk");
+    enqueueEvent: async (hash) => {
+      const rawEvent: RawRecorderEvent = {
+        source: "system",
+        rawType: "screen.recording.chunk",
+        sid: runtime.sid,
+        tabId: runtime.tabId,
+        t: Date.now(),
+        mono: monotonicTime(),
+        payload: {
+          recordingId: recording.recordingId,
+          chunkId: hash,
+          index,
+          mime: message.mime,
+          size: message.size,
+          startOffsetMs: normalizeRecordingOffset(message.startOffsetMs),
+          endOffsetMs: normalizeRecordingOffset(message.endOffsetMs),
+          durationMs: normalizeRecordingOffset(message.durationMs)
+        }
+      };
+      if (stopAdmission) {
+        if (!isRuntimeOwnedScreenRecordingStopAdmission(runtime, recording)) {
+          throw new Error("Screen recording stop-chunk admission expired.");
+        }
+        runtime.recorder.ingest(rawEvent);
+      } else if (!(await ingestRawEvent(rawEvent))) {
+        throw new Error("Screen recording chunk event was not admitted.");
+      }
+    },
+    flush: () =>
+      flushBufferedPipelineEvents(runtime, {
+        screenRecordingFinalization: stopAdmission
+      }),
+    getDurableHash: () => recording.chunks[index],
+    commitDurable: (hash) => {
+      if (runtime.screenRecording !== recording) {
+        throw new Error("Screen recording changed before its chunk became durable.");
+      }
+      recording.chunks[index] = hash;
+      recording.chunkCount = Math.max(recording.chunkCount, index + 1);
+      recording.sizeBytes += message.size;
+    }
+  });
+  const pendingWrite = task.then(
+    () => undefined,
+    () => undefined
+  );
+  recording.pendingWrites.add(pendingWrite);
+  void task.then(
+    () => recording.pendingWrites.delete(pendingWrite),
+    () => {
+      recording.pendingWrites.delete(pendingWrite);
     }
   );
+  const hash = await task;
+  const acknowledgement: ScreenRecordingChunkAckMessage = {
+    kind: "sw.screen-recording-chunk-ack",
+    sid: runtime.sid,
+    recordingId: recording.recordingId,
+    index,
+    size: message.size,
+    chunkId: hash
+  };
 
-  await task;
+  try {
+    port.postMessage(acknowledgement);
+  } catch {
+    // The offscreen delivery registry keeps the exact bytes and replays them
+    // after the resilient port binds to the next worker.
+  }
+}
+
+function isRuntimeOwnedScreenRecordingStopAdmission(
+  runtime: SessionRuntime,
+  recording: ScreenRecordingRuntime
+): boolean {
+  return (
+    runtime.screenRecording === recording &&
+    runtime.stoppedAt === undefined &&
+    isRuntimeCaptureAdmitted(runtime.activationState) &&
+    isMapEntrySame(sessionsByTab, runtime.tabId, runtime) &&
+    isMapEntrySame(sessionsBySid, runtime.sid, runtime) &&
+    (recording.stopPromise !== null ||
+      (runtime.stopRequestedAt !== undefined && !isVolatileCaptureOpen(runtime.captureFence)))
+  );
 }
 
 async function handleOffscreenScreenRecordingEnded(
   message: OffscreenScreenRecordingEndedMessage
 ): Promise<void> {
   const runtime = sessionsBySid.get(message.sid);
+  const recording = runtime?.screenRecording;
 
-  if (!runtime?.screenRecording) {
+  if (!runtime || !recording || recording.recordingId !== message.result.recordingId) {
     return;
   }
 
-  await finalizeScreenRecording(runtime, message.result);
+  await retryScreenRecordingFinalization({
+    maxAttempts: SCREEN_RECORDING_FINALIZATION_MAX_ATTEMPTS,
+    isCurrent: () => runtime.screenRecording === recording,
+    finalize: () => finalizeScreenRecording(runtime, message.result),
+    waitForRetry: (attempt) =>
+      wait(Math.min(SCREEN_RECORDING_FINALIZATION_RETRY_INITIAL_MS * 2 ** (attempt - 1), 2_000))
+  });
 }
 
 function handleOffscreenScreenRecordingError(message: OffscreenScreenRecordingErrorMessage): void {
@@ -4995,30 +7953,107 @@ async function finalizeScreenRecording(
     return;
   }
 
+  await recording.finalization.run(() => finalizeScreenRecordingOnce(runtime, recording, result));
+}
+
+async function finalizeScreenRecordingOnce(
+  runtime: SessionRuntime,
+  recording: ScreenRecordingRuntime,
+  result: OffscreenScreenRecordingStopResult
+): Promise<void> {
+  if (runtime.screenRecording !== recording || recording.recordingId !== result.recordingId) {
+    return;
+  }
+
   await waitForScreenRecordingChunkWrites(recording);
   const chunks = compactScreenRecordingChunkHashes(recording.chunks);
+  const reportedChunkCount = normalizeNonNegativeInt(result.chunkCount);
+  const reportedSize = normalizeNonNegativeInt(result.size);
+  const acknowledgedChunkCount = normalizeNonNegativeInt(result.durableChunkCount);
+  const acknowledgedSize = normalizeNonNegativeInt(result.durableSize);
+  const durabilityMismatch =
+    result.degraded === true ||
+    reportedChunkCount === null ||
+    reportedSize === null ||
+    reportedChunkCount !== chunks.length ||
+    reportedSize !== recording.sizeBytes ||
+    (acknowledgedChunkCount !== null && acknowledgedChunkCount !== chunks.length) ||
+    (acknowledgedSize !== null && acknowledgedSize !== recording.sizeBytes);
 
-  ingestRawEvent({
-    source: "system",
-    rawType: "screen.recording.end",
-    sid: runtime.sid,
-    tabId: runtime.tabId,
-    t: Date.now(),
-    mono: monotonicTime(),
-    payload: {
-      recordingId: recording.recordingId,
-      mime: result.mime || recording.mime,
-      chunks,
-      chunkCount: chunks.length,
-      size: recording.sizeBytes,
-      durationMs: Math.max(0, Math.round(result.durationMs)),
-      width: result.width ?? recording.width,
-      height: result.height ?? recording.height,
-      reason: result.reason
+  const mismatchError = durabilityMismatch
+    ? new Error(
+        `Offscreen screen recording durability mismatch: reported=${reportedChunkCount ?? "invalid"}/${reportedSize ?? "invalid"}, acknowledged=${acknowledgedChunkCount ?? "invalid"}/${acknowledgedSize ?? "invalid"}, durable=${chunks.length}/${recording.sizeBytes}.`
+      )
+    : null;
+
+  await runDurableScreenRecordingFinalization({
+    beginCompletionCheckpoint: () => {
+      recording.finalizing = true;
+    },
+    rollbackCompletionCheckpoint: () => {
+      recording.finalizing = false;
+    },
+    persistCompletionCheckpoint: () => persistRuntimeState({ required: true }),
+    writeTerminalEvidence: async () => {
+      if (
+        mismatchError &&
+        !recording.durabilityEvidenceQueued &&
+        !(await ingestRawEvent({
+          source: "system",
+          rawType: "screen.recording.error",
+          sid: runtime.sid,
+          tabId: runtime.tabId,
+          t: Date.now(),
+          mono: monotonicTime(),
+          payload: {
+            recordingId: recording.recordingId,
+            name: mismatchError.name,
+            message: mismatchError.message,
+            stage: "durability"
+          }
+        }))
+      ) {
+        throw new Error("Screen recording durability evidence was not admitted.");
+      }
+      if (mismatchError) {
+        recording.durabilityEvidenceQueued = true;
+      }
+
+      if (!recording.terminalEvidenceQueued) {
+        const ended = await ingestRawEvent({
+          source: "system",
+          rawType: "screen.recording.end",
+          sid: runtime.sid,
+          tabId: runtime.tabId,
+          t: Date.now(),
+          mono: monotonicTime(),
+          payload: {
+            recordingId: recording.recordingId,
+            mime: result.mime || recording.mime,
+            chunks,
+            chunkCount: chunks.length,
+            size: recording.sizeBytes,
+            durationMs: Math.max(0, Math.round(result.durationMs)),
+            width: result.width ?? recording.width,
+            height: result.height ?? recording.height,
+            reason: durabilityMismatch ? "screen-chunk-durability-mismatch" : result.reason
+          }
+        });
+        if (!ended) {
+          throw new Error("Screen recording terminal evidence was not admitted.");
+        }
+        recording.terminalEvidenceQueued = true;
+      }
+      await flushBufferedPipelineEvents(runtime);
+      await runtime.pipeline.flush();
+    },
+    commit: () => {
+      if (runtime.screenRecording !== recording) {
+        throw new Error("Screen recording changed before finalization committed.");
+      }
+      runtime.screenRecording = null;
     }
   });
-
-  runtime.screenRecording = null;
 }
 
 function ingestScreenRecordingError(
@@ -5047,11 +8082,6 @@ async function waitForScreenRecordingChunkWrites(recording: ScreenRecordingRunti
   while (recording.pendingWrites.size > 0) {
     await Promise.allSettled([...recording.pendingWrites]);
   }
-}
-
-function resolveScreenRecordingChunkIndex(value: unknown, fallback: number): number {
-  const numberValue = asFiniteNumber(value);
-  return numberValue === null ? Math.max(0, fallback) : Math.max(0, Math.round(numberValue));
 }
 
 function normalizeRecordingOffset(value: unknown): number | undefined {
@@ -5775,7 +8805,7 @@ function authorizeContentSender(
   const authorized =
     frameId === 0
       ? runtime.contentDocuments.authorizeTopSender(authorizationInput, {
-          allowNavigationFallback: !usesExactLiteTopDocumentAuthorization(runtime),
+          allowNavigationFallback: !usesExactContentTopDocumentAuthorization(runtime),
           currentCaptureUrl: runtime.captureUrl,
           ready
         })
@@ -5787,7 +8817,14 @@ function authorizeContentSender(
     return false;
   }
 
-  if (frameId === 0 && senderUrl !== runtime.captureUrl) {
+  if (
+    shouldContentSenderClaimCaptureUrl({
+      frameId,
+      senderUrl,
+      currentCaptureUrl: runtime.captureUrl,
+      usesExactTopDocumentAuthorization: usesExactContentTopDocumentAuthorization(runtime)
+    })
+  ) {
     runtime.captureUrl = senderUrl;
     runtime.cdpScope.captureUrl = senderUrl;
     runtime.url = sanitizeUrlForPrivacy(senderUrl);
@@ -5795,32 +8832,6 @@ function authorizeContentSender(
 
   syncAuthorizedContentFrames(runtime);
   return true;
-}
-
-function matchesAuthorizedContentSender(
-  runtime: SessionRuntime,
-  sender: MessageSenderLike | undefined,
-  documentUrl?: string
-): boolean {
-  const tabId = sender?.tab?.id;
-  const frameId = normalizeSenderFrameId(sender);
-  const documentId = sender?.documentId;
-  const url =
-    typeof documentUrl === "string" && documentUrl.length > 0
-      ? documentUrl
-      : typeof sender?.url === "string" && sender.url.length > 0
-        ? sender.url
-        : null;
-
-  return (
-    typeof tabId === "number" &&
-    tabId === runtime.tabId &&
-    frameId >= 0 &&
-    typeof documentId === "string" &&
-    documentId.length > 0 &&
-    url !== null &&
-    runtime.contentDocuments.matchesSender({ tabId, frameId, documentId, url })
-  );
 }
 
 function shouldStopRuntimeForDeniedContentSender(
@@ -5871,69 +8882,7 @@ async function authorizeContentSenderForReady(
     }
   }
 
-  if (!shouldInjectMainWorldHooksForMode(runtime.mode)) {
-    return true;
-  }
-
-  const frameId = normalizeSenderFrameId(sender);
-
-  if (frameId === 0) {
-    if (usesExactLiteTopDocumentAuthorization(runtime)) {
-      return true;
-    }
-
-    try {
-      await injectMainWorldHook(chromeApi, {
-        tabId: runtime.tabId,
-        frameId: 0
-      });
-    } catch (error) {
-      if (
-        isRuntimeCurrentCaptureOpen(runtime) &&
-        matchesAuthorizedContentSender(runtime, sender, documentUrl)
-      ) {
-        failContentSender(runtime, sender);
-        await stopRuntimeIfCurrent(runtime);
-      }
-
-      console.warn("[WebBlackbox] top main-world hook injection failed closed", {
-        tabId: runtime.tabId,
-        documentId: sender?.documentId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return false;
-    }
-
-    return (
-      isRuntimeCurrentCaptureOpen(runtime) &&
-      matchesAuthorizedContentSender(runtime, sender, documentUrl)
-    );
-  }
-
-  const documentId = sender?.documentId;
-
-  if (frameId < 0 || typeof documentId !== "string" || documentId.length === 0) {
-    failContentSender(runtime, sender);
-    return false;
-  }
-
-  try {
-    await injectMainWorldHook(chromeApi, {
-      tabId: runtime.tabId,
-      frameId,
-      documentId
-    });
-    return true;
-  } catch (error) {
-    failContentSender(runtime, sender);
-    console.warn("[WebBlackbox] child main-world hook injection failed closed", {
-      tabId: runtime.tabId,
-      frameId,
-      documentId,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return false;
-  }
+  return true;
 }
 
 function failContentSender(
@@ -5947,8 +8896,13 @@ function failContentSender(
     return false;
   }
 
+  void revokeContentFrameActivations(runtime, frameId, "document-failed", documentId);
+  runtime.contentMainWorldProofs.delete(contentActivationParentKey(frameId, documentId));
   const navigationFailed = runtime.contentDocuments.failNavigation(frameId, documentId);
-  const activeRevoked = runtime.contentDocuments.revoke(frameId, documentId);
+  const activeRevoked =
+    frameId === 0
+      ? runtime.contentDocuments.revoke(frameId, documentId)
+      : runtime.contentDocuments.blockDocument(frameId, documentId);
   syncAuthorizedContentFrames(runtime);
   return navigationFailed || activeRevoked;
 }
@@ -5963,8 +8917,7 @@ function syncAuthorizedContentFrames(runtime: SessionRuntime): void {
 
 async function deactivateDeniedContentFrame(
   runtime: SessionRuntime,
-  sender: MessageSenderLike | undefined,
-  port?: PortLike
+  sender: MessageSenderLike | undefined
 ): Promise<void> {
   if (shouldStopRuntimeForDeniedContentSender(runtime, sender)) {
     await stopRuntimeIfCurrent(runtime);
@@ -5977,27 +8930,20 @@ async function deactivateDeniedContentFrame(
     return;
   }
 
-  const deactivated = failContentSender(runtime, sender);
-
-  if (port?.name === PORT_NAMES.content) {
-    sendContentPortRecordingState(port, runtime, false);
-  } else if (deactivated) {
-    await notifyTabStatus(
-      runtime.tabId,
-      false,
-      runtime.sid,
-      runtime.mode,
-      toStatusSampling(runtime),
-      runtime.config.capturePolicy,
-      frameId
-    );
-  }
+  failContentSender(runtime, sender);
 }
 
 function resetAuthorizedContentFrames(
   runtime: SessionRuntime,
   topDocumentUrl = runtime.captureUrl
 ): void {
+  revokeRuntimeContent(runtime, "authorization-reset");
+  runtime.contentActivationParents.clear();
+  runtime.contentMainWorldProofs.clear();
+  runtime.contentNavigationRevisions.clear();
+  runtime.pendingContentPolicyRevisions.clear();
+  runtime.pendingLiteNetworkPolicyRevisions.clear();
+  runtime.sameDocumentTransitions.clear();
   runtime.contentDocuments.reset({ url: topDocumentUrl });
   syncAuthorizedContentFrames(runtime);
 }
@@ -6008,11 +8954,32 @@ function usesExactLiteTopDocumentAuthorization(runtime: SessionRuntime): boolean
       mode: runtime.mode,
       permissions: chromeApi?.runtime?.getManifest?.().permissions,
       hasWebNavigationApi: typeof chromeApi?.webNavigation?.onCommitted?.addListener === "function",
+      hasSameDocumentNavigationApi:
+        typeof chromeApi?.webNavigation?.onHistoryStateUpdated?.addListener === "function" &&
+        typeof chromeApi?.webNavigation?.onReferenceFragmentUpdated?.addListener === "function",
       hasScriptingApi: typeof chromeApi?.scripting?.executeScript === "function"
     });
   } catch {
     return false;
   }
+}
+
+function hasExactWebNavigationTracking(): boolean {
+  const permissions = chromeApi?.runtime?.getManifest?.().permissions;
+  return (
+    Array.isArray(permissions) &&
+    permissions.includes("webNavigation") &&
+    typeof chromeApi?.webNavigation?.onCommitted?.addListener === "function" &&
+    typeof chromeApi?.webNavigation?.onHistoryStateUpdated?.addListener === "function" &&
+    typeof chromeApi?.webNavigation?.onReferenceFragmentUpdated?.addListener === "function" &&
+    typeof chromeApi?.scripting?.executeScript === "function"
+  );
+}
+
+function usesExactContentTopDocumentAuthorization(runtime: SessionRuntime): boolean {
+  return runtime.mode === "full"
+    ? hasExactWebNavigationTracking()
+    : usesExactLiteTopDocumentAuthorization(runtime);
 }
 
 function asString(value: unknown): string | null {
@@ -6226,6 +9193,85 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
       runtime.config.capturePolicy?.categories.network === "body-allowlist"
         ? normalizeBodyCaptureMaxBytesUtil(sampling.bodyCaptureMaxBytes, 0)
         : 0
+  };
+}
+
+function normalizePipelineDeliveryReceipt(
+  raw: unknown,
+  query: PipelineDeliveryReceiptQuery
+): PipelineDeliveryReceipt | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  const row = asRecord(raw);
+  if (
+    !row ||
+    Object.keys(row).length !== 8 ||
+    row.tabId !== query.tabId ||
+    row.frameId !== query.frameId ||
+    row.documentId !== query.documentId ||
+    row.batchId !== query.batchId ||
+    typeof row.fingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(row.fingerprint) ||
+    !Number.isSafeInteger(row.eventCount) ||
+    (row.eventCount as number) <= 0 ||
+    (row.eventCount as number) > CONTENT_EVENT_BATCH_MAX ||
+    !Array.isArray(row.indexes) ||
+    row.indexes.length > (row.eventCount as number) ||
+    typeof row.complete !== "boolean"
+  ) {
+    throw new Error("Invalid offscreen pipeline delivery receipt.");
+  }
+
+  const indexes: PipelineDeliveryReceipt["indexes"] = [];
+  const seen = new Set<number>();
+  for (const candidate of row.indexes) {
+    const index = asRecord(candidate);
+    if (
+      !index ||
+      !Number.isSafeInteger(index.eventIndex) ||
+      (index.eventIndex as number) < 0 ||
+      (index.eventIndex as number) >= (row.eventCount as number) ||
+      seen.has(index.eventIndex as number)
+    ) {
+      throw new Error("Invalid offscreen pipeline delivery receipt index.");
+    }
+    seen.add(index.eventIndex as number);
+
+    if (index.outcome === "no-output" && Object.keys(index).length === 2) {
+      indexes.push({ eventIndex: index.eventIndex as number, outcome: "no-output" });
+      continue;
+    }
+    if (
+      index.outcome === "event" &&
+      Object.keys(index).length === 3 &&
+      typeof index.eventId === "string" &&
+      /^E-[0-9]{1,16}$/.test(index.eventId)
+    ) {
+      indexes.push({
+        eventIndex: index.eventIndex as number,
+        outcome: "event",
+        eventId: index.eventId
+      });
+      continue;
+    }
+    throw new Error("Invalid offscreen pipeline delivery receipt outcome.");
+  }
+  indexes.sort((left, right) => left.eventIndex - right.eventIndex);
+  if (row.complete !== (indexes.length === row.eventCount)) {
+    throw new Error("Offscreen pipeline delivery receipt completion is inconsistent.");
+  }
+
+  return {
+    tabId: query.tabId,
+    frameId: query.frameId,
+    documentId: query.documentId,
+    batchId: query.batchId,
+    fingerprint: row.fingerprint,
+    eventCount: row.eventCount as number,
+    indexes,
+    complete: row.complete
   };
 }
 
@@ -6485,12 +9531,175 @@ async function ensureRootPageAgentsInjected(
     beforeEach?: (step: "isolated-content" | "main-world-hook") => Promise<void> | void;
   } = {}
 ): Promise<void> {
-  await injectRootPageAgentsForMode(chromeApi, {
+  const contentTarget = resolveContentScriptInjectionTarget(
+    runtime.config.capturePolicy,
+    runtime.tabId
+  );
+  const injection = await injectRootPageAgentsForMode(chromeApi, {
     mode: runtime.mode,
-    contentTarget: resolveContentScriptInjectionTarget(runtime.config.capturePolicy, runtime.tabId),
-    mainWorldTarget: { tabId: runtime.tabId, frameId: 0 },
+    contentTarget,
+    mainWorldTarget: contentTarget.allFrames
+      ? { tabId: runtime.tabId, allFrames: true }
+      : { tabId: runtime.tabId, frameId: 0 },
     ...guards
   });
+  const { contentResults, mainWorldResults } = injection;
+  guards.assertCurrent?.();
+  const rootResult = contentResults.find((result) => result.frameId === 0);
+
+  if (
+    !rootResult ||
+    typeof rootResult.documentId !== "string" ||
+    rootResult.documentId.length === 0 ||
+    rootResult.error
+  ) {
+    throw new Error("Exact root content injection did not return a document identity.");
+  }
+
+  if (runtime.mode === "lite") {
+    for (const contentResult of contentResults) {
+      if (
+        typeof contentResult.documentId !== "string" ||
+        contentResult.documentId.length === 0 ||
+        contentResult.error
+      ) {
+        continue;
+      }
+
+      const mainWorldResult = mainWorldResults.find(
+        (candidate) =>
+          candidate.frameId === contentResult.frameId &&
+          candidate.documentId === contentResult.documentId &&
+          !candidate.error
+      );
+
+      if (mainWorldResult) {
+        if (
+          !rememberMainWorldController(
+            runtime,
+            contentActivationParentKey(contentResult.frameId, contentResult.documentId),
+            mainWorldResult.controller
+          )
+        ) {
+          throw new Error("Root MAIN-world controller conflicted with its isolated singleton.");
+        }
+      }
+    }
+
+    if (
+      !runtime.contentMainWorldProofs.has(
+        contentActivationParentKey(rootResult.frameId, rootResult.documentId)
+      )
+    ) {
+      throw new Error("Exact root MAIN-world injection did not match the content document.");
+    }
+  }
+
+  await populateInitialContentActivationParents(runtime, contentResults);
+  guards.assertCurrent?.();
+  await requestFreshContentActivation(runtime, {
+    frameId: 0,
+    documentId: rootResult.documentId,
+    assertCurrent: guards.assertCurrent
+  });
+  guards.assertCurrent?.();
+
+  const pendingChildren = contentResults.filter(
+    (result): result is typeof result & { documentId: string } =>
+      result.frameId > 0 &&
+      typeof result.documentId === "string" &&
+      result.documentId.length > 0 &&
+      !result.error &&
+      (runtime.mode === "full" ||
+        runtime.contentMainWorldProofs.has(
+          contentActivationParentKey(result.frameId, result.documentId)
+        )) &&
+      runtime.contentActivationParents.has(
+        contentActivationParentKey(result.frameId, result.documentId)
+      )
+  );
+
+  while (pendingChildren.length > 0) {
+    const live = contentActivations.listRuntime(runtime, runtime.captureFence);
+    const readyChildren = pendingChildren.filter((result) => {
+      const parent = runtime.contentActivationParents.get(
+        contentActivationParentKey(result.frameId, result.documentId)
+      );
+      return live.some(
+        (activation) =>
+          activation.frameId === parent?.frameId && activation.documentId === parent.documentId
+      );
+    });
+
+    if (readyChildren.length === 0) {
+      break;
+    }
+
+    for (const child of readyChildren) {
+      pendingChildren.splice(pendingChildren.indexOf(child), 1);
+    }
+
+    await Promise.all(
+      readyChildren.map((result) =>
+        requestFreshContentActivation(runtime, {
+          frameId: result.frameId,
+          documentId: result.documentId,
+          assertCurrent: guards.assertCurrent
+        }).catch(() => null)
+      )
+    );
+  }
+  guards.assertCurrent?.();
+}
+
+async function populateInitialContentActivationParents(
+  runtime: SessionRuntime,
+  results: readonly { frameId: number; documentId?: string }[]
+): Promise<void> {
+  if (!chromeApi?.webNavigation?.getAllFrames) {
+    return;
+  }
+
+  let frames: Awaited<ReturnType<NonNullable<typeof chromeApi.webNavigation.getAllFrames>>>;
+
+  try {
+    frames = await chromeApi.webNavigation.getAllFrames({ tabId: runtime.tabId });
+  } catch {
+    return;
+  }
+
+  const resultDocumentByFrame = new Map(
+    results.flatMap((result) =>
+      typeof result.documentId === "string" && result.documentId.length > 0
+        ? [[result.frameId, result.documentId] as const]
+        : []
+    )
+  );
+
+  for (const frame of frames) {
+    if (frame.frameId <= 0 || frame.parentFrameId < 0) {
+      continue;
+    }
+
+    const documentId = frame.documentId;
+    const parent = resolveExactInitialContentParent({
+      frameId: frame.frameId,
+      parentFrameId: frame.parentFrameId,
+      documentId,
+      parentDocumentId: frame.parentDocumentId,
+      injectedDocumentId: resultDocumentByFrame.get(frame.frameId),
+      injectedParentDocumentId: resultDocumentByFrame.get(frame.parentFrameId)
+    });
+
+    if (!documentId || !parent) {
+      continue;
+    }
+
+    runtime.contentActivationParents.set(
+      contentActivationParentKey(frame.frameId, documentId),
+      parent
+    );
+  }
 }
 
 function installLiteWebRequestCapture(): void {
@@ -6522,7 +9731,32 @@ function installLiteWebRequestCapture(): void {
     }
 
     const requestMetaKey = buildRequestMetaKey(details.requestId);
+    if (!isLiteWebRequestPolicyAdmissionOpen(runtime)) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+    if (
+      !isLiteWebRequestDocumentUrlUnambiguous(
+        runtime.config.capturePolicy?.scope.excludedUrlPatterns ?? [],
+        details.type
+      )
+    ) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
     const existingMetadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
+    const navigationFrameId =
+      typeof details.frameId === "number" && Number.isSafeInteger(details.frameId)
+        ? Math.max(0, details.frameId)
+        : 0;
+    const previousNavigationDocument =
+      details.type === "main_frame" || details.type === "sub_frame"
+        ? runtime.contentDocuments.get(navigationFrameId)
+        : null;
+
+    if (previousNavigationDocument) {
+      blockKnownContentSubtree(runtime, previousNavigationDocument, "navigation-start");
+    }
 
     const authorization = authorizeLiteWebRequest({
       authorization: runtime.contentDocuments,
@@ -6550,6 +9784,18 @@ function installLiteWebRequestCapture(): void {
       return;
     }
 
+    if (
+      !isLiteWebRequestActivationAuthorized(
+        runtime,
+        authorization,
+        details.parentFrameId,
+        details.parentDocumentId
+      )
+    ) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+
     const startedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
     upsertRequestMeta(runtime.requestMeta, requestMetaKey, {
       url: details.url,
@@ -6562,7 +9808,11 @@ function installLiteWebRequestCapture(): void {
           : undefined
     });
 
-    ingestRawEvent(
+    if (authorization.kind === "top-navigation" || authorization.kind === "subframe-navigation") {
+      return;
+    }
+
+    void ingestRawEvent(
       buildLiteNetworkRequestRawEvent(
         {
           sid: runtime.sid,
@@ -6600,6 +9850,19 @@ function installLiteWebRequestCapture(): void {
 
     const requestMetaKey = buildRequestMetaKey(details.requestId);
     const metadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
+    if (!isLiteWebRequestPolicyAdmissionOpen(runtime)) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+    if (
+      !isLiteWebRequestDocumentUrlUnambiguous(
+        runtime.config.capturePolicy?.scope.excludedUrlPatterns ?? [],
+        details.type ?? metadata?.resourceType
+      )
+    ) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
     const authorization = authorizeLiteWebRequest({
       authorization: runtime.contentDocuments,
       details: {
@@ -6626,9 +9889,19 @@ function installLiteWebRequestCapture(): void {
       return;
     }
 
+    if (!isLiteWebRequestActivationAuthorized(runtime, authorization)) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+
+    if (authorization.kind === "top-navigation" || authorization.kind === "subframe-navigation") {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+
     const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
 
-    ingestRawEvent(
+    void ingestRawEvent(
       buildLiteNetworkResponseRawEvent(
         {
           sid: runtime.sid,
@@ -6673,6 +9946,19 @@ function installLiteWebRequestCapture(): void {
 
     const requestMetaKey = buildRequestMetaKey(details.requestId);
     const metadata = getRequestMeta(runtime.requestMeta, requestMetaKey);
+    if (!isLiteWebRequestPolicyAdmissionOpen(runtime)) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+    if (
+      !isLiteWebRequestDocumentUrlUnambiguous(
+        runtime.config.capturePolicy?.scope.excludedUrlPatterns ?? [],
+        details.type ?? metadata?.resourceType
+      )
+    ) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
     const authorization = authorizeLiteWebRequest({
       authorization: runtime.contentDocuments,
       details: {
@@ -6699,9 +9985,22 @@ function installLiteWebRequestCapture(): void {
       return;
     }
 
+    if (!isLiteWebRequestActivationAuthorized(runtime, authorization)) {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      return;
+    }
+
+    if (authorization.kind === "top-navigation" || authorization.kind === "subframe-navigation") {
+      deleteRequestMeta(runtime.requestMeta, requestMetaKey);
+      if (authorization.kind === "top-navigation" && authorization.navigationCurrent === true) {
+        requestStopRuntimeIfCurrent(runtime, "navigation-error");
+      }
+      return;
+    }
+
     const endedAt = normalizeLiteNetworkTimestamp(details.timeStamp);
 
-    ingestRawEvent(
+    void ingestRawEvent(
       buildLiteNetworkFailureRawEvent(
         {
           sid: runtime.sid,
@@ -6724,10 +10023,6 @@ function installLiteWebRequestCapture(): void {
     );
 
     deleteRequestMeta(runtime.requestMeta, requestMetaKey);
-
-    if (authorization.kind === "top-navigation" && authorization.navigationCurrent === true) {
-      requestStopRuntimeIfCurrent(runtime, "navigation-error");
-    }
   };
 
   chromeApi.webRequest.onBeforeRequest.addListener(onBeforeRequest, filter);
@@ -6796,6 +10091,73 @@ function resolveActiveLiteRuntime(tabId: number): SessionRuntime | undefined {
   return runtime;
 }
 
+function isLiteWebRequestPolicyAdmissionOpen(runtime: SessionRuntime): boolean {
+  return (
+    runtime.pendingContentPolicyRevisions.size === 0 &&
+    runtime.pendingLiteNetworkPolicyRevisions.size === 0
+  );
+}
+
+function isLiteWebRequestActivationAuthorized(
+  runtime: SessionRuntime,
+  decision: LiteWebRequestAuthorizationDecision,
+  parentFrameId?: number,
+  parentDocumentId?: string
+): boolean {
+  if (decision.kind === "top-navigation") {
+    return true;
+  }
+
+  if (decision.kind === "subframe-navigation") {
+    return (
+      typeof parentFrameId === "number" &&
+      typeof parentDocumentId === "string" &&
+      hasLiveContentActivationAncestry(runtime, parentFrameId, parentDocumentId)
+    );
+  }
+
+  const document = runtime.contentDocuments.get(decision.frameId);
+  return (
+    document !== null &&
+    hasLiveContentActivationAncestry(runtime, document.frameId, document.documentId)
+  );
+}
+
+function hasLiveContentActivationAncestry(
+  runtime: SessionRuntime,
+  frameId: number,
+  documentId: string
+): boolean {
+  const active = contentActivations.listRuntime(runtime, runtime.captureFence, ["active"]);
+  const byDocument = new Map(
+    active.map((activation) => [
+      contentActivationParentKey(activation.frameId, activation.documentId),
+      activation
+    ])
+  );
+  let current = byDocument.get(contentActivationParentKey(frameId, documentId));
+  const visited = new Set<string>();
+
+  while (current) {
+    const key = contentActivationParentKey(current.frameId, current.documentId);
+    if (visited.has(key)) {
+      return false;
+    }
+    visited.add(key);
+
+    if (current.frameId === 0) {
+      return current.parent === undefined;
+    }
+    const parent = current.parent;
+    if (!parent) {
+      return false;
+    }
+    current = byDocument.get(contentActivationParentKey(parent.frameId, parent.documentId));
+  }
+
+  return false;
+}
+
 function normalizeLiteNetworkTimestamp(candidate: unknown): number {
   return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
     ? candidate
@@ -6808,22 +10170,23 @@ async function ensureOffscreenDocument(): Promise<void> {
   }
 
   const offscreenUrl = chromeApi.runtime.getURL(OFFSCREEN_PATH);
-  const contexts = chromeApi.runtime.getContexts
-    ? await chromeApi.runtime.getContexts({
-        contextTypes: ["OFFSCREEN_DOCUMENT"],
-        documentUrls: [offscreenUrl]
+  await offscreenDocumentLifecycle.ensure({
+    exists: async () => {
+      const contexts = chromeApi.runtime?.getContexts
+        ? await chromeApi.runtime.getContexts({
+            contextTypes: ["OFFSCREEN_DOCUMENT"],
+            documentUrls: [offscreenUrl]
+          })
+        : [];
+      return contexts.length > 0;
+    },
+    create: () =>
+      chromeApi.offscreen!.createDocument!({
+        url: OFFSCREEN_PATH,
+        reasons: ["DOM_PARSER", "USER_MEDIA"],
+        justification:
+          "WebBlackbox uses offscreen document for persistent local recording pipeline and optional tab video capture."
       })
-    : [];
-
-  if (contexts.length > 0) {
-    return;
-  }
-
-  await chromeApi.offscreen.createDocument({
-    url: OFFSCREEN_PATH,
-    reasons: ["DOM_PARSER", "USER_MEDIA"],
-    justification:
-      "WebBlackbox uses offscreen document for persistent local recording pipeline and optional tab video capture."
   });
 }
 
@@ -6980,24 +10343,39 @@ async function disposeStoppedSessionOnce(runtime: SessionRuntime): Promise<void>
     return;
   }
 
-  await flushBufferedPipelineEvents(runtime).catch((error) => {
-    console.warn("[WebBlackbox] stopped-session buffer flush failed during purge", error);
-  });
-  await runtime.queue.catch((error) => {
-    console.warn("[WebBlackbox] stopped-session queue drain failed during purge", error);
-  });
-  await runtime.pipeline.flush().catch(() => undefined);
-  await runtime.pipeline.close({
-    purge: true
-  });
-  await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
-  if (sessionAnnotations.delete(runtime.sid)) {
-    await persistSessionAnnotations().catch(() => undefined);
+  const previousCleanupDeadline = runtime.cleanupDeadline;
+  const retryDeadline = Date.now() + RETAINED_STOPPING_RETRY_DELAY_MS;
+  runtime.cleanupDeadline = retryDeadline;
+  try {
+    await persistRuntimeState({ required: true });
+  } catch (error) {
+    runtime.cleanupDeadline = previousCleanupDeadline;
+    throw error;
   }
 
-  if (!deleteMapEntryIfSame(sessionsBySid, runtime.sid, runtime)) {
-    return;
+  try {
+    await flushBufferedPipelineEvents(runtime).catch((error) => {
+      console.warn("[WebBlackbox] stopped-session buffer flush failed during purge", error);
+    });
+    await runtime.queue.catch((error) => {
+      console.warn("[WebBlackbox] stopped-session queue drain failed during purge", error);
+    });
+    await runtime.pipeline.flush().catch(() => undefined);
+    await runtime.pipeline.close({
+      purge: true
+    });
+
+    if (!(await persistStoppedRuntimeRemoval(runtime))) {
+      throw new Error("The stopped runtime changed before its removal checkpoint.");
+    }
+  } catch (error) {
+    if (isMapEntrySame(sessionsBySid, runtime.sid, runtime)) {
+      await runtimeCleanupScheduler.schedule(runtime.sid, retryDeadline).catch(() => undefined);
+    }
+    throw error;
   }
+
+  await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
 
   if (sessionsByTab.size === 0) {
     await setIdleBadge();
@@ -7007,10 +10385,41 @@ async function disposeStoppedSessionOnce(runtime: SessionRuntime): Promise<void>
 
   await closeOffscreenIfUnused().catch(() => undefined);
   pushSessionList();
-  await persistRuntimeState().catch((error) => {
-    console.warn("[WebBlackbox] failed to persist stopped-session purge", error);
-  });
   notifyOffscreenPipelineStatus();
+}
+
+async function persistStoppedRuntimeRemoval(runtime: SessionRuntime): Promise<boolean> {
+  if (!chromeApi?.storage?.local?.set) {
+    throw new Error("Chrome storage is unavailable for the stopped-session removal checkpoint.");
+  }
+  return sessionAnnotationMutations.run(runtime.sid, async () => {
+    const previousAnnotation = sessionAnnotations.get(runtime.sid);
+    return commitDurableRemoval({
+      remove: () => {
+        if (!deleteMapEntryIfSame(sessionsBySid, runtime.sid, runtime)) {
+          return false;
+        }
+        sessionAnnotations.delete(runtime.sid);
+        return true;
+      },
+      persist: () =>
+        enqueueRuntimeStatePersist(async () => {
+          await chromeApi.storage!.local.set({
+            [ACTIVE_SESSION_STORAGE_KEY]: createCurrentRuntimeStateSnapshot(),
+            [SESSION_ANNOTATIONS_STORAGE_KEY]: serializeSessionAnnotations()
+          });
+        }),
+      restore: () => {
+        if (sessionsBySid.has(runtime.sid)) {
+          throw new Error("Stopped runtime identity was replaced during removal rollback.");
+        }
+        sessionsBySid.set(runtime.sid, runtime);
+        if (previousAnnotation) {
+          sessionAnnotations.set(runtime.sid, previousAnnotation);
+        }
+      }
+    });
+  });
 }
 
 function resolveRuntimeLocalTtlMs(policy: CapturePolicy | null | undefined): number {
@@ -7027,11 +10436,19 @@ function resolveRuntimeLocalTtlMs(policy: CapturePolicy | null | undefined): num
 }
 
 async function closeOffscreenIfUnused(): Promise<void> {
-  if (sessionsBySid.size > 0) {
-    return;
-  }
-
-  await chromeApi?.offscreen?.closeDocument?.().catch(() => undefined);
+  await offscreenDocumentLifecycle
+    .closeIfUnused({
+      isUnused: () =>
+        sessionsBySid.size === 0 &&
+        retainedStoppingRuntimesBySid.size === 0 &&
+        pendingRuntimeRestorationsBySid.size === 0 &&
+        runtimeRestorationSourceRowsBySid.size === 0 &&
+        offscreenSessionRecovery.size === 0,
+      close: async () => {
+        await chromeApi?.offscreen?.closeDocument?.();
+      }
+    })
+    .catch(() => undefined);
 }
 
 async function downloadExportedBundle(
@@ -7143,7 +10560,7 @@ function updateSessionMetadataFromEvent(runtime: SessionRuntime, event: WebBlack
   const frame = asRecord(payload?.frame);
   const nextUrl = asString(payload?.url) ?? asString(frame?.url);
 
-  if (nextUrl && !usesExactLiteTopDocumentAuthorization(runtime)) {
+  if (nextUrl && !usesExactContentTopDocumentAuthorization(runtime)) {
     const claim = claimCurrentRuntimeNavigation(runtime, "content-navigation", nextUrl);
 
     if (!claim) {
@@ -7189,10 +10606,10 @@ async function updateSessionMetadataFromEventAsync(
   let changed = false;
 
   if (nextUrl) {
-    const exactLiteTopDocument = usesExactLiteTopDocumentAuthorization(runtime);
-    const exactDocument = exactLiteTopDocument ? runtime.contentDocuments.get(0) : null;
+    const exactTopDocument = usesExactContentTopDocumentAuthorization(runtime);
+    const exactDocument = exactTopDocument ? runtime.contentDocuments.get(0) : null;
 
-    if (exactLiteTopDocument && (!exactDocument || exactDocument.url !== nextUrl)) {
+    if (exactTopDocument && (!exactDocument || exactDocument.url !== nextUrl)) {
       return;
     }
 
@@ -7226,7 +10643,7 @@ async function updateSessionMetadataFromEventAsync(
     }
 
     if (!policy.value) {
-      if (exactLiteTopDocument) {
+      if (exactTopDocument) {
         await stopRuntimeIfCurrent(runtime);
       } else if (navigationClaim) {
         await stopRuntimeIfNavigationClaimCurrent(navigationClaim);
@@ -7240,7 +10657,7 @@ async function updateSessionMetadataFromEventAsync(
       runtime.url = sanitizedNextUrl;
       runtime.captureUrl = nextUrl;
       runtime.cdpScope.captureUrl = nextUrl;
-      if (!exactLiteTopDocument) {
+      if (!exactTopDocument) {
         resetAuthorizedContentFrames(runtime);
       }
       changed = true;
@@ -7266,7 +10683,7 @@ async function updateSessionMetadataFromEventAsync(
   }
 
   if (globalCdpNavigationChanged && nextUrl && navigationClaim) {
-    await restoreCdpGlobalCaptureAfterNavigation(navigationClaim, true);
+    launchCdpNavigationRestore(navigationClaim);
   }
 }
 
@@ -7295,10 +10712,12 @@ function buildSessionListMessage(): SessionListMessage {
 }
 
 async function handleExactLiteTabUrlChanged(
-  runtime: SessionRuntime,
+  claim: SessionNavigationClaim,
   rawUrl: string
 ): Promise<void> {
-  if (!isRuntimeCurrentCaptureOpen(runtime) || !usesExactLiteTopDocumentAuthorization(runtime)) {
+  const runtime = claim.runtime;
+
+  if (!isSessionNavigationClaimCurrent(claim) || !usesExactLiteTopDocumentAuthorization(runtime)) {
     return;
   }
 
@@ -7308,24 +10727,17 @@ async function handleExactLiteTabUrlChanged(
     resolveCurrentUrl: () => resolveCurrentTabCaptureUrl(runtime.tabId)
   });
 
-  if (!isRuntimeCurrentCaptureOpen(runtime) || decision === "stale") {
+  if (!isSessionNavigationClaimCurrent(claim) || decision === "stale") {
     return;
   }
 
   if (decision === "denied") {
-    await stopRuntimeIfCurrent(runtime);
+    await stopRuntimeIfNavigationClaimCurrent(claim);
     return;
   }
 
-  const nextUrl = sanitizeUrlForPrivacy(rawUrl);
-
-  if (nextUrl !== runtime.url || rawUrl !== runtime.captureUrl) {
-    runtime.url = nextUrl;
-    runtime.captureUrl = rawUrl;
-    runtime.cdpScope.captureUrl = rawUrl;
-    pushSessionList();
-    scheduleRuntimeStatePersist();
-  }
+  // tabs.onUpdated is only an early-deny signal in exact mode. The exact
+  // webNavigation document transaction is the sole owner of captureUrl.
 }
 
 async function handleTabUrlChanged(
@@ -7334,7 +10746,10 @@ async function handleTabUrlChanged(
 ): Promise<boolean> {
   const runtime = claim.runtime;
 
-  if (!isSessionNavigationClaimCurrent(claim) || usesExactLiteTopDocumentAuthorization(runtime)) {
+  if (
+    !isSessionNavigationClaimCurrent(claim) ||
+    usesExactContentTopDocumentAuthorization(runtime)
+  ) {
     return false;
   }
 
@@ -7591,20 +11006,37 @@ async function updateSessionAnnotation(
 ): Promise<void> {
   const tags = normalizeSessionTags(tagsInput);
   const note = normalizeSessionNote(noteInput);
-  const runtime = sessionsBySid.get(sid);
+  await sessionAnnotationMutations.run(sid, async () => {
+    const runtime = sessionsBySid.get(sid);
+    if (!runtime) {
+      return;
+    }
+    const previousRuntimeAnnotation = { tags: [...runtime.tags], note: runtime.note };
+    const previousAnnotation = sessionAnnotations.get(sid);
 
-  if (runtime) {
-    runtime.tags = [...tags];
-    runtime.note = note;
-  }
-
-  sessionAnnotations.set(sid, {
-    tags: [...tags],
-    note
+    await commitSessionAnnotationMutation({
+      apply: () => {
+        if (runtime) {
+          runtime.tags = [...tags];
+          runtime.note = note;
+        }
+        sessionAnnotations.set(sid, {
+          tags: [...tags],
+          note
+        });
+      },
+      rollback: () => {
+        runtime.tags = previousRuntimeAnnotation.tags;
+        runtime.note = previousRuntimeAnnotation.note;
+        if (previousAnnotation) {
+          sessionAnnotations.set(sid, previousAnnotation);
+        } else {
+          sessionAnnotations.delete(sid);
+        }
+      },
+      persist: persistRuntimeAndAnnotations
+    });
   });
-
-  await persistSessionAnnotations().catch(() => undefined);
-  await persistRuntimeState().catch(() => undefined);
   pushSessionList();
 }
 
@@ -7623,6 +11055,30 @@ function getSessionAnnotation(sid: string): SessionAnnotation {
   };
 }
 
+function mergeStoredSessionAnnotation(runtime: PersistedRuntime): PersistedRuntime {
+  return mergePersistedSessionAnnotation(runtime, sessionAnnotations.get(runtime.sid));
+}
+
+async function deleteSessionAnnotationDurably(sid: string): Promise<boolean> {
+  return sessionAnnotationMutations.run(sid, async () => {
+    const previous = sessionAnnotations.get(sid);
+    if (!previous) {
+      return false;
+    }
+
+    sessionAnnotations.delete(sid);
+    try {
+      await persistSessionAnnotations();
+      return true;
+    } catch (error) {
+      if (!sessionAnnotations.has(sid)) {
+        sessionAnnotations.set(sid, previous);
+      }
+      throw error;
+    }
+  });
+}
+
 async function loadSessionAnnotations(): Promise<void> {
   sessionAnnotations.clear();
 
@@ -7630,9 +11086,7 @@ async function loadSessionAnnotations(): Promise<void> {
     return;
   }
 
-  const values = await chromeApi.storage.local
-    .get(SESSION_ANNOTATIONS_STORAGE_KEY)
-    .catch(() => undefined);
+  const values = await chromeApi.storage.local.get(SESSION_ANNOTATIONS_STORAGE_KEY);
   const raw = asRecord(values?.[SESSION_ANNOTATIONS_STORAGE_KEY]);
 
   if (!raw) {
@@ -7653,9 +11107,30 @@ async function loadSessionAnnotations(): Promise<void> {
 
 async function persistSessionAnnotations(): Promise<void> {
   if (!chromeApi?.storage?.local?.set) {
-    return;
+    throw new Error("Chrome storage is unavailable for session annotations.");
   }
 
+  await enqueueRuntimeStatePersist(async () => {
+    await chromeApi.storage!.local.set({
+      [SESSION_ANNOTATIONS_STORAGE_KEY]: serializeSessionAnnotations()
+    });
+  });
+}
+
+async function persistRuntimeAndAnnotations(): Promise<void> {
+  if (!chromeApi?.storage?.local?.set) {
+    throw new Error("Chrome storage is unavailable for the session annotation checkpoint.");
+  }
+
+  await enqueueRuntimeStatePersist(async () => {
+    await chromeApi.storage!.local.set({
+      [ACTIVE_SESSION_STORAGE_KEY]: createCurrentRuntimeStateSnapshot(),
+      [SESSION_ANNOTATIONS_STORAGE_KEY]: serializeSessionAnnotations()
+    });
+  });
+}
+
+function serializeSessionAnnotations(): Record<string, SessionAnnotation> {
   const serialized: Record<string, SessionAnnotation> = {};
 
   for (const [sid, annotation] of sessionAnnotations.entries()) {
@@ -7665,9 +11140,7 @@ async function persistSessionAnnotations(): Promise<void> {
     };
   }
 
-  await chromeApi.storage.local.set({
-    [SESSION_ANNOTATIONS_STORAGE_KEY]: serialized
-  });
+  return serialized;
 }
 
 function normalizeSessionTags(input: unknown): string[] {
@@ -7744,6 +11217,7 @@ async function persistRuntimeStoppingTombstone(
     await persistDurableStopTombstone({
       persist: async () => {
         const snapshot = createCurrentRuntimeStateSnapshot({
+          state: "stopping",
           runtime,
           stopRequestedAt,
           cleanupDeadline
@@ -7761,32 +11235,93 @@ async function persistRuntimeStoppingTombstone(
   });
 }
 
-function createCurrentRuntimeStateSnapshot(stoppingCheckpoint?: {
-  runtime: SessionRuntime;
-  stopRequestedAt: number;
-  cleanupDeadline: number;
-}) {
+async function persistRuntimeStoppedCheckpoint(
+  runtime: SessionRuntime,
+  stoppedAt: number,
+  cleanupDeadline: number
+): Promise<void> {
+  if (!chromeApi?.storage?.local?.set) {
+    throw new Error("Chrome storage is unavailable for the stopped checkpoint.");
+  }
+
+  await enqueueRuntimeStatePersist(async () => {
+    const snapshot = createCurrentRuntimeStateSnapshot({
+      state: "stopped",
+      runtime,
+      stoppedAt,
+      cleanupDeadline
+    });
+    await chromeApi.storage!.local.set({
+      [ACTIVE_SESSION_STORAGE_KEY]: snapshot
+    });
+  });
+}
+
+function createCurrentRuntimeStateSnapshot(
+  checkpoint?:
+    | {
+        state: "stopping";
+        runtime: SessionRuntime;
+        stopRequestedAt: number;
+        cleanupDeadline: number;
+      }
+    | {
+        state: "stopped";
+        runtime: SessionRuntime;
+        stoppedAt: number;
+        cleanupDeadline: number;
+      }
+) {
+  const finalizingScreenRecordings = new Set(
+    [...sessionsBySid.values()]
+      .filter((runtime) => runtime.screenRecording?.finalizing === true)
+      .map((runtime) => runtime.sid)
+  );
+  const omitCompletedScreenRecording = <Runtime extends PersistedRuntime>(
+    runtime: Runtime
+  ): Runtime => {
+    if (!finalizingScreenRecordings.has(runtime.sid) || !runtime.screenRecording) {
+      return runtime;
+    }
+    const { screenRecording: _completed, ...base } = runtime;
+    void _completed;
+    return base as Runtime;
+  };
   const liveSessions = [...sessionsBySid.values()].map((runtime) => {
     const persisted = toPersistedRuntime(runtime);
 
-    if (stoppingCheckpoint?.runtime !== runtime) {
+    if (checkpoint?.runtime !== runtime) {
       return persisted;
+    }
+
+    if (checkpoint.state === "stopped") {
+      if (persisted.state !== "active" && persisted.state !== "stopping") {
+        throw new Error("Only a live runtime can enter the stopped checkpoint.");
+      }
+
+      return createStoppedRuntimeTombstone(
+        persisted,
+        checkpoint.stoppedAt,
+        checkpoint.cleanupDeadline
+      );
     }
 
     if (persisted.state !== "active") {
       throw new Error("Only an active runtime can enter the stopping checkpoint.");
     }
-
     return createStoppingRuntimeTombstone(
       persisted,
-      stoppingCheckpoint.stopRequestedAt,
-      stoppingCheckpoint.cleanupDeadline
+      checkpoint.stopRequestedAt,
+      checkpoint.cleanupDeadline
     );
   });
   return createRuntimeStateSnapshot(
     mergeRuntimeStateWithStoppingTombstones(
-      [...pendingRuntimeRestorationsBySid.values(), ...liveSessions],
-      [...retainedStoppingRuntimesBySid.values()]
+      [
+        ...[...pendingRuntimeRestorationsBySid.values()].map(omitCompletedScreenRecording),
+        ...liveSessions
+      ],
+      [...retainedStoppingRuntimesBySid.values()].map(omitCompletedScreenRecording)
     )
   );
 }
@@ -7824,21 +11359,22 @@ function toPersistedRuntime(runtime: SessionRuntime): PersistedRuntime {
     networkTotal: runtime.networkBudgetSample.total,
     networkFailed: runtime.networkBudgetSample.failed
   };
-  const screenRecording: PersistedScreenRecording | undefined = runtime.screenRecording
-    ? {
-        recordingId: runtime.screenRecording.recordingId,
-        startedAt: runtime.screenRecording.startedAt,
-        startedMono: runtime.screenRecording.startedMono,
-        mime: runtime.screenRecording.mime,
-        ...(runtime.screenRecording.width ? { width: runtime.screenRecording.width } : {}),
-        ...(runtime.screenRecording.height ? { height: runtime.screenRecording.height } : {}),
-        ...(runtime.screenRecording.frameRate
-          ? { frameRate: runtime.screenRecording.frameRate }
-          : {}),
-        chunkCount: runtime.screenRecording.chunkCount,
-        sizeBytes: runtime.screenRecording.sizeBytes
-      }
-    : undefined;
+  const screenRecording: PersistedScreenRecording | undefined =
+    runtime.screenRecording && !runtime.screenRecording.finalizing
+      ? {
+          recordingId: runtime.screenRecording.recordingId,
+          startedAt: runtime.screenRecording.startedAt,
+          startedMono: runtime.screenRecording.startedMono,
+          mime: runtime.screenRecording.mime,
+          ...(runtime.screenRecording.width ? { width: runtime.screenRecording.width } : {}),
+          ...(runtime.screenRecording.height ? { height: runtime.screenRecording.height } : {}),
+          ...(runtime.screenRecording.frameRate
+            ? { frameRate: runtime.screenRecording.frameRate }
+            : {}),
+          chunkCount: runtime.screenRecording.chunkCount,
+          sizeBytes: runtime.screenRecording.sizeBytes
+        }
+      : undefined;
   const base = {
     sid: runtime.sid,
     tabId: runtime.tabId,
@@ -7911,6 +11447,8 @@ function redactOperationalMessage(message: string): string {
 async function restoreRuntimeState(): Promise<void> {
   await loadSessionAnnotations();
   pendingRuntimeRestorationsBySid.clear();
+  runtimeRestorationSourceRowsBySid.clear();
+  runtimeRestorationCheckpointRewriteAllowed = false;
 
   if (!chromeApi?.storage?.local?.get) {
     return;
@@ -7919,47 +11457,57 @@ async function restoreRuntimeState(): Promise<void> {
   const values = await chromeApi.storage.local.get(ACTIVE_SESSION_STORAGE_KEY);
   const persisted = values?.[ACTIVE_SESSION_STORAGE_KEY];
   const snapshot = parseRuntimeStateSnapshot(persisted);
+  runtimeRestorationCheckpointRewriteAllowed = persisted === undefined || snapshot !== null;
 
   if (persisted !== undefined && !snapshot) {
     const identities = extractPersistedRuntimeIdentities(persisted);
-    sessionAnnotations.clear();
-    await persistSessionAnnotations().catch(() => undefined);
-    await chromeApi.storage.local
-      .set({
-        [ACTIVE_SESSION_STORAGE_KEY]: createRuntimeStateSnapshot([])
-      })
-      .catch(() => undefined);
-    await clearStaleRuntimeCleanupAlarms(new Set());
 
     for (const identity of identities) {
-      await notifyTabStatus(identity.tabId, false);
-      await purgePersistedRuntimeData({
-        ...identity,
-        mode: "lite",
-        url: "https://invalid.invalid/",
-        title: undefined,
-        tags: [],
-        config: withSessionCapturePolicy(resolveModeBaseConfig("lite"), {
-          tabId: identity.tabId,
-          origin: "https://invalid.invalid",
-          startedAt: identity.startedAt
-        })
-      });
+      await notifyTabContentReset(identity.tabId, "invalid-runtime-snapshot");
+      await purgePersistedRuntimeData(
+        {
+          ...identity,
+          mode: "lite",
+          url: "https://invalid.invalid/",
+          title: undefined,
+          tags: [],
+          config: withSessionCapturePolicy(resolveModeBaseConfig("lite"), {
+            tabId: identity.tabId,
+            origin: "https://invalid.invalid",
+            startedAt: identity.startedAt
+          })
+        },
+        {
+          rethrow: true
+        }
+      );
     }
+
+    sessionAnnotations.clear();
+    await persistSessionAnnotations();
+    await chromeApi.storage.local.set({
+      [ACTIVE_SESSION_STORAGE_KEY]: createRuntimeStateSnapshot([])
+    });
+    runtimeRestorationCheckpointRewriteAllowed = true;
+    await clearStaleRuntimeCleanupAlarms(new Set());
   } else if (snapshot) {
+    const restoredSessions = snapshot.sessions.map(mergeStoredSessionAnnotation);
+    runtimeRestorationSourceRowsBySid.clear();
+    for (const runtime of restoredSessions) {
+      runtimeRestorationSourceRowsBySid.set(runtime.sid, runtime);
+      pendingRuntimeRestorationsBySid.set(runtime.sid, runtime);
+    }
+
     const enterprisePolicy = await loadEnterprisePolicy();
     const performanceBudget = await loadPerformanceBudgetConfig();
     const stoppedRuntimes: SessionRuntime[] = [];
     const restorationOrder = [
-      ...snapshot.sessions.filter((runtime) => runtime.state === "stopping"),
-      ...snapshot.sessions.filter((runtime) => runtime.state !== "stopping")
+      ...restoredSessions.filter((runtime) => runtime.state === "stopping"),
+      ...restoredSessions.filter((runtime) => runtime.state !== "stopping")
     ];
 
-    for (const runtime of snapshot.sessions) {
-      pendingRuntimeRestorationsBySid.set(runtime.sid, runtime);
-    }
-
     for (const persistedRuntime of restorationOrder) {
+      let keepPendingRestoration = false;
       const config = applyEnterprisePolicyToRecorderConfig(
         persistedRuntime.config,
         enterprisePolicy
@@ -7978,18 +11526,19 @@ async function restoreRuntimeState(): Promise<void> {
           continue;
         }
 
-        if (restorationPlan.kind === "purge-stopping") {
+        if (restorationPlan.kind === "finalize-stopping") {
           const retainedTombstone: PersistedStoppingRuntime = {
             ...restorationPlan.runtime,
             config
           };
           retainedStoppingRuntimesBySid.set(retainedTombstone.sid, retainedTombstone);
-          await notifyTabStatus(restorationPlan.runtime.tabId, false);
-          await purgePersistedRuntimeData(retainedTombstone, {
-            stopScreenRecording: true,
-            rethrow: true
-          });
-          retainedStoppingRuntimesBySid.delete(retainedTombstone.sid);
+          await notifyTabContentReset(restorationPlan.runtime.tabId, "stopping-runtime-recovery");
+          const runtime = await finalizeRetainedStoppingRuntime(
+            retainedTombstone,
+            config,
+            performanceBudget
+          );
+          stoppedRuntimes.push(runtime);
           continue;
         }
 
@@ -8000,24 +11549,51 @@ async function restoreRuntimeState(): Promise<void> {
         );
 
         if (restoration.kind === "rejected") {
-          await notifyTabStatus(restorationPlan.runtime.tabId, false);
-          await purgePersistedRuntimeData({ ...restorationPlan.runtime, config });
+          await notifyTabContentReset(restorationPlan.runtime.tabId, "runtime-restore-rejected");
+          const retained = await checkpointFailedActiveRuntimeCleanup({
+            ...restorationPlan.runtime,
+            config
+          });
+          const runtime = await finalizeRetainedStoppingRuntime(
+            retained,
+            config,
+            performanceBudget
+          );
+          stoppedRuntimes.push(runtime);
+          continue;
+        }
+
+        if (restoration.kind === "failed-cleaned") {
+          const retained = retainedStoppingRuntimesBySid.get(restorationPlan.runtime.sid);
+
+          if (!retained) {
+            throw new Error("Failed active restoration is missing its retained stopping row.");
+          }
+
+          const runtime = await finalizeRetainedStoppingRuntime(
+            retained,
+            config,
+            performanceBudget
+          );
+          stoppedRuntimes.push(runtime);
         }
       } catch (error) {
         console.warn("[WebBlackbox] failed closed while restoring session", {
           sid: persistedRuntime.sid,
           error: error instanceof Error ? error.message : String(error)
         });
-        await notifyTabStatus(persistedRuntime.tabId, false);
+        await notifyTabContentReset(persistedRuntime.tabId, "runtime-restore-failed");
 
         if (persistedRuntime.state === "stopping") {
-          await chromeApi?.offscreen?.closeDocument?.().catch(() => undefined);
           console.warn("[WebBlackbox] retained stopping tombstone for recovery retry", {
             sid: persistedRuntime.sid
           });
-          await scheduleRetainedStoppingRuntimeRecovery(
-            retainedStoppingRuntimesBySid.get(persistedRuntime.sid)!
-          ).catch((scheduleError) => {
+          const retained = retainedStoppingRuntimesBySid.get(persistedRuntime.sid) ?? {
+            ...persistedRuntime,
+            config
+          };
+          retainedStoppingRuntimesBySid.set(retained.sid, retained);
+          await scheduleRetainedStoppingRuntimeRecovery(retained).catch((scheduleError) => {
             console.warn("[WebBlackbox] stopping recovery retry schedule failed", {
               sid: persistedRuntime.sid,
               error: scheduleError instanceof Error ? scheduleError.message : String(scheduleError)
@@ -8025,9 +11601,40 @@ async function restoreRuntimeState(): Promise<void> {
           });
           continue;
         }
-        await purgePersistedRuntimeData({ ...persistedRuntime, config });
+
+        if (persistedRuntime.state === "stopped") {
+          const retainedStopped: PersistedStoppedRuntime = {
+            ...persistedRuntime,
+            config
+          };
+          pendingRuntimeRestorationsBySid.set(retainedStopped.sid, retainedStopped);
+          keepPendingRestoration = true;
+          await scheduleRetainedStoppedRuntimeRecovery(retainedStopped).catch(() => undefined);
+          continue;
+        }
+
+        const retained =
+          retainedStoppingRuntimesBySid.get(persistedRuntime.sid) ??
+          (await checkpointFailedActiveRuntimeCleanup({ ...persistedRuntime, config }));
+
+        try {
+          const runtime = await finalizeRetainedStoppingRuntime(
+            retained,
+            config,
+            performanceBudget
+          );
+          stoppedRuntimes.push(runtime);
+        } catch (retentionError) {
+          console.warn("[WebBlackbox] active restoration retention remains pending", {
+            sid: persistedRuntime.sid,
+            error: retentionError instanceof Error ? retentionError.message : String(retentionError)
+          });
+          await scheduleRetainedStoppingRuntimeRecovery(retained).catch(() => undefined);
+        }
       } finally {
-        pendingRuntimeRestorationsBySid.delete(persistedRuntime.sid);
+        if (!keepPendingRestoration) {
+          pendingRuntimeRestorationsBySid.delete(persistedRuntime.sid);
+        }
       }
     }
 
@@ -8050,6 +11657,7 @@ async function restoreRuntimeState(): Promise<void> {
     }
 
     await persistRuntimeState();
+    runtimeRestorationSourceRowsBySid.clear();
   }
 
   if (sessionsByTab.size > 0) {
@@ -8063,15 +11671,64 @@ async function restoreRuntimeState(): Promise<void> {
 
 async function failClosedRuntimeRestoration(): Promise<void> {
   const runtimes = [...sessionsBySid.values()];
+  const durableRecoveryCheckpoint = new DurableRuntimeRecoveryCheckpoint();
+  const currentRows: PersistedRuntime[] = [];
+  for (const runtime of runtimes) {
+    try {
+      currentRows.push(toPersistedRuntime(runtime));
+    } catch (error) {
+      console.warn("[WebBlackbox] failed to snapshot a partial restored runtime", {
+        sid: runtime.sid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  const recoveryRows = preserveRuntimeRowsAfterGlobalRestoreFailure({
+    rows: [
+      ...runtimeRestorationSourceRowsBySid.values(),
+      ...pendingRuntimeRestorationsBySid.values(),
+      ...currentRows,
+      ...retainedStoppingRuntimesBySid.values()
+    ],
+    failedAt: Date.now(),
+    resolveLocalTtlMs: (runtime) => resolveRuntimeLocalTtlMs(runtime.config.capturePolicy)
+  });
+
+  if (runtimeRestorationCheckpointRewriteAllowed || recoveryRows.length > 0) {
+    let checkpointError: unknown;
+    const persisted = await durableRecoveryCheckpoint.attempt(async () => {
+      try {
+        if (!chromeApi?.storage?.local?.set) {
+          throw new Error("Chrome storage is unavailable for fail-closed restoration.");
+        }
+        await chromeApi.storage.local.set({
+          [ACTIVE_SESSION_STORAGE_KEY]: createRuntimeStateSnapshot(recoveryRows)
+        });
+      } catch (error) {
+        checkpointError = error;
+        throw error;
+      }
+    });
+    if (!persisted) {
+      console.warn(
+        "[WebBlackbox] failed to persist fail-closed restoration identities",
+        checkpointError
+      );
+    }
+  } else {
+    console.warn(
+      "[WebBlackbox] left the unread runtime checkpoint untouched after restore failure"
+    );
+  }
+
   sessionsByTab.clear();
-  sessionsBySid.clear();
-  retainedStoppingRuntimesBySid.clear();
-  pendingRuntimeRestorationsBySid.clear();
-  sessionAnnotations.clear();
   uninstallLiteWebRequestCaptureIfUnused();
 
   for (const runtime of runtimes) {
     await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
+    blockVolatileCapture(runtime.captureFence);
+    runtime.queueAccepting = false;
+    cancelRuntimeStopDrain(runtime);
 
     if (!runtime.stoppedAt) {
       await notifyAuthorizedContentFrames(runtime, false).catch(() => undefined);
@@ -8080,25 +11737,60 @@ async function failClosedRuntimeRestoration(): Promise<void> {
 
     resetAuthorizedContentFrames(runtime);
 
-    await runtime.pipeline.close({ purge: true }).catch(() => undefined);
+    await runtime.pipeline.close({ purge: false }).catch((error) => {
+      console.warn("[WebBlackbox] failed to retain a partial restored pipeline", {
+        sid: runtime.sid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    deleteMapEntryIfSame(sessionsBySid, runtime.sid, runtime);
   }
 
-  await chromeApi?.storage?.local
-    ?.set({
-      [ACTIVE_SESSION_STORAGE_KEY]: createRuntimeStateSnapshot([])
-    })
-    .catch(() => undefined);
-  await persistSessionAnnotations().catch(() => undefined);
+  sessionsBySid.clear();
+  retainedStoppingRuntimesBySid.clear();
+  pendingRuntimeRestorationsBySid.clear();
+  runtimeRestorationSourceRowsBySid.clear();
+
+  for (const runtime of recoveryRows) {
+    if (runtime.state === "stopping") {
+      retainedStoppingRuntimesBySid.set(runtime.sid, runtime);
+      await scheduleRetainedStoppingRuntimeRecovery(runtime).catch(() => undefined);
+    } else if (runtime.state === "stopped") {
+      pendingRuntimeRestorationsBySid.set(runtime.sid, runtime);
+      await scheduleRetainedStoppedRuntimeRecovery(runtime).catch(() => undefined);
+    }
+  }
+
+  if (runtimeRestorationCheckpointRewriteAllowed || recoveryRows.length > 0) {
+    let checkpointError: unknown;
+    const persisted = await durableRecoveryCheckpoint.attempt(async () => {
+      try {
+        await persistRuntimeState({ required: true });
+      } catch (error) {
+        checkpointError = error;
+        throw error;
+      }
+    });
+    if (!persisted) {
+      console.warn(
+        "[WebBlackbox] fail-closed restoration checkpoint remains pending",
+        checkpointError
+      );
+    }
+  }
 
   for (const port of connectedPorts) {
     if (port.name === PORT_NAMES.content) {
-      sendInactiveContentPortState(port);
+      contentActivations.unbindPort(port);
+      port.disconnect?.();
     }
   }
 
   await setIdleBadge();
   pushSessionList();
   notifyOffscreenPipelineStatus();
+
+  durableRecoveryCheckpoint.requirePersisted();
 }
 
 async function restoreActiveRuntime(
@@ -8186,6 +11878,9 @@ async function restoreActiveRuntime(
           sid: persisted.sid
         })
       );
+      if (screenRecordingStatus.active && screenRecordingStatus.quiescedForStop) {
+        throw new Error("Recovered screen recording carries an unfinished stop intent.");
+      }
       const reconciledScreenRecording = reconcileScreenRecordingResumeState(
         persisted.screenRecording,
         screenRecordingResume
@@ -8410,6 +12105,21 @@ async function restoreActiveRuntime(
       await runtime.pipeline.flush();
     },
     activateRuntime: ({ runtime }) => {
+      const armedRoot = requireArmedRootContentActivation(runtime);
+
+      if (
+        !isMapEntrySame(sessionsByTab, runtime.tabId, runtime) ||
+        !isMapEntrySame(sessionsBySid, runtime.sid, runtime) ||
+        !isVolatileCaptureOpen(runtime.captureFence) ||
+        runtime.activationState !== "starting" ||
+        runtime.stopping ||
+        runtime.stoppedAt !== undefined ||
+        (runtime.screenRecording !== null && !runtime.screenRecording.provisional)
+      ) {
+        throw new Error("The restoring runtime lost its content activation identity.");
+      }
+
+      activateArmedRuntimeContent(runtime, armedRoot.activationId);
       commitRestoredRuntimeActivation(runtime, {
         currentByTab: isMapEntrySame(sessionsByTab, runtime.tabId, runtime),
         currentBySid: isMapEntrySame(sessionsBySid, runtime.sid, runtime)
@@ -8425,7 +12135,7 @@ async function restoreActiveRuntime(
     return { kind: "restored", runtime: transaction.runtime.runtime };
   }
 
-  console.warn("[WebBlackbox] partial active runtime restoration cleaned", {
+  console.warn("[WebBlackbox] partial active runtime restoration retained as stopping", {
     sid: persisted.sid,
     phase: transaction.phase,
     error:
@@ -8438,10 +12148,6 @@ async function restoreActiveRuntime(
           : String(transaction.cleanupError)
   });
 
-  if (sessionAnnotations.delete(persisted.sid)) {
-    await persistSessionAnnotations().catch(() => undefined);
-  }
-
   return { kind: "failed-cleaned" };
 }
 
@@ -8450,21 +12156,11 @@ async function cleanupFailedPipelineRestoration(
   pipeline: SessionPipelineClient,
   existingTombstone?: PersistedStoppingRuntime
 ): Promise<void> {
-  let tombstone: PersistedStoppingRuntime | null = null;
-
-  await runDurableFailedRuntimeCleanup({
+  await runDurableFailedRuntimeRetention({
     persistStopping: async () => {
-      tombstone = await checkpointFailedActiveRuntimeCleanup(
-        persisted,
-        undefined,
-        existingTombstone
-      );
+      await checkpointFailedActiveRuntimeCleanup(persisted, undefined, existingTombstone);
     },
-    cleanup: async () => {
-      await pipeline.close({ purge: true });
-      await closeOffscreenIfUnused().catch(() => undefined);
-    },
-    clearStopping: () => clearFailedActiveRuntimeCleanup(requireTombstone(tombstone))
+    retain: () => pipeline.close({ purge: false })
   });
 }
 
@@ -8473,14 +12169,11 @@ async function cleanupFailedActiveRuntimeRestoration(
   runtime: SessionRuntime,
   existingTombstone?: PersistedStoppingRuntime
 ): Promise<void> {
-  let tombstone: PersistedStoppingRuntime | null = null;
-
-  await runDurableFailedRuntimeCleanup({
+  await runDurableFailedRuntimeRetention({
     persistStopping: async () => {
-      tombstone = await checkpointFailedActiveRuntimeCleanup(persisted, runtime, existingTombstone);
+      await checkpointFailedActiveRuntimeCleanup(persisted, runtime, existingTombstone);
     },
-    cleanup: () => purgeFailedActiveRuntimeRestoration(runtime),
-    clearStopping: () => clearFailedActiveRuntimeCleanup(requireTombstone(tombstone))
+    retain: () => retainFailedActiveRuntimeRestoration(runtime)
   });
 }
 
@@ -8493,9 +12186,19 @@ async function checkpointFailedActiveRuntimeCleanup(
   const cleanupDeadline =
     existingTombstone?.cleanupDeadline ??
     stopRequestedAt + resolveRuntimeLocalTtlMs(persisted.config.capturePolicy);
+  let recoverySource = persisted;
+
+  if (runtime && !existingTombstone) {
+    const snapshot = toPersistedRuntime(runtime);
+
+    if (snapshot.state === "active") {
+      recoverySource = snapshot;
+    }
+  }
+
   const tombstone =
     existingTombstone ??
-    createStoppingRuntimeTombstone(persisted, stopRequestedAt, cleanupDeadline);
+    createStoppingRuntimeTombstone(recoverySource, stopRequestedAt, cleanupDeadline);
 
   if (!existingTombstone) {
     pendingRuntimeRestorationsBySid.delete(persisted.sid);
@@ -8547,33 +12250,7 @@ async function checkpointFailedActiveRuntimeCleanup(
   return tombstone;
 }
 
-async function clearFailedActiveRuntimeCleanup(tombstone: PersistedStoppingRuntime): Promise<void> {
-  if (!deleteMapEntryIfSame(retainedStoppingRuntimesBySid, tombstone.sid, tombstone)) {
-    return;
-  }
-
-  try {
-    await persistRuntimeState({ required: true });
-  } catch (error) {
-    if (!retainedStoppingRuntimesBySid.has(tombstone.sid)) {
-      retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
-    }
-    await scheduleRetainedStoppingRuntimeRecovery(tombstone).catch(() => undefined);
-    throw error;
-  }
-
-  await runtimeCleanupScheduler.cancel(tombstone.sid).catch(() => undefined);
-}
-
-function requireTombstone(tombstone: PersistedStoppingRuntime | null): PersistedStoppingRuntime {
-  if (!tombstone) {
-    throw new Error("Restoration cleanup is missing its durable stopping tombstone.");
-  }
-
-  return tombstone;
-}
-
-async function purgeFailedActiveRuntimeRestoration(runtime: SessionRuntime): Promise<void> {
+async function retainFailedActiveRuntimeRestoration(runtime: SessionRuntime): Promise<void> {
   blockVolatileCapture(runtime.captureFence);
   runtime.stopping = true;
   runtime.queueAccepting = false;
@@ -8604,8 +12281,8 @@ async function purgeFailedActiveRuntimeRestoration(runtime: SessionRuntime): Pro
   runtime.queue = Promise.resolve();
   runtime.queueDepth = 0;
 
-  await stopScreenRecording(runtime, "restore-failed").catch((error) => {
-    console.warn("[WebBlackbox] failed to stop recorder during restoration cleanup", {
+  await quiesceScreenRecordingForStop(runtime).catch((error) => {
+    console.warn("[WebBlackbox] failed to quiesce recorder during retained restoration cleanup", {
       sid: runtime.sid,
       error: error instanceof Error ? error.message : String(error)
     });
@@ -8620,6 +12297,12 @@ async function purgeFailedActiveRuntimeRestoration(runtime: SessionRuntime): Pro
   runtime.contentDocuments.reset();
   runtime.authorizedContentFrames.clear();
   runtime.requestMeta.clear();
+  await drainPipelineBufferBatches(runtime, "drain").catch((error) => {
+    console.warn("[WebBlackbox] failed to retain the provisional pipeline tail", {
+      sid: runtime.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
   runtime.pipelineEventBuffer.length = 0;
   runtime.pipelineBatchInFlight = null;
   runtime.pipelineFlushQueued = false;
@@ -8632,20 +12315,24 @@ async function purgeFailedActiveRuntimeRestoration(runtime: SessionRuntime): Pro
     await setRecordingBadge().catch(() => undefined);
   }
 
-  await runtime.pipeline.close({ purge: true });
-  await closeOffscreenIfUnused().catch(() => undefined);
+  await runtime.pipeline.close({ purge: false });
 }
 
 function cancelRuntimeStopDrain(runtime: SessionRuntime): void {
   const pending = pendingStopDrainAcks.get(runtime.sid);
 
-  if (!pending || pending.capability.runtime !== runtime) {
+  preparedStopDrainPlans.delete(runtime);
+
+  if (!pending || pending.runtime !== runtime) {
     return;
   }
 
   pendingStopDrainAcks.delete(runtime.sid);
   clearTimeout(pending.timeout);
-  closeStopDrain(pending.capability);
+  clearInterval(pending.retryTimer);
+  for (const capability of pending.capabilities.values()) {
+    closeStopDrain(capability);
+  }
   pending.resolve();
 }
 
@@ -8696,6 +12383,294 @@ async function restoreStoppedRuntime(
   return runtime;
 }
 
+async function finalizeRetainedStoppingRuntime(
+  tombstone: PersistedStoppingRuntime,
+  config: typeof DEFAULT_RECORDER_CONFIG,
+  performanceBudget: PerformanceBudgetConfig
+): Promise<SessionRuntime> {
+  if (retainedStoppingRuntimesBySid.get(tombstone.sid) !== tombstone) {
+    throw new Error("Stopping recovery lost its durable tombstone identity.");
+  }
+
+  await ensureOffscreenDocument();
+  const pipeline = createOffscreenPipelineClient(tombstone.sid);
+  await pipeline.start(
+    {
+      sid: tombstone.sid,
+      tabId: tombstone.tabId,
+      startedAt: tombstone.startedAt,
+      endedAt: tombstone.stopRequestedAt,
+      mode: tombstone.mode,
+      url: tombstone.url,
+      title: tombstone.title,
+      tags: [...tombstone.tags]
+    },
+    config.redaction,
+    config.capturePolicy
+  );
+  const resumeState = await pipeline.getResumeState();
+  const restoredCounters = mergeRuntimeCountersWithSequenceWatermark(
+    tombstone.counters,
+    resumeState.sequenceWatermark
+  );
+  const terminalRecoveryConfig = config.capturePolicy
+    ? {
+        ...config,
+        capturePolicy: {
+          ...config.capturePolicy,
+          categories: {
+            ...config.capturePolicy.categories,
+            screenRecordings: "allow" as const
+          }
+        }
+      }
+    : config;
+  let recoveryRuntime: SessionRuntime | null = null;
+  let claimedRecordingId: string | undefined;
+  let stoppedCounters = restoredCounters;
+
+  await recoverStoppingRuntimeForRetention({
+    getScreenRecordingStatus: async () =>
+      normalizeOffscreenScreenRecordingStatus(
+        await requestOffscreenPipeline<unknown>({
+          op: "getScreenRecordingStatus",
+          sid: tombstone.sid
+        })
+      ),
+    claimRuntime: (status) => {
+      if (recoveryRuntime) {
+        throw new Error("Stopping recovery already owns a runtime claim.");
+      }
+      if (sessionsBySid.has(tombstone.sid) || sessionsByTab.has(tombstone.tabId)) {
+        throw new Error("Stopping recovery runtime identity conflicts with a live session.");
+      }
+
+      const durable = status.active
+        ? resumeState.screenRecordings.find(
+            (recording) => recording.recordingId === status.recordingId
+          )
+        : undefined;
+      const persisted =
+        status.active && tombstone.screenRecording?.recordingId === status.recordingId
+          ? tombstone.screenRecording
+          : undefined;
+      const provisionalScreenRecording = status.active
+        ? (persisted ?? {
+            recordingId: status.recordingId,
+            startedAt: tombstone.screenRecording?.startedAt ?? tombstone.startedAt,
+            startedMono: tombstone.screenRecording?.startedMono ?? 0,
+            mime: status.mime,
+            width: status.width,
+            height: status.height,
+            frameRate: status.frameRate,
+            chunkCount: 0,
+            sizeBytes: 0
+          })
+        : undefined;
+      const reconciled = reconcileScreenRecordingResumeState(provisionalScreenRecording, durable);
+      const screenRecording = provisionalScreenRecording
+        ? (reconciled.screenRecording ?? {
+            ...provisionalScreenRecording,
+            chunkCount: 0,
+            sizeBytes: 0
+          })
+        : undefined;
+      const runtime = createSessionRuntime({
+        sid: tombstone.sid,
+        tabId: tombstone.tabId,
+        mode: tombstone.mode,
+        url: tombstone.url,
+        captureUrl: tombstone.url,
+        title: tombstone.title,
+        tags: tombstone.tags,
+        note: tombstone.note,
+        config: terminalRecoveryConfig,
+        startedAt: tombstone.startedAt,
+        pipeline,
+        performanceBudget,
+        counters: restoredCounters,
+        screenRecording,
+        screenRecordingChunks: reconciled.chunks
+      });
+      blockVolatileCapture(runtime.captureFence);
+      runtime.stopping = true;
+      runtime.stopRequestedAt = tombstone.stopRequestedAt;
+      runtime.cleanupDeadline = tombstone.cleanupDeadline;
+      sessionsByTab.set(runtime.tabId, runtime);
+      sessionsBySid.set(runtime.sid, runtime);
+      recoveryRuntime = runtime;
+      claimedRecordingId = status.active ? status.recordingId : undefined;
+    },
+    stopScreenRecording: async (status) => {
+      const runtime = recoveryRuntime;
+      const recording = runtime?.screenRecording;
+
+      if (!runtime || !recording || recording.recordingId !== status.recordingId) {
+        throw new Error("Stopping recovery lost its exact screen-recording claim.");
+      }
+
+      await stopScreenRecording(runtime, "stop-tombstone-recovery", recording);
+    },
+    retain: async () => {
+      const runtime = recoveryRuntime;
+
+      if (!runtime) {
+        throw new Error("Stopping recovery is missing its runtime claim.");
+      }
+
+      const interrupted = buildInterruptedScreenRecordingRecoveries({
+        persisted: tombstone.screenRecording,
+        resumeState,
+        status: claimedRecordingId
+          ? {
+              active: true,
+              recordingId: claimedRecordingId,
+              mime: runtime.screenRecording?.mime ?? tombstone.screenRecording?.mime ?? "video/webm"
+            }
+          : { active: false },
+        claimedRecordingId
+      });
+
+      for (const recording of interrupted) {
+        await appendInterruptedScreenRecordingTerminalEvents(
+          runtime,
+          recording,
+          "stop-tombstone-recovery-incomplete"
+        );
+      }
+
+      await flushBufferedPipelineEvents(runtime);
+      await pipeline.flush();
+      stoppedCounters = toPersistedRuntime(runtime).counters;
+      await pipeline.close({ purge: false });
+    },
+    releaseRuntimeClaim: () => {
+      const runtime = recoveryRuntime;
+
+      if (!runtime) {
+        return;
+      }
+
+      if (runtime.pipelineFlushTimer !== null) {
+        clearTimeout(runtime.pipelineFlushTimer);
+        runtime.pipelineFlushTimer = null;
+      }
+      blockVolatileCapture(runtime.captureFence);
+      runtime.queueAccepting = false;
+      deleteMapEntryIfSame(sessionsByTab, runtime.tabId, runtime);
+      deleteMapEntryIfSame(sessionsBySid, runtime.sid, runtime);
+      recoveryRuntime = null;
+    }
+  });
+
+  const { screenRecording: completedScreenRecording, ...terminalizedBase } = tombstone;
+  void completedScreenRecording;
+  const terminalizedTombstone: PersistedStoppingRuntime = {
+    ...terminalizedBase,
+    counters: stoppedCounters
+  };
+
+  if (retainedStoppingRuntimesBySid.get(tombstone.sid) !== tombstone) {
+    throw new Error("Stopping recovery tombstone changed before terminal evidence checkpointing.");
+  }
+  retainedStoppingRuntimesBySid.set(tombstone.sid, terminalizedTombstone);
+
+  try {
+    await persistRuntimeState({ required: true });
+  } catch (error) {
+    if (retainedStoppingRuntimesBySid.get(tombstone.sid) === terminalizedTombstone) {
+      retainedStoppingRuntimesBySid.set(tombstone.sid, tombstone);
+    }
+    throw error;
+  }
+
+  const stopped = createStoppedRuntimeTombstone(
+    terminalizedTombstone,
+    tombstone.stopRequestedAt,
+    tombstone.cleanupDeadline
+  );
+  const restored = await restoreStoppedRuntime(stopped, config, performanceBudget);
+  const pending = pendingRuntimeRestorationsBySid.get(tombstone.sid);
+
+  if (!deleteMapEntryIfSame(retainedStoppingRuntimesBySid, tombstone.sid, terminalizedTombstone)) {
+    deleteMapEntryIfSame(sessionsBySid, restored.sid, restored);
+    await restored.pipeline.close({ purge: false }).catch(() => undefined);
+    throw new Error("Stopping recovery tombstone changed before its stopped checkpoint.");
+  }
+  pendingRuntimeRestorationsBySid.delete(tombstone.sid);
+
+  try {
+    await persistRuntimeState({ required: true });
+  } catch (error) {
+    deleteMapEntryIfSame(sessionsBySid, restored.sid, restored);
+    await restored.pipeline.close({ purge: false }).catch(() => undefined);
+    retainedStoppingRuntimesBySid.set(tombstone.sid, terminalizedTombstone);
+    if (pending) {
+      pendingRuntimeRestorationsBySid.set(tombstone.sid, pending);
+    }
+    await scheduleRetainedStoppingRuntimeRecovery(terminalizedTombstone).catch(() => undefined);
+    throw error;
+  }
+
+  await scheduleStoppedRuntimeCleanup(restored).catch((error) => {
+    console.warn("[WebBlackbox] recovered stopped-session cleanup scheduled for retry", {
+      sid: restored.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+  return restored;
+}
+
+async function appendInterruptedScreenRecordingTerminalEvents(
+  runtime: SessionRuntime,
+  interrupted: ReturnType<typeof buildInterruptedScreenRecordingRecoveries>[number],
+  reason: string
+): Promise<void> {
+  const hashes = [...interrupted.chunks]
+    .sort((left, right) => left.index - right.index)
+    .map((chunk) => chunk.hash);
+  const endedAt = Date.now();
+  const endAccepted = await ingestRawEvent({
+    source: "system",
+    rawType: "screen.recording.end",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: endedAt,
+    mono: monotonicTime(),
+    payload: {
+      recordingId: interrupted.recordingId,
+      mime: interrupted.mime,
+      chunks: hashes,
+      chunkCount: hashes.length,
+      size: interrupted.sizeBytes,
+      durationMs: interrupted.startedAt
+        ? Math.max(0, Math.round(endedAt - interrupted.startedAt))
+        : 0,
+      width: interrupted.width,
+      height: interrupted.height,
+      reason
+    }
+  });
+  const errorAccepted = await ingestRawEvent({
+    source: "system",
+    rawType: "screen.recording.error",
+    sid: runtime.sid,
+    tabId: runtime.tabId,
+    t: endedAt,
+    mono: monotonicTime(),
+    payload: {
+      recordingId: interrupted.recordingId,
+      name: "OffscreenRecordingInterrupted",
+      message: "Screen recording was interrupted while a stopping runtime was recovered.",
+      stage: "restart"
+    }
+  });
+
+  if (!endAccepted || !errorAccepted) {
+    throw new Error("Stopping recovery could not persist screen-recording terminal evidence.");
+  }
+}
+
 async function purgePersistedRuntimeData(
   runtime: {
     sid: string;
@@ -8712,26 +12687,36 @@ async function purgePersistedRuntimeData(
     rethrow?: boolean;
   } = {}
 ): Promise<void> {
-  if (sessionAnnotations.delete(runtime.sid)) {
-    await persistSessionAnnotations().catch(() => undefined);
+  try {
+    await deleteSessionAnnotationDurably(runtime.sid);
+  } catch (error) {
+    if (options.rethrow) {
+      throw error;
+    }
+    console.warn("[WebBlackbox] failed to delete purged-session annotation", error);
   }
 
   try {
     await ensureOffscreenDocument();
     const pipeline = createOffscreenPipelineClient(runtime.sid);
-    await pipeline.start(
-      {
-        sid: runtime.sid,
-        tabId: runtime.tabId,
-        startedAt: runtime.startedAt,
-        mode: runtime.mode,
-        url: sanitizeUrlForPrivacy(runtime.url),
-        title: runtime.title,
-        tags: [...runtime.tags]
-      },
-      runtime.config.redaction,
-      runtime.config.capturePolicy
-    );
+    const metadata: SessionMetadata = {
+      sid: runtime.sid,
+      tabId: runtime.tabId,
+      startedAt: runtime.startedAt,
+      mode: runtime.mode,
+      url: sanitizeUrlForPrivacy(runtime.url),
+      title: runtime.title,
+      tags: [...runtime.tags]
+    };
+    try {
+      await pipeline.start(metadata, runtime.config.redaction, runtime.config.capturePolicy);
+    } catch {
+      // A surviving offscreen pipeline may carry a now-untrusted policy
+      // fingerprint. Purge that exact instance, then recreate an empty client
+      // so storage cleanup remains possible without accepting the old policy.
+      await pipeline.close({ purge: true });
+      await pipeline.start(metadata, runtime.config.redaction, runtime.config.capturePolicy);
+    }
 
     if (options.stopScreenRecording) {
       await recoverStoppingRuntimeFailClosed({
@@ -8774,21 +12759,61 @@ async function scheduleRetainedStoppingRuntimeRecovery(
   await runtimeCleanupScheduler.schedule(runtime.sid, retryAt);
 }
 
+async function scheduleRetainedStoppedRuntimeRecovery(
+  runtime: PersistedStoppedRuntime
+): Promise<void> {
+  const retryAt = Math.min(runtime.cleanupDeadline, Date.now() + RETAINED_STOPPING_RETRY_DELAY_MS);
+  await runtimeCleanupScheduler.schedule(runtime.sid, retryAt);
+}
+
 async function retryRetainedStoppingRuntimeRecovery(
   runtime: PersistedStoppingRuntime
 ): Promise<void> {
-  await purgePersistedRuntimeData(runtime, {
-    stopScreenRecording: true,
-    rethrow: true
-  });
-  retainedStoppingRuntimesBySid.delete(runtime.sid);
+  const enterprisePolicy = await loadEnterprisePolicy();
+  const config = applyEnterprisePolicyToRecorderConfig(runtime.config, enterprisePolicy);
+  const performanceBudget = await loadPerformanceBudgetConfig();
+  await finalizeRetainedStoppingRuntime(runtime, config, performanceBudget);
+  pushSessionList();
+  notifyOffscreenPipelineStatus();
+}
+
+async function retryRetainedStoppedRuntimeRecovery(
+  runtime: PersistedStoppedRuntime
+): Promise<void> {
+  if (pendingRuntimeRestorationsBySid.get(runtime.sid) !== runtime) {
+    return;
+  }
+
+  if (Date.now() >= runtime.cleanupDeadline) {
+    await purgePersistedRuntimeData(runtime, { rethrow: true });
+    pendingRuntimeRestorationsBySid.delete(runtime.sid);
+
+    try {
+      await persistRuntimeState({ required: true });
+    } catch (error) {
+      pendingRuntimeRestorationsBySid.set(runtime.sid, runtime);
+      throw error;
+    }
+    return;
+  }
+
+  const enterprisePolicy = await loadEnterprisePolicy();
+  const config = applyEnterprisePolicyToRecorderConfig(runtime.config, enterprisePolicy);
+  const performanceBudget = await loadPerformanceBudgetConfig();
+  const restored = await restoreStoppedRuntime(runtime, config, performanceBudget);
+  pendingRuntimeRestorationsBySid.delete(runtime.sid);
 
   try {
     await persistRuntimeState({ required: true });
   } catch (error) {
-    retainedStoppingRuntimesBySid.set(runtime.sid, runtime);
+    deleteMapEntryIfSame(sessionsBySid, restored.sid, restored);
+    await restored.pipeline.close({ purge: false }).catch(() => undefined);
+    pendingRuntimeRestorationsBySid.set(runtime.sid, runtime);
     throw error;
   }
+
+  await scheduleStoppedRuntimeCleanup(restored);
+  pushSessionList();
 }
 
 async function clearStaleRuntimeCleanupAlarms(validSids: ReadonlySet<string>): Promise<void> {
@@ -8819,9 +12844,9 @@ function notifyOffscreenPipelineStatus(): void {
   const activeRuntimes = [...sessionsByTab.values()].filter(
     (runtime) =>
       isRuntimeCaptureAdmitted(runtime.activationState) &&
-      isVolatileCaptureOpen(runtime.captureFence) &&
-      !runtime.stopping &&
-      !runtime.stoppedAt
+      !runtime.stoppedAt &&
+      ((isVolatileCaptureOpen(runtime.captureFence) && !runtime.stopping) ||
+        isRuntimeAwaitingDurableStop(runtime))
   );
 
   try {
@@ -8858,162 +12883,431 @@ function notifyOffscreenPipelineStatus(): void {
   }
 }
 
-async function notifyTabStatus(
-  tabId: number,
-  active: boolean,
-  sid?: string,
-  mode?: CaptureMode,
-  sampling?: RecordingSampling,
-  capturePolicy?: CapturePolicy,
-  frameId?: number,
-  stopDrain?: { token: string; deadline: number; documentUrl: string },
-  documentId?: string
-): Promise<void> {
+async function notifyTabContentReset(tabId: number, reason: string): Promise<void> {
   if (!chromeApi?.tabs?.sendMessage) {
     return;
   }
 
-  const target =
-    frameId === undefined && documentId === undefined
-      ? undefined
-      : {
-          ...(frameId === undefined ? {} : { frameId }),
-          ...(documentId === undefined ? {} : { documentId })
-        };
-
   await chromeApi.tabs
-    .sendMessage(
-      tabId,
-      {
-        kind: "sw.recording-status",
-        active,
-        tabId,
-        sid,
-        mode,
-        sampling,
-        capturePolicy,
-        stopDrain
-      },
-      target
-    )
+    .sendMessage(tabId, { kind: "sw.content-reset", reason })
     .catch(() => undefined);
+}
+
+function quiesceRuntimeContentProducers(runtime: SessionRuntime): void {
+  for (const activation of contentActivations.listRuntime(runtime, runtime.captureFence, [
+    "active"
+  ])) {
+    const message = {
+      kind: "sw.content-quiesce" as const,
+      activationId: activation.activationId
+    };
+    let deliveredToPort = false;
+
+    for (const port of connectedPorts) {
+      if (
+        port.name !== PORT_NAMES.content ||
+        !contentActivations.validatePort(port, activation, ["active"])
+      ) {
+        continue;
+      }
+
+      try {
+        port.postMessage(message);
+        deliveredToPort = true;
+        break;
+      } catch (error) {
+        logPortSendFailure("sw.content-quiesce", error, {
+          activationId: activation.activationId,
+          frameId: activation.frameId
+        });
+      }
+    }
+
+    if (!deliveredToPort) {
+      void sendContentActivationMessage(activation, message, { required: true }).catch((error) => {
+        logInboundMessageFailure("sw.content-quiesce", error, undefined, {
+          activationId: activation.activationId,
+          frameId: activation.frameId
+        });
+      });
+    }
+  }
 }
 
 async function notifyAuthorizedContentFrames(
   runtime: SessionRuntime,
   active: boolean,
-  stopDrain?: { token: string; deadline: number; documentUrl: string }
+  stopDrains?: ReadonlyMap<ContentActivationId, StopDrainNotice>
 ): Promise<void> {
-  const documents = runtime.contentDocuments.activeDocuments();
-
-  await Promise.all(
-    documents.map((document) =>
-      notifyTabStatus(
-        runtime.tabId,
-        active,
-        runtime.sid,
-        runtime.mode,
-        toStatusSampling(runtime),
-        runtime.config.capturePolicy,
-        document.frameId,
-        document.frameId === 0 ? stopDrain : undefined,
-        document.documentId
+  if (active) {
+    const activated = isRuntimeCaptureAdmitted(runtime.activationState)
+      ? activateArmedRuntimeContent(runtime)
+      : [];
+    const current = [
+      ...activated,
+      ...contentActivations.listRuntime(runtime, runtime.captureFence, ["active"])
+    ];
+    const unique = new Map(current.map((activation) => [activation.activationId, activation]));
+    await Promise.all(
+      [...unique.values()].map((activation) =>
+        sendContentActivationMessage(activation, {
+          kind: "sw.content-activated",
+          activationId: activation.activationId
+        })
       )
-    )
-  );
-}
-
-function adjustInFlightContentMessages(tabId: number, delta: 1 | -1): void {
-  const next = (inFlightContentMessagesByTab.get(tabId) ?? 0) + delta;
-
-  if (next <= 0) {
-    inFlightContentMessagesByTab.delete(tabId);
-    resolveStopDrainAcksForTab(tabId);
+    );
     return;
   }
 
-  inFlightContentMessagesByTab.set(tabId, next);
+  const live = contentActivations.listRuntime(runtime, runtime.captureFence);
+  const shouldDrain = (activation: SessionContentActivation): boolean =>
+    activation.state === "draining" && stopDrains?.has(activation.activationId) === true;
+
+  await Promise.all(
+    live.map(async (activation) => {
+      const stopDrain = stopDrains?.get(activation.activationId);
+
+      if (stopDrain && shouldDrain(activation)) {
+        await sendContentActivationMessage(activation, stopDrain, { required: true });
+        return;
+      }
+
+      await revokeContentActivationOnce(activation, "runtime-stop");
+    })
+  );
+}
+
+function adjustInFlightContentMessages(activationId: ContentActivationId, delta: 1 | -1): void {
+  const next = (inFlightContentMessagesByActivation.get(activationId) ?? 0) + delta;
+
+  if (next <= 0) {
+    inFlightContentMessagesByActivation.delete(activationId);
+    resolveStopDrainAckForActivation(activationId);
+    return;
+  }
+
+  inFlightContentMessagesByActivation.set(activationId, next);
+}
+
+function getOrCreateContentEventBatchRecord(
+  activationId: ContentActivationId,
+  batchId: ContentEventBatchId,
+  fingerprint: string,
+  port: PortLike
+): { record: ContentEventBatchRecord<PortLike>; process: boolean } {
+  const result = contentEventBatchLedger.begin(activationId, batchId, fingerprint, port);
+  return { record: result.record, process: result.kind === "process" };
+}
+
+function retryContentEventBatch(
+  activationId: ContentActivationId,
+  batchId: ContentEventBatchId,
+  record: ContentEventBatchRecord<PortLike>
+): void {
+  contentEventBatchLedger.retry(activationId, batchId, record);
+}
+
+function completeContentEventBatch(
+  activationId: ContentActivationId,
+  batchId: ContentEventBatchId,
+  record: ContentEventBatchRecord<PortLike>
+): void {
+  for (const port of contentEventBatchLedger.complete(activationId, batchId, record)) {
+    sendContentEventBatchAck(port, activationId, batchId);
+  }
+}
+
+function sendContentEventBatchAck(
+  port: PortLike,
+  activationId: ContentActivationId,
+  batchId: ContentEventBatchId
+): void {
+  try {
+    port.postMessage({
+      kind: "sw.content-events-ack",
+      activationId,
+      batchId
+    });
+  } catch (error) {
+    logPortSendFailure("sw.content-events-ack", error, { activationId, batchId });
+  }
+}
+
+function invalidateContentEventBatchAdmissions(activationId: ContentActivationId): void {
+  const admissions = contentEventBatchAdmissionsByActivation.get(activationId);
+  if (admissions) {
+    for (const admission of admissions) {
+      admission.valid = false;
+    }
+    contentEventBatchAdmissionsByActivation.delete(activationId);
+  }
+  contentEventBatchLedger.invalidate(activationId);
 }
 
 function createStopDrainAck(runtime: SessionRuntime): {
   wait: Promise<void>;
-  notice?: { token: string; deadline: number; documentUrl: string };
+  notices: ReadonlyMap<ContentActivationId, StopDrainNotice>;
 } {
   const existing = pendingStopDrainAcks.get(runtime.sid);
 
   if (existing) {
     clearTimeout(existing.timeout);
+    clearInterval(existing.retryTimer);
     pendingStopDrainAcks.delete(runtime.sid);
-    closeStopDrain(existing.capability);
+    for (const capability of existing.capabilities.values()) {
+      closeStopDrain(capability);
+    }
     existing.resolve();
   }
 
-  if (
-    runtime.mode !== "lite" ||
-    !runtime.authorizedContentFrames.has(0) ||
-    !isRuntimeDocumentWithinScope(runtime)
-  ) {
-    return { wait: Promise.resolve() };
-  }
-
   const deadline = Date.now() + STOP_DRAIN_ACK_TIMEOUT_MS;
-  let capability: StopDrainCapability;
+  const ordinaryEventCutoff = runtime.stopRequestedAt ?? Date.now();
+  const capabilities = new Map<ContentActivationId, StopDrainCapability>();
+  const notices = new Map<ContentActivationId, StopDrainNotice>();
 
-  try {
-    capability = createStopDrainCapability({
-      runtime,
-      fence: runtime.captureFence,
-      sid: runtime.sid,
-      tabId: runtime.tabId,
-      documentUrl: runtime.captureUrl,
-      deadline
-    });
-  } catch (error) {
-    console.warn("[WebBlackbox] stop-drain capability creation failed closed", {
-      sid: runtime.sid,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return { wait: Promise.resolve() };
+  for (const activation of contentActivations.listRuntime(runtime, runtime.captureFence, [
+    "active"
+  ])) {
+    const draining = contentActivations.drain(activation);
+
+    if (!draining) {
+      continue;
+    }
+
+    try {
+      const capability = createStopDrainCapability({
+        runtime,
+        fence: runtime.captureFence,
+        activationId: draining.activationId,
+        sid: runtime.sid,
+        tabId: runtime.tabId,
+        frameId: draining.frameId,
+        documentId: draining.documentId,
+        documentUrl: draining.url,
+        deadline,
+        ordinaryEventCutoff
+      });
+      capabilities.set(capability.activationId, capability);
+      notices.set(capability.activationId, toStopDrainNotice(capability));
+    } catch (error) {
+      console.warn("[WebBlackbox] stop-drain capability creation failed closed", {
+        sid: runtime.sid,
+        frameId: draining.frameId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      void revokeContentFrameActivations(
+        runtime,
+        draining.frameId,
+        "stop-drain-capability-failed",
+        draining.documentId
+      );
+    }
   }
 
+  if (capabilities.size === 0) {
+    return { wait: Promise.resolve(), notices };
+  }
+
+  let pending!: PendingStopDrainAck;
   const wait = new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {
-      const pending = pendingStopDrainAcks.get(runtime.sid);
-
-      if (!pending || pending.capability !== capability) {
-        return;
-      }
-
-      pending.capability.accepting = false;
-      pending.ackReceived = true;
-      resolveStopDrainAckIfReady(pending);
+      void finalizeExpiredStopDrain(pending);
     }, STOP_DRAIN_ACK_TIMEOUT_MS);
+    const retryTimer = setInterval(() => {
+      retryPendingStopDrainNotices(pending);
+    }, STOP_DRAIN_NOTIFICATION_RETRY_MS);
 
-    pendingStopDrainAcks.set(runtime.sid, {
+    pending = {
       sid: runtime.sid,
-      tabId: runtime.tabId,
-      capability,
-      ackReceived: false,
+      runtime,
+      capabilities,
+      acknowledged: new Set(),
       settling: false,
+      timeoutFinalizing: false,
+      timeoutNoticeQueued: false,
       resolve,
-      timeout
-    });
+      timeout,
+      retryTimer
+    };
+    pendingStopDrainAcks.set(runtime.sid, pending);
   });
 
   return {
     wait,
-    notice: {
-      token: capability.token,
-      deadline: capability.deadline,
-      documentUrl: capability.documentUrl
-    }
+    notices
   };
 }
 
-function markStopDrainAckReceived(
+async function finalizeExpiredStopDrain(pending: PendingStopDrainAck): Promise<void> {
+  if (
+    pendingStopDrainAcks.get(pending.sid) !== pending ||
+    pending.settling ||
+    pending.timeoutFinalizing
+  ) {
+    return;
+  }
+
+  pending.timeoutFinalizing = true;
+  const expired = [...pending.capabilities].filter(
+    ([activationId]) => !pending.acknowledged.has(activationId)
+  );
+
+  try {
+    if (!pending.timeoutNoticeQueued && expired.length > 0) {
+      for (const [activationId, capability] of expired) {
+        capability.accepting = false;
+        const expectedArtifacts = resolveExpectedStopDrainArtifactsForCapability(
+          pending.runtime,
+          capability
+        );
+        const timeoutEvidence = resolveStopDrainTimeoutEvidence(capability, expectedArtifacts);
+        pending.runtime.recorder.ingest({
+          source: "system",
+          rawType: "notice",
+          sid: pending.runtime.sid,
+          tabId: pending.runtime.tabId,
+          t: Date.now(),
+          mono: monotonicTime(),
+          frame: normalizeContentFrameId(capability.frameId),
+          payload: {
+            message: "stop-drain-timeout",
+            activationId,
+            frameId: capability.frameId,
+            documentId: capability.documentId,
+            documentUrl: sanitizeUrlForPrivacy(capability.documentUrl),
+            ...timeoutEvidence,
+            droppedOrdinaryEvents: capability.droppedOrdinaryEvents
+          }
+        });
+      }
+      pending.timeoutNoticeQueued = true;
+    }
+
+    await flushContentEventBatchDurably(pending.runtime);
+  } catch (error) {
+    logInboundMessageFailure("stop-drain-timeout", error, undefined, {
+      sid: pending.sid,
+      frames: expired.length
+    });
+    pending.timeoutFinalizing = false;
+    pending.timeout = setTimeout(() => {
+      void finalizeExpiredStopDrain(pending);
+    }, STOP_DRAIN_NOTIFICATION_RETRY_MS);
+    return;
+  }
+
+  for (const [activationId, capability] of expired) {
+    capability.accepting = false;
+    capability.acknowledged = true;
+    pending.acknowledged.add(activationId);
+    invalidateContentEventBatchAdmissions(activationId);
+  }
+  pending.timeoutFinalizing = false;
+  resolveStopDrainAckIfReady(pending, true);
+}
+
+function prepareRuntimeStopDrain(runtime: SessionRuntime): {
+  wait: Promise<void>;
+  notification: Promise<void>;
+} {
+  const existing = preparedStopDrainPlans.get(runtime);
+
+  if (existing) {
+    return existing;
+  }
+
+  const drain = createStopDrainAck(runtime);
+  const rawNotification = notifyAuthorizedContentFrames(runtime, false, drain.notices);
+  const plan = {
+    wait: drain.wait,
+    notification: withCdpCommandTimeout(rawNotification, STOP_DRAIN_NOTIFICATION_TIMEOUT_MS).then(
+      (outcome) => {
+        if (!outcome.ok) {
+          throw new Error("Timed out notifying exact content documents to drain.");
+        }
+      }
+    )
+  };
+  preparedStopDrainPlans.set(runtime, plan);
+  return plan;
+}
+
+function getStopDrainCapability(
+  sid: string,
+  activationId: ContentActivationId
+): StopDrainCapability | undefined {
+  return pendingStopDrainAcks.get(sid)?.capabilities.get(activationId);
+}
+
+function toStopDrainNotice(capability: StopDrainCapability): StopDrainNotice {
+  return {
+    kind: "sw.content-drain",
+    activationId: capability.activationId,
+    sid: capability.sid,
+    token: capability.token,
+    deadline: capability.deadline,
+    documentUrl: capability.documentUrl
+  };
+}
+
+function sendStopDrainNotice(port: PortLike, capability: StopDrainCapability): boolean {
+  try {
+    port.postMessage(toStopDrainNotice(capability));
+    return true;
+  } catch (error) {
+    logPortSendFailure("sw.content-drain", error, {
+      activationId: capability.activationId,
+      sid: capability.sid
+    });
+    return false;
+  }
+}
+
+function retryPendingStopDrainNotices(pending: PendingStopDrainAck): void {
+  if (pendingStopDrainAcks.get(pending.sid) !== pending || pending.settling) {
+    return;
+  }
+
+  for (const [activationId, capability] of pending.capabilities) {
+    if (pending.acknowledged.has(activationId)) {
+      continue;
+    }
+    const activation = contentActivations.lookupByActivationId(activationId, ["draining"]);
+    if (!activation) {
+      continue;
+    }
+
+    let deliveredToPort = false;
+    for (const port of connectedPorts) {
+      if (
+        port.name === PORT_NAMES.content &&
+        contentActivations.validatePort(port, activation, ["draining"])
+      ) {
+        deliveredToPort = sendStopDrainNotice(port, capability);
+        if (deliveredToPort) {
+          break;
+        }
+      }
+    }
+
+    if (!deliveredToPort) {
+      void sendContentActivationMessage(activation, toStopDrainNotice(capability), {
+        required: true
+      }).catch((error) => {
+        logInboundMessageFailure("sw.content-drain", error, undefined, {
+          activationId,
+          stage: "retry"
+        });
+      });
+    }
+  }
+}
+
+async function markStopDrainAckReceived(
   message: Extract<ExtensionInboundMessage, { kind: "content.stop-drained" }>,
+  port: PortLike | undefined,
   sender: MessageSenderLike | undefined
-): void {
+): Promise<void> {
   const pending = pendingStopDrainAcks.get(message.sid);
 
   if (!pending) {
@@ -9021,52 +13315,181 @@ function markStopDrainAckReceived(
   }
 
   const runtime = sessionsBySid.get(message.sid);
+  const capability = pending.capabilities.get(message.activationId);
+  const activation = resolveBoundContentActivation(
+    message.activationId,
+    message.documentUrl,
+    port,
+    sender,
+    ["draining"]
+  );
+  const binding = runtime
+    ? {
+        runtime,
+        fence: runtime.captureFence,
+        activationId: message.activationId,
+        token: message.token,
+        sid: message.sid,
+        tabId: sender?.tab?.id ?? -1,
+        frameId: normalizeSenderFrameId(sender),
+        documentId: sender?.documentId ?? "",
+        documentUrl: message.documentUrl
+      }
+    : null;
 
   if (
     !runtime ||
-    !acknowledgeStopDrain(pending.capability, {
-      runtime,
-      fence: runtime.captureFence,
-      token: message.token,
-      sid: message.sid,
-      tabId: sender?.tab?.id ?? -1,
-      frameId: normalizeSenderFrameId(sender),
-      documentUrl: message.documentUrl
-    })
+    runtime !== pending.runtime ||
+    !capability ||
+    !activation ||
+    activation.runtime !== runtime ||
+    !binding ||
+    !canAdmitStopDrainBatch(capability, binding)
   ) {
     return;
   }
 
-  pending.ackReceived = true;
+  const expectedArtifacts = resolveExpectedStopDrainArtifacts(runtime, activation);
+  const committedArtifacts = new Set(getCommittedStopDrainArtifactTypes(capability));
+  const emittedArtifacts = expectedArtifacts.filter((artifact) =>
+    artifact === "main-world-tail"
+      ? message.emittedArtifacts.includes(artifact)
+      : committedArtifacts.has(artifact)
+  );
+  const omittedArtifacts = expectedArtifacts.filter(
+    (artifact) => !emittedArtifacts.includes(artifact)
+  );
+  const evidenceMismatch =
+    !sameStringSet(message.expectedArtifacts, expectedArtifacts) ||
+    !sameStringSet(message.emittedArtifacts, emittedArtifacts) ||
+    !sameStringSet(message.omittedArtifacts, omittedArtifacts);
+
+  if (
+    omittedArtifacts.length > 0 ||
+    message.degradationReasons.length > 0 ||
+    evidenceMismatch ||
+    capability.droppedOrdinaryEvents > 0
+  ) {
+    const noticeClaim = claimStopDrainEvent(capability, {
+      ...binding,
+      batchId: `b1_${capability.token}`,
+      eventIndex: 0,
+      rawType: "notice",
+      reason: "stop"
+    });
+    if (!noticeClaim) {
+      return;
+    }
+
+    try {
+      const persisted = await ingestRawEvent(
+        {
+          source: "system",
+          rawType: "notice",
+          sid: runtime.sid,
+          tabId: runtime.tabId,
+          t: Date.now(),
+          mono: monotonicTime(),
+          frame: normalizeContentFrameId(activation.frameId),
+          payload: {
+            message: "stop-artifacts-omitted",
+            expectedArtifacts,
+            emittedArtifacts,
+            omittedArtifacts,
+            degradationReasons: message.degradationReasons,
+            evidenceMismatch,
+            droppedOrdinaryEvents: capability.droppedOrdinaryEvents
+          }
+        },
+        noticeClaim
+      );
+      if (!persisted) {
+        throw new Error("Stop-drain degradation notice was not accepted.");
+      }
+      await flushContentEventBatchDurably(runtime);
+      if (!commitStopDrainClaim(noticeClaim, runtime, runtime.captureFence)) {
+        throw new Error("Stop-drain degradation notice could not be committed.");
+      }
+    } catch (error) {
+      releaseStopDrainClaim(noticeClaim);
+      logInboundMessageFailure("content.stop-drained", error, port, {
+        activationId: activation.activationId,
+        stage: "degradation-notice"
+      });
+      return;
+    }
+  }
+
+  if (!acknowledgeStopDrain(capability, binding)) {
+    return;
+  }
+
+  pending.acknowledged.add(message.activationId);
   resolveStopDrainAckIfReady(pending);
 }
 
-function resolveStopDrainAcksForTab(tabId: number): void {
+function resolveExpectedStopDrainArtifacts(
+  runtime: SessionRuntime,
+  activation: Pick<SessionContentActivation, "frameId">
+): Array<"main-world-tail" | "snapshot" | "localStorageSnapshot" | "screenshot"> {
+  if (runtime.mode !== "lite") {
+    return [];
+  }
+
+  const expected: Array<"main-world-tail" | "snapshot" | "localStorageSnapshot" | "screenshot"> = [
+    "main-world-tail"
+  ];
+  if (activation.frameId !== 0) {
+    return expected;
+  }
+  if (runtime.config.capturePolicy?.categories.dom !== "off") {
+    expected.push("snapshot");
+  }
+  if (runtime.config.capturePolicy?.categories.storage !== "off") {
+    expected.push("localStorageSnapshot");
+  }
+  if (
+    runtime.config.sampling.screenshotIdleMs > 0 &&
+    runtime.config.capturePolicy?.categories.screenshots === "allow"
+  ) {
+    expected.push("screenshot");
+  }
+  return expected;
+}
+
+function resolveExpectedStopDrainArtifactsForCapability(
+  runtime: SessionRuntime,
+  capability: StopDrainCapability
+): Array<"main-world-tail" | "snapshot" | "localStorageSnapshot" | "screenshot"> {
+  return resolveExpectedStopDrainArtifacts(runtime, capability);
+}
+
+function sameStringSet(first: readonly string[], second: readonly string[]): boolean {
+  return first.length === second.length && first.every((value) => second.includes(value));
+}
+
+function resolveStopDrainAckForActivation(activationId: ContentActivationId): void {
   for (const pending of pendingStopDrainAcks.values()) {
-    if (pending.tabId === tabId) {
+    if (pending.capabilities.has(activationId)) {
       resolveStopDrainAckIfReady(pending);
     }
   }
 }
 
-function resolveStopDrainAckIfReady(pending: {
-  sid: string;
-  tabId: number;
-  capability: StopDrainCapability;
-  ackReceived: boolean;
-  settling: boolean;
-  resolve: () => void;
-  timeout: ReturnType<typeof setTimeout>;
-}): void {
-  if (!pending.ackReceived || pending.settling) {
+function resolveStopDrainAckIfReady(pending: PendingStopDrainAck, force = false): void {
+  if (pending.acknowledged.size !== pending.capabilities.size || pending.settling) {
     return;
   }
 
-  if ((inFlightContentMessagesByTab.get(pending.tabId) ?? 0) > 0) {
+  if (
+    !force &&
+    [...pending.capabilities.keys()].some(
+      (activationId) => (inFlightContentMessagesByActivation.get(activationId) ?? 0) > 0
+    )
+  ) {
     return;
   }
 
-  const runtime = sessionsBySid.get(pending.sid);
   pending.settling = true;
 
   const finalize = () => {
@@ -9075,16 +13498,23 @@ function resolveStopDrainAckIfReady(pending: {
     }
 
     clearTimeout(pending.timeout);
-    closeStopDrain(pending.capability);
+    clearInterval(pending.retryTimer);
+    const drainingSnapshots = [...pending.capabilities.keys()]
+      .map((activationId) => contentActivations.lookupByActivationId(activationId, ["draining"]))
+      .filter((activation): activation is SessionContentActivation => activation !== null);
+
+    for (const [activationId, capability] of pending.capabilities) {
+      closeStopDrain(capability);
+      invalidateContentEventBatchAdmissions(activationId);
+    }
+    void revokeContentActivationSnapshots(drainingSnapshots, "stop-drained");
     pending.resolve();
   };
 
-  if (!runtime) {
-    finalize();
-    return;
-  }
-
-  void runtime.queue.then(finalize, finalize);
+  void withCdpCommandTimeout(pending.runtime.queue, STOP_DRAIN_QUEUE_SETTLE_TIMEOUT_MS).then(
+    finalize,
+    finalize
+  );
 }
 
 async function relayMarkerCommand(): Promise<void> {

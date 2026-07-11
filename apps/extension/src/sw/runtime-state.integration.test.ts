@@ -6,6 +6,8 @@ import {
   capCleanupDeadline,
   createRuntimeCleanupAlarmName,
   createRuntimeStateSnapshot,
+  createStoppedRuntimeTombstone,
+  createStoppingRuntimeTombstone,
   evaluateActiveRuntimeRestoration,
   extractPersistedRuntimeIdentities,
   parseRuntimeStateSnapshot,
@@ -145,7 +147,7 @@ describe("service-worker restart recovery integration", () => {
     ).toEqual({ allowed: false, reason: "consent-expired" });
   });
 
-  it("routes a crash-persisted stopping tombstone to purge, never active restoration", () => {
+  it("routes a crash-persisted stopping tombstone to retained stopped finalization", () => {
     const snapshot = parseRuntimeStateSnapshot(
       createRuntimeStateSnapshot([stopping()], STARTED_AT + 31_000)
     );
@@ -153,11 +155,62 @@ describe("service-worker restart recovery integration", () => {
 
     expect(row?.state).toBe("stopping");
     expect(row && planRuntimeRestoration(row)).toMatchObject({
-      kind: "purge-stopping",
+      kind: "finalize-stopping",
       runtime: {
         sid: "S-1780272030000-stopping",
         stopRequestedAt: STARTED_AT + 30_000
       }
+    });
+
+    const finalized = createStoppedRuntimeTombstone(
+      row as PersistedStoppingRuntime,
+      (row as PersistedStoppingRuntime).stopRequestedAt,
+      (row as PersistedStoppingRuntime).cleanupDeadline
+    );
+    expect(finalized).toMatchObject({
+      state: "stopped",
+      sid: "S-1780272030000-stopping",
+      stoppedAt: STARTED_AT + 30_000,
+      counters: COUNTERS
+    });
+    expect(parseRuntimeStateSnapshot(createRuntimeStateSnapshot([finalized]))?.sessions[0]).toEqual(
+      finalized
+    );
+  });
+
+  it("retains a rejected active restore as exportable stopping data instead of purging it", () => {
+    const rejected = active();
+    rejected.screenRecording = {
+      recordingId: "VR-rejected-restore",
+      startedAt: STARTED_AT + 1_000,
+      startedMono: 1_000,
+      mime: "video/webm",
+      chunkCount: 2,
+      sizeBytes: 512
+    };
+    const failedAt = STARTED_AT + 45_000;
+    const retained = createStoppingRuntimeTombstone(rejected, failedAt, failedAt + 86_400_000);
+    const checkpoint = parseRuntimeStateSnapshot(createRuntimeStateSnapshot([retained]));
+
+    expect(checkpoint?.sessions[0]).toMatchObject({
+      state: "stopping",
+      sid: rejected.sid,
+      counters: COUNTERS,
+      screenRecording: {
+        recordingId: "VR-rejected-restore",
+        chunkCount: 2,
+        sizeBytes: 512
+      }
+    });
+    expect(planRuntimeRestoration(checkpoint!.sessions[0]!)).toMatchObject({
+      kind: "finalize-stopping"
+    });
+
+    const stopped = createStoppedRuntimeTombstone(retained, failedAt, retained.cleanupDeadline);
+    expect(stopped).toMatchObject({
+      state: "stopped",
+      sid: rejected.sid,
+      counters: COUNTERS
     });
   });
 

@@ -43,7 +43,7 @@ describe("ContentDocumentAuthorization", () => {
     });
   });
 
-  it("updates the same top document URL without invalidating child documents", () => {
+  it("requires an explicit policy-approved URL refresh without invalidating child documents", () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     authorization.reset({ url: TOP_URL });
     authorization.authorize({
@@ -66,8 +66,78 @@ describe("ContentDocumentAuthorization", () => {
         documentId: "top-document",
         url: "https://app.example/next"
       })
+    ).toBeNull();
+    expect(
+      authorization.refreshKnownDocumentUrl({
+        tabId: TAB_ID,
+        frameId: 0,
+        documentId: "top-document",
+        url: "https://app.example/next"
+      })
+    ).toBe(true);
+    expect(
+      authorization.authorize({
+        tabId: TAB_ID,
+        frameId: 0,
+        documentId: "top-document",
+        url: "https://app.example/next"
+      })
     ).toMatchObject({ url: "https://app.example/next" });
     expect(authorization.get(3)?.documentId).toBe("child-document");
+  });
+
+  it("accepts a lagging sender URL only for an exact same-origin document refresh", () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    authorization.reset({ url: TOP_URL });
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 0,
+      documentId: "top-document",
+      url: TOP_URL
+    });
+    const currentUrl = "https://app.example/checkout?step=payment#/confirm";
+    expect(
+      authorization.refreshKnownDocumentUrl({
+        tabId: TAB_ID,
+        frameId: 0,
+        documentId: "top-document",
+        url: currentUrl
+      })
+    ).toBe(true);
+
+    expect(
+      authorization.matchesSameDocumentSender(
+        {
+          tabId: TAB_ID,
+          frameId: 0,
+          documentId: "top-document",
+          url: currentUrl
+        },
+        TOP_URL
+      )
+    ).toBe(true);
+    expect(
+      authorization.matchesSameDocumentSender(
+        {
+          tabId: TAB_ID,
+          frameId: 0,
+          documentId: "top-document",
+          url: currentUrl
+        },
+        "https://other.example/dashboard"
+      )
+    ).toBe(false);
+    expect(
+      authorization.matchesSameDocumentSender(
+        {
+          tabId: TAB_ID,
+          frameId: 0,
+          documentId: "stale-document",
+          url: currentUrl
+        },
+        TOP_URL
+      )
+    ).toBe(false);
   });
 
   it("lets store-safe top B prove navigation before tabs policy resolution", () => {
@@ -217,6 +287,26 @@ describe("ContentDocumentAuthorization", () => {
     expect(authorization.activeFrameIds()).toEqual([5]);
     expect(authorization.revoke(5, "new-document")).toBe(true);
     expect(authorization.get(5)).toBeNull();
+  });
+
+  it("keeps a policy-blocked child closed until a new committed navigation", () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 5,
+      documentId: "blocked-child",
+      url: "https://widgets.example/blocked"
+    });
+
+    expect(authorization.blockDocument(5, "blocked-child")).toBe(true);
+    expect(
+      authorization.authorize({
+        tabId: TAB_ID,
+        frameId: 5,
+        documentId: "blocked-child",
+        url: "https://widgets.example/blocked"
+      })
+    ).toBeNull();
   });
 
   it("revokes a failed current top document but permits the same exact document to reconnect", () => {
@@ -376,6 +466,109 @@ describe("ContentDocumentAuthorization", () => {
     expect(authorization.getPending(10)?.documentId).toBe("document-c");
   });
 
+  it("re-evaluates the latest preparing URL before committing policy", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    const firstDecision = deferred<ContentDocumentScopeDecision>();
+    const evaluated: string[] = [];
+    const preparation = authorization.prepareCommittedNavigation(
+      navigation(10, "document-b"),
+      ({ url }) => {
+        evaluated.push(url);
+        return evaluated.length === 1 ? firstDecision.promise : true;
+      }
+    );
+
+    await Promise.resolve();
+    expect(authorization.matchesKnownDocument({ frameId: 10, documentId: "document-b" })).toBe(
+      true
+    );
+    expect(
+      authorization.refreshKnownDocumentUrl({
+        tabId: TAB_ID,
+        frameId: 10,
+        documentId: "document-b",
+        url: "https://widgets.example/document-c"
+      })
+    ).toBe(true);
+    firstDecision.resolve(true);
+
+    await expect(preparation).resolves.toMatchObject({
+      prepared: true,
+      document: { url: "https://widgets.example/document-c" }
+    });
+    expect(evaluated).toEqual([
+      "https://widgets.example/document-b",
+      "https://widgets.example/document-c"
+    ]);
+  });
+
+  it("exposes preparing and pending parents without authorizing them early", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    const decision = deferred<ContentDocumentScopeDecision>();
+    const preparation = authorization.prepareCommittedNavigation(
+      navigation(12, "parent-document"),
+      () => decision.promise
+    );
+
+    await Promise.resolve();
+    expect(authorization.getKnownFrameDocument(12)).toMatchObject({
+      documentId: "parent-document",
+      state: "preparing"
+    });
+    const activation = authorization.waitForKnownDocumentActivation({
+      frameId: 12,
+      documentId: "parent-document"
+    });
+    expect(activation).not.toBeNull();
+
+    decision.resolve(true);
+    await preparation;
+    expect(authorization.getKnownFrameDocument(12)).toMatchObject({
+      documentId: "parent-document",
+      state: "pending"
+    });
+    authorization.completePendingInjection(12, "parent-document");
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 12,
+      documentId: "parent-document",
+      url: "https://widgets.example/parent-document"
+    });
+
+    await expect(activation).resolves.toBe(true);
+    expect(authorization.getKnownFrameDocument(12)).toMatchObject({ state: "active" });
+  });
+
+  it("promotes only the refreshed pending URL", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    await authorization.prepareCommittedNavigation(navigation(11, "document-b"), () => true);
+    expect(
+      authorization.refreshKnownDocumentUrl({
+        tabId: TAB_ID,
+        frameId: 11,
+        documentId: "document-b",
+        url: "https://widgets.example/document-c"
+      })
+    ).toBe(true);
+    expect(authorization.completePendingInjection(11, "document-b")).toBe(true);
+    expect(
+      authorization.authorize({
+        tabId: TAB_ID,
+        frameId: 11,
+        documentId: "document-b",
+        url: "https://widgets.example/document-b"
+      })
+    ).toBeNull();
+    expect(
+      authorization.authorize({
+        tabId: TAB_ID,
+        frameId: 11,
+        documentId: "document-b",
+        url: "https://widgets.example/document-c"
+      })
+    ).toMatchObject({ url: "https://widgets.example/document-c" });
+  });
+
   it("promotes only exact top B after A enters the navigation window", async () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     authorization.reset({ url: "https://app.example/a" });
@@ -470,6 +663,40 @@ describe("ContentDocumentAuthorization", () => {
         frameId: 0
       })
     ).toBe(true);
+  });
+
+  it("lets an exact commit supersede a request lineage that missed its final redirect", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    authorization.reset({ url: "https://app.example/a" });
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 0,
+      documentId: "top-document-a",
+      url: "https://app.example/a"
+    });
+    const request = authorization.beginNavigation(0, "https://app.example/b");
+    expect(request).not.toBeNull();
+
+    await expect(
+      authorization.prepareCommittedNavigation(
+        {
+          tabId: TAB_ID,
+          frameId: 0,
+          documentId: "top-document-c",
+          url: "https://app.example/c"
+        },
+        () => true
+      )
+    ).resolves.toMatchObject({
+      prepared: true,
+      document: { documentId: "top-document-c", url: "https://app.example/c" }
+    });
+    expect(
+      authorization.matchesNavigationCompletion({
+        authorization: request!,
+        frameId: 0
+      })
+    ).toBe(false);
   });
 
   it("finalizes B request lineage before a later BFCache A commit", async () => {
@@ -981,6 +1208,135 @@ describe("ContentDocumentAuthorization", () => {
     authorization.authorize(navigation(10, "document-c"));
     expect(authorization.failNavigation(10, "document-b")).toBe(false);
     expect(authorization.get(10)?.documentId).toBe("document-c");
+  });
+
+  it("atomically blocks an exact parent and all active, pending, and preparing descendants", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    authorization.reset({ url: TOP_URL });
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 0,
+      documentId: "top-document",
+      url: TOP_URL
+    });
+    authorization.authorize(navigation(4, "parent-document"));
+    authorization.authorize(navigation(8, "unrelated-sibling"));
+    await prepare(authorization, 5, "pending-child");
+    await prepare(authorization, 6, "pending-grandchild");
+    const preparingDecision = deferred<ContentDocumentScopeDecision>();
+    const preparingGreatGrandchild = authorization.prepareCommittedNavigation(
+      navigation(7, "preparing-great-grandchild"),
+      () => preparingDecision.promise
+    );
+    await Promise.resolve();
+
+    authorization.authorize(navigation(5, "pending-child"));
+    authorization.authorize(navigation(6, "pending-grandchild"));
+    const pendingChildOutcome = authorization.waitForPreparingAuthorization(
+      navigation(5, "pending-child")
+    );
+    const pendingGrandchildOutcome = authorization.waitForPreparingAuthorization(
+      navigation(6, "pending-grandchild")
+    );
+    const parents = new Map([
+      ["4:parent-document", { frameId: 0, documentId: "top-document" }],
+      ["5:pending-child", { frameId: 4, documentId: "parent-document" }],
+      ["6:pending-grandchild", { frameId: 5, documentId: "pending-child" }],
+      ["7:preparing-great-grandchild", { frameId: 6, documentId: "pending-grandchild" }],
+      ["8:unrelated-sibling", { frameId: 0, documentId: "top-document" }]
+    ]);
+
+    const removed = authorization.blockKnownDocumentSubtree(
+      { frameId: 4, documentId: "parent-document" },
+      (document) => parents.get(`${document.frameId}:${document.documentId}`)
+    );
+
+    for (const document of removed) {
+      parents.delete(`${document.frameId}:${document.documentId}`);
+    }
+
+    expect(removed).toEqual([
+      expect.objectContaining({ frameId: 4, documentId: "parent-document", state: "active" }),
+      expect.objectContaining({ frameId: 5, documentId: "pending-child", state: "pending" }),
+      expect.objectContaining({ frameId: 6, documentId: "pending-grandchild", state: "pending" }),
+      expect.objectContaining({
+        frameId: 7,
+        documentId: "preparing-great-grandchild",
+        state: "preparing"
+      })
+    ]);
+    await expect(pendingChildOutcome).resolves.toBe(false);
+    await expect(pendingGrandchildOutcome).resolves.toBe(false);
+    expect(authorization.beginNavigation(4, "https://widgets.example/replacement")).not.toBeNull();
+    expect(authorization.get(4)).toBeNull();
+    expect(authorization.getPending(5)).toBeNull();
+    expect(authorization.getPending(6)).toBeNull();
+    expect(
+      authorization.matchesKnownDocument({
+        frameId: 6,
+        documentId: "pending-grandchild"
+      })
+    ).toBe(false);
+    expect(authorization.get(8)?.documentId).toBe("unrelated-sibling");
+    expect(parents).toEqual(
+      new Map([["8:unrelated-sibling", { frameId: 0, documentId: "top-document" }]])
+    );
+
+    preparingDecision.resolve(true);
+    await expect(preparingGreatGrandchild).resolves.toMatchObject({
+      prepared: false,
+      reason: "stale-navigation"
+    });
+  });
+
+  it("fails closed for missing or cyclic exact ancestry during subtree cleanup", () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    authorization.reset({ url: TOP_URL });
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 0,
+      documentId: "top-document",
+      url: TOP_URL
+    });
+    authorization.authorize(navigation(4, "parent-document"));
+    authorization.authorize(navigation(8, "valid-sibling"));
+    authorization.authorize(navigation(9, "missing-parent"));
+    authorization.authorize(navigation(10, "cycle-a"));
+    authorization.authorize(navigation(11, "cycle-b"));
+    const parents = new Map([
+      ["4:parent-document", { frameId: 0, documentId: "top-document" }],
+      ["8:valid-sibling", { frameId: 0, documentId: "top-document" }],
+      ["10:cycle-a", { frameId: 11, documentId: "cycle-b" }],
+      ["11:cycle-b", { frameId: 10, documentId: "cycle-a" }]
+    ]);
+
+    const removed = authorization.blockKnownDocumentSubtree(
+      { frameId: 4, documentId: "parent-document" },
+      (document) => parents.get(`${document.frameId}:${document.documentId}`)
+    );
+
+    expect(removed.map(({ documentId }) => documentId)).toEqual([
+      "parent-document",
+      "missing-parent",
+      "cycle-a",
+      "cycle-b"
+    ]);
+    expect(authorization.get(8)?.documentId).toBe("valid-sibling");
+    for (const documentId of ["parent-document", "missing-parent", "cycle-a", "cycle-b"]) {
+      expect(
+        authorization.matchesKnownDocument({
+          frameId:
+            documentId === "parent-document"
+              ? 4
+              : documentId === "missing-parent"
+                ? 9
+                : documentId === "cycle-a"
+                  ? 10
+                  : 11,
+          documentId
+        })
+      ).toBe(false);
+    }
   });
 
   it("revokes a sender promoted during a failed exact injection", async () => {
