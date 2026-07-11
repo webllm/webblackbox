@@ -129,6 +129,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/webblackbox
     devDependencies:
+      '@webblackbox/player-sdk':
+        specifier: workspace:*
+        version: link:../../packages/player-sdk
       cross-env:
         specifier: ^10.1.0
         version: 10.1.0

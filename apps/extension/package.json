@@ -37,6 +37,7 @@
     "webblackbox": "workspace:*"
   },
   "devDependencies": {
+    "@webblackbox/player-sdk": "workspace:*",
     "cross-env": "^10.1.0",
     "es-module-lexer": "^2.3.0",
     "fake-indexeddb": "^6.2.5",

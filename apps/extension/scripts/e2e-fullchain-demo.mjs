@@ -8,7 +8,7 @@ import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:
 import { createServer as createNetServer } from "node:net";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import JSZip from "jszip";
+import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
 
 import {
   createE2eTempPath,
@@ -21,6 +21,10 @@ import {
   startSessionFromPopupRuntime,
   stopSessionFromPopupPort
 } from "./lib/extension-e2e-controller.mjs";
+import {
+  verifyRealWorldArchiveEvidence,
+  verifyScreenRecordingArchiveEvidence
+} from "./lib/archive-evidence.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = resolve(root, "..");
@@ -457,9 +461,18 @@ async function main() {
     downloadRecord
   });
 
+  const needsArchiveEvidence = Boolean(
+    (realWorldScenario && realWorldResult.archiveEvidence) || recordScreenInFullMode
+  );
+  const archiveEvidencePlayer = needsArchiveEvidence
+    ? await WebBlackboxPlayer.open(
+        await readFile(exportedPath),
+        exportPassphrase.trim().length > 0 ? { passphrase: exportPassphrase.trim() } : {}
+      )
+    : null;
   const archiveEvidenceResult =
     realWorldScenario && realWorldResult.archiveEvidence
-      ? await verifyRealWorldArchiveEvidence(exportedPath, realWorldResult.archiveEvidence)
+      ? verifyRealWorldArchiveEvidence(archiveEvidencePlayer, realWorldResult.archiveEvidence)
       : { ok: true, skipped: true };
   assert(
     archiveEvidenceResult.ok,
@@ -468,7 +481,10 @@ async function main() {
   );
 
   const screenRecordingArchiveResult = recordScreenInFullMode
-    ? await verifyScreenRecordingArchiveEvidence(exportedPath)
+    ? await verifyScreenRecordingArchiveEvidence(archiveEvidencePlayer, {
+        captureScreenshots: captureScreenshotsInFullMode,
+        maxBlobBytes: e2eExportPolicy.maxArchiveBytes
+      })
     : { ok: true, skipped: "screen-recording-e2e-disabled" };
   assert(
     screenRecordingArchiveResult.ok,
@@ -639,14 +655,6 @@ function assert(condition, message, details) {
   if (!condition) {
     const suffix = details === undefined ? "" : ` | details=${JSON.stringify(details)}`;
     throw new Error(`${message}${suffix}`);
-  }
-}
-
-function safeStringify(value) {
-  try {
-    return JSON.stringify(value) ?? "";
-  } catch {
-    return String(value);
   }
 }
 
@@ -980,7 +988,12 @@ async function handleApiRequest(request, response, requestUrl, tasks) {
     return;
   }
 
-  if (pathname === "/api/large-response" && request.method === "GET") {
+  if (
+    ["/api/large-response", "/api/iframe-large-response", "/api/worker-large-response"].includes(
+      pathname
+    ) &&
+    request.method === "GET"
+  ) {
     const rawBytes = Number(requestUrl.searchParams.get("bytes") ?? realWorldLargeResponseBytes);
     const size = Number.isFinite(rawBytes)
       ? Math.max(1024, Math.min(rawBytes, 4 * 1024 * 1024))
@@ -2311,125 +2324,6 @@ async function waitForExportedArchiveFile(sid, startedAtMs, timeoutMs) {
   );
 }
 
-async function verifyRealWorldArchiveEvidence(archivePath, evidence) {
-  if (exportPassphrase.length > 0) {
-    return { ok: true, skipped: "encrypted-export" };
-  }
-
-  const events = await readArchiveEvents(archivePath);
-  const eventTexts = events.map((event) => `${event.type} ${safeStringify(event.data)}`);
-  const missingMarkers = (evidence.markers ?? []).filter(
-    (marker) => !eventTexts.some((text) => text.includes(marker))
-  );
-  const missingUrls = (evidence.urls ?? []).filter(
-    (url) => !eventTexts.some((text) => text.includes(url))
-  );
-  const missingEventTypes = (evidence.eventTypes ?? []).filter(
-    (type) => !events.some((event) => event.type === type)
-  );
-
-  return {
-    ok: missingMarkers.length === 0 && missingUrls.length === 0 && missingEventTypes.length === 0,
-    eventCount: events.length,
-    missingMarkers,
-    missingUrls,
-    missingEventTypes
-  };
-}
-
-async function verifyScreenRecordingArchiveEvidence(archivePath) {
-  if (exportPassphrase.length > 0) {
-    return { ok: true, skipped: "encrypted-export" };
-  }
-
-  const zip = await JSZip.loadAsync(await readFile(archivePath));
-  const paths = Object.keys(zip.files);
-  const events = await readArchiveEvents(archivePath);
-  const startEvents = events.filter((event) => event.type === "screen.recording.start");
-  const chunkEvents = events.filter((event) => event.type === "screen.recording.chunk");
-  const endEvents = events.filter((event) => event.type === "screen.recording.end");
-  const screenshotEvents = events.filter((event) => event.type === "screen.screenshot");
-  const endWithChunks = endEvents.find(
-    (event) => Array.isArray(event.data?.chunks) && event.data.chunks.length > 0
-  );
-  const referencedChunks = new Set([
-    ...chunkEvents
-      .map((event) => event.data?.chunkId)
-      .filter((value) => typeof value === "string" && value.length > 0),
-    ...((Array.isArray(endWithChunks?.data?.chunks) ? endWithChunks.data.chunks : []).filter(
-      (value) => typeof value === "string" && value.length > 0
-    ) ?? [])
-  ]);
-  const webmBlobs = paths.filter((path) => path.startsWith("blobs/") && path.endsWith(".webm"));
-  const screenshotBlobs = paths.filter(
-    (path) => path.startsWith("blobs/") && path.endsWith(".webp")
-  );
-  const missingChunkBlobs = [...referencedChunks].filter(
-    (hash) => !webmBlobs.some((path) => path.includes(hash))
-  );
-  const screenshotLeak =
-    !captureScreenshotsInFullMode && (screenshotEvents.length > 0 || screenshotBlobs.length > 0);
-
-  return {
-    ok:
-      startEvents.length > 0 &&
-      chunkEvents.length > 0 &&
-      endEvents.length > 0 &&
-      Boolean(endWithChunks) &&
-      webmBlobs.length > 0 &&
-      missingChunkBlobs.length === 0 &&
-      !screenshotLeak,
-    startEvents: startEvents.length,
-    chunkEvents: chunkEvents.length,
-    endEvents: endEvents.length,
-    screenshotEvents: screenshotEvents.length,
-    endChunkCount: Array.isArray(endWithChunks?.data?.chunks)
-      ? endWithChunks.data.chunks.length
-      : 0,
-    webmBlobs: webmBlobs.length,
-    screenshotBlobs: screenshotBlobs.length,
-    referencedChunks: referencedChunks.size,
-    missingChunkBlobs,
-    screenshotLeak
-  };
-}
-
-async function readArchiveEvents(archivePath) {
-  const zip = await JSZip.loadAsync(await readFile(archivePath));
-  const paths = Object.keys(zip.files)
-    .filter((path) => path.startsWith("events/") && path.endsWith(".ndjson"))
-    .sort();
-  const events = [];
-
-  for (const path of paths) {
-    const file = zip.file(path);
-
-    if (!file) {
-      continue;
-    }
-
-    const text = await file.async("string");
-
-    for (const line of text.split(/\r?\n/u)) {
-      const trimmed = line.trim();
-
-      if (!trimmed) {
-        continue;
-      }
-
-      try {
-        events.push(JSON.parse(trimmed));
-      } catch (error) {
-        throw new Error(
-          `Failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-  }
-
-  return events;
-}
-
 async function runDemoScenario(demoClient) {
   const expression = `
     (async () => {
@@ -2497,6 +2391,7 @@ async function runRealWorldScenarioAddons({
         history.replaceState({ route: 'checkout' }, '', '#/checkout?step=payment');
         window.dispatchEvent(new HashChangeEvent('hashchange'));
         result.spaRoutes.push(location.href);
+        await new Promise((resolve) => setTimeout(resolve, 500));
         mark('spa route checkout');
 
         const iframe = document.createElement('iframe');
@@ -2511,7 +2406,7 @@ async function runRealWorldScenarioAddons({
         mark('iframe ready');
 
         if (${JSON.stringify(wantsIframeNetwork)}) {
-          const iframeResponse = await iframe.contentWindow?.fetch('/api/large-response?source=iframe&bytes=2048');
+          const iframeResponse = await iframe.contentWindow?.fetch('/api/iframe-large-response?bytes=2048');
           const iframeText = iframeResponse ? await iframeResponse.text() : '';
           result.iframeNetworkBytes = iframeText.length;
           mark('iframe network ' + result.iframeNetworkBytes);
@@ -2519,7 +2414,7 @@ async function runRealWorldScenarioAddons({
 
         if (${JSON.stringify(wantsChildTarget)}) {
           const workerResult = await new Promise((resolve) => {
-            const workerFetchUrl = new URL('/api/large-response?source=worker&bytes=2048', location.href).href;
+            const workerFetchUrl = new URL('/api/worker-large-response?bytes=2048', location.href).href;
             const workerSource = [
               'self.onmessage = async () => {',
               '  try {',
@@ -2714,12 +2609,12 @@ async function runRealWorldScenarioAddons({
     permissionMarker,
     multiTabMarker
   ].filter((marker) => typeof marker === "string" && marker.length > 0);
-  const expectedUrls = ["/api/large-response?bytes="];
+  const expectedUrls = ["/api/large-response"];
   if (wantsIframeNetwork) {
-    expectedUrls.push("/api/large-response?source=iframe");
+    expectedUrls.push("/api/iframe-large-response");
   }
   if (wantsChildTarget) {
-    expectedUrls.push("/api/large-response?source=worker");
+    expectedUrls.push("/api/worker-large-response");
   }
 
   return {
