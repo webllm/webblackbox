@@ -217,6 +217,11 @@ import {
   type RuntimeActivationState,
   type VolatileCaptureFence
 } from "./runtime-state.js";
+import {
+  RuntimeTaskCoordinator,
+  cancelOwnedRuntimeStart,
+  resolveRuntimeEventOwner
+} from "./runtime-identity.js";
 
 type SessionRuntime = {
   sid: string;
@@ -254,6 +259,7 @@ type SessionRuntime = {
   pipelineFlushQueued: boolean;
   captureFence: VolatileCaptureFence;
   activationState: RuntimeActivationState;
+  startToken: RuntimeStartToken | null;
   stopping: boolean;
   responseBodyCaptures: number;
   responseBodyCaptureTimestamps: number[];
@@ -481,7 +487,8 @@ const extensionBaseUrl = chromeApi?.runtime?.getURL("") ?? "";
 const sessionsByTab = new Map<number, SessionRuntime>();
 const sessionsBySid = new Map<string, SessionRuntime>();
 const sessionStartCoordinator = new RuntimeStartCoordinator();
-const stopSessionTasks = new Map<number, Promise<void>>();
+const runtimeStopTasks = new RuntimeTaskCoordinator<SessionRuntime>();
+const runtimeDisposeTasks = new RuntimeTaskCoordinator<SessionRuntime>();
 const retainedStoppingRuntimesBySid = new Map<string, PersistedStoppingRuntime>();
 const pendingRuntimeRestorationsBySid = new Map<string, PersistedRuntime>();
 const sessionAnnotations = new Map<string, SessionAnnotation>();
@@ -1200,7 +1207,11 @@ async function deleteSessionBySid(sid: string): Promise<void> {
   }
 
   if (!runtime.stoppedAt) {
-    await stopSession(runtime.tabId);
+    await stopRuntimeIfCurrent(runtime);
+
+    if (!runtime.stoppedAt) {
+      return;
+    }
   }
 
   await disposeStoppedSession(runtime);
@@ -1331,7 +1342,8 @@ async function startSessionUnlocked(
         startedAt,
         pipeline,
         performanceBudget,
-        activationState: "starting"
+        activationState: "starting",
+        startToken
       }),
     registerRuntime: (candidate) => {
       if (sessionsByTab.has(tabId) || sessionsBySid.has(sid)) {
@@ -1511,6 +1523,7 @@ async function commitProvisionalRuntimeStart(
   // The required storage write above is the only active-state commit point.
   // Nothing below this assignment is allowed to reject the successful start.
   runtime.activationState = "active";
+  runtime.startToken = null;
 
   if (runtime.screenRecording) {
     runtime.screenRecording.provisional = false;
@@ -1576,6 +1589,7 @@ function createSessionRuntime(input: {
   screenRecording?: PersistedScreenRecording;
   screenRecordingChunks?: readonly ScreenRecordingChunkReference[];
   activationState?: RuntimeActivationState;
+  startToken?: RuntimeStartToken;
 }): SessionRuntime {
   const counters = input.counters ?? {
     recorderEventSequence: 0,
@@ -1688,6 +1702,7 @@ function createSessionRuntime(input: {
     pipelineFlushQueued: false,
     captureFence: createVolatileCaptureFence(input.stoppedAt !== undefined),
     activationState: input.activationState ?? "active",
+    startToken: input.startToken ?? null,
     stopping: false,
     responseBodyCaptures: counters.responseBodyCaptures,
     responseBodyCaptureTimestamps: [],
@@ -1999,11 +2014,7 @@ async function requestExactContentRecordingStatus(
 }
 
 async function stopRuntimeIfCurrent(runtime: SessionRuntime): Promise<void> {
-  if (sessionsByTab.get(runtime.tabId) !== runtime) {
-    return;
-  }
-
-  await stopSession(runtime.tabId);
+  await requestRuntimeStop(runtime);
 }
 
 function isRuntimeCurrentCaptureOpen(runtime: SessionRuntime): boolean {
@@ -2289,47 +2300,41 @@ function stopSession(tabId: number): Promise<void> {
   sessionStartCoordinator.cancel(tabId);
   const runtime = sessionsByTab.get(tabId);
 
-  if (runtime) {
-    blockVolatileCapture(runtime.captureFence);
-    runtime.contentDocuments.cancelPendingNavigations();
-    notifyOffscreenPipelineStatus();
-
-    if (runtime.activationState === "starting") {
-      return Promise.resolve();
-    }
-  }
-
-  return requestSessionStop(tabId);
+  return runtime ? requestRuntimeStop(runtime) : Promise.resolve();
 }
 
 function requestSessionStop(tabId: number): Promise<void> {
   const runtime = sessionsByTab.get(tabId);
 
-  if (runtime) {
-    blockVolatileCapture(runtime.captureFence);
-    runtime.contentDocuments.cancelPendingNavigations();
-    notifyOffscreenPipelineStatus();
-  }
-
-  const existing = stopSessionTasks.get(tabId);
-
-  if (existing) {
-    return existing;
-  }
-
-  const task = stopSessionOnce(tabId).finally(() => {
-    if (stopSessionTasks.get(tabId) === task) {
-      stopSessionTasks.delete(tabId);
-    }
-  });
-  stopSessionTasks.set(tabId, task);
-  return task;
+  return runtime ? requestRuntimeStop(runtime) : Promise.resolve();
 }
 
-async function stopSessionOnce(tabId: number): Promise<void> {
-  const runtime = sessionsByTab.get(tabId);
+function requestRuntimeStop(runtime: SessionRuntime): Promise<void> {
+  if (
+    !isMapEntrySame(sessionsByTab, runtime.tabId, runtime) ||
+    !isMapEntrySame(sessionsBySid, runtime.sid, runtime)
+  ) {
+    return Promise.resolve();
+  }
 
-  if (!runtime || runtime.stoppedAt) {
+  blockVolatileCapture(runtime.captureFence);
+  runtime.contentDocuments.cancelPendingNavigations();
+  notifyOffscreenPipelineStatus();
+
+  if (runtime.activationState === "starting") {
+    cancelOwnedRuntimeStart(runtime.startToken);
+    return Promise.resolve();
+  }
+
+  return runtimeStopTasks.run(runtime, () => stopSessionOnce(runtime));
+}
+
+async function stopSessionOnce(runtime: SessionRuntime): Promise<void> {
+  if (
+    runtime.stoppedAt ||
+    !isMapEntrySame(sessionsByTab, runtime.tabId, runtime) ||
+    !isMapEntrySame(sessionsBySid, runtime.sid, runtime)
+  ) {
     return;
   }
 
@@ -2369,7 +2374,7 @@ async function stopSessionOnce(tabId: number): Promise<void> {
           );
         },
         async () => {
-          sessionsByTab.delete(runtime.tabId);
+          deleteMapEntryIfSame(sessionsByTab, runtime.tabId, runtime);
           resetAuthorizedContentFrames(runtime);
           uninstallLiteWebRequestCaptureIfUnused();
           runtime.stoppedAt = stopRequestedAt;
@@ -2467,7 +2472,11 @@ async function exportSession(
 
   try {
     if (!runtime.stoppedAt) {
-      await stopSession(runtime.tabId);
+      await stopRuntimeIfCurrent(runtime);
+
+      if (!runtime.stoppedAt) {
+        throw new Error("Session identity changed before export could stop it.");
+      }
     }
 
     await flushBufferedPipelineEvents(runtime);
@@ -2571,9 +2580,7 @@ function ingestRawEvent(
   rawEvent: RawRecorderEvent,
   stopDrainClaim: StopDrainClaim | null = null
 ): void {
-  const runtime =
-    sessionsByTab.get(rawEvent.tabId) ??
-    (typeof rawEvent.sid === "string" ? sessionsBySid.get(rawEvent.sid) : undefined);
+  const runtime = resolveRuntimeEventOwner(sessionsBySid, sessionsByTab, rawEvent);
   const stopDrainAuthorized = Boolean(
     runtime &&
     stopDrainClaim &&
@@ -2606,7 +2613,7 @@ function ingestRawEvent(
 
   if (!runtimeScope.allowed) {
     if (!runtime.stopping && !runtime.stoppedAt) {
-      void stopSession(runtime.tabId);
+      requestStopRuntimeIfCurrent(runtime, "capture-scope-denied");
     }
 
     return;
@@ -6911,7 +6918,7 @@ function scheduleConsentExpiry(runtime: SessionRuntime): void {
   const delay = Date.parse(expiresAt) - Date.now();
 
   if (!Number.isFinite(delay) || delay <= 0) {
-    void stopSession(runtime.tabId);
+    requestStopRuntimeIfCurrent(runtime, "consent-expired");
     return;
   }
 
@@ -6920,7 +6927,7 @@ function scheduleConsentExpiry(runtime: SessionRuntime): void {
       runtime.consentExpiryTimer = null;
 
       if (Date.now() >= Date.parse(expiresAt)) {
-        void stopSession(runtime.tabId);
+        requestStopRuntimeIfCurrent(runtime, "consent-expired");
         return;
       }
 
@@ -6964,8 +6971,12 @@ async function scheduleStoppedRuntimeCleanup(runtime: SessionRuntime): Promise<v
   await runtimeCleanupScheduler.schedule(runtime.sid, runtime.cleanupDeadline);
 }
 
-async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
-  if (!sessionsBySid.has(runtime.sid)) {
+function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
+  return runtimeDisposeTasks.run(runtime, () => disposeStoppedSessionOnce(runtime));
+}
+
+async function disposeStoppedSessionOnce(runtime: SessionRuntime): Promise<void> {
+  if (!runtime.stoppedAt || !isMapEntrySame(sessionsBySid, runtime.sid, runtime)) {
     return;
   }
 
@@ -6979,10 +6990,13 @@ async function disposeStoppedSession(runtime: SessionRuntime): Promise<void> {
   await runtime.pipeline.close({
     purge: true
   });
-  sessionsBySid.delete(runtime.sid);
   await runtimeCleanupScheduler.cancel(runtime.sid).catch(() => undefined);
   if (sessionAnnotations.delete(runtime.sid)) {
     await persistSessionAnnotations().catch(() => undefined);
+  }
+
+  if (!deleteMapEntryIfSame(sessionsBySid, runtime.sid, runtime)) {
+    return;
   }
 
   if (sessionsByTab.size === 0) {

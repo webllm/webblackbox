@@ -11,6 +11,10 @@
 
 ### Patch Changes
 
+- Bound stop, purge, consent-expiry, and late raw-event work to the exact runtime identity: active
+  runtime failures no longer cancel a pending same-tab replacement start, stop and purge tasks only
+  coalesce for the same runtime object, supplied event session ids are authoritative, and an old
+  finalizer cannot delete or leave a replacement capture fence permanently blocked.
 - Kept active-runtime restoration provisional through pipeline resume, required injection and CDP
   bootstrap, interrupted-recording recovery, and requested screen-recording restart; capture and
   active content publication now begin only after one identity-fenced activation commit, while
