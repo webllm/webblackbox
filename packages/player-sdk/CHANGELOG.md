@@ -4,10 +4,16 @@
 
 ### Minor Changes
 
-- No Player SDK runtime changes shipped in this release. The package picks up protocol 0.6.0 support for screen-recording archive events and transfer metadata.
+- Added explicit privacy-scan coverage reporting and bounded transient blob reads for trusted tools
+  that inspect untrusted archives.
 
 ### Patch Changes
 
+- Added bounded transient blob reads so untrusted archive analyzers can verify blobs without
+  retaining every decoded payload in the Player cache.
+- Rejected non-canonical blob paths instead of silently excluding them from Player lookup.
+- Rejected invalid UTF-8 in archive metadata, indexes, and event chunks, and exposed scanner
+  coverage without promoting missing or incomplete legacy coverage to `passed`.
 - Rejected archives whose time-index ranges move backwards across chunk boundaries.
 - Updated dependencies
   - @webblackbox/protocol@0.6.0

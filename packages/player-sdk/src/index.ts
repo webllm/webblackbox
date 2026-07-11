@@ -8,6 +8,7 @@ import type {
   HashesManifest,
   InvertedIndexEntry,
   PrivacyManifest,
+  PrivacyScannerCoverage,
   RequestIndexEntry,
   WebBlackboxEvent,
   WebBlackboxEventType
@@ -18,6 +19,7 @@ import {
   assertArchiveLayout,
   extractRequestId,
   inferBlobMime,
+  isCanonicalArchiveBlobPath,
   parseArchivedEvent,
   parseExportManifest,
   parseHashesManifest,
@@ -47,7 +49,7 @@ export {
   type ArchiveResourceLimits
 } from "./archive-resource-limits.js";
 export { ArchiveDecodeTimeoutError } from "./bounded-stream-reader.js";
-export { BoundedZipReader } from "./bounded-zip-reader.js";
+export { ArchiveEntryReadLimitError, BoundedZipReader } from "./bounded-zip-reader.js";
 
 /** Player lifecycle status. */
 export type PlayerStatus = "idle" | "loaded";
@@ -207,6 +209,7 @@ export type PrivacyProtectionReport = {
     preEncryption: boolean;
     status: "passed" | "blocked" | "unknown";
     findingCount: number;
+    coverage: PrivacyScannerCoverage | null;
   };
 };
 
@@ -949,6 +952,43 @@ export class WebBlackboxPlayer {
     return clonePlayerBlob(await pending);
   }
 
+  /** Reads and verifies one blob without retaining it in the Player cache. */
+  public async readBlobTransient(hash: string, maxBytes: number): Promise<PlayerBlob | null> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+      throw new TypeError("Transient blob read limit must be a positive safe integer.");
+    }
+
+    const blob = resolveBlobByKey(this.blobsByHash, hash);
+    if (!blob || !this.zipReader.has(blob.path)) {
+      return null;
+    }
+
+    const encryptionOverhead = this.encryptedFiles[blob.path] ? 16 : 0;
+    const storedByteLimit = addSafeInteger(maxBytes, encryptionOverhead);
+    let rawBytes: Uint8Array;
+
+    try {
+      rawBytes = await this.zipReader.readBounded(blob.path, storedByteLimit);
+    } catch (error) {
+      if (error instanceof ArchiveEntryReadLimitError) {
+        throw new ArchiveEntryReadLimitError(
+          blob.path,
+          maxBytes,
+          Math.max(0, error.actual - encryptionOverhead)
+        );
+      }
+      throw error;
+    }
+
+    await assertArchiveFileIntegrity(this.archive.integrity, blob.path, rawBytes);
+    const bytes = await this.decryptArchiveFile(blob.path, rawBytes);
+    if (bytes.byteLength > maxBytes) {
+      throw new ArchiveEntryReadLimitError(blob.path, maxBytes, bytes.byteLength);
+    }
+
+    return { mime: blob.mime, bytes };
+  }
+
   /** Builds action-span aggregates and total counters for the selected range. */
   public buildDerived(range?: PlayerRange): PlayerDerivedView {
     if (isRangeUnbounded(range) && this.allDerivedCache) {
@@ -1043,13 +1083,22 @@ export class WebBlackboxPlayer {
       scanner: this.archive.privacyManifest
         ? {
             preEncryption: this.archive.privacyManifest.scanner.preEncryption,
-            status: this.archive.privacyManifest.scanner.status,
-            findingCount: this.archive.privacyManifest.scanner.findings.length
+            status:
+              this.archive.privacyManifest.scanner.status === "blocked"
+                ? "blocked"
+                : this.archive.privacyManifest.scanner.coverage?.complete === true
+                  ? "passed"
+                  : "unknown",
+            findingCount: this.archive.privacyManifest.scanner.findings.length,
+            coverage: this.archive.privacyManifest.scanner.coverage
+              ? { ...this.archive.privacyManifest.scanner.coverage }
+              : null
           }
         : {
             preEncryption: false,
             status: "unknown",
-            findingCount: 0
+            findingCount: 0,
+            coverage: null
           }
     };
   }
@@ -2030,38 +2079,7 @@ export class WebBlackboxPlayer {
   }
 
   private async readHarResponseBody(hash: string, maxBytes: number): Promise<PlayerBlob | null> {
-    const blob = resolveBlobByKey(this.blobsByHash, hash);
-    if (!blob || !this.zipReader.has(blob.path)) {
-      return null;
-    }
-
-    const encryptionOverhead = this.encryptedFiles[blob.path] ? 16 : 0;
-    const storedByteLimit = addSafeInteger(maxBytes, encryptionOverhead);
-    let rawBytes: Uint8Array;
-
-    try {
-      rawBytes = await this.zipReader.readBounded(blob.path, storedByteLimit);
-    } catch (error) {
-      if (error instanceof ArchiveEntryReadLimitError) {
-        throw new ArchiveEntryReadLimitError(
-          blob.path,
-          maxBytes,
-          Math.max(0, error.actual - encryptionOverhead)
-        );
-      }
-      throw error;
-    }
-
-    await assertArchiveFileIntegrity(this.archive.integrity, blob.path, rawBytes);
-    const bytes = await this.decryptArchiveFile(blob.path, rawBytes);
-    if (bytes.byteLength > maxBytes) {
-      throw new ArchiveEntryReadLimitError(blob.path, maxBytes, bytes.byteLength);
-    }
-
-    return {
-      mime: blob.mime,
-      bytes
-    };
+    return this.readBlobTransient(hash, maxBytes);
   }
 
   private getNetworkBucketsWithLimit(
@@ -3413,7 +3431,7 @@ function parseChunkEvents(
   chunk: EventChunkSource,
   decodeBudget: ArchiveDecodeBudget
 ): WebBlackboxEvent[] {
-  const content = new TextDecoder().decode(chunk.bytes);
+  const content = decodeArchiveUtf8(chunk.bytes, chunk.path);
   const events: WebBlackboxEvent[] = [];
   let lineStart = 0;
   let lineNumber = 0;
@@ -3845,7 +3863,7 @@ function clonePlayerBlob(blob: PlayerBlob): PlayerBlob {
 
 async function readJsonValue(zipReader: BoundedZipReader, path: string): Promise<unknown> {
   return readTransientZipEntry(zipReader, path, (bytes) => {
-    const content = new TextDecoder().decode(bytes);
+    const content = decodeArchiveUtf8(bytes, path);
     return parseArchiveJson(content, path);
   });
 }
@@ -3860,8 +3878,16 @@ async function readIntegrityArchiveJsonValue(
   return readTransientZipEntry(zipReader, path, async (rawBytes) => {
     await assertArchiveFileIntegrity(integrity, path, rawBytes);
     const bytes = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
-    return parseArchiveJson(new TextDecoder().decode(bytes), path);
+    return parseArchiveJson(decodeArchiveUtf8(bytes, path), path);
   });
+}
+
+function decodeArchiveUtf8(bytes: Uint8Array, path: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`Invalid WebBlackbox archive: '${path}' contains invalid UTF-8.`);
+  }
 }
 
 async function readTransientZipEntry<T>(
@@ -3953,6 +3979,9 @@ async function assertArchiveFileIntegrity(
 }
 
 function parseBlobPath(path: string): { hash: string; extension: string } | null {
+  if (!isCanonicalArchiveBlobPath(path)) {
+    return null;
+  }
   const prefixed = /^blobs\/sha256-([^.]+)\.(.+)$/.exec(path);
 
   if (!prefixed) {

@@ -9,6 +9,21 @@ import { WebBlackboxPlayer } from "./index.js";
 
 type HarExportLimits = Parameters<WebBlackboxPlayer["exportHarWithLimits"]>[1];
 
+const FIXTURE_BLOB_HASH = fixtureBlobHash(1);
+const FIXTURE_PNG_HASH = fixtureBlobHash(2);
+const FIXTURE_BIN_HASH = fixtureBlobHash(3);
+const RICH_BODY_HASH = fixtureBlobHash(4);
+const RICH_CPU_HASH = fixtureBlobHash(5);
+const RICH_HEAP_HASH = fixtureBlobHash(6);
+const RICH_DOM_FIRST_HASH = fixtureBlobHash(7);
+const RICH_DOM_SECOND_HASH = fixtureBlobHash(8);
+const LITE_DOM_FIRST_HASH = fixtureBlobHash(9);
+const LITE_DOM_SECOND_HASH = fixtureBlobHash(10);
+
+function fixtureBlobHash(value: number): string {
+  return value.toString(16).padStart(64, "0");
+}
+
 function expectValidTypeScript(source: string): void {
   const result = transpileModule(source, {
     compilerOptions: {
@@ -67,15 +82,15 @@ describe("WebBlackboxPlayer", () => {
     const searchResults = player.search("api");
     expect(searchResults[0]?.eventId).toBe("E-3");
 
-    const blob = await player.getBlob("blob1");
+    const blob = await player.getBlob(FIXTURE_BLOB_HASH);
     expect(blob?.mime).toBe("image/webp");
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
   });
 
   it("memoizes lazy blob work without exposing mutable cached bytes", async () => {
     const player = await WebBlackboxPlayer.open(await createFixtureArchive());
-    const first = await player.getBlob("blob1");
-    const second = await player.getBlob("blob1");
+    const first = await player.getBlob(FIXTURE_BLOB_HASH);
+    const second = await player.getBlob(FIXTURE_BLOB_HASH);
 
     expect(first?.bytes).not.toBe(second?.bytes);
     if (!first || !second) {
@@ -83,7 +98,7 @@ describe("WebBlackboxPlayer", () => {
     }
     first.bytes[0] = 99;
     expect(Array.from(second.bytes)).toEqual([1, 2, 3]);
-    await expect(player.getBlob("blob1")).resolves.toMatchObject({
+    await expect(player.getBlob(FIXTURE_BLOB_HASH)).resolves.toMatchObject({
       bytes: Uint8Array.from([1, 2, 3])
     });
   });
@@ -108,6 +123,107 @@ describe("WebBlackboxPlayer", () => {
       expect.arrayContaining(["redacted-marker", "hashed-value", "sensitive-pattern"])
     );
     expect(preview.samples.some((sample) => sample.snippet.includes("…"))).toBe(true);
+  });
+
+  it("does not promote incomplete or legacy scanner coverage to passed", async () => {
+    const source = await createPrivacyFixtureArchive();
+    const incompleteZip = await JSZip.loadAsync(source);
+    incompleteZip.file(
+      "privacy/manifest.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: new Date(0).toISOString(),
+        categories: [],
+        scanner: {
+          scannedAt: new Date(0).toISOString(),
+          preEncryption: true,
+          status: "passed",
+          findings: [],
+          coverage: {
+            complete: false,
+            scannedEventCount: 0,
+            scannedBlobCount: 0,
+            opaqueBlobCount: 0,
+            inspectedBytes: 0,
+            incompleteReason: "deadline"
+          }
+        },
+        encryption: { archive: "plaintext" },
+        totals: { events: 1, blobs: 0, privacyViolations: 0 }
+      })
+    );
+    await writeIntegrityManifest(incompleteZip);
+    const incompletePlayer = await WebBlackboxPlayer.open(
+      await incompleteZip.generateAsync({ type: "uint8array" })
+    );
+
+    expect(incompletePlayer.getPrivacyProtectionReport().scanner).toMatchObject({
+      status: "unknown",
+      coverage: {
+        complete: false,
+        incompleteReason: "deadline"
+      }
+    });
+
+    const legacyZip = await JSZip.loadAsync(source);
+    legacyZip.file(
+      "privacy/manifest.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: new Date(0).toISOString(),
+        categories: [],
+        scanner: {
+          scannedAt: new Date(0).toISOString(),
+          preEncryption: true,
+          status: "passed",
+          findings: []
+        },
+        encryption: { archive: "plaintext" },
+        totals: { events: 1, blobs: 0, privacyViolations: 0 }
+      })
+    );
+    await writeIntegrityManifest(legacyZip);
+    const legacyPlayer = await WebBlackboxPlayer.open(
+      await legacyZip.generateAsync({ type: "uint8array" })
+    );
+
+    expect(legacyPlayer.getPrivacyProtectionReport().scanner).toEqual({
+      preEncryption: true,
+      status: "unknown",
+      findingCount: 0,
+      coverage: null
+    });
+  });
+
+  it("rejects complete scanner coverage whose counts contradict archive totals", async () => {
+    const zip = await JSZip.loadAsync(await createPrivacyFixtureArchive());
+    zip.file(
+      "privacy/manifest.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: new Date(0).toISOString(),
+        categories: [],
+        scanner: {
+          scannedAt: new Date(0).toISOString(),
+          preEncryption: true,
+          status: "passed",
+          findings: [],
+          coverage: {
+            complete: true,
+            scannedEventCount: 999,
+            scannedBlobCount: 999,
+            opaqueBlobCount: 0,
+            inspectedBytes: 0
+          }
+        },
+        encryption: { archive: "plaintext" },
+        totals: { events: 1, blobs: 0, privacyViolations: 0 }
+      })
+    );
+    await writeIntegrityManifest(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/coverage exceeds archive totals/i);
   });
 
   it("supports range-preloaded open via time index chunks", async () => {
@@ -272,29 +388,64 @@ describe("WebBlackboxPlayer", () => {
   it("infers blob mime types by extension and rejects empty blob hashes", async () => {
     const fixture = await createFixtureArchive();
     const zip = await JSZip.loadAsync(fixture);
-    zip.file("blobs/sha256-blobpng.png", Uint8Array.from([9]));
-    zip.file("blobs/sha256-blobbin.bin", Uint8Array.from([8]));
+    zip.file(`blobs/sha256-${FIXTURE_PNG_HASH}.png`, Uint8Array.from([9]));
+    zip.file(`blobs/sha256-${FIXTURE_BIN_HASH}.bin`, Uint8Array.from([8]));
     await writeIntegrityManifest(zip);
     const bytes = await zip.generateAsync({ type: "uint8array" });
     const player = await WebBlackboxPlayer.open(bytes);
 
     await expect(player.getBlob("   ")).resolves.toBeNull();
-    await expect(player.getBlob("blobpng")).resolves.toEqual(
+    await expect(player.getBlob(FIXTURE_PNG_HASH)).resolves.toEqual(
       expect.objectContaining({
         mime: "image/png"
       })
     );
-    await expect(player.getBlob("blobbin")).resolves.toEqual(
+    await expect(player.getBlob(FIXTURE_BIN_HASH)).resolves.toEqual(
       expect.objectContaining({
         mime: "application/octet-stream"
       })
     );
   });
 
+  it("reads bounded blobs transiently without retaining them in the Player cache", async () => {
+    const player = await WebBlackboxPlayer.open(await createFixtureArchive());
+    const blobReads = (player as unknown as { blobReads: Map<string, unknown> }).blobReads;
+
+    await expect(player.readBlobTransient(FIXTURE_BLOB_HASH, 1024)).resolves.toMatchObject({
+      mime: "image/webp"
+    });
+    expect(blobReads.size).toBe(0);
+
+    await expect(player.readBlobTransient(FIXTURE_BLOB_HASH, 1)).rejects.toMatchObject({
+      name: "ArchiveEntryReadLimitError",
+      limit: 1
+    });
+    expect(blobReads.size).toBe(0);
+  });
+
   it("rejects malformed event chunks while opening the archive", async () => {
     const bytes = await createLazyParseFixtureArchive();
 
     await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/chunk-000002.*malformed JSON/i);
+  });
+
+  it.each([
+    { path: "manifest.json", marker: "https://example.com" },
+    { path: "index/time.json", marker: "chunk-000001" },
+    { path: "events/chunk-000001.ndjson", marker: "https://example.com" }
+  ])("rejects invalid UTF-8 in $path", async ({ path, marker }) => {
+    const zip = await JSZip.loadAsync(await createFixtureArchive());
+    const file = zip.file(path);
+    if (!file) {
+      throw new Error(`Missing fixture archive path '${path}'.`);
+    }
+    const content = await file.async("uint8array");
+    replaceFirstByteSequence(content, new TextEncoder().encode(marker), 0xff);
+    zip.file(path, content);
+    await writeIntegrityHashes(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/invalid UTF-8/i);
   });
 
   it("memoizes full-range queries and derived analyzers", async () => {
@@ -366,8 +517,8 @@ describe("WebBlackboxPlayer", () => {
     heapSamples.push(process.memoryUsage().heapUsed);
     const domSnapshots = player.getDomSnapshots();
     heapSamples.push(process.memoryUsage().heapUsed);
-    const firstScreenshot = await player.getBlob("large-shot-0000");
-    const firstResponseBody = await player.getBlob("large-body-0000");
+    const firstScreenshot = await player.getBlob(fixtureBlobHash(200_000));
+    const firstResponseBody = await player.getBlob(fixtureBlobHash(100_000));
     heapSamples.push(process.memoryUsage().heapUsed);
     const heapPeak = Math.max(...heapSamples);
     const heapBaseline = Math.min(...heapSamples);
@@ -413,7 +564,7 @@ describe("WebBlackboxPlayer", () => {
 
   it("opens a legitimate highly compressible exporter blob under default limits", async () => {
     const zip = await JSZip.loadAsync(await createFixtureArchive());
-    zip.file("blobs/sha256-blob1.webp", new Uint8Array(1024 * 1024));
+    zip.file(`blobs/sha256-${FIXTURE_BLOB_HASH}.webp`, new Uint8Array(1024 * 1024));
     await writeIntegrityHashes(zip);
     const bytes = await zip.generateAsync({
       type: "uint8array",
@@ -422,7 +573,7 @@ describe("WebBlackboxPlayer", () => {
     });
 
     const player = await WebBlackboxPlayer.open(bytes);
-    await expect(player.getBlob("blob1")).resolves.toMatchObject({
+    await expect(player.getBlob(FIXTURE_BLOB_HASH)).resolves.toMatchObject({
       bytes: expect.objectContaining({ byteLength: 1024 * 1024 })
     });
   });
@@ -438,7 +589,7 @@ describe("WebBlackboxPlayer", () => {
 
     expect(player.query({ types: ["network.request"] })).toHaveLength(1);
 
-    const blob = await player.getBlob("blob1");
+    const blob = await player.getBlob(FIXTURE_BLOB_HASH);
     expect(Array.from(blob?.bytes ?? [])).toEqual([1, 2, 3]);
   });
 
@@ -693,13 +844,9 @@ describe("WebBlackboxPlayer", () => {
     await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow("integrity/hashes.json");
   });
 
-  it("does not resolve blobs that omit the sha256- prefix in path names", async () => {
+  it("rejects blobs that omit the sha256- prefix in path names", async () => {
     const bytes = await createArchiveWithDeprecatedBlobPath();
-    const player = await WebBlackboxPlayer.open(bytes);
-
-    await expect(player.getBlob("blob1")).resolves.toBeNull();
-    await expect(player.getBlob("sha256-blob1")).resolves.toBeNull();
-    await expect(player.getBlob("blobs/blob1.webp")).resolves.toBeNull();
+    await expect(WebBlackboxPlayer.open(bytes)).rejects.toThrow(/invalid blob path/i);
   });
 
   it("rejects archives with tampered manifest contents", async () => {
@@ -718,29 +865,29 @@ describe("WebBlackboxPlayer", () => {
   it("rejects tampered blobs on demand", async () => {
     const bytes = await tamperArchiveFile(
       await createFixtureArchive(),
-      "blobs/sha256-blob1.webp",
+      `blobs/sha256-${FIXTURE_BLOB_HASH}.webp`,
       Uint8Array.from([9, 9, 9, 9])
     );
     const player = await WebBlackboxPlayer.open(bytes);
 
-    await expect(player.getBlob("blob1")).rejects.toThrow(/integrity mismatch/i);
+    await expect(player.getBlob(FIXTURE_BLOB_HASH)).rejects.toThrow(/integrity mismatch/i);
   });
 
   it("applies actual ZIP output limits to lazily loaded blobs", async () => {
     const zip = await JSZip.loadAsync(await createFixtureArchive());
-    zip.file("blobs/sha256-blob1.webp", new Uint8Array(2 * 1024 * 1024));
+    zip.file(`blobs/sha256-${FIXTURE_BLOB_HASH}.webp`, new Uint8Array(2 * 1024 * 1024));
     await writeIntegrityHashes(zip);
     const bytes = await zip.generateAsync({
       type: "uint8array",
       compression: "DEFLATE",
       compressionOptions: { level: 9 }
     });
-    forgeZipEntryUncompressedSize(bytes, "blobs/sha256-blob1.webp", 1);
+    forgeZipEntryUncompressedSize(bytes, `blobs/sha256-${FIXTURE_BLOB_HASH}.webp`, 1);
 
     const player = await WebBlackboxPlayer.open(bytes, {
       resourceLimits: { maxEntryUncompressedBytes: 1024 * 1024 }
     });
-    await expect(player.getBlob("blob1")).rejects.toMatchObject({
+    await expect(player.getBlob(FIXTURE_BLOB_HASH)).rejects.toMatchObject({
       name: "ArchiveResourceLimitError",
       resource: "maxEntryUncompressedBytes"
     });
@@ -901,7 +1048,7 @@ describe("WebBlackboxPlayer", () => {
     expect(waterfall).toHaveLength(1);
     expect(waterfall[0]?.reqId).toBe("R-1");
     expect(waterfall[0]?.status).toBe(200);
-    expect(waterfall[0]?.responseBodyHash).toBe("blob-body-1");
+    expect(waterfall[0]?.responseBodyHash).toBe(RICH_BODY_HASH);
 
     const curl = player.generateCurl("R-1");
     expect(curl).toContain("curl --url 'https://example.com/api'");
@@ -1068,7 +1215,7 @@ describe("WebBlackboxPlayer", () => {
 
     const domSnapshots = player.getDomSnapshots();
     expect(domSnapshots).toHaveLength(2);
-    expect(domSnapshots[0]?.contentHash).toBe("dom-hash-1");
+    expect(domSnapshots[0]?.contentHash).toBe(RICH_DOM_FIRST_HASH);
 
     const domDiff = await player.compareDomSnapshots("E-18", "E-19");
     expect(domDiff).not.toBeNull();
@@ -1082,7 +1229,7 @@ describe("WebBlackboxPlayer", () => {
   it("diffs lite DOM snapshots stored as HTML blobs", async () => {
     const bytes = await createLiteDomFixtureArchive();
     const player = await WebBlackboxPlayer.open(bytes);
-    const blob = await player.getBlob("dom-lite-1");
+    const blob = await player.getBlob(LITE_DOM_FIRST_HASH);
 
     expect(blob?.mime).toBe("text/html");
 
@@ -1233,7 +1380,7 @@ async function createFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/req.json", JSON.stringify([{ reqId: "R-1", eventIds: ["E-3", "E-4"] }]));
   zip.file("index/inv.json", JSON.stringify([{ term: "api", eventIds: ["E-3"] }]));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
-  zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
+  zip.file(`blobs/sha256-${FIXTURE_BLOB_HASH}.webp`, new Uint8Array([1, 2, 3]));
 
   await writeIntegrityManifest(zip);
 
@@ -1382,7 +1529,7 @@ async function createLargePressureArchive(): Promise<Uint8Array> {
     const mono = index * 125 + 10;
     const actionId = `A-large-${index.toString().padStart(4, "0")}`;
     const reqId = `R-large-${index.toString().padStart(4, "0")}`;
-    const bodyHash = `large-body-${index.toString().padStart(4, "0")}`;
+    const bodyHash = fixtureBlobHash(100_000 + index);
     const eventIds: string[] = [];
 
     const clickId = `E-large-${index.toString().padStart(4, "0")}-click`;
@@ -1487,7 +1634,7 @@ async function createLargePressureArchive(): Promise<Uint8Array> {
     invertedIndex[0]?.eventIds.push(consoleId);
 
     if (index % 12 === 0) {
-      const shotHash = `large-shot-${index.toString().padStart(4, "0")}`;
+      const shotHash = fixtureBlobHash(200_000 + index);
       events.push({
         v: 1,
         sid,
@@ -2108,7 +2255,7 @@ async function createRichFixtureArchive(
       },
       data: {
         reqId: "R-1",
-        contentHash: "blob-body-1",
+        contentHash: RICH_BODY_HASH,
         size: 42
       }
     },
@@ -2224,7 +2371,7 @@ async function createRichFixtureArchive(
       id: "E-18",
       data: {
         snapshotId: "D-1",
-        contentHash: "dom-hash-1",
+        contentHash: RICH_DOM_FIRST_HASH,
         source: "cdp",
         nodeCount: 5,
         reason: "interval"
@@ -2240,7 +2387,7 @@ async function createRichFixtureArchive(
       id: "E-19",
       data: {
         snapshotId: "D-2",
-        contentHash: "dom-hash-2",
+        contentHash: RICH_DOM_SECOND_HASH,
         source: "cdp",
         nodeCount: 5,
         reason: "freeze:error"
@@ -2255,7 +2402,7 @@ async function createRichFixtureArchive(
       type: "perf.cpu.profile",
       id: "E-20",
       data: {
-        profileHash: "cpu-hash-1",
+        profileHash: RICH_CPU_HASH,
         size: 128,
         reason: "freeze:error"
       }
@@ -2269,7 +2416,7 @@ async function createRichFixtureArchive(
       type: "perf.heap.snapshot",
       id: "E-21",
       data: {
-        snapshotHash: "heap-hash-1",
+        snapshotHash: RICH_HEAP_HASH,
         size: 256,
         reason: "freeze:error"
       }
@@ -2308,16 +2455,16 @@ async function createRichFixtureArchive(
   );
   zip.file("index/inv.json", JSON.stringify([{ term: "unexpected", eventIds: ["E-16"] }]));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
-  zip.file("blobs/sha256-blob1.webp", new Uint8Array([1, 2, 3]));
-  zip.file("blobs/sha256-blob-body-1.json", new TextEncoder().encode('{"ok":true}'));
-  zip.file("blobs/sha256-cpu-hash-1.json", new TextEncoder().encode('{"nodes":[]}'));
-  zip.file("blobs/sha256-heap-hash-1.json", new TextEncoder().encode('{"snapshot":true}'));
+  zip.file(`blobs/sha256-${FIXTURE_BLOB_HASH}.webp`, new Uint8Array([1, 2, 3]));
+  zip.file(`blobs/sha256-${RICH_BODY_HASH}.json`, new TextEncoder().encode('{"ok":true}'));
+  zip.file(`blobs/sha256-${RICH_CPU_HASH}.json`, new TextEncoder().encode('{"nodes":[]}'));
+  zip.file(`blobs/sha256-${RICH_HEAP_HASH}.json`, new TextEncoder().encode('{"snapshot":true}'));
   zip.file(
-    "blobs/sha256-dom-hash-1.json",
+    `blobs/sha256-${RICH_DOM_FIRST_HASH}.json`,
     new TextEncoder().encode(JSON.stringify(createDomSnapshotPayload(["DIV", "P"])))
   );
   zip.file(
-    "blobs/sha256-dom-hash-2.json",
+    `blobs/sha256-${RICH_DOM_SECOND_HASH}.json`,
     new TextEncoder().encode(JSON.stringify(createDomSnapshotPayload(["DIV", "SPAN"])))
   );
 
@@ -2349,7 +2496,7 @@ async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
       id: "E-lite-1",
       data: {
         snapshotId: "D-lite-1",
-        contentHash: "dom-lite-1",
+        contentHash: LITE_DOM_FIRST_HASH,
         source: "html",
         nodeCount: 3,
         reason: "interval"
@@ -2365,7 +2512,7 @@ async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
       id: "E-lite-2",
       data: {
         snapshotId: "D-lite-2",
-        contentHash: "dom-lite-2",
+        contentHash: LITE_DOM_SECOND_HASH,
         source: "html",
         nodeCount: 4,
         reason: "interval"
@@ -2403,11 +2550,11 @@ async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
   zip.file("index/inv.json", JSON.stringify([]));
   zip.file("events/chunk-000001.ndjson", events.map((event) => JSON.stringify(event)).join("\n"));
   zip.file(
-    "blobs/sha256-dom-lite-1.html",
+    `blobs/sha256-${LITE_DOM_FIRST_HASH}.html`,
     new TextEncoder().encode("<html><body><div><p></p></div></body></html>")
   );
   zip.file(
-    "blobs/sha256-dom-lite-2.html",
+    `blobs/sha256-${LITE_DOM_SECOND_HASH}.html`,
     new TextEncoder().encode("<html><body><div><span></span><a></a></div></body></html>")
   );
 
@@ -2424,6 +2571,21 @@ async function tamperArchiveFile(
   const zip = await JSZip.loadAsync(source);
   zip.file(path, content);
   return zip.generateAsync({ type: "uint8array" });
+}
+
+function replaceFirstByteSequence(
+  target: Uint8Array,
+  sequence: Uint8Array,
+  replacement: number
+): void {
+  for (let offset = 0; offset <= target.byteLength - sequence.byteLength; offset += 1) {
+    if (sequence.every((value, index) => target[offset + index] === value)) {
+      target[offset] = replacement;
+      return;
+    }
+  }
+
+  throw new Error("Fixture byte sequence was not found.");
 }
 
 async function writeIntegrityManifest(zip: JSZip): Promise<void> {

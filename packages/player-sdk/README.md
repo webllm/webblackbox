@@ -135,6 +135,10 @@ if (blob) {
   console.log(blob.mime); // "image/webp"
   console.log(blob.bytes); // Uint8Array
 }
+
+// Trusted analyzers can enforce a per-read ceiling without populating the
+// Player blob cache. Integrity and decryption checks are still applied.
+const transient = await player.readBlobTransient("abc123...", 2 * 1024 * 1024);
 ```
 
 ## Analysis APIs

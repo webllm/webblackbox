@@ -577,7 +577,6 @@ function createHarFixture(bodySizes: number[]): {
 
   bodySizes.forEach((bodySize, index) => {
     const reqId = `REQ-HAR-${index}`;
-    const hash = `har-body-${index}`;
     const mono = index * 10 + 1;
     events.push(
       {
@@ -619,6 +618,8 @@ function createHarFixture(bodySizes: number[]): {
     );
 
     if (bodySize > 0) {
+      const bodyBytes = new Uint8Array(bodySize).fill(0x78);
+      const hash = sha256Hex(bodyBytes);
       events.push({
         v: 1,
         sid: "S-HAR",
@@ -634,7 +635,7 @@ function createHarFixture(bodySizes: number[]): {
           size: bodySize
         }
       });
-      blobs[`blobs/sha256-${hash}.json`] = new Uint8Array(bodySize).fill(0x78);
+      blobs[`blobs/sha256-${hash}.json`] = bodyBytes;
     }
   });
 
