@@ -69,6 +69,10 @@ describe("pipeline batch retry state", () => {
 
     expect(shouldRetryOffscreenPipelineRequest("ingest", timeout)).toBe(true);
     expect(shouldRetryOffscreenPipelineRequest("ingestBatch", timeout)).toBe(true);
+    expect(shouldRetryOffscreenPipelineRequest("ingestBatchDurably", timeout)).toBe(true);
+    expect(shouldRetryOffscreenPipelineRequest("ingestBatchWithDelivery", timeout)).toBe(true);
+    expect(shouldRetryOffscreenPipelineRequest("commitDeliveryProgress", timeout)).toBe(true);
+    expect(shouldRetryOffscreenPipelineRequest("getDeliveryReceipt", timeout)).toBe(true);
     expect(shouldRetryOffscreenPipelineRequest("putBlob", timeout)).toBe(false);
     expect(shouldRetryOffscreenPipelineRequest("exportDownload", timeout)).toBe(false);
     expect(shouldRetryOffscreenPipelineRequest("close", timeout)).toBe(false);
@@ -81,8 +85,12 @@ describe("pipeline batch retry state", () => {
     const replaySafeAfterDisconnect = [
       "ingest",
       "ingestBatch",
+      "ingestBatchDurably",
+      "ingestBatchWithDelivery",
+      "commitDeliveryProgress",
       "flush",
       "getResumeState",
+      "getDeliveryReceipt",
       "putBlob",
       "close",
       "getScreenRecordingStatus",

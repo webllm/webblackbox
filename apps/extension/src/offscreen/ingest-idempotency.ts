@@ -7,13 +7,18 @@ export const INGEST_IDEMPOTENCY_DEFAULT_MAX_ENTRIES = 2_048;
 export const INGEST_IDEMPOTENCY_MAX_SESSION_ID_LENGTH = 128;
 export const INGEST_IDEMPOTENCY_MAX_OPERATION_ID_LENGTH = 128;
 
-export type IngestOperation = "ingest" | "ingestBatch";
+export type IngestOperation =
+  | "ingest"
+  | "ingestBatch"
+  | "ingestBatchDurably"
+  | "ingestBatchWithDelivery";
 
 export type IngestOperationFingerprint = Readonly<{
   op: IngestOperation;
   count: number;
   firstId: string;
   lastId: string;
+  deliveryFingerprint?: string;
 }>;
 
 export type IngestIdempotencyOperation = Readonly<{
@@ -50,6 +55,11 @@ export type SequenceAwareIngestPipeline<TEvent extends EventWithId> = Readonly<{
   getSequenceWatermark: () => Promise<Readonly<{ event: number }>>;
   ingest: (event: TEvent) => Promise<void>;
   ingestBatch: (events: TEvent[]) => Promise<void>;
+  ingestBatchWithDelivery?: (
+    events: TEvent[],
+    deliveryByEventId: PipelineDeliverySidecar
+  ) => Promise<void>;
+  flush: () => Promise<void>;
 }>;
 
 export type ExecuteIngestOperationOptions<TEvent extends EventWithId> = Readonly<{
@@ -57,6 +67,7 @@ export type ExecuteIngestOperationOptions<TEvent extends EventWithId> = Readonly
   op: IngestOperation;
   operationId?: unknown;
   events: readonly TEvent[];
+  deliveryByEventId?: PipelineDeliverySidecar;
   pipeline: SequenceAwareIngestPipeline<TEvent>;
   registry: IngestIdempotencyRegistry;
 }>;
@@ -197,12 +208,20 @@ export async function executeIngestOperation<TEvent extends EventWithId>(
   options: ExecuteIngestOperationOptions<TEvent>
 ): Promise<void> {
   const operationId = normalizeOptionalIngestOperationId(options.operationId);
-  const fingerprint = createIngestOperationFingerprint(options.op, options.events);
+  const fingerprint = createIngestOperationFingerprint(
+    options.op,
+    options.events,
+    options.deliveryByEventId
+  );
   const task = async (): Promise<void> => {
     const watermark = await options.pipeline.getSequenceWatermark();
     const suffix = selectContiguousIngestSuffix(options.events, watermark.event);
 
-    if (suffix.length === 0) {
+    if (
+      suffix.length === 0 &&
+      options.op !== "ingestBatchDurably" &&
+      options.op !== "ingestBatchWithDelivery"
+    ) {
       return;
     }
 
@@ -211,7 +230,20 @@ export async function executeIngestOperation<TEvent extends EventWithId>(
       return;
     }
 
-    await options.pipeline.ingestBatch(suffix);
+    if (suffix.length > 0 && options.op === "ingestBatchWithDelivery") {
+      if (!options.pipeline.ingestBatchWithDelivery) {
+        throw new Error("Pipeline does not support delivery-aware ingest.");
+      }
+      await options.pipeline.ingestBatchWithDelivery(
+        suffix,
+        selectDeliverySidecar(options.deliveryByEventId!, suffix)
+      );
+    } else if (suffix.length > 0) {
+      await options.pipeline.ingestBatch(suffix);
+    }
+    if (options.op === "ingestBatchDurably" || options.op === "ingestBatchWithDelivery") {
+      await options.pipeline.flush();
+    }
   };
 
   if (operationId === undefined) {
@@ -244,7 +276,8 @@ export function normalizeOptionalIngestOperationId(value: unknown): string | und
 
 export function createIngestOperationFingerprint<TEvent extends EventWithId>(
   op: IngestOperation,
-  events: readonly TEvent[]
+  events: readonly TEvent[],
+  deliveryByEventId?: PipelineDeliverySidecar
 ): IngestOperationFingerprint {
   const sequences = parseStrictlyContiguousSequences(events);
 
@@ -252,11 +285,14 @@ export function createIngestOperationFingerprint<TEvent extends EventWithId>(
     throw new Error("A single ingest operation must contain exactly one event.");
   }
 
+  const deliveryFingerprint = serializeDeliverySidecar(op, events, deliveryByEventId);
+
   return {
     op,
     count: events.length,
     firstId: events[0]!.id,
-    lastId: events[sequences.length - 1]!.id
+    lastId: events[sequences.length - 1]!.id,
+    ...(deliveryFingerprint === undefined ? {} : { deliveryFingerprint })
   };
 }
 
@@ -313,7 +349,12 @@ function parseCanonicalEventSequence(eventId: string): number {
 }
 
 function serializeFingerprint(fingerprint: IngestOperationFingerprint): string {
-  if (fingerprint.op !== "ingest" && fingerprint.op !== "ingestBatch") {
+  if (
+    fingerprint.op !== "ingest" &&
+    fingerprint.op !== "ingestBatch" &&
+    fingerprint.op !== "ingestBatchDurably" &&
+    fingerprint.op !== "ingestBatchWithDelivery"
+  ) {
     throw new Error("Invalid ingest operation fingerprint type.");
   }
 
@@ -332,12 +373,88 @@ function serializeFingerprint(fingerprint: IngestOperationFingerprint): string {
     throw new Error("A single ingest fingerprint must describe exactly one event.");
   }
 
+  if (
+    fingerprint.op === "ingestBatchWithDelivery" &&
+    (typeof fingerprint.deliveryFingerprint !== "string" ||
+      fingerprint.deliveryFingerprint.length === 0)
+  ) {
+    throw new Error("A delivery-aware ingest fingerprint must include its sidecar.");
+  }
+  if (
+    fingerprint.op !== "ingestBatchWithDelivery" &&
+    fingerprint.deliveryFingerprint !== undefined
+  ) {
+    throw new Error("A non-delivery ingest fingerprint cannot include a delivery sidecar.");
+  }
+
   return JSON.stringify([
     fingerprint.op,
     fingerprint.count,
     fingerprint.firstId,
-    fingerprint.lastId
+    fingerprint.lastId,
+    fingerprint.deliveryFingerprint ?? null
   ]);
+}
+
+function serializeDeliverySidecar<TEvent extends EventWithId>(
+  op: IngestOperation,
+  events: readonly TEvent[],
+  deliveryByEventId: PipelineDeliverySidecar | undefined
+): string | undefined {
+  if (op !== "ingestBatchWithDelivery") {
+    if (deliveryByEventId && deliveryByEventId.size > 0) {
+      throw new Error("A non-delivery ingest operation cannot include a delivery sidecar.");
+    }
+    return undefined;
+  }
+
+  if (!deliveryByEventId || deliveryByEventId.size === 0) {
+    throw new Error("A delivery-aware ingest operation requires a delivery sidecar.");
+  }
+
+  const eventIds = new Set(events.map((event) => event.id));
+  for (const eventId of deliveryByEventId.keys()) {
+    if (!eventIds.has(eventId)) {
+      throw new Error("Delivery sidecar references an event outside its ingest batch.");
+    }
+  }
+
+  return JSON.stringify(
+    events.map((event) => {
+      const provenance = deliveryByEventId.get(event.id);
+      return provenance ? serializeDeliveryProvenance(event.id, provenance) : null;
+    })
+  );
+}
+
+function serializeDeliveryProvenance(
+  eventId: string,
+  provenance: PipelineDeliveryEventProvenance
+): readonly unknown[] {
+  return [
+    eventId,
+    provenance.tabId,
+    provenance.frameId,
+    provenance.documentId,
+    provenance.batchId,
+    provenance.fingerprint,
+    provenance.eventCount,
+    provenance.eventIndex
+  ];
+}
+
+function selectDeliverySidecar<TEvent extends EventWithId>(
+  deliveryByEventId: PipelineDeliverySidecar,
+  events: readonly TEvent[]
+): PipelineDeliverySidecar {
+  const selected = new Map<string, PipelineDeliveryEventProvenance>();
+  for (const event of events) {
+    const provenance = deliveryByEventId.get(event.id);
+    if (provenance) {
+      selected.set(event.id, provenance);
+    }
+  }
+  return selected;
 }
 
 function serializeOperationKey(sid: string, operationId: string): string {
@@ -366,3 +483,7 @@ function requirePositiveSafeInteger(value: number, label: string): number {
 
   return value;
 }
+import type {
+  PipelineDeliveryEventProvenance,
+  PipelineDeliverySidecar
+} from "@webblackbox/pipeline";

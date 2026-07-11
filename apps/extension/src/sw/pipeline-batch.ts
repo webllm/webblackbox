@@ -7,12 +7,17 @@ type OffscreenPipelineOperation =
   | "start"
   | "ingest"
   | "ingestBatch"
+  | "ingestBatchDurably"
+  | "ingestBatchWithDelivery"
   | "flush"
   | "getResumeState"
+  | "getDeliveryReceipt"
+  | "commitDeliveryProgress"
   | "putBlob"
   | "exportDownload"
   | "close"
   | "getScreenRecordingStatus"
+  | "quiesceScreenRecording"
   | "startScreenRecording"
   | "stopScreenRecording";
 
@@ -103,7 +108,12 @@ export function shouldRetryOffscreenPipelineRequest(
   }
 
   return (
-    (op === "ingest" || op === "ingestBatch") &&
+    (op === "ingest" ||
+      op === "ingestBatch" ||
+      op === "ingestBatchDurably" ||
+      op === "ingestBatchWithDelivery" ||
+      op === "commitDeliveryProgress" ||
+      op === "getDeliveryReceipt") &&
     message.includes("Timed out waiting for offscreen response")
   );
 }

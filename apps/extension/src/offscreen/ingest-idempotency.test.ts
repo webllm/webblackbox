@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { PipelineDeliveryEventProvenance } from "@webblackbox/pipeline";
 
 import {
   INGEST_IDEMPOTENCY_MAX_OPERATION_ID_LENGTH,
@@ -263,7 +264,14 @@ describe("executeIngestOperation", () => {
     return {
       getSequenceWatermark: vi.fn(async () => ({ event: watermark })),
       ingest: vi.fn<(event: TestEvent) => Promise<void>>(async () => undefined),
-      ingestBatch: vi.fn<(events: TestEvent[]) => Promise<void>>(async () => undefined)
+      ingestBatch: vi.fn<(events: TestEvent[]) => Promise<void>>(async () => undefined),
+      ingestBatchWithDelivery: vi.fn<
+        (
+          events: TestEvent[],
+          delivery: ReadonlyMap<string, PipelineDeliveryEventProvenance>
+        ) => Promise<void>
+      >(async () => undefined),
+      flush: vi.fn<() => Promise<void>>(async () => undefined)
     };
   }
 
@@ -310,6 +318,83 @@ describe("executeIngestOperation", () => {
     expect(pipeline.ingestBatch).toHaveBeenCalledWith(events.slice(2));
   });
 
+  it("slices delivery provenance with a partially durable event suffix", async () => {
+    const pipeline = createPipeline(2);
+    const deliveryByEventId = new Map<string, PipelineDeliveryEventProvenance>(
+      events.map((event, eventIndex) => [
+        event.id,
+        {
+          tabId: 1,
+          frameId: 0,
+          documentId: "document-1",
+          batchId: "batch-1",
+          fingerprint: "a".repeat(64),
+          eventCount: events.length,
+          eventIndex
+        }
+      ])
+    );
+
+    await executeIngestOperation({
+      sid: "S-session-1",
+      op: "ingestBatchWithDelivery",
+      operationId: "I-delivery-suffix",
+      events,
+      deliveryByEventId,
+      pipeline,
+      registry: new IngestIdempotencyRegistry()
+    });
+
+    expect(pipeline.ingestBatchWithDelivery).toHaveBeenCalledOnce();
+    const [suffix, suffixSidecar] = pipeline.ingestBatchWithDelivery.mock.calls[0]!;
+    expect(suffix).toEqual(events.slice(2));
+    expect([...suffixSidecar.keys()]).toEqual(["E-00000003", "E-00000004"]);
+    expect(pipeline.flush).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an operation-id replay whose delivery sidecar changed", async () => {
+    const registry = new IngestIdempotencyRegistry();
+    const pipeline = createPipeline(0);
+    const createSidecar = (fingerprint: string) =>
+      new Map<string, PipelineDeliveryEventProvenance>([
+        [
+          events[0]!.id,
+          {
+            tabId: 1,
+            frameId: 0,
+            documentId: "document-1",
+            batchId: "batch-1",
+            fingerprint,
+            eventCount: 1,
+            eventIndex: 0
+          }
+        ]
+      ]);
+    const firstEvents = events.slice(0, 1);
+
+    await executeIngestOperation({
+      sid: "S-session-1",
+      op: "ingestBatchWithDelivery",
+      operationId: "I-delivery-fingerprint",
+      events: firstEvents,
+      deliveryByEventId: createSidecar("a".repeat(64)),
+      pipeline,
+      registry
+    });
+    await expect(
+      executeIngestOperation({
+        sid: "S-session-1",
+        op: "ingestBatchWithDelivery",
+        operationId: "I-delivery-fingerprint",
+        events: firstEvents,
+        deliveryByEventId: createSidecar("b".repeat(64)),
+        pipeline,
+        registry
+      })
+    ).rejects.toThrow(/different fingerprint/i);
+    expect(pipeline.ingestBatchWithDelivery).toHaveBeenCalledOnce();
+  });
+
   it("acknowledges a fully durable replay without ingesting it again", async () => {
     const pipeline = createPipeline(4);
 
@@ -354,6 +439,65 @@ describe("executeIngestOperation", () => {
 
     expect(pipeline.ingest).toHaveBeenCalledWith(events[0]);
     expect(pipeline.ingestBatch).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed durable flush without appending the in-memory batch twice", async () => {
+    let watermark = 0;
+    let flushAttempts = 0;
+    const pipeline = {
+      getSequenceWatermark: vi.fn(async () => ({ event: watermark })),
+      ingest: vi.fn<(event: TestEvent) => Promise<void>>(async () => undefined),
+      ingestBatch: vi.fn(async (batch: TestEvent[]) => {
+        watermark = Number(batch.at(-1)!.id.slice(2));
+      }),
+      flush: vi.fn(async () => {
+        flushAttempts += 1;
+        if (flushAttempts === 1) {
+          throw new Error("durable chunk commit failed");
+        }
+      })
+    };
+    const options = {
+      sid: "S-session-1",
+      op: "ingestBatchDurably" as const,
+      operationId: "I-durable-retry",
+      events,
+      pipeline,
+      registry: new IngestIdempotencyRegistry()
+    };
+
+    await expect(executeIngestOperation(options)).rejects.toThrow("durable chunk commit failed");
+    await expect(executeIngestOperation(options)).resolves.toBeUndefined();
+    expect(pipeline.ingestBatch).toHaveBeenCalledOnce();
+    expect(pipeline.flush).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays the full durable batch after an offscreen restart loses only memory", async () => {
+    const first = createPipeline(0);
+    first.flush.mockRejectedValueOnce(new Error("offscreen crashed before commit"));
+    await expect(
+      executeIngestOperation({
+        sid: "S-session-1",
+        op: "ingestBatchDurably",
+        operationId: "I-offscreen-restart",
+        events,
+        pipeline: first,
+        registry: new IngestIdempotencyRegistry()
+      })
+    ).rejects.toThrow("offscreen crashed before commit");
+
+    const restored = createPipeline(0);
+    await executeIngestOperation({
+      sid: "S-session-1",
+      op: "ingestBatchDurably",
+      operationId: "I-offscreen-restart",
+      events,
+      pipeline: restored,
+      registry: new IngestIdempotencyRegistry()
+    });
+
+    expect(restored.ingestBatch).toHaveBeenCalledWith(events);
+    expect(restored.flush).toHaveBeenCalledOnce();
   });
 });
 
