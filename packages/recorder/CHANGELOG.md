@@ -9,10 +9,6 @@
 
 ### Patch Changes
 
-- Excluded future-timeline events from AI root-cause precursor analysis when delayed capture
-  batches arrive out of sample-time order.
-- Prevented delayed pre-action events from being linked to a later action span while preserving
-  request-based correlation to the action that originated the request.
 - Updated dependencies
   - @webblackbox/protocol@0.6.0
 

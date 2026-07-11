@@ -4,22 +4,11 @@
 
 ### Minor Changes
 
-- Added server-owned, upload-time privacy analysis for deployments that explicitly enable plaintext
-  share uploads.
+- No share-server runtime changes shipped in this release. The version bump keeps hosted sharing aligned with Player SDK 0.6.0 archive metadata support.
 
 ### Patch Changes
 
-- Re-scanned explicitly allowed plaintext archives on the server instead of promoting an embedded
-  `passed` scanner claim to server attestation; decoded sensitive events or text-like blobs now
-  block retention, accepted summaries identify the result as an upload-time scan, and opaque or
-  budget-limited content keeps the public scanner status `unknown` with partial-analysis trust.
-- Rejected non-canonical and mismatched blob layouts, strictly decoded UTF-8 and JSON strings, and
-  bounded server scan bytes, findings, and elapsed time without caching every decoded blob.
-- Verified encrypted envelope required paths, exact private-file/IV metadata, stored-byte integrity,
-  and canonical blob totals before retention, and downgraded persisted server attestations that lack
-  complete count-consistent scan coverage.
 - Updated dependencies
-  - @webblackbox/pipeline@0.6.0
   - @webblackbox/player-sdk@0.6.0
 
 ## 0.5.0

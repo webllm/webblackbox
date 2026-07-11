@@ -9,16 +9,6 @@
 
 ### Patch Changes
 
-- Allowed a surviving pipeline instance to durably rebind mutable session metadata while rejecting
-  any change to its session id, tab, start time, or capture mode.
-- Allowed privacy scans to consume bounded blob streams and distinguish upload-time scans from
-  pre-encryption scans, with strict text decoding, semantic JSON scanning, explicit coverage, and
-  byte/finding/deadline ceilings for trusted services processing untrusted archive content.
-- Canonicalized delayed multi-source events into monotonic chunk timelines and restored the
-  persisted timeline watermark after restart so exported archives remain replayable.
-- Closed the legacy `allowPlaintextLocalExport` bypass: real-user and required-policy exports now
-  require a passphrase, while plaintext remains available only to trusted synthetic/local-debug
-  exemptions.
 - Updated dependencies
   - @webblackbox/protocol@0.6.0
 

@@ -8,16 +8,6 @@
 - Added `screenRecordings` capture policy and `includeScreenRecordings` export policy fields.
 - Added WebM and MP4 blob MIME/extension inference for screen-recording chunks.
 
-### Patch Changes
-
-- Rejected non-canonical blob paths, duplicate logical hashes under different extensions, and
-  unknown files outside the closed archive layout, and added optional bounded privacy-scan coverage
-  metadata for consumers that distinguish complete from partial analysis.
-- Rejected archive chunks whose wall-clock events regress and time indexes whose wall-clock or
-  monotonic ranges move backwards between adjacent chunks.
-- Made the public schema implementation tree-shakeable so browser consumers do not bundle unused
-  Zod locale and conversion modules.
-
 ## 0.5.0
 
 ### Minor Changes

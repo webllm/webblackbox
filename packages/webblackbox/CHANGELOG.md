@@ -8,14 +8,6 @@
 
 ### Patch Changes
 
-- Added the capability-bound direct injected-hook controller used by the extension's dynamic ESM
-  bootstrap, including strict monotonic activation commands and a bounded, sequence-aware replay
-  tail that lets the isolated capture agent reconcile ambiguous observation delivery at stop.
-- Made repeated injected-hook bootstrap calls side-effect free so a later default inactive install
-  cannot disable an already configured Lite capture or reset its response-body budget.
-- Emitted one final Lite DOM, local-storage, and screenshot stop artifact even when an earlier
-  background capture had already run, and normalized count-only storage metadata to the archive
-  schema so hosts can drain a complete terminal state safely.
 - Updated dependencies
   - @webblackbox/pipeline@0.6.0
   - @webblackbox/protocol@0.6.0
