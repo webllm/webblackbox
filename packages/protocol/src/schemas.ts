@@ -340,12 +340,26 @@ export const privacyScannerFindingSchema = z
   })
   .strict();
 
+export const privacyScannerCoverageSchema = z
+  .object({
+    complete: z.boolean(),
+    scannedEventCount: z.number().int().nonnegative(),
+    scannedBlobCount: z.number().int().nonnegative(),
+    opaqueBlobCount: z.number().int().nonnegative(),
+    inspectedBytes: z.number().int().nonnegative(),
+    incompleteReason: z
+      .enum(["deadline", "decode-failed", "finding-limit", "target-byte-limit", "total-byte-limit"])
+      .optional()
+  })
+  .strict();
+
 export const privacyScannerResultSchema = z
   .object({
     scannedAt: z.string().datetime(),
     preEncryption: z.boolean(),
     status: z.enum(["passed", "blocked"]),
-    findings: z.array(privacyScannerFindingSchema)
+    findings: z.array(privacyScannerFindingSchema),
+    coverage: privacyScannerCoverageSchema.optional()
   })
   .strict();
 

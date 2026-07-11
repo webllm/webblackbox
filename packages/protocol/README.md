@@ -203,6 +203,9 @@ All types have corresponding Zod schemas for runtime validation:
 
 ```typescript
 import {
+  assertArchiveBlobPaths,
+  assertArchiveFilePaths,
+  isCanonicalArchiveBlobPath,
   validateEvent,
   validateEventData,
   validateMessage,
@@ -211,6 +214,14 @@ import {
   exportManifestSchema,
   getEventPayloadSchema
 } from "@webblackbox/protocol";
+
+// Reject files outside the closed archive layout, non-canonical 64-character
+// lowercase SHA-256 blob paths, and duplicate logical blob hashes.
+assertArchiveFilePaths(archivePaths);
+const blobCount = assertArchiveBlobPaths(archivePaths);
+if (!isCanonicalArchiveBlobPath(candidateBlobPath)) {
+  throw new Error("Invalid blob path");
+}
 
 // Validate a full event (envelope + payload)
 const result = validateEvent(unknownEvent);

@@ -257,11 +257,26 @@ export type PrivacyScannerFinding = {
   sampleSha256: string;
 };
 
+export type PrivacyScannerCoverage = {
+  complete: boolean;
+  scannedEventCount: number;
+  scannedBlobCount: number;
+  opaqueBlobCount: number;
+  inspectedBytes: number;
+  incompleteReason?:
+    | "deadline"
+    | "decode-failed"
+    | "finding-limit"
+    | "target-byte-limit"
+    | "total-byte-limit";
+};
+
 export type PrivacyScannerResult = {
   scannedAt: string;
   preEncryption: boolean;
   status: "passed" | "blocked";
   findings: PrivacyScannerFinding[];
+  coverage?: PrivacyScannerCoverage;
 };
 
 export type PrivacyManifestCategorySummary = {

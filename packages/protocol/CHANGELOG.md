@@ -10,6 +10,9 @@
 
 ### Patch Changes
 
+- Rejected non-canonical blob paths, duplicate logical hashes under different extensions, and
+  unknown files outside the closed archive layout, and added optional bounded privacy-scan coverage
+  metadata for consumers that distinguish complete from partial analysis.
 - Rejected archive chunks whose wall-clock events regress and time indexes whose wall-clock or
   monotonic ranges move backwards between adjacent chunks.
 

@@ -25,6 +25,12 @@ const REQUIRED_ARCHIVE_PATHS = [
   "index/inv.json"
 ] as const;
 
+const SUPPORTED_ARCHIVE_METADATA_PATHS = new Set([
+  ...REQUIRED_ARCHIVE_PATHS,
+  "integrity/hashes.json",
+  "privacy/manifest.json"
+]);
+
 const PRIVATE_INDEX_PATHS = new Set([
   "index/time.json",
   "index/req.json",
@@ -33,6 +39,7 @@ const PRIVATE_INDEX_PATHS = new Set([
 ]);
 
 const EVENT_PATH_PATTERN = /^events\/([A-Za-z0-9][A-Za-z0-9._-]{0,255})\.ndjson$/;
+const BLOB_PATH_PATTERN = /^blobs\/sha256-([a-f0-9]{64})\.(bin|html|json|mp4|png|webm|webp)$/;
 
 type ParseResult<TValue> =
   | { success: true; data: TValue }
@@ -124,16 +131,59 @@ export function assertArchiveLayout(input: ArchiveLayoutInput): void {
     }
   }
 
+  assertArchiveFilePaths(input.paths);
+
   assertEncryptionCoverage(input.manifest, input.paths);
   assertTimeIndexLayout(input.manifest, input.timeIndex, input.paths);
   assertSecondaryIndexes(input.requestIndex, input.invertedIndex);
   assertPrivacyConsistency(input.manifest, input.privacyManifest);
 
-  const blobCount = input.paths.filter((path) => path.startsWith("blobs/")).length;
+  const blobCount = assertArchiveBlobPaths(input.paths);
 
   if (input.manifest.stats.blobCount !== blobCount) {
     throw archiveError("manifest blob count does not match archive contents");
   }
+}
+
+/** Validates canonical blob names and returns the number of unique content digests. */
+export function assertArchiveBlobPaths(paths: readonly string[]): number {
+  const blobPaths = paths.filter((path) => path.startsWith("blobs/"));
+  const blobHashes = new Set<string>();
+
+  for (const path of blobPaths) {
+    const match = BLOB_PATH_PATTERN.exec(path);
+    const hash = match?.[1];
+    if (!hash) {
+      throw archiveError(`archive contains invalid blob path '${path}'`);
+    }
+    if (blobHashes.has(hash)) {
+      throw archiveError(`archive contains duplicate blob hash '${hash}'`);
+    }
+    blobHashes.add(hash);
+  }
+
+  return blobPaths.length;
+}
+
+/** Rejects files outside the closed archive layout before any private entry must be decoded. */
+export function assertArchiveFilePaths(paths: string[]): void {
+  for (const path of paths) {
+    if (path.startsWith("blobs/")) {
+      if (!isCanonicalArchiveBlobPath(path)) {
+        throw archiveError(`archive contains invalid blob path '${path}'`);
+      }
+      continue;
+    }
+    if (SUPPORTED_ARCHIVE_METADATA_PATHS.has(path) || EVENT_PATH_PATTERN.test(path)) {
+      continue;
+    }
+    throw archiveError(`archive contains unsupported file '${path}'`);
+  }
+}
+
+/** Returns whether a path uses the canonical archive blob namespace understood by readers. */
+export function isCanonicalArchiveBlobPath(path: string): boolean {
+  return BLOB_PATH_PATTERN.test(path);
 }
 
 /** Validates an already decoded event chunk against its signed time-index entry. */
@@ -395,6 +445,34 @@ function assertPrivacyConsistency(
     privacyManifest.totals.blobs !== manifest.stats.blobCount
   ) {
     throw archiveError("privacy manifest totals do not match archive manifest");
+  }
+
+  const scanner = privacyManifest.scanner;
+  if (
+    (scanner.status === "passed" && scanner.findings.length > 0) ||
+    (scanner.status === "blocked" && scanner.findings.length === 0)
+  ) {
+    throw archiveError("privacy scanner status does not match its findings");
+  }
+
+  const coverage = scanner.coverage;
+  if (!coverage) {
+    return;
+  }
+  const accountedBlobCount = coverage.scannedBlobCount + coverage.opaqueBlobCount;
+  if (
+    coverage.scannedEventCount > privacyManifest.totals.events ||
+    accountedBlobCount > privacyManifest.totals.blobs
+  ) {
+    throw archiveError("privacy scanner coverage exceeds archive totals");
+  }
+  if (
+    coverage.complete !== (coverage.incompleteReason === undefined) ||
+    (coverage.complete &&
+      (coverage.scannedEventCount !== privacyManifest.totals.events ||
+        accountedBlobCount !== privacyManifest.totals.blobs))
+  ) {
+    throw archiveError("privacy scanner coverage is inconsistent with archive totals");
   }
 }
 

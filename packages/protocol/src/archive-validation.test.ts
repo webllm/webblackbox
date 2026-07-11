@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { ChunkTimeIndexEntry, ExportManifest, WebBlackboxEvent } from "./types.js";
+import type {
+  ChunkTimeIndexEntry,
+  ExportManifest,
+  PrivacyManifest,
+  WebBlackboxEvent
+} from "./types.js";
 
 import { assertArchiveChunk, assertArchiveLayout } from "./archive-validation.js";
 import { DEFAULT_REDACTION_PROFILE } from "./defaults.js";
@@ -48,7 +53,171 @@ describe("archive timeline validation", () => {
 
     expect(() => assertTwoChunkLayout(second)).not.toThrow();
   });
+
+  it.each([
+    "blobs/private.json",
+    "blobs/sha256-nested/value.json",
+    "blobs/sha256-.json",
+    "blobs/sha256-not-a-digest.json",
+    `blobs/sha256-${"a".repeat(64)}.exe`
+  ])("rejects non-canonical blob path %s", (blobPath) => {
+    const manifest = createManifest();
+    manifest.stats.blobCount = 1;
+
+    expect(() =>
+      assertArchiveLayout({
+        paths: [
+          "manifest.json",
+          "index/time.json",
+          "index/req.json",
+          "index/inv.json",
+          "events/chunk-000001.ndjson",
+          "events/chunk-000002.ndjson",
+          blobPath
+        ],
+        manifest,
+        timeIndex: [createIndexEntry(1, 50, 100, 1, 10), createIndexEntry(2, 100, 120, 10, 30)],
+        requestIndex: [],
+        invertedIndex: [],
+        privacyManifest: null
+      })
+    ).toThrow(/invalid blob path/i);
+  });
+
+  it("rejects two blob paths that alias the same content digest", () => {
+    const manifest = createManifest();
+    manifest.stats.blobCount = 2;
+    const hash = "a".repeat(64);
+
+    expect(() =>
+      assertArchiveLayout({
+        paths: [
+          "manifest.json",
+          "index/time.json",
+          "index/req.json",
+          "index/inv.json",
+          "events/chunk-000001.ndjson",
+          "events/chunk-000002.ndjson",
+          `blobs/sha256-${hash}.json`,
+          `blobs/sha256-${hash}.bin`
+        ],
+        manifest,
+        timeIndex: [createIndexEntry(1, 50, 100, 1, 10), createIndexEntry(2, 100, 120, 10, 30)],
+        requestIndex: [],
+        invertedIndex: [],
+        privacyManifest: null
+      })
+    ).toThrow(/duplicate blob hash/i);
+  });
+
+  it.each(["secrets/private.json", "assets/nested/private.txt"])(
+    "rejects unsupported archive file %s",
+    (unsupportedPath) => {
+      expect(() =>
+        assertArchiveLayout({
+          paths: [
+            "manifest.json",
+            "index/time.json",
+            "index/req.json",
+            "index/inv.json",
+            "events/chunk-000001.ndjson",
+            "events/chunk-000002.ndjson",
+            unsupportedPath
+          ],
+          manifest: createManifest(),
+          timeIndex: [createIndexEntry(1, 50, 100, 1, 10), createIndexEntry(2, 100, 120, 10, 30)],
+          requestIndex: [],
+          invertedIndex: [],
+          privacyManifest: null
+        })
+      ).toThrow(/unsupported file/i);
+    }
+  );
+
+  it.each([
+    {
+      label: "event counts beyond totals",
+      mutate: (privacy: PrivacyManifest) => {
+        privacy.scanner.coverage!.scannedEventCount = 3;
+      },
+      expected: /coverage exceeds archive totals/i
+    },
+    {
+      label: "complete coverage below totals",
+      mutate: (privacy: PrivacyManifest) => {
+        privacy.scanner.coverage!.scannedEventCount = 1;
+      },
+      expected: /coverage is inconsistent/i
+    },
+    {
+      label: "incomplete coverage without a reason",
+      mutate: (privacy: PrivacyManifest) => {
+        privacy.scanner.coverage!.complete = false;
+      },
+      expected: /coverage is inconsistent/i
+    }
+  ])("rejects $label", ({ mutate, expected }) => {
+    const privacy = createPrivacyManifest();
+    mutate(privacy);
+
+    expect(() => assertPrivacyLayout(privacy)).toThrow(expected);
+  });
+
+  it("rejects privacy scanner status that contradicts its findings", () => {
+    const privacy = createPrivacyManifest();
+    privacy.scanner.findings.push({
+      kind: "private-key",
+      severity: "high",
+      path: "event:E-1",
+      matchCount: 1,
+      sampleSha256: SHA256
+    });
+
+    expect(() => assertPrivacyLayout(privacy)).toThrow(/status does not match its findings/i);
+  });
 });
+
+function assertPrivacyLayout(privacyManifest: PrivacyManifest): void {
+  assertArchiveLayout({
+    paths: [
+      "manifest.json",
+      "index/time.json",
+      "index/req.json",
+      "index/inv.json",
+      "privacy/manifest.json",
+      "events/chunk-000001.ndjson",
+      "events/chunk-000002.ndjson"
+    ],
+    manifest: createManifest(),
+    timeIndex: [createIndexEntry(1, 50, 100, 1, 10), createIndexEntry(2, 100, 120, 10, 30)],
+    requestIndex: [],
+    invertedIndex: [],
+    privacyManifest
+  });
+}
+
+function createPrivacyManifest(): PrivacyManifest {
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date(0).toISOString(),
+    categories: [],
+    scanner: {
+      scannedAt: new Date(0).toISOString(),
+      preEncryption: true,
+      status: "passed",
+      findings: [],
+      coverage: {
+        complete: true,
+        scannedEventCount: 2,
+        scannedBlobCount: 0,
+        opaqueBlobCount: 0,
+        inspectedBytes: 1
+      }
+    },
+    encryption: { archive: "plaintext" },
+    totals: { events: 2, blobs: 0, privacyViolations: 0 }
+  };
+}
 
 function assertTwoChunkLayout(second: ChunkTimeIndexEntry): void {
   const entries = [createIndexEntry(1, 50, 100, 1, 10), second];
