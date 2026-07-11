@@ -11,6 +11,11 @@
 
 ### Patch Changes
 
+- Made the root Full-CDP bootstrap transactional and strict: debugger attach, the four baseline
+  domains, requested subframe auto-attach, validated frame-tree priming, Runtime context reset, and
+  explicitly requested full Performance metrics now fail startup or restoration closed, while
+  DOMStorage remains best effort, child-only scope blocks suspend global artifacts without rejecting
+  the root baseline, and initial Full artifacts run only after activation commits.
 - Made required root-page script injection strict across atomic start, runtime restore, and
   post-navigation recovery: isolated and Lite MAIN-world failures now roll back or stop only the
   current runtime, cancellation is fenced between worlds, and stale tasks cannot instrument or

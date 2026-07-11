@@ -91,11 +91,17 @@ import {
   forgetCdpRequestScope,
   forgetCdpSessionScope,
   invalidateCdpCaptureFrameTree,
+  isCdpCaptureFrameTreePrimedForRoot,
   isCdpSessionWithinScope,
   refreshCdpCaptureFrameTree,
   type CdpCaptureScopeState
 } from "./cdp-capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
+import {
+  bootstrapCdpRoot,
+  cleanupAndRethrowCdpRootBootstrapFailure,
+  type CdpRootFrameTreePrime
+} from "./cdp-root-bootstrap.js";
 import { ContentDocumentAuthorization } from "./content-document-authorization.js";
 import { disconnectContentPort } from "./content-port-lifecycle.js";
 import { injectPendingContentDocument } from "./dynamic-content-injection.js";
@@ -1361,6 +1367,7 @@ async function startSessionUnlocked(
     throw new RuntimeStartCancelledError();
   }
 
+  scheduleFullModeSessionStartArtifacts(runtime);
   publishCommittedRuntimeStart(runtime);
 }
 
@@ -3370,9 +3377,10 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
   let router: CdpRouter | null = null;
 
   try {
-    router = createCdpRouter(createChromeDebuggerTransport());
+    const candidateRouter = createCdpRouter(createChromeDebuggerTransport());
+    router = candidateRouter;
 
-    const unsubscribeEvent = router.onEvent((event) => {
+    const unsubscribeEvent = candidateRouter.onEvent((event) => {
       if (!isMapEntrySame(sessionsByTab, runtime.tabId, runtime)) {
         return;
       }
@@ -3487,7 +3495,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       );
     });
 
-    const unsubscribeDetach = router.onDetach((event) => {
+    const unsubscribeDetach = candidateRouter.onDetach((event) => {
       if (event.tabId === runtime.tabId && isMapEntrySame(sessionsByTab, runtime.tabId, runtime)) {
         void stopSession(runtime.tabId);
       }
@@ -3495,37 +3503,38 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
 
     runtime.removeCdpListeners.push(unsubscribeEvent, unsubscribeDetach);
 
-    await router.attach(runtime.tabId);
-    runtime.cdpRouter = router;
-    runtime.enabledCdpSessions.clear();
-    await router.enableBaseline(runtime.tabId);
+    const bootstrapResult = await bootstrapCdpRoot({
+      cdpLevel: runtime.config.capturePolicy?.categories.cdp ?? "off",
+      commands: {
+        attach: async () => {
+          await candidateRouter.attach(runtime.tabId);
+
+          if (!isMapEntrySame(sessionsByTab, runtime.tabId, runtime)) {
+            throw new Error("The runtime changed while its root debugger was attaching.");
+          }
+
+          runtime.cdpRouter = candidateRouter;
+          runtime.enabledCdpSessions.clear();
+        },
+        clearExecutionContextScopes: () => {
+          runtime.cdpScope.executionContextScopes.clear();
+        },
+        enableAutoAttach: () => candidateRouter.enableAutoAttach(runtime.tabId),
+        primeFrameTree: () => primeCdpFrameTreeScopes(runtime, candidateRouter),
+        send: (method) => candidateRouter.send({ tabId: runtime.tabId }, method)
+      },
+      includeSubframes: runtime.config.capturePolicy?.scope.includeSubframes === true
+    });
+
     runtime.enabledCdpSessions.add("root");
-    const globalCaptureScopePrimed = await primeCdpFrameTreeScopes(runtime);
 
     if (runtime.screenRecording) {
-      if (globalCaptureScopePrimed) {
+      if (bootstrapResult.globalCaptureReady) {
         runtime.screenRecording.cdpScopeGeneration = runtime.cdpScope.generation;
       } else {
-        await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
+        await stopScreenRecording(runtime, "capture-scope");
       }
     }
-
-    runtime.cdpScope.executionContextScopes.clear();
-    await router.send({ tabId: runtime.tabId }, "Runtime.disable").catch(() => undefined);
-    await router.send({ tabId: runtime.tabId }, "Runtime.enable").catch(() => undefined);
-    if (runtime.config.capturePolicy?.scope.includeSubframes === true) {
-      await router.enableAutoAttach(runtime.tabId);
-    }
-    await router.send({ tabId: runtime.tabId }, "DOMStorage.enable").catch(() => undefined);
-    await router.send({ tabId: runtime.tabId }, "Performance.enable").catch(() => undefined);
-
-    enqueue(
-      runtime,
-      async () => {
-        await captureFullModeArtifacts(runtime, "session-start");
-      },
-      { bestEffort: true }
-    );
 
     const normalizedScreenshotIntervalMs = normalizeOptionalSamplingInterval(
       runtime.config.sampling.screenshotIdleMs,
@@ -3549,41 +3558,68 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       }, screenshotIntervalMs);
     }
   } catch (error) {
-    await cleanupCdpInstrumentation(runtime, router);
-    console.warn("[WebBlackbox] failed to attach debugger", error);
+    console.warn("[WebBlackbox] failed to bootstrap root debugger", error);
+    await cleanupAndRethrowCdpRootBootstrapFailure(error, () =>
+      cleanupCdpInstrumentation(runtime, router)
+    );
   }
 }
 
-async function primeCdpFrameTreeScopes(runtime: SessionRuntime): Promise<boolean> {
-  if (!runtime.cdpRouter) {
-    invalidateCdpCaptureFrameTree(runtime.cdpScope);
-    return false;
+function scheduleFullModeSessionStartArtifacts(runtime: SessionRuntime): void {
+  if (
+    runtime.mode !== "full" ||
+    !runtime.cdpRouter ||
+    !isMapEntrySame(sessionsByTab, runtime.tabId, runtime)
+  ) {
+    return;
   }
 
-  const primed = await refreshCdpCaptureFrameTree(runtime.cdpScope, async () => {
-    const response = await runtime.cdpRouter?.send<{ frameTree?: unknown }>(
+  enqueue(
+    runtime,
+    async () => {
+      await captureFullModeArtifacts(runtime, "session-start");
+    },
+    { bestEffort: true }
+  );
+}
+
+async function primeCdpFrameTreeScopes(
+  runtime: SessionRuntime,
+  router: CdpRouter | null = runtime.cdpRouter
+): Promise<CdpRootFrameTreePrime> {
+  if (!router) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
+    return {
+      globalCaptureReady: false,
+      rootValid: false
+    };
+  }
+
+  await refreshCdpCaptureFrameTree(runtime.cdpScope, async () => {
+    const response = await router.send<{ frameTree?: unknown }>(
       { tabId: runtime.tabId },
       "Page.getFrameTree"
     );
     return response?.frameTree;
   });
 
-  if (
-    !primed ||
-    !canCaptureGlobalCdpArtifactsForRoot(
-      runtime.cdpScope,
-      runtime.captureUrl,
-      runtime.cdpScope.generation
-    )
-  ) {
-    if (primed) {
-      invalidateCdpCaptureFrameTree(runtime.cdpScope);
-    }
+  const generation = runtime.cdpScope.generation;
+  const rootValid = isCdpCaptureFrameTreePrimedForRoot(
+    runtime.cdpScope,
+    runtime.captureUrl,
+    generation
+  );
 
-    return false;
+  if (!rootValid) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
   }
 
-  return true;
+  return {
+    globalCaptureReady:
+      rootValid &&
+      canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl, generation),
+    rootValid
+  };
 }
 
 async function restoreCdpGlobalCaptureAfterNavigation(
@@ -3614,9 +3650,13 @@ async function restoreCdpGlobalCaptureAfterNavigation(
   }
 
   if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime, allowStarting) === null) {
-    const primed = await primeCdpFrameTreeScopes(runtime);
+    const frameTreePrime = await primeCdpFrameTreeScopes(runtime);
 
-    if (!primed || !isRuntimeCaptureScopeActive(runtime) || runtime.captureUrl !== expectedUrl) {
+    if (
+      !frameTreePrime.globalCaptureReady ||
+      !isRuntimeCaptureScopeActive(runtime) ||
+      runtime.captureUrl !== expectedUrl
+    ) {
       if (
         recording &&
         runtime.screenRecording === recording &&
@@ -3830,9 +3870,6 @@ async function primeChildCdpSession(
     await runtime.cdpRouter.enableAutoAttach(runtime.tabId, undefined, childSessionId);
     await runtime.cdpRouter
       .send({ tabId: runtime.tabId, sessionId: childSessionId }, "DOMStorage.enable")
-      .catch(() => undefined);
-    await runtime.cdpRouter
-      .send({ tabId: runtime.tabId, sessionId: childSessionId }, "Performance.enable")
       .catch(() => undefined);
   } catch {
     runtime.enabledCdpSessions.delete(childSessionId);
@@ -7758,6 +7795,7 @@ async function restoreActiveRuntime(
   });
 
   if (transaction.kind === "restored") {
+    scheduleFullModeSessionStartArtifacts(transaction.runtime.runtime);
     return { kind: "restored", runtime: transaction.runtime.runtime };
   }
 

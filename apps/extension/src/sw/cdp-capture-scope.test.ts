@@ -9,6 +9,7 @@ import {
   filterCdpSnapshotDocuments,
   hasDisallowedCdpFrames,
   invalidateCdpCaptureFrameTree,
+  isCdpCaptureFrameTreePrimedForRoot,
   isCdpSessionWithinScope,
   primeCdpCaptureFrameTree,
   refreshCdpCaptureFrameTree
@@ -348,6 +349,22 @@ describe("CDP capture scope", () => {
     ).toBe(false);
   });
 
+  it("keeps root validity separate from a child that blocks global artifacts", () => {
+    const scope = state(policy({ includeSubframes: false }));
+
+    primeCdpCaptureFrameTree(scope, {
+      frame: { id: "root", url: "https://app.example/home" },
+      childFrames: [{ frame: { id: "child", url: "https://widgets.example/embed" } }]
+    });
+
+    expect(
+      isCdpCaptureFrameTreePrimedForRoot(scope, "https://app.example/home", scope.generation)
+    ).toBe(true);
+    expect(
+      canCaptureGlobalCdpArtifactsForRoot(scope, "https://app.example/home", scope.generation)
+    ).toBe(false);
+  });
+
   it.each([
     "Page.captureScreenshot",
     "DOMSnapshot.captureSnapshot",
@@ -550,6 +567,9 @@ describe("CDP capture scope", () => {
       frame: { id: "root", url: "https://app.example/home" }
     });
     expect(canCaptureGlobalCdpArtifacts(scope)).toBe(false);
+    expect(
+      isCdpCaptureFrameTreePrimedForRoot(scope, "https://app.example/home", scope.generation)
+    ).toBe(true);
 
     evaluateCdpCaptureScopeEvent(
       scope,

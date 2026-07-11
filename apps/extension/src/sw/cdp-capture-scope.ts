@@ -494,6 +494,23 @@ export function canCaptureGlobalCdpArtifactsForRoot(
 ): boolean {
   return (
     canCaptureGlobalCdpArtifacts(state, expectedGeneration) &&
+    isCdpCaptureFrameTreePrimedForRoot(state, expectedRootUrl, expectedGeneration)
+  );
+}
+
+/**
+ * Distinguishes a structurally valid, in-scope root prime from global artifact
+ * readiness. A denied or still-pending child may block screenshots and tab
+ * recording without invalidating the root Full-CDP baseline.
+ */
+export function isCdpCaptureFrameTreePrimedForRoot(
+  state: CdpCaptureScopeState,
+  expectedRootUrl: string,
+  expectedGeneration?: number
+): boolean {
+  return (
+    state.primed &&
+    (expectedGeneration === undefined || state.generation === expectedGeneration) &&
     areEquivalentCaptureUrls(state.rootUrl, expectedRootUrl)
   );
 }
