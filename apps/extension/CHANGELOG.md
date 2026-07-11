@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Kept exact top and child document authorization alive across transient content-port disconnects,
+  limiting disconnect cleanup to transport state while navigation, tab removal, and capture stop
+  remain responsible for document-lifecycle revocation.
 - Kept Full mode entirely out of the page MAIN world while retaining its isolated interaction
   agent: initial start, runtime restore, top navigation, content readiness, and dynamic child-frame
   injection now load `injected.js` only for Lite, without changing Lite's exact dual-world order.

@@ -240,8 +240,9 @@ export class ContentDocumentAuthorization {
   }
 
   /**
-   * Revokes an active frame. documentId makes this conditional, so an old port
-   * disconnect cannot remove a replacement document in the reused frame.
+   * Revokes an active frame after an explicit document-lifecycle failure.
+   * documentId keeps a late failure from removing a replacement document in
+   * the reused frame. Transport disconnects must not call this method.
    */
   revoke(frameId: number, documentId?: string): boolean {
     const normalizedFrameId = normalizeFrameId(frameId);

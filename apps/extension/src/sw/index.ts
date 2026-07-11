@@ -97,6 +97,7 @@ import {
 } from "./cdp-capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
 import { ContentDocumentAuthorization } from "./content-document-authorization.js";
+import { disconnectContentPort } from "./content-port-lifecycle.js";
 import { injectPendingContentDocument } from "./dynamic-content-injection.js";
 import {
   buildLiteNetworkFailureRawEvent,
@@ -650,15 +651,10 @@ chromeApi?.runtime?.onConnect.addListener((port) => {
   };
 
   const onDisconnect = () => {
-    connectedPorts.delete(port);
-
     if (port.name === PORT_NAMES.content) {
-      const tabId = port.sender?.tab?.id;
-      const runtime = typeof tabId === "number" ? sessionsByTab.get(tabId) : undefined;
-
-      if (runtime) {
-        revokeContentSender(runtime, port.sender);
-      }
+      disconnectContentPort(connectedPorts, port);
+    } else {
+      connectedPorts.delete(port);
     }
 
     if (offscreenPort === port) {
@@ -5252,18 +5248,6 @@ async function authorizeContentSenderForReady(
     });
     return false;
   }
-}
-
-function revokeContentSender(runtime: SessionRuntime, sender: MessageSenderLike | undefined): void {
-  const frameId = normalizeSenderFrameId(sender);
-  const documentId = sender?.documentId;
-
-  if (frameId < 0 || typeof documentId !== "string" || documentId.length === 0) {
-    return;
-  }
-
-  runtime.contentDocuments.revoke(frameId, documentId);
-  syncAuthorizedContentFrames(runtime);
 }
 
 function failContentSender(

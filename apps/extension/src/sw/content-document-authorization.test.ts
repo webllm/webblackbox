@@ -200,7 +200,7 @@ describe("ContentDocumentAuthorization", () => {
     ).toBe(false);
   });
 
-  it("conditionally revokes so an old port cannot remove its replacement", async () => {
+  it("conditionally revokes so a late failure cannot remove its replacement", async () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     const prepared = await prepare(authorization, 5, "new-document");
     expect(prepared.prepared).toBe(true);
@@ -219,7 +219,7 @@ describe("ContentDocumentAuthorization", () => {
     expect(authorization.get(5)).toBeNull();
   });
 
-  it("revokes a current top port but permits the same exact document to reconnect", () => {
+  it("revokes a failed current top document but permits the same exact document to reconnect", () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     authorization.reset({ url: TOP_URL });
     authorization.authorize({
