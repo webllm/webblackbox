@@ -2396,13 +2396,21 @@ async function runRealWorldScenarioAddons({
 
         const iframe = document.createElement('iframe');
         iframe.id = 'wb-realworld-frame';
-        iframe.srcdoc = '<!doctype html><button id="frame-button">Frame action</button><script>document.body.dataset.ready="true";<\\/script>';
+        iframe.src = '/demo/realworld-frame.html';
+        const iframeLoaded = new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 3000);
+          iframe.addEventListener('load', () => {
+            clearTimeout(timeout);
+            resolve(true);
+          }, { once: true });
+        });
         document.body.appendChild(iframe);
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        const iframeReady = await iframeLoaded;
+        await new Promise((resolve) => setTimeout(resolve, 300));
         iframe.contentDocument?.getElementById('frame-button')?.dispatchEvent(
           new MouseEvent('click', { bubbles: true })
         );
-        result.iframe = iframe.contentDocument?.body?.dataset.ready === 'true';
+        result.iframe = iframeReady && iframe.contentDocument?.body?.dataset.ready === 'true';
         mark('iframe ready');
 
         if (${JSON.stringify(wantsIframeNetwork)}) {
