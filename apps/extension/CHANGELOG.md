@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Made service-worker-to-offscreen event ingestion idempotent across response loss, reconnect
+  retries, and offscreen recreation by retaining stable batch operation ids and reconciling each
+  replay against the durable pipeline sequence watermark.
 - Preserved Lite mode's final DOM, local-storage, and screenshot artifacts during stop with a
   short-lived, top-frame-bound drain capability, while keeping the synchronous capture fence and
   completing queued ingestion before the stopped checkpoint; count-only storage records are also

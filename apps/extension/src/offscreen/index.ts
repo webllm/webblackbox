@@ -10,6 +10,11 @@ import type {
 import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
 import { PORT_NAMES } from "../shared/messages.js";
+import {
+  IngestIdempotencyRegistry,
+  executeIngestOperation,
+  normalizeOptionalIngestOperationId
+} from "./ingest-idempotency.js";
 import { getExtensionPipelineStorage } from "./pipeline-storage.js";
 import { ResilientRuntimePort } from "./runtime-port.js";
 import {
@@ -34,6 +39,7 @@ type OffscreenPipelineRequest = {
     | "startScreenRecording"
     | "stopScreenRecording";
   sid: string;
+  operationId?: string;
   session?: SessionMetadata;
   redactionProfile?: RedactionProfile;
   capturePolicy?: CapturePolicy;
@@ -113,6 +119,7 @@ createExtensionI18n({
   pageTitleKey: "pageTitleOffscreen"
 });
 const pipelines = new Map<string, FlightRecorderPipeline>();
+const ingestIdempotencyRegistry = new IngestIdempotencyRegistry();
 const screenRecordings = new Map<string, OffscreenScreenRecordingState>();
 const EXPORT_OBJECT_URL_TTL_MS = 90_000;
 const SERVICE_WORKER_KEEPALIVE_INTERVAL_MS = 20_000;
@@ -286,6 +293,8 @@ async function handlePipelineRequest(message: OffscreenPipelineRequest): Promise
 }
 
 async function processPipelineRequest(message: OffscreenPipelineRequest): Promise<unknown> {
+  const operationId = normalizeOptionalIngestOperationId(message.operationId);
+
   if (message.op === "start") {
     if (!message.session) {
       throw new Error("Missing session metadata for pipeline start.");
@@ -354,7 +363,14 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       throw new Error("Missing event payload for pipeline ingest.");
     }
 
-    await pipeline.ingest(message.event);
+    await executeIngestOperation({
+      sid: message.sid,
+      op: message.op,
+      operationId,
+      events: [message.event],
+      pipeline,
+      registry: ingestIdempotencyRegistry
+    });
     return null;
   }
 
@@ -363,7 +379,14 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       return null;
     }
 
-    await pipeline.ingestBatch(message.events);
+    await executeIngestOperation({
+      sid: message.sid,
+      op: message.op,
+      operationId,
+      events: message.events,
+      pipeline,
+      registry: ingestIdempotencyRegistry
+    });
     return null;
   }
 
@@ -415,6 +438,7 @@ async function processPipelineRequest(message: OffscreenPipelineRequest): Promis
       purge: message.purge === true
     });
     pipelines.delete(message.sid);
+    ingestIdempotencyRegistry.clearSession(message.sid);
     return null;
   }
 

@@ -29,6 +29,7 @@ import {
   WebBlackboxRecorder
 } from "@webblackbox/recorder";
 
+import { normalizeOptionalIngestOperationId } from "../offscreen/ingest-idempotency.js";
 import { getChromeApi, type MessageSenderLike, type PortLike } from "../shared/chrome-api.js";
 import {
   isAuthorizedExtensionPort,
@@ -94,6 +95,13 @@ import {
 } from "./lite-network-baseline.js";
 import { shouldUpdateSessionMetadataFromNavigation } from "./navigation-metadata.js";
 import { extractPerformanceBudgetNetworkSample } from "./performance-budget.js";
+import {
+  acknowledgePipelineBatch,
+  acquirePipelineBatch,
+  shouldRecoverOffscreenPipeline,
+  shouldRetryOffscreenPipelineRequest,
+  type PipelineBatchInFlight
+} from "./pipeline-batch.js";
 import {
   buildRequestMetaKey,
   deleteRequestMeta,
@@ -180,6 +188,7 @@ type SessionRuntime = {
   queueDepth: number;
   droppedBestEffortTasks: number;
   pipelineEventBuffer: WebBlackboxEvent[];
+  pipelineBatchInFlight: PipelineBatchInFlight<WebBlackboxEvent> | null;
   pipelineFlushTimer: ReturnType<typeof setTimeout> | null;
   pipelineFlushQueued: boolean;
   captureFence: VolatileCaptureFence;
@@ -275,8 +284,8 @@ type SessionPipelineClient = {
     redactionProfile: RedactionProfile,
     capturePolicy?: CapturePolicy
   ) => Promise<void>;
-  ingest: (event: WebBlackboxEvent) => Promise<void>;
-  ingestBatch: (events: WebBlackboxEvent[]) => Promise<void>;
+  ingest: (event: WebBlackboxEvent, operationId?: string) => Promise<void>;
+  ingestBatch: (events: readonly WebBlackboxEvent[], operationId?: string) => Promise<void>;
   flush: () => Promise<void>;
   getResumeState: () => Promise<PipelineResumeState>;
   putBlob: (mime: string, bytes: Uint8Array) => Promise<string>;
@@ -306,11 +315,12 @@ type OffscreenPipelineRequest = {
     | "startScreenRecording"
     | "stopScreenRecording";
   sid: string;
+  operationId?: string;
   session?: SessionMetadata;
   redactionProfile?: RedactionProfile;
   capturePolicy?: CapturePolicy;
   event?: WebBlackboxEvent;
-  events?: WebBlackboxEvent[];
+  events?: readonly WebBlackboxEvent[];
   mime?: string;
   bytes?: Uint8Array;
   passphrase?: string;
@@ -1335,6 +1345,7 @@ function createSessionRuntime(input: {
     queueDepth: 0,
     droppedBestEffortTasks: counters.droppedBestEffortTasks,
     pipelineEventBuffer: [],
+    pipelineBatchInFlight: null,
     pipelineFlushTimer: null,
     pipelineFlushQueued: false,
     captureFence: createVolatileCaptureFence(input.stoppedAt !== undefined),
@@ -2395,20 +2406,24 @@ async function drainPipelineBufferBatches(
 ): Promise<void> {
   let flushed = 0;
 
-  while (runtime.pipelineEventBuffer.length > 0) {
-    const batchSize = Math.min(
-      runtime.pipelineEventBuffer.length,
-      PIPELINE_BATCH_DRAIN_CHUNK_EVENTS
+  while (runtime.pipelineBatchInFlight || runtime.pipelineEventBuffer.length > 0) {
+    runtime.pipelineBatchInFlight = acquirePipelineBatch(
+      runtime.pipelineBatchInFlight,
+      runtime.pipelineEventBuffer,
+      PIPELINE_BATCH_DRAIN_CHUNK_EVENTS,
+      createPipelineIngestOperationId,
+      requireIngestOperationId
     );
-    const batch = runtime.pipelineEventBuffer.slice(0, batchSize);
+    const batch = runtime.pipelineBatchInFlight;
 
-    if (batch.length === 0) {
+    if (!batch) {
       break;
     }
 
-    await runtime.pipeline.ingestBatch(batch);
-    runtime.pipelineEventBuffer.splice(0, batch.length);
-    flushed += batch.length;
+    await runtime.pipeline.ingestBatch(batch.events, batch.operationId);
+    acknowledgePipelineBatch(runtime.pipelineEventBuffer, batch);
+    runtime.pipelineBatchInFlight = null;
+    flushed += batch.events.length;
 
     if (runtime.pipelineEventBuffer.length > 0) {
       await wait(0);
@@ -2426,6 +2441,20 @@ async function drainPipelineBufferBatches(
   }
 }
 
+function createPipelineIngestOperationId(): string {
+  return `I-${crypto.randomUUID()}`;
+}
+
+function requireIngestOperationId(value: unknown): string {
+  const operationId = normalizeOptionalIngestOperationId(value);
+
+  if (!operationId) {
+    throw new Error("Missing ingest idempotency operation id.");
+  }
+
+  return operationId;
+}
+
 function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
   return {
     start: async (session, redactionProfile, capturePolicy) => {
@@ -2437,18 +2466,22 @@ function createOffscreenPipelineClient(sid: string): SessionPipelineClient {
         capturePolicy
       });
     },
-    ingest: async (event) => {
+    ingest: async (event, operationId) => {
+      const normalizedOperationId = normalizeOptionalIngestOperationId(operationId);
       await requestOffscreenPipeline<void>({
         op: "ingest",
         sid,
-        event
+        event,
+        ...(normalizedOperationId === undefined ? {} : { operationId: normalizedOperationId })
       });
     },
-    ingestBatch: async (events) => {
+    ingestBatch: async (events, operationId) => {
+      const normalizedOperationId = normalizeOptionalIngestOperationId(operationId);
       await requestOffscreenPipeline<void>({
         op: "ingestBatch",
         sid,
-        events
+        events,
+        ...(normalizedOperationId === undefined ? {} : { operationId: normalizedOperationId })
       });
     },
     flush: async () => {
@@ -2569,17 +2602,7 @@ function shouldRetryOffscreenRequest(
   request: Omit<OffscreenPipelineRequest, "kind" | "requestId">,
   error: unknown
 ): boolean {
-  if (request.op === "start") {
-    return false;
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-
-  return (
-    message.includes("Pipeline session not found") ||
-    message.includes("Offscreen pipeline disconnected") ||
-    message.includes("Offscreen pipeline is unavailable")
-  );
+  return shouldRetryOffscreenPipelineRequest(request.op, error);
 }
 
 function resolveOffscreenRequestTimeoutMs(requestOp: OffscreenPipelineRequest["op"]): number {
@@ -2693,7 +2716,7 @@ function rejectPendingOffscreenRequests(message: string): void {
 
 async function recoverAllActiveOffscreenPipelines(): Promise<void> {
   for (const runtime of sessionsByTab.values()) {
-    if (!isVolatileCaptureOpen(runtime.captureFence) || runtime.stopping || runtime.stoppedAt) {
+    if (!shouldRecoverOffscreenPipeline(toOffscreenPipelineRecoveryState(runtime), "automatic")) {
       continue;
     }
 
@@ -2714,9 +2737,7 @@ async function recoverOffscreenSession(sid: string): Promise<void> {
 
     if (
       !runtime ||
-      !isVolatileCaptureOpen(runtime.captureFence) ||
-      runtime.stopping ||
-      runtime.stoppedAt
+      !shouldRecoverOffscreenPipeline(toOffscreenPipelineRecoveryState(runtime), "request")
     ) {
       return;
     }
@@ -2743,6 +2764,14 @@ async function recoverOffscreenSession(sid: string): Promise<void> {
 
   offscreenSessionRecovery.set(sid, task);
   await task;
+}
+
+function toOffscreenPipelineRecoveryState(runtime: SessionRuntime) {
+  return {
+    captureOpen: isVolatileCaptureOpen(runtime.captureFence),
+    stopping: runtime.stopping,
+    stopped: runtime.stoppedAt !== undefined
+  };
 }
 
 async function attachCdp(runtime: SessionRuntime): Promise<void> {
