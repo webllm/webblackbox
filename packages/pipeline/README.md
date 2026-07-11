@@ -127,6 +127,39 @@ const hash = await pipeline.putBlob("image/webp", screenshotBytes);
 // Returns SHA-256 hash for content-addressable retrieval
 ```
 
+### Bounded Privacy Analysis
+
+`buildPrivacyManifest` accepts arrays or streaming blob sources. Services scanning untrusted
+archives should provide the exact blob total and explicit byte, finding, and elapsed-time ceilings.
+The returned coverage distinguishes a complete `passed` result from partial or opaque analysis.
+
+```typescript
+import { buildPrivacyManifest } from "@webblackbox/pipeline";
+
+const privacy = await buildPrivacyManifest({
+  events,
+  blobs: readBlobs() as AsyncIterable<{
+    hash: string;
+    mime: string;
+    bytes: Uint8Array;
+  }>,
+  expectedBlobCount: manifest.stats.blobCount,
+  encrypted: false,
+  preEncryption: false,
+  scan: {
+    maxTargetBytes: 2 * 1024 * 1024,
+    maxTotalBytes: 64 * 1024 * 1024,
+    maxFindings: 1,
+    deadlineMs: 5_000,
+    stopOnFinding: true
+  }
+});
+
+if (privacy.scanner.coverage?.complete !== true) {
+  console.warn("Privacy analysis is partial", privacy.scanner.coverage?.incompleteReason);
+}
+```
+
 ## Event Chunking
 
 The `EventChunker` groups events into size-bounded chunks:

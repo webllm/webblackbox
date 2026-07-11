@@ -18,7 +18,8 @@ export function encodeEventsNdjson(events: WebBlackboxEvent[]): Uint8Array {
 }
 
 export function decodeEventsNdjson(input: string | Uint8Array): WebBlackboxEvent[] {
-  const text = typeof input === "string" ? input : new TextDecoder().decode(input);
+  const text =
+    typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true }).decode(input);
 
   if (!text.trim()) {
     return [];

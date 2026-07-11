@@ -257,7 +257,7 @@ async function readJsonValue(zip: JSZip, path: string): Promise<unknown> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  const content = await file.async("string");
+  const content = decodeArchiveUtf8(await file.async("uint8array"), path);
   return parseArchiveJson(content, path);
 }
 
@@ -298,8 +298,7 @@ async function parseArchiveChunkEvents(
   path: string
 ): Promise<WebBlackboxEvent[]> {
   const decoded = await decodeChunkBytes(encoded, codec);
-  const lines = new TextDecoder()
-    .decode(decoded)
+  const lines = decodeArchiveUtf8(decoded, path)
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0);
   const events: WebBlackboxEvent[] = [];
@@ -335,7 +334,15 @@ async function readArchiveFileText(
 ): Promise<string> {
   const bytes = await readFileBytes(zip, path);
   const decrypted = await decryptArchiveFile(path, bytes, manifest, archiveKey);
-  return new TextDecoder().decode(decrypted);
+  return decodeArchiveUtf8(decrypted, path);
+}
+
+function decodeArchiveUtf8(bytes: Uint8Array, path: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`Invalid WebBlackbox archive: '${path}' contains invalid UTF-8.`);
+  }
 }
 
 async function verifyArchiveIntegrity(zip: JSZip, integrity: HashesManifest): Promise<void> {

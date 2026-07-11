@@ -1793,6 +1793,34 @@ describe("pipeline", () => {
     }
   });
 
+  it("rejects invalid UTF-8 in unencrypted archive metadata", async () => {
+    const pipeline = createTestPipeline({
+      session: SESSION,
+      storage: new MemoryPipelineStorage(),
+      maxChunkBytes: 128
+    });
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-invalid-metadata-utf8", "user.click", 10));
+
+    const exported = await pipeline.exportBundle(FULL_EXPORT_OPTIONS);
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const manifestFile = zip.file("manifest.json");
+    if (!manifestFile) {
+      throw new Error("Missing fixture manifest.");
+    }
+    const manifestBytes = await manifestFile.async("uint8array");
+    replaceFirstByteSequenceForTest(
+      manifestBytes,
+      new TextEncoder().encode("https://example.com"),
+      0xff
+    );
+    zip.file("manifest.json", manifestBytes);
+    await writeArchiveIntegrityForTest(zip);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(readWebBlackboxArchive(bytes)).rejects.toThrow(/invalid UTF-8/i);
+  });
+
   it("rejects archives with integrity mismatches on read", async () => {
     const storage = new MemoryPipelineStorage();
     const pipeline = createTestPipeline({
@@ -2324,6 +2352,21 @@ async function writeArchiveIntegrityForTest(zip: JSZip): Promise<void> {
       files
     })
   );
+}
+
+function replaceFirstByteSequenceForTest(
+  target: Uint8Array,
+  sequence: Uint8Array,
+  replacement: number
+): void {
+  for (let offset = 0; offset <= target.byteLength - sequence.byteLength; offset += 1) {
+    if (sequence.every((value, index) => target[offset + index] === value)) {
+      target[offset] = replacement;
+      return;
+    }
+  }
+
+  throw new Error("Fixture byte sequence was not found.");
 }
 
 function toArrayBufferForTest(bytes: Uint8Array): ArrayBuffer {

@@ -523,6 +523,7 @@ export class FlightRecorderPipeline {
       const privacyManifest = await buildPrivacyManifest({
         events,
         blobs,
+        expectedBlobCount: blobs.length,
         capturePolicy: this.options.capturePolicy,
         encrypted,
         transfer: buildExportTransferPolicy({
@@ -848,6 +849,7 @@ export class FlightRecorderPipeline {
     const privacyManifest = await buildPrivacyManifest({
       events,
       blobs: exportData.blobs,
+      expectedBlobCount: exportData.blobs.length,
       capturePolicy: this.options.capturePolicy,
       encrypted,
       transfer: buildExportTransferPolicy({
