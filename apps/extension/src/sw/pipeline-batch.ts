@@ -90,10 +90,16 @@ export function shouldRetryOffscreenPipelineRequest(
 
   if (
     message.includes("Pipeline session not found") ||
-    message.includes("Offscreen pipeline disconnected") ||
     message.includes("Offscreen pipeline is unavailable")
   ) {
     return true;
+  }
+
+  if (message.includes("Offscreen pipeline disconnected")) {
+    // A disconnect can happen after the offscreen document has started the
+    // operation. Replaying a download with an unknown result can create a
+    // duplicate user-visible file, so require the caller to resolve it.
+    return op !== "exportDownload";
   }
 
   return (

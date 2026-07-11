@@ -74,10 +74,31 @@ describe("pipeline batch retry state", () => {
     expect(shouldRetryOffscreenPipelineRequest("close", timeout)).toBe(false);
   });
 
-  it("retains existing recovery errors for non-start operations", () => {
+  it("does not replay an export after a disconnect with an unknown result", () => {
     const disconnected = new Error("Offscreen pipeline disconnected.");
+    const unavailable = new Error("Offscreen pipeline is unavailable.");
+    const missingSession = new Error("Pipeline session not found: session-1");
+    const replaySafeAfterDisconnect = [
+      "ingest",
+      "ingestBatch",
+      "flush",
+      "getResumeState",
+      "putBlob",
+      "close",
+      "getScreenRecordingStatus",
+      "startScreenRecording",
+      "stopScreenRecording"
+    ] as const;
 
-    expect(shouldRetryOffscreenPipelineRequest("flush", disconnected)).toBe(true);
+    for (const op of replaySafeAfterDisconnect) {
+      expect(shouldRetryOffscreenPipelineRequest(op, disconnected)).toBe(true);
+    }
+
+    expect(shouldRetryOffscreenPipelineRequest("exportDownload", disconnected)).toBe(false);
+    expect(shouldRetryOffscreenPipelineRequest("exportDownload", unavailable)).toBe(true);
+    expect(shouldRetryOffscreenPipelineRequest("exportDownload", missingSession)).toBe(true);
     expect(shouldRetryOffscreenPipelineRequest("start", disconnected)).toBe(false);
+    expect(shouldRetryOffscreenPipelineRequest("start", unavailable)).toBe(false);
+    expect(shouldRetryOffscreenPipelineRequest("start", missingSession)).toBe(false);
   });
 });

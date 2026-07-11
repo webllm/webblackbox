@@ -11,6 +11,8 @@
 
 ### Patch Changes
 
+- Stopped automatically replaying an export download after an ambiguous offscreen disconnect,
+  preventing a lost acknowledgement from creating duplicate user-visible files.
 - Required a successfully validated CDP frame tree before screenshots, DOM/storage snapshots,
   performance profiles, or tab-recording chunks can be captured, and invalidated in-flight
   artifacts across frame navigation until the current tree is safely re-primed.
