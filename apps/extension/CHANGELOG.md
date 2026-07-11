@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Required a successfully validated CDP frame tree before screenshots, DOM/storage snapshots,
+  performance profiles, or tab-recording chunks can be captured, and invalidated in-flight
+  artifacts across frame navigation until the current tree is safely re-primed.
 - Preserved successful screen-recording stop results for bounded retries so a lost offscreen
   response cannot replace the real chunk count, size, duration, or reason with fabricated zeros.
 - Bound dynamically navigated subframes to exact Chrome document identities before injection or

@@ -76,15 +76,16 @@ import {
   shouldStopForEnterpriseOriginPolicy as shouldStopForEnterpriseOriginPolicyInput
 } from "./capture-scope.js";
 import {
+  canCaptureGlobalCdpArtifactsForRoot,
   clearCdpCaptureScopeState,
   createCdpCaptureScopeState,
   evaluateCdpCaptureScopeEvent,
   filterCdpSnapshotDocuments,
   forgetCdpRequestScope,
   forgetCdpSessionScope,
-  hasDisallowedCdpFrames,
+  invalidateCdpCaptureFrameTree,
   isCdpSessionWithinScope,
-  primeCdpCaptureFrameTree,
+  refreshCdpCaptureFrameTree,
   type CdpCaptureScopeState
 } from "./cdp-capture-scope.js";
 import { withCdpCommandTimeout, type CdpCommandOutcome } from "./cdp-command.js";
@@ -220,6 +221,7 @@ type SessionRuntime = {
 
 type ScreenRecordingRuntime = {
   recordingId: string;
+  cdpScopeGeneration: number | null;
   source: "tab";
   startedAt: number;
   startedMono: number;
@@ -248,6 +250,7 @@ type ViewportState = {
 };
 
 type HeapSnapshotCaptureState = {
+  cdpScopeGeneration: number;
   chunks: string[];
   bytes: number;
   truncated: boolean;
@@ -500,7 +503,8 @@ const FULL_MODE_FOLLOWUP_METHODS = new Set([
   "Network.loadingFinished",
   "Network.loadingFailed",
   "Runtime.exceptionThrown",
-  "Page.frameNavigated"
+  "Page.frameNavigated",
+  "Page.navigatedWithinDocument"
 ]);
 const LITE_DEFAULT_BODY_MIME_ALLOWLIST = [
   "text/*",
@@ -1346,6 +1350,7 @@ function createSessionRuntime(input: {
     screenRecording: input.screenRecording
       ? {
           recordingId: input.screenRecording.recordingId,
+          cdpScopeGeneration: null,
           source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
           startedAt: input.screenRecording.startedAt,
           startedMono: input.screenRecording.startedMono,
@@ -1418,6 +1423,11 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
     return;
   }
 
+  if (runtime.mode === "full" && runtime.cdpRouter) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
+    void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+  }
+
   const tabMetadata = await resolveTabSessionMetadata(tabId);
 
   if (!(await isRuntimeTopDocumentAllowed(runtime, tabMetadata.captureUrl))) {
@@ -1432,6 +1442,11 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
 
   await ensureContentScriptInjected(runtime);
   await ensureInjectedHooks(tabId, 0);
+
+  if (runtime.mode === "full" && runtime.cdpRouter) {
+    await restoreCdpGlobalCaptureAfterNavigation(runtime, tabMetadata.captureUrl, true);
+  }
+
   await notifyAuthorizedContentFrames(runtime, true);
 }
 
@@ -2876,6 +2891,7 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
       );
       const scopeAllowed = scopeEvaluation.allowed;
       const captureAllowed = scopeAllowed && isVolatileCaptureOpen(runtime.captureFence);
+      const cdpFrameTreeMutated = scopeEvaluation.globalFrameTreeMutation === true;
 
       if (scopeEvaluation.topNavigation) {
         const { url, decision } = scopeEvaluation.topNavigation;
@@ -2883,18 +2899,44 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
         if (!decision.allowed) {
           void stopSession(runtime.tabId);
         } else {
+          void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
           runtime.captureUrl = url;
           runtime.url = sanitizeUrlForPrivacy(url);
           resetAuthorizedContentFrames(runtime);
-          void handleTabUrlChanged(runtime.tabId, url);
+          enqueue(runtime, async () => {
+            await handleTabUrlChanged(runtime.tabId, url);
+            await restoreCdpGlobalCaptureAfterNavigation(runtime, url, true);
+          });
         }
+      } else if (cdpFrameTreeMutated) {
+        const recordingGeneration = runtime.screenRecording?.cdpScopeGeneration;
+
+        if (
+          recordingGeneration !== undefined &&
+          (recordingGeneration === null ||
+            !isRuntimeGlobalCdpCaptureClaimValid(runtime, recordingGeneration))
+        ) {
+          void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+        }
+
+        const expectedUrl = runtime.captureUrl;
+        enqueue(runtime, async () => {
+          await restoreCdpGlobalCaptureAfterNavigation(runtime, expectedUrl, true);
+        });
       }
 
       if (captureAllowed && event.method === "HeapProfiler.addHeapSnapshotChunk") {
         const payload = asRecord(normalizedPayload);
         const chunk = typeof payload?.chunk === "string" ? payload.chunk : undefined;
 
-        if (chunk && runtime.heapSnapshotCapture) {
+        if (
+          chunk &&
+          runtime.heapSnapshotCapture &&
+          isRuntimeGlobalCdpCaptureClaimValid(
+            runtime,
+            runtime.heapSnapshotCapture.cdpScopeGeneration
+          )
+        ) {
           const chunkBytes = new TextEncoder().encode(chunk).byteLength;
           const nextBytes = runtime.heapSnapshotCapture.bytes + chunkBytes;
 
@@ -2951,7 +2993,16 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
     runtime.enabledCdpSessions.clear();
     await router.enableBaseline(runtime.tabId);
     runtime.enabledCdpSessions.add("root");
-    await primeCdpFrameTreeScopes(runtime);
+    const globalCaptureScopePrimed = await primeCdpFrameTreeScopes(runtime);
+
+    if (runtime.screenRecording) {
+      if (globalCaptureScopePrimed) {
+        runtime.screenRecording.cdpScopeGeneration = runtime.cdpScope.generation;
+      } else {
+        await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
+      }
+    }
+
     runtime.cdpScope.executionContextScopes.clear();
     await router.send({ tabId: runtime.tabId }, "Runtime.disable").catch(() => undefined);
     await router.send({ tabId: runtime.tabId }, "Runtime.enable").catch(() => undefined);
@@ -2996,16 +3047,99 @@ async function attachCdp(runtime: SessionRuntime): Promise<void> {
   }
 }
 
-async function primeCdpFrameTreeScopes(runtime: SessionRuntime): Promise<void> {
+async function primeCdpFrameTreeScopes(runtime: SessionRuntime): Promise<boolean> {
   if (!runtime.cdpRouter) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
+    return false;
+  }
+
+  const primed = await refreshCdpCaptureFrameTree(runtime.cdpScope, async () => {
+    const response = await runtime.cdpRouter?.send<{ frameTree?: unknown }>(
+      { tabId: runtime.tabId },
+      "Page.getFrameTree"
+    );
+    return response?.frameTree;
+  });
+
+  if (
+    !primed ||
+    !canCaptureGlobalCdpArtifactsForRoot(
+      runtime.cdpScope,
+      runtime.captureUrl,
+      runtime.cdpScope.generation
+    )
+  ) {
+    if (primed) {
+      invalidateCdpCaptureFrameTree(runtime.cdpScope);
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
+async function restoreCdpGlobalCaptureAfterNavigation(
+  runtime: SessionRuntime,
+  expectedUrl: string,
+  forceRefresh = false
+): Promise<void> {
+  if (
+    runtime.mode !== "full" ||
+    !runtime.cdpRouter ||
+    !isRuntimeCaptureScopeActive(runtime) ||
+    runtime.captureUrl !== expectedUrl
+  ) {
     return;
   }
 
-  const response = await runtime.cdpRouter
-    .send<{ frameTree?: unknown }>({ tabId: runtime.tabId }, "Page.getFrameTree")
-    .catch(() => undefined);
+  const recording = runtime.screenRecording;
+  const currentGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
-  primeCdpCaptureFrameTree(runtime.cdpScope, response?.frameTree);
+  if (
+    recording &&
+    (forceRefresh ||
+      currentGeneration === null ||
+      recording.cdpScopeGeneration !== currentGeneration)
+  ) {
+    await stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+  }
+
+  if (forceRefresh || claimRuntimeGlobalCdpCapture(runtime) === null) {
+    const primed = await primeCdpFrameTreeScopes(runtime);
+
+    if (!primed || !isRuntimeCaptureScopeActive(runtime) || runtime.captureUrl !== expectedUrl) {
+      if (
+        recording &&
+        runtime.screenRecording === recording &&
+        (recording.cdpScopeGeneration === null ||
+          !isRuntimeGlobalCdpCaptureClaimValid(runtime, recording.cdpScopeGeneration))
+      ) {
+        await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
+      }
+
+      return;
+    }
+  }
+
+  const finalGeneration = claimRuntimeGlobalCdpCapture(runtime);
+  const activeRecording = runtime.screenRecording;
+
+  if (
+    activeRecording &&
+    (finalGeneration === null || activeRecording.cdpScopeGeneration !== finalGeneration)
+  ) {
+    await stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+  }
+
+  if (!runtime.screenRecording && shouldStartScreenRecording(runtime)) {
+    await startScreenRecording(runtime).catch((error) => {
+      console.warn("[WebBlackbox] failed to restart screen recording after navigation", {
+        sid: runtime.sid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
 }
 
 function evaluateRuntimeFrameDocument(
@@ -3026,6 +3160,24 @@ function isRuntimeCaptureScopeActive(runtime: SessionRuntime): boolean {
     !runtime.stopping &&
     !runtime.stoppedAt &&
     isRuntimeDocumentWithinScope(runtime)
+  );
+}
+
+function claimRuntimeGlobalCdpCapture(runtime: SessionRuntime): number | null {
+  if (
+    !isRuntimeCaptureScopeActive(runtime) ||
+    !canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl)
+  ) {
+    return null;
+  }
+
+  return runtime.cdpScope.generation;
+}
+
+function isRuntimeGlobalCdpCaptureClaimValid(runtime: SessionRuntime, generation: number): boolean {
+  return (
+    isRuntimeCaptureScopeActive(runtime) &&
+    canCaptureGlobalCdpArtifactsForRoot(runtime.cdpScope, runtime.captureUrl, generation)
   );
 }
 
@@ -3127,10 +3279,13 @@ async function processFullModeEvent(
 
   const frame = asRecord(payload?.frame);
   const isTopFrameNavigation =
-    method === "Page.frameNavigated" &&
     !sessionId &&
-    typeof frame?.parentId !== "string" &&
-    typeof frame?.parentFrameId !== "string";
+    ((method === "Page.frameNavigated" &&
+      typeof frame?.parentId !== "string" &&
+      typeof frame?.parentFrameId !== "string") ||
+      (method === "Page.navigatedWithinDocument" &&
+        typeof payload?.frameId === "string" &&
+        payload.frameId === runtime.cdpScope.rootFrameId));
 
   if (isTopFrameNavigation && shouldCaptureNavigationSnapshot(runtime)) {
     await captureDomSnapshot(runtime, "navigation");
@@ -3313,7 +3468,7 @@ function isLikelyTextualResourceType(resourceType?: string): boolean {
 }
 
 function shouldCaptureIncidentArtifacts(runtime: SessionRuntime): boolean {
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  if (claimRuntimeGlobalCdpCapture(runtime) === null) {
     return false;
   }
 
@@ -3342,7 +3497,7 @@ async function captureIncidentArtifacts(runtime: SessionRuntime, reason: string)
 }
 
 function shouldCaptureNavigationSnapshot(runtime: SessionRuntime): boolean {
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  if (claimRuntimeGlobalCdpCapture(runtime) === null) {
     return false;
   }
 
@@ -3382,7 +3537,7 @@ function handleFreezeNotice(runtime: SessionRuntime, reason: FreezeReason): void
 }
 
 async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+  if (claimRuntimeGlobalCdpCapture(runtime) === null) {
     await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
     return;
   }
@@ -3404,11 +3559,9 @@ async function captureFullModeArtifacts(runtime: SessionRuntime, reason: string)
 }
 
 async function captureScreenshot(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (
-    !runtime.cdpRouter ||
-    !isRuntimeCaptureScopeActive(runtime) ||
-    hasDisallowedCdpFrames(runtime.cdpScope)
-  ) {
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
+
+  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -3427,18 +3580,14 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
     }
   );
 
-  if (!screenshot?.data) {
-    return;
-  }
-
-  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+  if (!screenshot?.data || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
   const bytes = decodeBase64(screenshot.data);
   const hash = await putRuntimeCaptureBlob(runtime, "image/webp", bytes);
 
-  if (!hash) {
+  if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
@@ -3485,19 +3634,20 @@ async function captureScreenshot(runtime: SessionRuntime, reason: string): Promi
 function shouldStartScreenRecording(runtime: SessionRuntime): boolean {
   return (
     runtime.mode === "full" &&
-    isRuntimeCaptureScopeActive(runtime) &&
-    !hasDisallowedCdpFrames(runtime.cdpScope) &&
+    claimRuntimeGlobalCdpCapture(runtime) !== null &&
     runtime.config.capturePolicy?.categories.screenRecordings === "allow"
   );
 }
 
 async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
-  if (!chromeApi?.tabCapture?.getMediaStreamId) {
-    throw new Error("Chrome tabCapture API is unavailable for screen recording.");
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
+
+  if (runtime.screenRecording || cdpScopeGeneration === null) {
+    return;
   }
 
-  if (runtime.screenRecording || !isRuntimeCaptureScopeActive(runtime)) {
-    return;
+  if (!chromeApi?.tabCapture?.getMediaStreamId) {
+    throw new Error("Chrome tabCapture API is unavailable for screen recording.");
   }
 
   const recordingId = createScreenRecordingId(runtime.sid);
@@ -3507,7 +3657,7 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
     targetTabId: runtime.tabId
   });
 
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
@@ -3515,12 +3665,9 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
     throw new Error("Chrome did not grant a tab capture stream.");
   }
 
-  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
-    return;
-  }
-
   const recording: ScreenRecordingRuntime = {
     recordingId,
+    cdpScopeGeneration,
     source: SCREEN_RECORDING_OFFSCREEN_SOURCE,
     startedAt,
     startedMono,
@@ -3542,7 +3689,7 @@ async function startScreenRecording(runtime: SessionRuntime): Promise<void> {
       source: SCREEN_RECORDING_OFFSCREEN_SOURCE
     });
 
-    if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+    if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
       await stopScreenRecording(runtime, "capture-fence").catch(() => undefined);
       return;
     }
@@ -3620,7 +3767,10 @@ async function handleOffscreenScreenRecordingChunk(
     return;
   }
 
-  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
+  if (
+    recording.cdpScopeGeneration === null ||
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, recording.cdpScopeGeneration)
+  ) {
     await stopScreenRecording(runtime, "capture-scope").catch(() => undefined);
     return;
   }
@@ -3633,7 +3783,12 @@ async function handleOffscreenScreenRecordingChunk(
 
   const index = resolveScreenRecordingChunkIndex(message.index, recording.chunkCount);
   const task = (async () => {
-    if (!isRuntimeCaptureScopeActive(runtime)) {
+    const cdpScopeGeneration = recording.cdpScopeGeneration;
+
+    if (
+      cdpScopeGeneration === null ||
+      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
+    ) {
       return;
     }
 
@@ -3642,8 +3797,8 @@ async function handleOffscreenScreenRecordingChunk(
 
     if (
       !hash ||
-      !isRuntimeCaptureScopeActive(runtime) ||
-      hasDisallowedCdpFrames(runtime.cdpScope)
+      runtime.screenRecording !== recording ||
+      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
     ) {
       return;
     }
@@ -3806,11 +3961,9 @@ function createScreenRecordingId(sid: string): string {
 }
 
 async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!isRuntimeCaptureScopeActive(runtime) || hasDisallowedCdpFrames(runtime.cdpScope)) {
-    return;
-  }
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
-  if (!runtime.cdpRouter) {
+  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -3829,11 +3982,7 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
     }
   );
 
-  if (!snapshot) {
-    return;
-  }
-
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  if (!snapshot || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
@@ -3845,7 +3994,7 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
   const bytes = new TextEncoder().encode(JSON.stringify(scopedSnapshot));
   const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-  if (!hash) {
+  if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
@@ -3871,11 +4020,9 @@ async function captureDomSnapshot(runtime: SessionRuntime, reason: string): Prom
 }
 
 async function captureStorageSnapshots(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!isRuntimeCaptureScopeActive(runtime)) {
-    return;
-  }
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
-  if (!runtime.cdpRouter) {
+  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -3893,7 +4040,11 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
         )
       : null;
 
-  if (cookies?.cookies && isRuntimeCaptureScopeActive(runtime)) {
+  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+    return;
+  }
+
+  if (cookies?.cookies) {
     const cookieNames = cookies.cookies
       .map((entry) => asString(asRecord(entry)?.name))
       .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
@@ -3901,7 +4052,7 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     const bytes = new TextEncoder().encode(JSON.stringify(cookieNames));
     const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-    if (!hash) {
+    if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
       return;
     }
 
@@ -3928,11 +4079,15 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
     ? await evaluateExpression(runtime, buildLocalStorageSnapshotExpression(localStorageMode))
     : null;
 
-  if (typeof localStorageData === "string" && isRuntimeCaptureScopeActive(runtime)) {
+  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+    return;
+  }
+
+  if (typeof localStorageData === "string") {
     const bytes = new TextEncoder().encode(localStorageData);
     const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-    if (!hash) {
+    if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
       return;
     }
 
@@ -3962,7 +4117,11 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       ? await evaluateExpression(runtime, "location.origin")
       : null;
 
-  if (typeof origin === "string" && isRuntimeCaptureScopeActive(runtime)) {
+  if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+    return;
+  }
+
+  if (typeof origin === "string") {
     const dbNames = await sendCdpCommand<{ databaseNames?: string[] }>(
       runtime,
       { tabId: runtime.tabId },
@@ -3972,11 +4131,15 @@ async function captureStorageSnapshots(runtime: SessionRuntime, reason: string):
       }
     );
 
-    if (dbNames?.databaseNames && isRuntimeCaptureScopeActive(runtime)) {
+    if (!isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+      return;
+    }
+
+    if (dbNames?.databaseNames) {
       const bytes = new TextEncoder().encode(JSON.stringify(dbNames.databaseNames));
       const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-      if (!hash) {
+      if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
         return;
       }
 
@@ -4009,11 +4172,9 @@ function resolveLocalStorageSnapshotMode(
 }
 
 async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (!isRuntimeCaptureScopeActive(runtime)) {
-    return;
-  }
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
 
-  if (!runtime.cdpRouter) {
+  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -4027,18 +4188,14 @@ async function captureTraceMetrics(runtime: SessionRuntime, reason: string): Pro
     "Performance.getMetrics"
   );
 
-  if (!metrics) {
-    return;
-  }
-
-  if (!isRuntimeCaptureScopeActive(runtime)) {
+  if (!metrics || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
   const bytes = new TextEncoder().encode(JSON.stringify(metrics));
   const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-  if (!hash) {
+  if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
     return;
   }
 
@@ -4067,11 +4224,9 @@ async function captureAdvancedProfiles(runtime: SessionRuntime, reason: string):
 }
 
 async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (
-    !runtime.cdpRouter ||
-    !isRuntimeCaptureScopeActive(runtime) ||
-    hasDisallowedCdpFrames(runtime.cdpScope)
-  ) {
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
+
+  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -4102,8 +4257,7 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
 
     if (
       !profileResult?.profile ||
-      !isRuntimeCaptureScopeActive(runtime) ||
-      hasDisallowedCdpFrames(runtime.cdpScope)
+      !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
     ) {
       return;
     }
@@ -4111,7 +4265,7 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
     const bytes = new TextEncoder().encode(JSON.stringify(profileResult.profile));
     const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-    if (!hash) {
+    if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
       return;
     }
 
@@ -4135,11 +4289,9 @@ async function captureCpuProfile(runtime: SessionRuntime, reason: string): Promi
 }
 
 async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Promise<void> {
-  if (
-    !runtime.cdpRouter ||
-    !isRuntimeCaptureScopeActive(runtime) ||
-    hasDisallowedCdpFrames(runtime.cdpScope)
-  ) {
+  const cdpScopeGeneration = claimRuntimeGlobalCdpCapture(runtime);
+
+  if (!runtime.cdpRouter || cdpScopeGeneration === null) {
     return;
   }
 
@@ -4151,6 +4303,7 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
   }
 
   runtime.heapSnapshotCapture = {
+    cdpScopeGeneration,
     chunks: [],
     bytes: 0,
     truncated: false
@@ -4176,8 +4329,7 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
     !completed.ok ||
     !snapshot ||
     snapshot.chunks.length === 0 ||
-    !isRuntimeCaptureScopeActive(runtime) ||
-    hasDisallowedCdpFrames(runtime.cdpScope)
+    !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)
   ) {
     await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.disable");
     return;
@@ -4187,7 +4339,8 @@ async function captureHeapSnapshot(runtime: SessionRuntime, reason: string): Pro
   const bytes = new TextEncoder().encode(joined);
   const hash = await putRuntimeCaptureBlob(runtime, "application/json", bytes);
 
-  if (!hash) {
+  if (!hash || !isRuntimeGlobalCdpCaptureClaimValid(runtime, cdpScopeGeneration)) {
+    await sendCdpCommand(runtime, { tabId: runtime.tabId }, "HeapProfiler.disable");
     return;
   }
 
@@ -5744,7 +5897,15 @@ async function updateSessionMetadataFromEventAsync(
   const frame = asRecord(payload?.frame);
   const nextUrl = asString(payload?.url) ?? asString(frame?.url);
   const nextTitle = asString(payload?.title) ?? asString(payload?.documentTitle);
+  const globalCdpNavigationChanged = Boolean(
+    nextUrl && runtime.mode === "full" && runtime.cdpRouter
+  );
   let changed = false;
+
+  if (globalCdpNavigationChanged) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
+    void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
+  }
 
   if (nextUrl) {
     if (!(await isRuntimeTopDocumentAllowed(runtime, nextUrl))) {
@@ -5771,6 +5932,12 @@ async function updateSessionMetadataFromEventAsync(
   if (changed) {
     pushSessionList();
     scheduleRuntimeStatePersist();
+  }
+
+  if (globalCdpNavigationChanged && nextUrl) {
+    enqueue(runtime, async () => {
+      await restoreCdpGlobalCaptureAfterNavigation(runtime, nextUrl, true);
+    });
   }
 }
 
@@ -5807,6 +5974,11 @@ async function handleTabUrlChanged(tabId: number, rawUrl: string): Promise<void>
     runtime.stoppedAt
   ) {
     return;
+  }
+
+  if (runtime.mode === "full" && runtime.cdpRouter && rawUrl !== runtime.captureUrl) {
+    invalidateCdpCaptureFrameTree(runtime.cdpScope);
+    void stopScreenRecording(runtime, "navigation-scope").catch(() => undefined);
   }
 
   if (!(await isRuntimeTopDocumentAllowed(runtime, rawUrl))) {
