@@ -2111,6 +2111,7 @@ syncBuiltinESMExports();
   it("keeps committed operations successful when the audit sink is unavailable", async () => {
     const server = await startShareServer();
     const auditPath = resolve(server.dataDir, "audit/share-access.jsonl");
+    await readLatestAuditClientHash(server, "list");
     await rm(auditPath, { force: true });
     await mkdir(auditPath);
 
