@@ -53,7 +53,10 @@ import {
   assertRuntimeStartRequirements,
   resolveInstalledRuntimeCapabilities
 } from "../shared/runtime-capabilities.js";
-import { shouldInjectPageHooksForMode } from "../shared/mode-profile.js";
+import {
+  shouldInjectIsolatedContentForMode,
+  shouldInjectMainWorldHooksForMode
+} from "../shared/mode-profile.js";
 import {
   applyEnterprisePolicyToRecorderConfig,
   ENTERPRISE_POLICY_STORAGE_KEY,
@@ -122,7 +125,7 @@ import {
   upsertRequestMeta,
   type RequestMetaEntry
 } from "./request-meta.js";
-import { injectMainWorldHook } from "./script-injection.js";
+import { injectMainWorldHook, injectRootPageAgentsForMode } from "./script-injection.js";
 import {
   FULL_MODE_STORAGE_SNAPSHOT_MAX_ITEMS,
   buildLocalStorageSnapshotExpression,
@@ -1296,11 +1299,9 @@ async function startSessionUnlocked(
       startToken.assertActive();
       await candidate.pipeline.flush();
 
-      if (shouldInjectHooksForMode(mode)) {
+      if (shouldInjectIsolatedContentForMode(mode)) {
         startToken.assertActive();
-        await ensureContentScriptInjected(candidate);
-        startToken.assertActive();
-        await ensureInjectedHooks(tabId, 0);
+        await ensureRootPageAgentsInjected(candidate);
       }
 
       if (mode === "full" && recorderConfig.capturePolicy?.categories.cdp !== "off") {
@@ -1663,7 +1664,7 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
     !isVolatileCaptureOpen(runtime.captureFence) ||
     runtime.stopping ||
     runtime.stoppedAt ||
-    !shouldInjectHooksForMode(runtime.mode)
+    !shouldInjectIsolatedContentForMode(runtime.mode)
   ) {
     return;
   }
@@ -1716,8 +1717,7 @@ async function restoreTabInstrumentationAfterNavigation(tabId: number): Promise<
 
   resetAuthorizedContentFrames(runtime);
 
-  await ensureContentScriptInjected(runtime);
-  await ensureInjectedHooks(tabId, 0);
+  await ensureRootPageAgentsInjected(runtime);
 
   if (runtime.mode === "full" && runtime.cdpRouter) {
     await restoreCdpGlobalCaptureAfterNavigation(runtime, tabMetadata.captureUrl, true);
@@ -1820,7 +1820,8 @@ async function handleCommittedContentDocument(details: {
       isVolatileCaptureOpen(runtime.captureFence) &&
       !runtime.stopping &&
       !runtime.stoppedAt &&
-      sessionsByTab.get(runtime.tabId) === runtime
+      sessionsByTab.get(runtime.tabId) === runtime,
+    mode: runtime.mode
   });
 
   if (result.status === "injected") {
@@ -5209,7 +5210,7 @@ async function authorizeContentSenderForReady(
     }
   }
 
-  if (!shouldInjectHooksForMode(runtime.mode)) {
+  if (!shouldInjectMainWorldHooksForMode(runtime.mode)) {
     return true;
   }
 
@@ -5220,7 +5221,10 @@ async function authorizeContentSenderForReady(
       return true;
     }
 
-    await ensureInjectedHooks(runtime.tabId, 0);
+    await injectMainWorldHook(chromeApi, {
+      tabId: runtime.tabId,
+      frameId: 0
+    }).catch(() => undefined);
     return true;
   }
 
@@ -5555,10 +5559,6 @@ function toStatusSampling(runtime: SessionRuntime): RecordingSampling {
   };
 }
 
-function shouldInjectHooksForMode(mode: CaptureMode): boolean {
-  return shouldInjectPageHooksForMode(mode);
-}
-
 function normalizePipelineResumeState(raw: unknown): PipelineResumeState {
   const row = asRecord(raw);
   const sequence = asRecord(row?.sequenceWatermark);
@@ -5808,26 +5808,12 @@ function normalizeHashesManifest(value: unknown): HashesManifest {
   };
 }
 
-async function ensureInjectedHooks(tabId: number, frameId: number): Promise<void> {
-  await chromeApi?.scripting
-    ?.executeScript({
-      target: { tabId, frameIds: [frameId] },
-      world: "MAIN",
-      files: ["injected.js"]
-    })
-    .catch(() => undefined);
-}
-
-async function ensureContentScriptInjected(runtime: SessionRuntime): Promise<void> {
-  await chromeApi?.scripting
-    ?.executeScript({
-      target: {
-        ...resolveContentScriptInjectionTarget(runtime.config.capturePolicy, runtime.tabId)
-      },
-      world: "ISOLATED",
-      files: ["content.js"]
-    })
-    .catch(() => undefined);
+async function ensureRootPageAgentsInjected(runtime: SessionRuntime): Promise<void> {
+  await injectRootPageAgentsForMode(chromeApi, {
+    mode: runtime.mode,
+    contentTarget: resolveContentScriptInjectionTarget(runtime.config.capturePolicy, runtime.tabId),
+    mainWorldTarget: { tabId: runtime.tabId, frameId: 0 }
+  }).catch(() => undefined);
 }
 
 function installLiteWebRequestCapture(): void {
@@ -7598,9 +7584,8 @@ async function restoreActiveRuntime(
         installLiteWebRequestCapture();
       }
 
-      if (shouldInjectHooksForMode(runtime.mode)) {
-        await ensureContentScriptInjected(runtime);
-        await ensureInjectedHooks(runtime.tabId, 0);
+      if (shouldInjectIsolatedContentForMode(runtime.mode)) {
+        await ensureRootPageAgentsInjected(runtime);
       }
 
       if (runtime.mode === "full" && runtime.config.capturePolicy?.categories.cdp !== "off") {

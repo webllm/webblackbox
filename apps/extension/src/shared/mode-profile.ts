@@ -56,8 +56,12 @@ export function applyModeProductBoundary(
   return next;
 }
 
-export function shouldInjectPageHooksForMode(mode: CaptureMode): boolean {
+export function shouldInjectIsolatedContentForMode(mode: CaptureMode): boolean {
   return mode === "lite" || mode === "full";
+}
+
+export function shouldInjectMainWorldHooksForMode(mode: CaptureMode): boolean {
+  return mode === "lite";
 }
 
 function applyFullModeCapturePolicy(policy: CapturePolicy | undefined): CapturePolicy {

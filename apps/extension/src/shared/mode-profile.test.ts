@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   MODE_PRODUCT_PROFILES,
   applyModeProductBoundary,
-  shouldInjectPageHooksForMode
+  shouldInjectIsolatedContentForMode,
+  shouldInjectMainWorldHooksForMode
 } from "./mode-profile.js";
 
 describe("mode-profile", () => {
@@ -68,9 +69,14 @@ describe("mode-profile", () => {
     expect(next.capturePolicy?.categories.cdp).toBe("full");
   });
 
-  it("injects page hooks for both shipped capture modes", () => {
-    expect(shouldInjectPageHooksForMode("lite")).toBe(true);
-    expect(shouldInjectPageHooksForMode("full")).toBe(true);
+  it("keeps isolated interaction agents in both modes", () => {
+    expect(shouldInjectIsolatedContentForMode("lite")).toBe(true);
+    expect(shouldInjectIsolatedContentForMode("full")).toBe(true);
+  });
+
+  it("reserves page MAIN-world hooks for Lite mode", () => {
+    expect(shouldInjectMainWorldHooksForMode("lite")).toBe(true);
+    expect(shouldInjectMainWorldHooksForMode("full")).toBe(false);
   });
 
   it("documents only the shipped runtime profiles", () => {

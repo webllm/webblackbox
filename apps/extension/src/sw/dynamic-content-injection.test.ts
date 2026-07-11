@@ -20,7 +20,8 @@ describe("injectPendingContentDocument", () => {
         chromeApi: chromeWithExecuteScript(executeScript),
         authorization,
         document,
-        isRuntimeActive: () => true
+        isRuntimeActive: () => true,
+        mode: "lite"
       })
     ).resolves.toEqual({ status: "injected" });
 
@@ -58,7 +59,8 @@ describe("injectPendingContentDocument", () => {
       chromeApi,
       authorization,
       document: documentB,
-      isRuntimeActive: () => true
+      isRuntimeActive: () => true,
+      mode: "lite"
     });
     await Promise.resolve();
 
@@ -68,7 +70,8 @@ describe("injectPendingContentDocument", () => {
         chromeApi,
         authorization,
         document: documentC,
-        isRuntimeActive: () => true
+        isRuntimeActive: () => true,
+        mode: "lite"
       })
     ).resolves.toEqual({ status: "injected" });
 
@@ -109,7 +112,8 @@ describe("injectPendingContentDocument", () => {
         chromeApi: chromeWithExecuteScript(executeScript),
         authorization,
         document,
-        isRuntimeActive: () => true
+        isRuntimeActive: () => true,
+        mode: "lite"
       })
     ).resolves.toEqual({
       status: "failed",
@@ -129,10 +133,65 @@ describe("injectPendingContentDocument", () => {
         chromeApi: chromeWithExecuteScript(executeScript),
         authorization,
         document,
-        isRuntimeActive: () => false
+        isRuntimeActive: () => false,
+        mode: "lite"
       })
     ).resolves.toEqual({ status: "stale" });
     expect(executeScript).not.toHaveBeenCalled();
+  });
+
+  it("injects only the isolated content agent in Full without touching page globals", async () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    const document = await pending(authorization, "document-full");
+    const originalConsole = () => undefined;
+    const originalFetch = () => Promise.resolve();
+    const originalStorage = { getItem: () => null };
+    const pageGlobals: {
+      console: () => void;
+      fetch: () => Promise<unknown>;
+      localStorage: { getItem: () => string | null };
+    } = {
+      console: originalConsole,
+      fetch: originalFetch,
+      localStorage: originalStorage
+    };
+    const executeScript = vi.fn(
+      async (options: {
+        target: { documentIds?: string[] };
+        world?: "MAIN" | "ISOLATED";
+        files?: string[];
+      }) => {
+        if (options.files?.includes("injected.js")) {
+          pageGlobals.console = () => undefined;
+          pageGlobals.fetch = () => Promise.reject(new Error("hooked"));
+          pageGlobals.localStorage = { getItem: () => "hooked" };
+        }
+
+        return [result(options.target.documentIds?.[0] ?? "")];
+      }
+    );
+
+    await expect(
+      injectPendingContentDocument({
+        chromeApi: chromeWithExecuteScript(executeScript),
+        authorization,
+        document,
+        isRuntimeActive: () => true,
+        mode: "full"
+      })
+    ).resolves.toEqual({ status: "injected" });
+
+    expect(executeScript).toHaveBeenCalledTimes(1);
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: TAB_ID, documentIds: ["document-full"] },
+      world: "ISOLATED",
+      files: ["content.js"]
+    });
+    expect(pageGlobals).toEqual({
+      console: originalConsole,
+      fetch: originalFetch,
+      localStorage: originalStorage
+    });
   });
 });
 

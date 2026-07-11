@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChromeApi, InjectionResult } from "../shared/chrome-api.js";
-import { injectContentScript, injectMainWorldHook } from "./script-injection.js";
+import {
+  injectContentScript,
+  injectMainWorldHook,
+  injectRootPageAgentsForMode
+} from "./script-injection.js";
 
 function chromeWithExecuteScript(
   executeScript: (options: unknown) => Promise<InjectionResult[]>
@@ -173,5 +177,79 @@ describe("script-injection", () => {
         documentId: "document-4"
       })
     ).rejects.toThrow("Main-world hook injection did not succeed in its target.");
+  });
+
+  it("starts Full with only the isolated content agent and leaves page hooks untouched", async () => {
+    const originalConsole = () => undefined;
+    const originalFetch = () => Promise.resolve();
+    const originalStorage = { getItem: () => null };
+    const pageGlobals: {
+      console: () => void;
+      fetch: () => Promise<unknown>;
+      localStorage: { getItem: () => string | null };
+    } = {
+      console: originalConsole,
+      fetch: originalFetch,
+      localStorage: originalStorage
+    };
+    const executeScript = vi.fn(async (rawOptions: unknown) => {
+      const options = rawOptions as {
+        target: { allFrames?: boolean; frameIds?: number[] };
+        files?: string[];
+        world?: "MAIN" | "ISOLATED";
+      };
+
+      if (options.files?.includes("injected.js")) {
+        pageGlobals.console = () => undefined;
+        pageGlobals.fetch = () => Promise.reject(new Error("hooked"));
+        pageGlobals.localStorage = { getItem: () => "hooked" };
+      }
+
+      return [{ frameId: options.target.frameIds?.[0] ?? 0 }];
+    });
+
+    await injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+      mode: "full",
+      contentTarget: { tabId: 7, allFrames: true },
+      mainWorldTarget: { tabId: 7, frameId: 0 }
+    });
+
+    expect(executeScript).toHaveBeenCalledTimes(1);
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: true },
+      world: "ISOLATED",
+      files: ["content.js"]
+    });
+    expect(pageGlobals).toEqual({
+      console: originalConsole,
+      fetch: originalFetch,
+      localStorage: originalStorage
+    });
+  });
+
+  it("starts Lite with isolated content followed by its MAIN-world hook", async () => {
+    const executeScript = vi.fn(async (rawOptions: unknown) => {
+      const options = rawOptions as {
+        target: { allFrames?: boolean; frameIds?: number[] };
+      };
+      return [{ frameId: options.target.frameIds?.[0] ?? 0 }];
+    });
+
+    await injectRootPageAgentsForMode(chromeWithExecuteScript(executeScript), {
+      mode: "lite",
+      contentTarget: { tabId: 7, allFrames: false },
+      mainWorldTarget: { tabId: 7, frameId: 0 }
+    });
+
+    expect(executeScript).toHaveBeenNthCalledWith(1, {
+      target: { tabId: 7, allFrames: false },
+      world: "ISOLATED",
+      files: ["content.js"]
+    });
+    expect(executeScript).toHaveBeenNthCalledWith(2, {
+      target: { tabId: 7, frameIds: [0] },
+      world: "MAIN",
+      files: ["injected.js"]
+    });
   });
 });

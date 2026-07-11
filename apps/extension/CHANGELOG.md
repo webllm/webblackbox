@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Kept Full mode entirely out of the page MAIN world while retaining its isolated interaction
+  agent: initial start, runtime restore, top navigation, content readiness, and dynamic child-frame
+  injection now load `injected.js` only for Lite, without changing Lite's exact dual-world order.
 - Made Lite coverage copy reflect installed runtime capabilities: store-safe UI now states that it
   records page-side signals without Chrome webRequest/browser-network metadata, while capable dev
   installs retain the browser-network baseline description and DOM snapshots are labeled nonvisual.

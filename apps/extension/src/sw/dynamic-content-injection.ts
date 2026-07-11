@@ -1,4 +1,10 @@
+import type { CaptureMode } from "@webblackbox/protocol";
+
 import type { ChromeApi } from "../shared/chrome-api.js";
+import {
+  shouldInjectIsolatedContentForMode,
+  shouldInjectMainWorldHooksForMode
+} from "../shared/mode-profile.js";
 import {
   ContentDocumentAuthorization,
   type AuthorizedContentDocument
@@ -10,14 +16,16 @@ export type DynamicContentInjectionResult =
   | Readonly<{ status: "failed"; failedCurrentNavigation: boolean; error: unknown }>;
 
 /**
- * Injects both worlds into one exact committed document. Every async boundary
- * rechecks the navigation identity so a late B result cannot touch C.
+ * Injects the mode-allowed worlds into one exact committed document. Every
+ * async boundary rechecks the navigation identity so a late B result cannot
+ * touch C.
  */
 export async function injectPendingContentDocument(input: {
   chromeApi: ChromeApi | null | undefined;
   authorization: ContentDocumentAuthorization;
   document: AuthorizedContentDocument;
   isRuntimeActive: () => boolean;
+  mode: CaptureMode;
 }): Promise<DynamicContentInjectionResult> {
   const { frameId, documentId } = input.document;
   const isCurrent = () =>
@@ -28,21 +36,25 @@ export async function injectPendingContentDocument(input: {
   }
 
   try {
-    await injectMainWorldHook(input.chromeApi, {
-      tabId: input.authorization.tabId,
-      frameId,
-      documentId
-    });
+    if (shouldInjectMainWorldHooksForMode(input.mode)) {
+      await injectMainWorldHook(input.chromeApi, {
+        tabId: input.authorization.tabId,
+        frameId,
+        documentId
+      });
 
-    if (!isCurrent()) {
-      return { status: "stale" };
+      if (!isCurrent()) {
+        return { status: "stale" };
+      }
     }
 
-    await injectContentScript(input.chromeApi, {
-      tabId: input.authorization.tabId,
-      frameId,
-      documentId
-    });
+    if (shouldInjectIsolatedContentForMode(input.mode)) {
+      await injectContentScript(input.chromeApi, {
+        tabId: input.authorization.tabId,
+        frameId,
+        documentId
+      });
+    }
 
     if (!isCurrent()) {
       return { status: "stale" };
