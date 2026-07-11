@@ -11,7 +11,6 @@ import {
   type ContentEventBatchId,
   type ContentReadyId
 } from "../shared/content-activation-protocol.js";
-import { createExtensionI18n } from "../shared/i18n.js";
 import {
   parseMainWorldControllerSeedMessage,
   sameMainWorldControllerCapability,
@@ -97,7 +96,8 @@ if (contentBootstrapLease) {
 
 function bootstrapContentRuntime(bootstrapLease: ContentBootstrapLease): void {
   const chromeApi = getChromeApi();
-  const { t } = createExtensionI18n();
+  const keyboardMarkerMessage =
+    chromeApi?.i18n?.getMessage?.("contentKeyboardMarker") || "Keyboard marker";
   let activationEpoch = 0;
   let lifecycleVersion = 0;
   let awaitingReady: AwaitingReady | null = null;
@@ -1134,7 +1134,7 @@ function bootstrapContentRuntime(bootstrapLease: ContentBootstrapLease): void {
 
     const agent = await ensureCaptureAgent();
     if (currentActivation === activation) {
-      agent.emitMarker(t("contentKeyboardMarker"));
+      agent.emitMarker(keyboardMarkerMessage);
     }
   }
 

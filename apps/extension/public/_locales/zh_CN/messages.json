@@ -10,5 +10,8 @@
   },
   "extensionCommandMarkBug": {
     "message": "创建用户标记"
+  },
+  "contentKeyboardMarker": {
+    "message": "键盘标记"
   }
 }

@@ -93,6 +93,7 @@ export type ChromeApi = {
     download(options: { url: string; filename: string; saveAs?: boolean }): Promise<number>;
   };
   i18n?: {
+    getMessage?(messageName: string): string;
     getUILanguage(): string;
   };
   offscreen?: {

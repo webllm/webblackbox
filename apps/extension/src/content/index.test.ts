@@ -12,6 +12,7 @@ const state = vi.hoisted(() => {
   const portMessages: unknown[] = [];
   const sentMessages: unknown[] = [];
   const agentStates: unknown[] = [];
+  const agentMarkers: string[] = [];
   let flushEvent: unknown | null = null;
   let flushCalls = 0;
   let freezeCalls = 0;
@@ -94,7 +95,9 @@ const state = vi.hoisted(() => {
           });
       });
     },
-    emitMarker() {},
+    emitMarker(message: string) {
+      agentMarkers.push(message);
+    },
     setIndicatorState() {},
     dispose() {}
   };
@@ -105,6 +108,7 @@ const state = vi.hoisted(() => {
     portMessages,
     sentMessages,
     agentStates,
+    agentMarkers,
     port,
     agent,
     setFlushEvent(event: unknown) {
@@ -193,6 +197,11 @@ const state = vi.hoisted(() => {
 
 vi.mock("../shared/chrome-api.js", () => ({
   getChromeApi: () => ({
+    i18n: {
+      getMessage: (messageName: string) =>
+        messageName === "contentKeyboardMarker" ? "Localized keyboard marker" : "",
+      getUILanguage: () => "en-US"
+    },
     runtime: {
       connect: vi.fn(() => state.port),
       getURL: () => "./content-agent.js",
@@ -320,6 +329,9 @@ describe("content activation runtime", () => {
         (message) => (message as { kind?: unknown }).kind === "content.events"
       )
     ).toBe(false);
+
+    await dispatchRuntimeMessage({ kind: "sw.marker-command" });
+    await vi.waitFor(() => expect(state.agentMarkers).toEqual(["Localized keyboard marker"]));
 
     state.agentOptions!.emitBatch(
       [
