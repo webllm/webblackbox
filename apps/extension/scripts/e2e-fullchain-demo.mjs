@@ -126,8 +126,13 @@ async function main() {
   await ensureBuildInputs();
 
   await mkdir(downloadDir, { recursive: true });
-  const extensionDirForRun = recordScreenInFullMode
-    ? await prepareScreenRecordingE2eExtensionDir(extensionDir)
+  const extensionCapabilities = await readExtensionHarnessCapabilities(extensionDir);
+  const { activeTabActionGrantRequired } = extensionCapabilities;
+  const networkEvidenceExpected =
+    captureMode === "full" ? extensionCapabilities.fullCdp : extensionCapabilities.browserNetwork;
+  const actionPopupRequired = recordScreenInFullMode || activeTabActionGrantRequired;
+  const extensionDirForRun = actionPopupRequired
+    ? await prepareActionShortcutE2eExtensionDir(extensionDir)
     : extensionDir;
   state.tempExtensionDir = extensionDirForRun === extensionDir ? null : extensionDirForRun;
 
@@ -237,16 +242,16 @@ async function main() {
 
   // Extension UI authorization is page- and transport-bound. Keep every
   // fullchain control action in an actual popup page, including headless runs.
-  let usePopupUiActionsEffective = recordScreenInFullMode ? false : usePopupUiActions;
+  let usePopupUiActionsEffective = actionPopupRequired ? false : usePopupUiActions;
   if (!popupTarget) {
-    popupTarget = recordScreenInFullMode
+    popupTarget = actionPopupRequired
       ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
       : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
     state.openedTargetIds.push(popupTarget.id);
   } else if (warmupPopupTargetId) {
     await closeTarget(baseUrl, warmupPopupTargetId);
     state.openedTargetIds = state.openedTargetIds.filter((id) => id !== warmupPopupTargetId);
-    popupTarget = recordScreenInFullMode
+    popupTarget = actionPopupRequired
       ? await openActionPopupFromShortcut(baseUrl, demoClient, extensionId)
       : await openTarget(baseUrl, `chrome-extension://${extensionId}/popup.html`);
     state.openedTargetIds.push(popupTarget.id);
@@ -386,7 +391,8 @@ async function main() {
     baseUrl,
     demoUrl,
     browserClient: state.browserClient,
-    extensionId
+    extensionId,
+    networkEvidenceExpected
   });
   assert(realWorldResult.ok, "Real-world scenario failed", realWorldResult);
 
@@ -524,24 +530,26 @@ async function main() {
   `);
   const playerResult = await waitForPlayerLoad(playerClient, 35_000, exportPassphrase);
   assert(playerResult.eventCount > 0, "Player rendered zero timeline events", playerResult);
-  assert(
-    playerResult.waterfallCount > 0,
-    "Player rendered zero network waterfall rows",
-    playerResult
-  );
+  if (networkEvidenceExpected) {
+    assert(
+      playerResult.waterfallCount > 0,
+      "Player rendered zero network waterfall rows",
+      playerResult
+    );
 
-  const hasApiRequest = [
-    ...(playerResult.waterfallSamples ?? []),
-    ...(playerResult.waterfallSampleUrls ?? [])
-  ].some((sample) => sample.includes("/api/"));
-  assert(hasApiRequest, "Player waterfall does not include demo API requests", playerResult);
+    const hasApiRequest = [
+      ...(playerResult.waterfallSamples ?? []),
+      ...(playerResult.waterfallSampleUrls ?? [])
+    ].some((sample) => sample.includes("/api/"));
+    assert(hasApiRequest, "Player waterfall does not include demo API requests", playerResult);
+  }
 
   const requiredEventTypes =
     captureMode === "lite"
       ? [
           "user.mousemove",
           "console.entry",
-          "network.request",
+          ...(networkEvidenceExpected ? ["network.request"] : []),
           "dom.snapshot",
           "storage.local.snapshot"
         ]
@@ -672,7 +680,18 @@ async function ensureBuildInputs() {
   await access(resolve(playerDir, "main.js"), constants.R_OK);
 }
 
-async function prepareScreenRecordingE2eExtensionDir(sourceDir) {
+async function readExtensionHarnessCapabilities(sourceDir) {
+  const manifest = JSON.parse(await readFile(resolve(sourceDir, "manifest.json"), "utf8"));
+  const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
+  return {
+    activeTabActionGrantRequired:
+      permissions.includes("activeTab") && !permissions.includes("tabs"),
+    browserNetwork: permissions.includes("webRequest"),
+    fullCdp: permissions.includes("debugger")
+  };
+}
+
+async function prepareActionShortcutE2eExtensionDir(sourceDir) {
   const tempDir = createE2eTempPath("webblackbox-ext-fullchain-extension");
   await rm(tempDir, { recursive: true, force: true });
   await cp(sourceDir, tempDir, { recursive: true });
@@ -2351,7 +2370,8 @@ async function runRealWorldScenarioAddons({
   control,
   baseUrl,
   demoUrl,
-  browserClient
+  browserClient,
+  networkEvidenceExpected
 }) {
   if (!scenario) {
     return { ok: true, skipped: true };
@@ -2618,11 +2638,11 @@ async function runRealWorldScenarioAddons({
     permissionMarker,
     multiTabMarker
   ].filter((marker) => typeof marker === "string" && marker.length > 0);
-  const expectedUrls = ["/api/large-response"];
-  if (wantsIframeNetwork) {
+  const expectedUrls = networkEvidenceExpected ? ["/api/large-response"] : [];
+  if (networkEvidenceExpected && wantsIframeNetwork) {
     expectedUrls.push("/api/iframe-large-response");
   }
-  if (wantsChildTarget) {
+  if (networkEvidenceExpected && wantsChildTarget) {
     expectedUrls.push("/api/worker-large-response");
   }
 
@@ -2648,7 +2668,7 @@ async function runRealWorldScenarioAddons({
     archiveEvidence: {
       markers: expectedMarkers,
       urls: expectedUrls,
-      eventTypes: ["console.entry", "network.request"]
+      eventTypes: ["console.entry", ...(networkEvidenceExpected ? ["network.request"] : [])]
     },
     browserConnected: Boolean(browserClient)
   };
