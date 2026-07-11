@@ -7,6 +7,7 @@ import {
 
 import { getChromeApi } from "../shared/chrome-api.js";
 import { createExtensionI18n } from "../shared/i18n.js";
+import { resolveInstalledRuntimeCapabilities } from "../shared/runtime-capabilities.js";
 import {
   PORT_NAMES,
   type ExportPrivacyWarning,
@@ -17,6 +18,7 @@ import {
 } from "../shared/messages.js";
 
 const chromeApi = getChromeApi();
+const runtimeCapabilities = resolveInstalledRuntimeCapabilities(chromeApi);
 const port = chromeApi?.runtime?.connect({ name: PORT_NAMES.popup });
 const extensionVersion = chromeApi?.runtime?.getManifest?.().version ?? "dev";
 const i18n = createExtensionI18n({
@@ -81,7 +83,8 @@ if (root) {
 async function bootstrap(container: HTMLElement): Promise<void> {
   state.tabId = await getActiveTabId();
   state.exportPolicyForm = loadPopupExportPolicyForm();
-  state.fullModeVisualCapture = loadPopupFullVisualCapture();
+  state.fullModeVisualCapture = normalizeFullModeVisualCapture(loadPopupFullVisualCapture());
+  savePopupFullVisualCapture(state.fullModeVisualCapture);
 
   port?.onMessage.addListener((message) => {
     applyMessage(message as ExtensionOutboundMessage);
@@ -232,20 +235,32 @@ function render(container: HTMLElement): void {
 
   const actions = document.createElement("div");
   actions.className = "wb-popup__actions";
+  if (runtimeCapabilities.pageInjection) {
+    actions.append(
+      createActionButton(t("popupStartLite"), "wb-btn wb-btn--brand", "start-lite", startDisabled)
+    );
+  }
+
+  if (runtimeCapabilities.fullMode) {
+    actions.append(
+      createActionButton(
+        t("popupStartFull"),
+        "wb-btn wb-btn--brand-alt",
+        "start-full",
+        startDisabled
+      )
+    );
+  }
+
   actions.append(
-    createActionButton(t("popupStartLite"), "wb-btn wb-btn--brand", "start-lite", startDisabled),
-    createActionButton(
-      t("popupStartFull"),
-      "wb-btn wb-btn--brand-alt",
-      "start-full",
-      startDisabled
-    ),
     createActionButton(t("popupStop"), "wb-btn wb-btn--muted", "stop", !activeSession),
     createActionButton(t("popupExport"), "wb-btn wb-btn--accent", "export", exportDisabled)
   );
   section.append(actions);
 
-  section.append(createFullModeRecordingSection(startDisabled));
+  if (runtimeCapabilities.fullMode && runtimeCapabilities.globalVisual) {
+    section.append(createFullModeRecordingSection(startDisabled));
+  }
 
   const nav = document.createElement("div");
   nav.className = "wb-popup__nav";
@@ -1197,6 +1212,7 @@ function createRingUsageSection(ringUsage: {
 function createFullModeRecordingSection(disabled: boolean): HTMLElement {
   const section = document.createElement("section");
   section.className = "wb-popup__policy";
+  section.dataset.section = "full-visual-capture";
 
   const title = document.createElement("h2");
   title.className = "wb-popup__policy-title";
@@ -1205,8 +1221,12 @@ function createFullModeRecordingSection(disabled: boolean): HTMLElement {
 
   const options: Array<{ value: FullModeVisualCapture; label: string }> = [
     { value: "screenshots", label: t("popupFullVisualScreenshots") },
-    { value: "recording", label: t("popupFullVisualRecording") },
-    { value: "both", label: t("popupFullVisualBoth") },
+    ...(runtimeCapabilities.tabCapture
+      ? [
+          { value: "recording" as const, label: t("popupFullVisualRecording") },
+          { value: "both" as const, label: t("popupFullVisualBoth") }
+        ]
+      : []),
     { value: "none", label: t("popupFullVisualNone") }
   ];
 
@@ -1232,6 +1252,18 @@ function createFullModeRecordingSection(disabled: boolean): HTMLElement {
 
 function isFullModeVisualCapture(value: string): value is FullModeVisualCapture {
   return value === "screenshots" || value === "recording" || value === "both" || value === "none";
+}
+
+function normalizeFullModeVisualCapture(value: FullModeVisualCapture): FullModeVisualCapture {
+  if (!runtimeCapabilities.globalVisual) {
+    return "none";
+  }
+
+  if (runtimeCapabilities.tabCapture || value === "screenshots" || value === "none") {
+    return value;
+  }
+
+  return value === "both" ? "screenshots" : "none";
 }
 
 function createActionButton(

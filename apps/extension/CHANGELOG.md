@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Made popup and options capture controls capability-aware: store-safe installs expose only Lite,
+  Full visual choices require CDP, recording choices require tabCapture, and saving a reduced UI
+  preserves supported hidden configuration instead of resetting it.
 - Made new-session startup atomic: capability, policy, performance-budget, pipeline, injection, CDP,
   optional recording, and Lite reload prerequisites now complete behind a durable stopping tombstone
   before one required active checkpoint; cancellation or failure purges the provisional session

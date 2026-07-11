@@ -9,10 +9,12 @@ import {
   normalizePerformanceBudget,
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
+import { resolveInstalledRuntimeCapabilities } from "../shared/runtime-capabilities.js";
 
 const STORAGE_KEY = "webblackbox.options";
 
 const chromeApi = getChromeApi();
+const runtimeCapabilities = resolveInstalledRuntimeCapabilities(chromeApi);
 const i18n = createExtensionI18n({
   pageTitleKey: "pageTitleOptions"
 });
@@ -37,6 +39,10 @@ async function bootstrap(container: HTMLElement): Promise<void> {
 
 function render(container: HTMLElement, options: OptionsState): void {
   const { recorderConfig: config, performanceBudget } = options;
+  const hasFullCapture = runtimeCapabilities.fullMode;
+  const hasNetworkCapture =
+    hasFullCapture ||
+    (runtimeCapabilities.pageInjection && runtimeCapabilities.browserNetwork === "webRequest");
   const section = document.createElement("section");
   section.className = "card wb-options-card";
 
@@ -99,31 +105,33 @@ function render(container: HTMLElement, options: OptionsState): void {
       { min: 500, max: 120_000 }
     )
   );
-  section.append(
-    ...createNumberField(
-      t("optionsScreenshotIdleMs"),
-      "screenshotIdleMs",
-      config.sampling.screenshotIdleMs,
-      { min: 0, max: 120_000 }
-    )
-  );
-  section.append(createHelpText([t("optionsScreenshotIdleHelp")]));
-  section.append(
-    ...createNumberField(
-      t("optionsBodyCaptureMaxBytes"),
-      "bodyCaptureMaxBytes",
-      config.sampling.bodyCaptureMaxBytes,
-      { min: 0, max: 1_048_576 }
-    )
-  );
-  section.append(createHelpText([t("optionsBodyCaptureHelp")]));
+  if (hasFullCapture) {
+    section.append(
+      ...createNumberField(
+        t("optionsScreenshotIdleMs"),
+        "screenshotIdleMs",
+        config.sampling.screenshotIdleMs,
+        { min: 0, max: 120_000 }
+      )
+    );
+    section.append(createHelpText([t("optionsScreenshotIdleHelp")]));
+    section.append(
+      ...createNumberField(
+        t("optionsBodyCaptureMaxBytes"),
+        "bodyCaptureMaxBytes",
+        config.sampling.bodyCaptureMaxBytes,
+        { min: 0, max: 1_048_576 }
+      )
+    );
+    section.append(createHelpText([t("optionsBodyCaptureHelp")]));
+  }
   section.append(
     createCheckboxRow("freezeOnError", t("optionsFreezeOnError"), config.freezeOnError, {
       spacious: true
     })
   );
   section.append(createHelpText([t("optionsFreezeHelp")], { variant: "spacious" }));
-  section.append(createPerformanceBudgetSection(performanceBudget));
+  section.append(createPerformanceBudgetSection(performanceBudget, hasNetworkCapture));
   section.append(
     ...createTextareaField(
       t("optionsBlockedSelectors"),
@@ -131,13 +139,15 @@ function render(container: HTMLElement, options: OptionsState): void {
       config.redaction.blockedSelectors.join("\n")
     )
   );
-  section.append(
-    ...createTextareaField(
-      t("optionsRedactedHeaders"),
-      "redactHeaders",
-      config.redaction.redactHeaders.join("\n")
-    )
-  );
+  if (hasNetworkCapture) {
+    section.append(
+      ...createTextareaField(
+        t("optionsRedactedHeaders"),
+        "redactHeaders",
+        config.redaction.redactHeaders.join("\n")
+      )
+    );
+  }
   section.append(
     ...createTextareaField(
       t("optionsBodySensitivePatterns"),
@@ -183,8 +193,8 @@ function render(container: HTMLElement, options: OptionsState): void {
   const resetButton = container.querySelector<HTMLButtonElement>("#resetConfig");
 
   saveButton?.addEventListener("click", async () => {
-    const nextRecorderConfig = readConfigFromForm(container);
-    const nextPerformanceBudget = readPerformanceBudgetFromForm(container);
+    const nextRecorderConfig = readConfigFromForm(container, config);
+    const nextPerformanceBudget = readPerformanceBudgetFromForm(container, performanceBudget);
     await saveOptionsState({
       recorderConfig: nextRecorderConfig,
       performanceBudget: nextPerformanceBudget
@@ -259,77 +269,82 @@ async function saveOptionsState(options: OptionsState): Promise<void> {
   });
 }
 
-function readPerformanceBudgetFromForm(container: HTMLElement): PerformanceBudgetConfig {
+function readPerformanceBudgetFromForm(
+  container: HTMLElement,
+  loaded: PerformanceBudgetConfig
+): PerformanceBudgetConfig {
   const raw = {
-    lcpWarnMs: Number(container.querySelector<HTMLInputElement>("#budgetLcpWarnMs")?.value),
-    requestWarnMs: Number(container.querySelector<HTMLInputElement>("#budgetRequestWarnMs")?.value),
-    errorRateWarnPct: Number(
-      container.querySelector<HTMLInputElement>("#budgetErrorRateWarnPct")?.value
-    ),
-    autoFreezeOnBreach:
-      container.querySelector<HTMLInputElement>("#budgetAutoFreezeOnBreach")?.checked ?? false
+    lcpWarnMs: readNumberInput(container, "budgetLcpWarnMs", loaded.lcpWarnMs),
+    requestWarnMs: readNumberInput(container, "budgetRequestWarnMs", loaded.requestWarnMs),
+    errorRateWarnPct: readNumberInput(container, "budgetErrorRateWarnPct", loaded.errorRateWarnPct),
+    autoFreezeOnBreach: readCheckboxInput(
+      container,
+      "budgetAutoFreezeOnBreach",
+      loaded.autoFreezeOnBreach
+    )
   };
 
   return normalizePerformanceBudget(raw);
 }
 
-function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CONFIG {
-  const ringBufferMinutes = Number(
-    container.querySelector<HTMLInputElement>("#ringBufferMinutes")?.value ??
-      DEFAULT_RECORDER_CONFIG.ringBufferMinutes
+function readConfigFromForm(
+  container: HTMLElement,
+  loaded: typeof DEFAULT_RECORDER_CONFIG
+): typeof DEFAULT_RECORDER_CONFIG {
+  const ringBufferMinutes = readNumberInput(
+    container,
+    "ringBufferMinutes",
+    loaded.ringBufferMinutes
   );
-  const actionWindowMs = Number(
-    container.querySelector<HTMLInputElement>("#actionWindowMs")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.actionWindowMs
+  const actionWindowMs = readNumberInput(
+    container,
+    "actionWindowMs",
+    loaded.sampling.actionWindowMs
   );
-  const mousemoveHz = Number(
-    container.querySelector<HTMLInputElement>("#mousemoveHz")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.mousemoveHz
+  const mousemoveHz = readNumberInput(container, "mousemoveHz", loaded.sampling.mousemoveHz);
+  const scrollHz = readNumberInput(container, "scrollHz", loaded.sampling.scrollHz);
+  const domFlushMs = readNumberInput(container, "domFlushMs", loaded.sampling.domFlushMs);
+  const snapshotIntervalMs = readNumberInput(
+    container,
+    "snapshotIntervalMs",
+    loaded.sampling.snapshotIntervalMs
   );
-  const scrollHz = Number(
-    container.querySelector<HTMLInputElement>("#scrollHz")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.scrollHz
+  const screenshotIdleMs = readNumberInput(
+    container,
+    "screenshotIdleMs",
+    loaded.sampling.screenshotIdleMs
   );
-  const domFlushMs = Number(
-    container.querySelector<HTMLInputElement>("#domFlushMs")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.domFlushMs
-  );
-  const snapshotIntervalMs = Number(
-    container.querySelector<HTMLInputElement>("#snapshotIntervalMs")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.snapshotIntervalMs
-  );
-  const screenshotIdleMs = Number(
-    container.querySelector<HTMLInputElement>("#screenshotIdleMs")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.screenshotIdleMs
-  );
-  const bodyCaptureMaxBytes = Number(
-    container.querySelector<HTMLInputElement>("#bodyCaptureMaxBytes")?.value ??
-      DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes
+  const bodyCaptureMaxBytes = readNumberInput(
+    container,
+    "bodyCaptureMaxBytes",
+    loaded.sampling.bodyCaptureMaxBytes
   );
 
   const blockedSelectors = splitLines(
     container.querySelector<HTMLTextAreaElement>("#blockedSelectors")?.value
   );
-  const redactHeaders = splitLines(
-    container.querySelector<HTMLTextAreaElement>("#redactHeaders")?.value
-  );
+  const redactHeadersInput = container.querySelector<HTMLTextAreaElement>("#redactHeaders");
+  const redactHeaders = redactHeadersInput
+    ? splitLines(redactHeadersInput.value)
+    : [...loaded.redaction.redactHeaders];
   const redactBodyPatterns = splitLines(
     container.querySelector<HTMLTextAreaElement>("#redactBodyPatterns")?.value
   );
-  const hashSensitiveValues =
-    container.querySelector<HTMLInputElement>("#hashSensitiveValues")?.checked ?? true;
-  const freezeOnError =
-    container.querySelector<HTMLInputElement>("#freezeOnError")?.checked ??
-    DEFAULT_RECORDER_CONFIG.freezeOnError;
+  const hashSensitiveValues = readCheckboxInput(
+    container,
+    "hashSensitiveValues",
+    loaded.redaction.hashSensitiveValues
+  );
+  const freezeOnError = readCheckboxInput(container, "freezeOnError", loaded.freezeOnError);
 
   return {
-    ...DEFAULT_RECORDER_CONFIG,
+    ...loaded,
     ringBufferMinutes: Number.isFinite(ringBufferMinutes) ? Math.max(1, ringBufferMinutes) : 10,
     freezeOnError,
     freezeOnNetworkFailure: false,
     freezeOnLongTaskSpike: false,
     sampling: {
-      ...DEFAULT_RECORDER_CONFIG.sampling,
+      ...loaded.sampling,
       actionWindowMs: Number.isFinite(actionWindowMs) ? Math.max(100, actionWindowMs) : 1500,
       mousemoveHz: Number.isFinite(mousemoveHz)
         ? Math.min(240, Math.max(1, mousemoveHz))
@@ -353,7 +368,7 @@ function readConfigFromForm(container: HTMLElement): typeof DEFAULT_RECORDER_CON
         : DEFAULT_RECORDER_CONFIG.sampling.bodyCaptureMaxBytes
     },
     redaction: {
-      ...DEFAULT_RECORDER_CONFIG.redaction,
+      ...loaded.redaction,
       blockedSelectors,
       redactHeaders,
       redactBodyPatterns,
@@ -442,37 +457,47 @@ function createRuntimeProfilesSection(): HTMLElement {
 }
 
 function createModeProfileCards(): HTMLElement[] {
-  return Object.keys(MODE_PRODUCT_PROFILES).map((mode) => {
-    const card = document.createElement("article");
-    card.className = "wb-options-profile-card";
+  return Object.keys(MODE_PRODUCT_PROFILES)
+    .filter((mode) =>
+      mode === "full" ? runtimeCapabilities.fullMode : runtimeCapabilities.pageInjection
+    )
+    .map((mode) => {
+      const card = document.createElement("article");
+      card.className = "wb-options-profile-card";
+      card.dataset.modeProfile = mode;
 
-    const title = document.createElement("strong");
-    title.append(mode === "full" ? t("modeFull") : t("modeLite"), " ", createCode(mode));
+      const title = document.createElement("strong");
+      title.append(mode === "full" ? t("modeFull") : t("modeLite"), " ", createCode(mode));
 
-    const summary = document.createElement("span");
-    summary.className = "wb-options-profile-summary";
-    summary.textContent =
-      mode === "full" ? t("optionsFullProfileSummary") : t("optionsLiteProfileSummary");
+      const summary = document.createElement("span");
+      summary.className = "wb-options-profile-summary";
+      summary.textContent =
+        mode === "full" ? t("optionsFullProfileSummary") : t("optionsLiteProfileSummary");
 
-    const signals = document.createElement("span");
-    signals.className = "wb-options-profile-meta";
-    signals.textContent = t("optionsProfileSignals", {
-      value: mode === "full" ? t("optionsFullProfileSignals") : t("optionsLiteProfileSignals")
+      const signals = document.createElement("span");
+      signals.className = "wb-options-profile-meta";
+      signals.textContent = t("optionsProfileSignals", {
+        value: mode === "full" ? t("optionsFullProfileSignals") : t("optionsLiteProfileSignals")
+      });
+
+      const heavyCapture = document.createElement("span");
+      heavyCapture.className = "wb-options-profile-meta";
+      heavyCapture.textContent = t("optionsProfileHeavyCapture", {
+        value:
+          mode === "full"
+            ? t("optionsFullProfileHeavyCapture")
+            : t("optionsLiteProfileHeavyCapture")
+      });
+
+      card.append(title, summary, signals, heavyCapture);
+      return card;
     });
-
-    const heavyCapture = document.createElement("span");
-    heavyCapture.className = "wb-options-profile-meta";
-    heavyCapture.textContent = t("optionsProfileHeavyCapture", {
-      value:
-        mode === "full" ? t("optionsFullProfileHeavyCapture") : t("optionsLiteProfileHeavyCapture")
-    });
-
-    card.append(title, summary, signals, heavyCapture);
-    return card;
-  });
 }
 
-function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConfig): HTMLElement {
+function createPerformanceBudgetSection(
+  performanceBudget: PerformanceBudgetConfig,
+  includeNetworkBudgets: boolean
+): HTMLElement {
   const section = createInsetSection("dense");
 
   const title = document.createElement("h2");
@@ -486,29 +511,37 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
       max: 30_000,
       step: 100,
       compact: true
-    }),
-    ...createNumberField(
-      t("optionsRequestWarnMs"),
-      "budgetRequestWarnMs",
-      performanceBudget.requestWarnMs,
-      {
-        min: 100,
-        max: 60_000,
-        step: 100,
-        compact: true
-      }
-    ),
-    ...createNumberField(
-      t("optionsErrorRateWarnPct"),
-      "budgetErrorRateWarnPct",
-      performanceBudget.errorRateWarnPct,
-      {
-        min: 1,
-        max: 100,
-        step: 1,
-        compact: true
-      }
-    ),
+    })
+  );
+
+  if (includeNetworkBudgets) {
+    section.append(
+      ...createNumberField(
+        t("optionsRequestWarnMs"),
+        "budgetRequestWarnMs",
+        performanceBudget.requestWarnMs,
+        {
+          min: 100,
+          max: 60_000,
+          step: 100,
+          compact: true
+        }
+      ),
+      ...createNumberField(
+        t("optionsErrorRateWarnPct"),
+        "budgetErrorRateWarnPct",
+        performanceBudget.errorRateWarnPct,
+        {
+          min: 1,
+          max: 100,
+          step: 1,
+          compact: true
+        }
+      )
+    );
+  }
+
+  section.append(
     createCheckboxRow(
       "budgetAutoFreezeOnBreach",
       t("optionsAutoFreezeOnBreach"),
@@ -517,6 +550,15 @@ function createPerformanceBudgetSection(performanceBudget: PerformanceBudgetConf
   );
 
   return section;
+}
+
+function readNumberInput(container: HTMLElement, id: string, fallback: number): number {
+  const input = container.querySelector<HTMLInputElement>(`#${id}`);
+  return input ? Number(input.value) : fallback;
+}
+
+function readCheckboxInput(container: HTMLElement, id: string, fallback: boolean): boolean {
+  return container.querySelector<HTMLInputElement>(`#${id}`)?.checked ?? fallback;
 }
 
 function createInsetSection(variant: "default" | "dense" = "default"): HTMLElement {

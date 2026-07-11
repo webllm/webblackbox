@@ -23,6 +23,7 @@ const EXPORT_PRIVACY_WARNING = {
 
 type PortMessageHandler = (message: unknown) => void;
 type PortPostMessageHandler = (message: unknown, port: FakePort) => void;
+type RuntimeFixture = "dev" | "store-safe" | "cdp-no-tab-capture";
 
 class FakePort {
   name = "webblackbox:popup";
@@ -65,8 +66,22 @@ function installChromeStub(
   options: {
     sendMessage?: ReturnType<typeof vi.fn>;
     onQuery?: () => void | Promise<void>;
+    runtimeFixture?: RuntimeFixture;
   } = {}
 ): void {
+  const runtimeFixture = options.runtimeFixture ?? "dev";
+  const hasCdp = runtimeFixture !== "store-safe";
+  const hasTabCapture = runtimeFixture !== "cdp-no-tab-capture";
+  const permissions = [
+    runtimeFixture === "store-safe" ? "activeTab" : undefined,
+    "scripting",
+    hasCdp ? "debugger" : undefined,
+    hasTabCapture ? "tabCapture" : undefined
+  ].filter((permission): permission is string => typeof permission === "string");
+  const runtimeEvent = {
+    addListener: vi.fn(),
+    removeListener: vi.fn()
+  };
   const query = vi.fn(async () => {
     await options.onQuery?.();
     return [
@@ -93,10 +108,42 @@ function installChromeStub(
         connect: vi.fn(() => port),
         getURL,
         getManifest: vi.fn(() => ({
-          version: "0.1.1"
+          version: "0.1.1",
+          permissions,
+          ...(runtimeFixture === "store-safe" ? {} : { host_permissions: ["<all_urls>"] })
         })),
         ...(options.sendMessage ? { sendMessage: options.sendMessage } : {})
       },
+      scripting: {
+        executeScript: vi.fn(async () => [])
+      },
+      ...(hasCdp
+        ? {
+            debugger: {
+              attach: vi.fn(async () => undefined),
+              detach: vi.fn(async () => undefined),
+              sendCommand: vi.fn(async () => ({})),
+              onEvent: runtimeEvent,
+              onDetach: runtimeEvent
+            }
+          }
+        : {}),
+      ...(hasTabCapture
+        ? {
+            tabCapture: {
+              getMediaStreamId: vi.fn(async () => "stream-id")
+            }
+          }
+        : {}),
+      ...(runtimeFixture === "dev"
+        ? {
+            webRequest: {
+              onBeforeRequest: runtimeEvent,
+              onCompleted: runtimeEvent,
+              onErrorOccurred: runtimeEvent
+            }
+          }
+        : {}),
       tabs: {
         create,
         query
@@ -296,6 +343,72 @@ describe("popup export policy form", () => {
     Reflect.deleteProperty(globalThis, "chrome");
     document.body.innerHTML = "";
     localStorage.clear();
+  });
+
+  it("renders all capture controls in a fully capable development runtime", async () => {
+    installChromeStub(new FakePort(), { runtimeFixture: "dev" });
+
+    await importPopupModule();
+
+    expect(getStartLiteButton()).toBeInstanceOf(HTMLButtonElement);
+    expect(getStartFullButton()).toBeInstanceOf(HTMLButtonElement);
+    expect(document.querySelector("[data-section='full-visual-capture']")).not.toBeNull();
+    expect(getFullVisualCaptureRadio("screenshots")).toBeInstanceOf(HTMLInputElement);
+    expect(getFullVisualCaptureRadio("recording")).toBeInstanceOf(HTMLInputElement);
+    expect(getFullVisualCaptureRadio("both")).toBeInstanceOf(HTMLInputElement);
+    expect(getFullVisualCaptureRadio("none")).toBeInstanceOf(HTMLInputElement);
+  });
+
+  it("omits Full and visual capture DOM in a store-safe runtime", async () => {
+    localStorage.setItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY, "both");
+    installChromeStub(new FakePort(), { runtimeFixture: "store-safe" });
+
+    await importPopupModule();
+
+    expect(getStartLiteButton()).toBeInstanceOf(HTMLButtonElement);
+    expect(document.querySelector("[data-action='start-full']")).toBeNull();
+    expect(document.querySelector("[data-section='full-visual-capture']")).toBeNull();
+    expect(document.querySelector("input[name='full-visual-capture']")).toBeNull();
+    expect(localStorage.getItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY)).toBe("none");
+  });
+
+  it("limits Full visual capture to screenshots or none without tabCapture", async () => {
+    localStorage.setItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY, "recording");
+    const port = new FakePort();
+    installChromeStub(port, { runtimeFixture: "cdp-no-tab-capture" });
+
+    await importPopupModule();
+
+    expect(getStartFullButton()).toBeInstanceOf(HTMLButtonElement);
+    expect(document.querySelector("[data-section='full-visual-capture']")).not.toBeNull();
+    expect(getFullVisualCaptureRadio("screenshots").checked).toBe(false);
+    expect(getFullVisualCaptureRadio("none").checked).toBe(true);
+    expect(
+      document.querySelector("input[name='full-visual-capture'][value='recording']")
+    ).toBeNull();
+    expect(document.querySelector("input[name='full-visual-capture'][value='both']")).toBeNull();
+    expect(localStorage.getItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY)).toBe("none");
+
+    getStartFullButton().click();
+    await flushPopup();
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      kind: "ui.start",
+      tabId: 17,
+      mode: "full",
+      visualCapture: "none"
+    });
+  });
+
+  it("preserves the screenshot half of a legacy both setting without tabCapture", async () => {
+    localStorage.setItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY, "both");
+    installChromeStub(new FakePort(), { runtimeFixture: "cdp-no-tab-capture" });
+
+    await importPopupModule();
+
+    expect(getFullVisualCaptureRadio("screenshots").checked).toBe(true);
+    expect(getFullVisualCaptureRadio("none").checked).toBe(false);
+    expect(localStorage.getItem(POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY)).toBe("screenshots");
   });
 
   it("preserves archive policy draft fields across popup rerenders and reopen", async () => {
