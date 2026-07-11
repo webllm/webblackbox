@@ -24,6 +24,8 @@
   surviving pipeline policy identity, and screen-recording quiesce/chunk/finalization durability.
 - Required dynamically addressed injected-module packages with the exact bootstrap/control export
   surface and made Chrome ZIP output byte-for-byte reproducible without timestamped directory entries.
+- Kept exact fail-closed capture-policy validation in the isolated content bridge without bundling
+  the general-purpose schema runtime into every page.
 - Removed the unreachable `tabCapture` permission from the store-safe Web Store profile; tab recording remains an explicit development/enterprise capability alongside CDP.
 - Bound stop, purge, consent-expiry, and late raw-event work to the exact runtime identity: active
   runtime failures no longer cancel a pending same-tab replacement start, stop and purge tasks only
