@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Made active-session restart recovery transactional so any partial pipeline, content, CDP, or
+  recording restoration is identity-safely removed, purged, and retained as a retryable stopping
+  tombstone when cleanup cannot complete, without reviving a ghost recording checkpoint.
 - Hardened generated-manifest verification to exact profile permission and host allowlists,
   rejecting duplicate, undeclared, or optional privileges before packaging.
 - Made the isolated-world content bootstrap a per-document singleton, including lifecycle-safe

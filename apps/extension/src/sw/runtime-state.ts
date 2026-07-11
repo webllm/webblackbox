@@ -169,6 +169,30 @@ export type StoppingRuntimeRecoveryOptions = {
   purge: () => void | Promise<void>;
 };
 
+export type ActiveRuntimeRestorationTransactionOptions<TRuntime extends object> = {
+  startPipeline: () => void | Promise<void>;
+  prepareRuntime: () => TRuntime | Promise<TRuntime>;
+  registerRuntime: (runtime: TRuntime) => void;
+  completeRuntime: (runtime: TRuntime) => void | Promise<void>;
+  cleanupPipeline: () => void | Promise<void>;
+  cleanupRuntime: (runtime: TRuntime) => void | Promise<void>;
+};
+
+export type ActiveRuntimeRestorationTransactionResult<TRuntime extends object> =
+  | Readonly<{ kind: "restored"; runtime: TRuntime }>
+  | Readonly<{
+      kind: "failed-cleaned";
+      phase: "pipeline" | "runtime";
+      error: unknown;
+      cleanupError?: unknown;
+    }>;
+
+export type DurableFailedRuntimeCleanupOptions = {
+  persistStopping: () => void | Promise<void>;
+  cleanup: () => void | Promise<void>;
+  clearStopping: () => void | Promise<void>;
+};
+
 export class RuntimeStartCoordinator {
   private readonly inFlight = new Map<number, Promise<void>>();
 
@@ -189,6 +213,94 @@ export class RuntimeStartCoordinator {
     this.inFlight.set(tabId, task);
     return task;
   }
+}
+
+/**
+ * Treats active-runtime restoration as a two-phase transaction. Once pipeline
+ * creation has been attempted, every failure is paired with exactly one
+ * cleanup path. Callers can therefore distinguish a rejected checkpoint from
+ * a restoration that already removed its partial state and must not be purged
+ * again by an outer recovery loop.
+ */
+export async function runActiveRuntimeRestorationTransaction<TRuntime extends object>(
+  options: ActiveRuntimeRestorationTransactionOptions<TRuntime>
+): Promise<ActiveRuntimeRestorationTransactionResult<TRuntime>> {
+  let runtime: TRuntime | undefined;
+
+  try {
+    await options.startPipeline();
+    runtime = await options.prepareRuntime();
+    options.registerRuntime(runtime);
+    await options.completeRuntime(runtime);
+    return { kind: "restored", runtime };
+  } catch (error) {
+    try {
+      if (runtime === undefined) {
+        await options.cleanupPipeline();
+      } else {
+        await options.cleanupRuntime(runtime);
+      }
+
+      return {
+        kind: "failed-cleaned",
+        phase: runtime === undefined ? "pipeline" : "runtime",
+        error
+      };
+    } catch (cleanupError) {
+      return {
+        kind: "failed-cleaned",
+        phase: runtime === undefined ? "pipeline" : "runtime",
+        error,
+        cleanupError
+      };
+    }
+  }
+}
+
+/**
+ * Makes the failure tombstone durable before destructive restoration cleanup,
+ * then removes it only after cleanup is complete. A crash at either boundary
+ * therefore resumes as stopping recovery, never as active capture.
+ */
+export async function runDurableFailedRuntimeCleanup(
+  options: DurableFailedRuntimeCleanupOptions
+): Promise<void> {
+  await options.persistStopping();
+  await options.cleanup();
+  await options.clearStopping();
+}
+
+/** Prevents teardown callbacks from observing or acting on a replacement runtime. */
+export async function disposeListenersBeforeTeardown(
+  listeners: readonly (() => void)[],
+  teardown: () => void | Promise<void>
+): Promise<void> {
+  for (const dispose of listeners) {
+    dispose();
+  }
+
+  await teardown();
+}
+
+/** Deletes a shared-map entry only when it still names the failed runtime. */
+export function isMapEntrySame<TKey, TValue>(
+  map: ReadonlyMap<TKey, TValue>,
+  key: TKey,
+  expected: TValue
+): boolean {
+  return map.get(key) === expected;
+}
+
+export function deleteMapEntryIfSame<TKey, TValue>(
+  map: Map<TKey, TValue>,
+  key: TKey,
+  expected: TValue
+): boolean {
+  if (!isMapEntrySame(map, key, expected)) {
+    return false;
+  }
+
+  return map.delete(key);
 }
 
 /** Creates the per-runtime fence. Only authoritative session creation may start it open. */

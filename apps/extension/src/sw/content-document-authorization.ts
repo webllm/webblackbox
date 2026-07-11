@@ -201,6 +201,12 @@ export class ContentDocumentAuthorization {
     return [...this.documents.keys()].sort((left, right) => left - right);
   }
 
+  activeDocuments(): AuthorizedContentDocument[] {
+    return [...this.documents.values()]
+      .sort((left, right) => left.frameId - right.frameId)
+      .map((document) => ({ ...document }));
+  }
+
   matchesSender(input: ContentDocumentIdentityInput): boolean {
     const identity = normalizeIdentityInput(this.tabId, input, true);
 

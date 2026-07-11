@@ -70,6 +70,27 @@ describe("ContentDocumentAuthorization", () => {
     expect(authorization.get(3)?.documentId).toBe("child-document");
   });
 
+  it("snapshots exact active document identities for targeted deactivation", () => {
+    const authorization = new ContentDocumentAuthorization(TAB_ID);
+    authorization.authorize({
+      tabId: TAB_ID,
+      frameId: 4,
+      documentId: "child-document",
+      url: "https://widgets.example/embed"
+    });
+
+    const documents = authorization.activeDocuments();
+    documents[0] = { ...documents[0]!, documentId: "mutated-copy" };
+
+    expect(authorization.activeDocuments()).toEqual([
+      {
+        frameId: 4,
+        documentId: "child-document",
+        url: "https://widgets.example/embed"
+      }
+    ]);
+  });
+
   it("binds child sender matching to documentId and URL", () => {
     const authorization = new ContentDocumentAuthorization(TAB_ID);
     authorization.authorize({

@@ -12,8 +12,11 @@ import {
   createRuntimeStateSnapshot,
   createStoppingRuntimeTombstone,
   compactScreenRecordingChunkHashes,
+  deleteMapEntryIfSame,
   deriveDurableScreenRecordingChunkCount,
+  disposeListenersBeforeTeardown,
   evaluateActiveRuntimeRestoration,
+  isMapEntrySame,
   isVolatileCaptureOpen,
   mergeRuntimeStateWithStoppingTombstones,
   mergeRuntimeCountersWithSequenceWatermark,
@@ -24,6 +27,8 @@ import {
   reconcileScreenRecordingResumeState,
   recoverStoppingRuntimeFailClosed,
   restoreScreenRecordingChunkHashes,
+  runActiveRuntimeRestorationTransaction,
+  runDurableFailedRuntimeCleanup,
   runDurableRuntimeStopWorkflow,
   runVolatileCaptureOperation,
   type PersistedActiveRuntime,
@@ -152,6 +157,25 @@ describe("runtime state checkpoint", () => {
       stopRequestedAt: tombstone.stopRequestedAt
     });
     expect(planRuntimeRestoration(merged[0]!)).toMatchObject({ kind: "purge-stopping" });
+  });
+
+  it("keeps unrelated pending sessions beside a restoration-failure tombstone", () => {
+    const failed = createRuntime("active") as PersistedActiveRuntime;
+    const other = createRuntime("active", {
+      sid: "S-1767225600001-other",
+      tabId: 8,
+      config: createConfig(8)
+    });
+    const tombstone = createStoppingRuntimeTombstone(
+      failed,
+      failed.startedAt + 1_000,
+      failed.startedAt + 10_000
+    );
+    const merged = mergeRuntimeStateWithStoppingTombstones([failed, other], [tombstone]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged.find((runtime) => runtime.sid === failed.sid)?.state).toBe("stopping");
+    expect(merged.find((runtime) => runtime.sid === other.sid)).toEqual(other);
   });
 
   it("does not activate a failed first tombstone write and persists again on retry", async () => {
@@ -761,6 +785,190 @@ describe("MV3 cleanup scheduling", () => {
     await scheduler.handleAlarm(createRuntimeCleanupAlarmName("S-1767225600001-retry"));
     expect(sessions.has("S-1767225600001-retry")).toBe(false);
     expect(onDue).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("active runtime restoration transaction", () => {
+  it.each(["start", "resume"] as const)(
+    "purges pipeline-only state when %s fails before runtime registration",
+    async (fault) => {
+      const cleanupPipeline = vi.fn(async () => undefined);
+      const cleanupRuntime = vi.fn(async () => undefined);
+      const result = await runActiveRuntimeRestorationTransaction({
+        startPipeline: async () => {
+          if (fault === "start") {
+            throw new Error("start failed after pipeline creation");
+          }
+        },
+        prepareRuntime: async () => {
+          throw new Error("resume state failed");
+        },
+        registerRuntime: vi.fn(),
+        completeRuntime: vi.fn(),
+        cleanupPipeline,
+        cleanupRuntime
+      });
+
+      expect(result).toMatchObject({ kind: "failed-cleaned", phase: "pipeline" });
+      expect(cleanupPipeline).toHaveBeenCalledOnce();
+      expect(cleanupRuntime).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["content", "cdp", "recording", "flush"] as const)(
+    "removes registered state when the %s restoration stage fails",
+    async (fault) => {
+      const runtime = { sid: "failed", tabId: 7 };
+      const other = { sid: "other", tabId: 8 };
+      const sessionsByTab = new Map([[other.tabId, other] as const]);
+      const sessionsBySid = new Map([[other.sid, other] as const]);
+      const cleanupPipeline = vi.fn(async () => undefined);
+      const cleanupRuntime = vi.fn(async (failed: typeof runtime) => {
+        deleteMapEntryIfSame(sessionsByTab, failed.tabId, failed);
+        deleteMapEntryIfSame(sessionsBySid, failed.sid, failed);
+      });
+      const stages = ["content", "cdp", "recording", "flush"] as const;
+      const result = await runActiveRuntimeRestorationTransaction({
+        startPipeline: vi.fn(async () => undefined),
+        prepareRuntime: vi.fn(async () => runtime),
+        registerRuntime: (restored) => {
+          sessionsByTab.set(restored.tabId, restored);
+          sessionsBySid.set(restored.sid, restored);
+        },
+        completeRuntime: async () => {
+          for (const stage of stages) {
+            if (stage === fault) {
+              throw new Error(`${stage} failed`);
+            }
+          }
+        },
+        cleanupPipeline,
+        cleanupRuntime
+      });
+
+      expect(result).toMatchObject({ kind: "failed-cleaned", phase: "runtime" });
+      expect(cleanupRuntime).toHaveBeenCalledOnce();
+      expect(cleanupPipeline).not.toHaveBeenCalled();
+      expect(sessionsByTab.has(runtime.tabId)).toBe(false);
+      expect(sessionsBySid.has(runtime.sid)).toBe(false);
+      expect(sessionsByTab.get(other.tabId)).toBe(other);
+      expect(sessionsBySid.get(other.sid)).toBe(other);
+    }
+  );
+
+  it("reports purge failure without replaying restoration cleanup", async () => {
+    const purgeError = new Error("purge failed");
+    const cleanupPipeline = vi.fn(async () => {
+      throw purgeError;
+    });
+    const result = await runActiveRuntimeRestorationTransaction({
+      startPipeline: vi.fn(async () => undefined),
+      prepareRuntime: async () => {
+        throw new Error("resume failed");
+      },
+      registerRuntime: vi.fn(),
+      completeRuntime: vi.fn(),
+      cleanupPipeline,
+      cleanupRuntime: vi.fn()
+    });
+
+    expect(result).toMatchObject({
+      kind: "failed-cleaned",
+      phase: "pipeline",
+      cleanupError: purgeError
+    });
+    expect(cleanupPipeline).toHaveBeenCalledOnce();
+  });
+
+  it("persists stopping before cleanup and clears it only after purge", async () => {
+    const order: string[] = [];
+
+    await runDurableFailedRuntimeCleanup({
+      persistStopping: () => {
+        order.push("stopping");
+      },
+      cleanup: () => {
+        order.push("purge");
+      },
+      clearStopping: () => {
+        order.push("clear");
+      }
+    });
+
+    expect(order).toEqual(["stopping", "purge", "clear"]);
+  });
+
+  it.each(["checkpoint", "purge", "clear"] as const)(
+    "preserves the durable cleanup boundary when %s fails",
+    async (fault) => {
+      const order: string[] = [];
+      const task = runDurableFailedRuntimeCleanup({
+        persistStopping: () => {
+          order.push("stopping");
+          if (fault === "checkpoint") {
+            throw new Error("checkpoint failed");
+          }
+        },
+        cleanup: () => {
+          order.push("purge");
+          if (fault === "purge") {
+            throw new Error("purge failed");
+          }
+        },
+        clearStopping: () => {
+          order.push("clear");
+          if (fault === "clear") {
+            throw new Error("clear failed");
+          }
+        }
+      });
+
+      await expect(task).rejects.toThrow(`${fault} failed`);
+      expect(order).toEqual(
+        fault === "checkpoint"
+          ? ["stopping"]
+          : fault === "purge"
+            ? ["stopping", "purge"]
+            : ["stopping", "purge", "clear"]
+      );
+    }
+  );
+
+  it("does not delete a replacement runtime that won an identity race", () => {
+    const failed = { sid: "same", tabId: 7, generation: 1 };
+    const replacement = { sid: "same", tabId: 7, generation: 2 };
+    const byTab = new Map([[7, replacement]]);
+    const bySid = new Map([["same", replacement]]);
+
+    expect(isMapEntrySame(byTab, failed.tabId, failed)).toBe(false);
+    expect(deleteMapEntryIfSame(byTab, failed.tabId, failed)).toBe(false);
+    expect(deleteMapEntryIfSame(bySid, failed.sid, failed)).toBe(false);
+    expect(byTab.get(7)).toBe(replacement);
+    expect(bySid.get("same")).toBe(replacement);
+  });
+
+  it("disposes runtime listeners before detach can target a same-tab replacement", async () => {
+    const replacement = { tabId: 7, generation: 2 };
+    const byTab = new Map([[7, replacement]]);
+    let detachListenerActive = true;
+    const stopReplacement = vi.fn();
+
+    await disposeListenersBeforeTeardown(
+      [
+        () => {
+          detachListenerActive = false;
+        }
+      ],
+      () => {
+        if (detachListenerActive) {
+          stopReplacement();
+        }
+      }
+    );
+
+    expect(detachListenerActive).toBe(false);
+    expect(stopReplacement).not.toHaveBeenCalled();
+    expect(byTab.get(7)).toBe(replacement);
   });
 });
 
