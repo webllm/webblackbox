@@ -11,6 +11,8 @@
 
 ### Patch Changes
 
+- Hardened generated-manifest verification to exact profile permission and host allowlists,
+  rejecting duplicate, undeclared, or optional privileges before packaging.
 - Made the isolated-world content bootstrap a per-document singleton, including lifecycle-safe
   suspension and resynchronization across back-forward cache restores, so repeated injection cannot
   duplicate agents, ports, listeners, or captured events.

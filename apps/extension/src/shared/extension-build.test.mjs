@@ -84,6 +84,147 @@ describe("extension build manifest", () => {
     ).toEqual([]);
   });
 
+  it.each(["dev", "store-safe"])(
+    "accepts only the exact %s permission set regardless of order",
+    (profile) => {
+      const release = profile === "store-safe";
+      const manifest = createExtensionManifest({ version: "1.2.3", release, profile });
+      manifest.permissions.reverse();
+      manifest.optional_permissions = [];
+      manifest.optional_host_permissions = [];
+
+      if (profile === "store-safe") {
+        manifest.host_permissions = [];
+      }
+
+      expect(
+        validateExtensionManifest(manifest, {
+          version: "1.2.3",
+          release,
+          profile
+        })
+      ).toEqual([]);
+    }
+  );
+
+  it.each([
+    ["dev", "history"],
+    ["dev", "cookies"],
+    ["dev", "management"],
+    ["store-safe", "history"],
+    ["store-safe", "cookies"],
+    ["store-safe", "management"]
+  ])("rejects undeclared %s permission %s", (profile, permission) => {
+    const release = profile === "store-safe";
+    const manifest = createExtensionManifest({ version: "1.2.3", release, profile });
+    manifest.permissions.push(permission);
+
+    const label = profile === "store-safe" ? "Store-safe" : "Dev";
+    expect(
+      validateExtensionManifest(manifest, {
+        version: "1.2.3",
+        release,
+        profile
+      })
+    ).toContain(`${label} manifest must not request undeclared permission '${permission}'.`);
+  });
+
+  it.each(["dev", "store-safe"])("rejects duplicate permissions in the %s profile", (profile) => {
+    const release = profile === "store-safe";
+    const manifest = createExtensionManifest({ version: "1.2.3", release, profile });
+    const duplicate = manifest.permissions[0];
+    manifest.permissions.push(duplicate);
+
+    expect(
+      validateExtensionManifest(manifest, {
+        version: "1.2.3",
+        release,
+        profile
+      })
+    ).toContain(`permissions must not contain duplicate value '${duplicate}'.`);
+  });
+
+  it.each([
+    ["dev", "downloads"],
+    ["store-safe", "scripting"]
+  ])("rejects a missing required %s permission", (profile, permission) => {
+    const release = profile === "store-safe";
+    const manifest = createExtensionManifest({ version: "1.2.3", release, profile });
+    manifest.permissions = manifest.permissions.filter((entry) => entry !== permission);
+
+    const label = profile === "store-safe" ? "Store-safe" : "Dev";
+    expect(
+      validateExtensionManifest(manifest, {
+        version: "1.2.3",
+        release,
+        profile
+      })
+    ).toContain(`${label} manifest must include '${permission}' permission.`);
+  });
+
+  it("rejects missing, duplicate, and undeclared dev host permissions", () => {
+    const base = createExtensionManifest({ version: "1.2.3", profile: "dev" });
+
+    const missing = { ...base, host_permissions: [] };
+    expect(validateExtensionManifest(missing, { version: "1.2.3", profile: "dev" })).toContain(
+      "Dev manifest must include <all_urls> host permission."
+    );
+
+    const duplicate = { ...base, host_permissions: ["<all_urls>", "<all_urls>"] };
+    expect(validateExtensionManifest(duplicate, { version: "1.2.3", profile: "dev" })).toContain(
+      "host_permissions must not contain duplicate value '<all_urls>'."
+    );
+
+    const undeclared = {
+      ...base,
+      host_permissions: ["<all_urls>", "https://example.com/*"]
+    };
+    expect(validateExtensionManifest(undeclared, { version: "1.2.3", profile: "dev" })).toContain(
+      "Dev manifest must not request undeclared host permission 'https://example.com/*'."
+    );
+  });
+
+  it("rejects any persistent host permissions in the store-safe profile", () => {
+    const manifest = createExtensionManifest({
+      version: "1.2.3",
+      release: true,
+      profile: "store-safe"
+    });
+    manifest.host_permissions = ["https://example.com/*"];
+
+    expect(
+      validateExtensionManifest(manifest, {
+        version: "1.2.3",
+        release: true,
+        profile: "store-safe"
+      })
+    ).toContain("Store-safe manifest must not declare persistent host_permissions.");
+  });
+
+  it.each(["optional_permissions", "optional_host_permissions"])(
+    "rejects a non-empty %s allowlist",
+    (fieldName) => {
+      const manifest = createExtensionManifest({ version: "1.2.3", profile: "dev" });
+      manifest[fieldName] = [fieldName === "optional_permissions" ? "history" : "<all_urls>"];
+
+      expect(validateExtensionManifest(manifest, { version: "1.2.3", profile: "dev" })).toContain(
+        `Manifest ${fieldName} must be absent or an empty array.`
+      );
+    }
+  );
+
+  it.each(["optional_permissions", "optional_host_permissions"])(
+    "rejects a non-array %s value",
+    (fieldName) => {
+      const manifest = createExtensionManifest({ version: "1.2.3", profile: "dev" });
+      manifest[fieldName] = null;
+
+      expect(validateExtensionManifest(manifest, { version: "1.2.3", profile: "dev" })).toContain(
+        `Manifest ${fieldName} must be absent or an empty array.`
+      );
+    }
+  );
+
   it("creates a release manifest without the development key", () => {
     const manifest = createExtensionManifest({ version: "1.2.3", release: true });
 

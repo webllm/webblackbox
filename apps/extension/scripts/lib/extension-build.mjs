@@ -212,14 +212,14 @@ export function validateExtensionManifest(
     issues.push("Manifest must only expose content-agent.js and injected.js as web resources.");
   }
 
-  validateUniqueStringArray(manifest?.permissions, "permissions", issues);
-
   if (storeSafe) {
     validateStoreSafeManifest(manifest, issues);
   } else {
-    validateUniqueStringArray(manifest?.host_permissions, "host_permissions", issues);
     validateDevManifest(manifest, issues);
   }
+
+  validateAbsentOrEmptyArray(manifest, "optional_permissions", issues);
+  validateAbsentOrEmptyArray(manifest, "optional_host_permissions", issues);
 
   return issues;
 }
@@ -455,25 +455,67 @@ function validateUniqueStringArray(value, fieldName, issues) {
   }
 }
 
-function validateStoreSafeManifest(manifest, issues) {
-  const permissions = new Set(manifest?.permissions ?? []);
+function validateExactStringArray(
+  value,
+  expectedValues,
+  fieldName,
+  issues,
+  { missingIssue, unexpectedIssue }
+) {
+  validateUniqueStringArray(value, fieldName, issues);
 
-  for (const permission of STORE_SAFE_PERMISSIONS) {
-    if (!permissions.has(permission)) {
-      issues.push(`Store-safe manifest must include '${permission}' permission.`);
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  const actualValues = new Set(
+    value.filter((entry) => typeof entry === "string" && entry.length > 0)
+  );
+  const expectedValueSet = new Set(expectedValues);
+
+  for (const expectedValue of expectedValues) {
+    if (!actualValues.has(expectedValue)) {
+      issues.push(missingIssue(expectedValue));
     }
   }
 
-  if (permissions.has("debugger")) {
-    issues.push("Store-safe manifest must not request the debugger permission.");
+  for (const actualValue of actualValues) {
+    if (!expectedValueSet.has(actualValue)) {
+      issues.push(unexpectedIssue(actualValue));
+    }
+  }
+}
+
+function validateAbsentOrEmptyArray(manifest, fieldName, issues) {
+  if (!Object.hasOwn(manifest ?? {}, fieldName)) {
+    return;
   }
 
-  if (permissions.has("tabs") || permissions.has("webRequest")) {
-    issues.push("Store-safe manifest must not request persistent tabs or webRequest access.");
+  const value = manifest[fieldName];
+  if (!Array.isArray(value) || value.length !== 0) {
+    issues.push(`Manifest ${fieldName} must be absent or an empty array.`);
   }
+}
 
-  if (Array.isArray(manifest?.host_permissions) && manifest.host_permissions.length > 0) {
-    issues.push("Store-safe manifest must not declare persistent host_permissions.");
+function validateStoreSafeManifest(manifest, issues) {
+  validateExactStringArray(manifest?.permissions, STORE_SAFE_PERMISSIONS, "permissions", issues, {
+    missingIssue: (permission) => `Store-safe manifest must include '${permission}' permission.`,
+    unexpectedIssue: (permission) => {
+      if (permission === "debugger") {
+        return "Store-safe manifest must not request the debugger permission.";
+      }
+      if (permission === "tabs" || permission === "webRequest") {
+        return "Store-safe manifest must not request persistent tabs or webRequest access.";
+      }
+      return `Store-safe manifest must not request undeclared permission '${permission}'.`;
+    }
+  });
+
+  if (Object.hasOwn(manifest ?? {}, "host_permissions")) {
+    const hostPermissions = manifest.host_permissions;
+    if (!Array.isArray(hostPermissions) || hostPermissions.length !== 0) {
+      issues.push("Store-safe manifest must not declare persistent host_permissions.");
+    }
   }
 
   if (Array.isArray(manifest?.content_scripts) && manifest.content_scripts.length > 0) {
@@ -482,20 +524,17 @@ function validateStoreSafeManifest(manifest, issues) {
 }
 
 function validateDevManifest(manifest, issues) {
-  const permissions = new Set(manifest?.permissions ?? []);
+  validateExactStringArray(manifest?.permissions, DEV_PERMISSIONS, "permissions", issues, {
+    missingIssue: (permission) => `Dev manifest must include '${permission}' permission.`,
+    unexpectedIssue: (permission) =>
+      `Dev manifest must not request undeclared permission '${permission}'.`
+  });
 
-  for (const permission of DEV_PERMISSIONS) {
-    if (!permissions.has(permission)) {
-      issues.push(`Dev manifest must include '${permission}' permission.`);
-    }
-  }
-
-  if (
-    !Array.isArray(manifest?.host_permissions) ||
-    !manifest.host_permissions.includes("<all_urls>")
-  ) {
-    issues.push("Dev manifest must include <all_urls> host permission.");
-  }
+  validateExactStringArray(manifest?.host_permissions, URL_MATCHES, "host_permissions", issues, {
+    missingIssue: () => "Dev manifest must include <all_urls> host permission.",
+    unexpectedIssue: (hostPermission) =>
+      `Dev manifest must not request undeclared host permission '${hostPermission}'.`
+  });
 
   if (Array.isArray(manifest?.content_scripts) && manifest.content_scripts.length > 0) {
     issues.push("Dev manifest must use policy-scoped dynamic content-script injection.");
