@@ -11,6 +11,9 @@
 
 ### Patch Changes
 
+- Added manifest-and-API capability preflight before capture side effects, so unsupported Full,
+  recording, page-injection, and Lite browser-network paths fail closed without stopping an
+  existing session or creating an offscreen pipeline.
 - Made active-session restart recovery transactional so any partial pipeline, content, CDP, or
   recording restoration is identity-safely removed, purged, and retained as a retryable stopping
   tombstone when cleanup cannot complete, without reviving a ghost recording checkpoint.

@@ -49,6 +49,10 @@ import {
   normalizePerformanceBudget,
   type PerformanceBudgetConfig
 } from "../shared/performance-budget.js";
+import {
+  assertRuntimeStartRequirements,
+  resolveInstalledRuntimeCapabilities
+} from "../shared/runtime-capabilities.js";
 import { shouldInjectPageHooksForMode } from "../shared/mode-profile.js";
 import {
   applyEnterprisePolicyToRecorderConfig,
@@ -1132,12 +1136,6 @@ async function startSessionUnlocked(
   mode: CaptureMode,
   options: { visualCapture?: FullModeVisualCapture }
 ): Promise<void> {
-  const existing = sessionsByTab.get(tabId);
-
-  if (existing) {
-    await stopSession(tabId);
-  }
-
   const sid = createSessionId();
   const startedAt = Date.now();
   const tabMetadata = await resolveTabSessionMetadata(tabId);
@@ -1166,6 +1164,18 @@ async function startSessionUnlocked(
 
   if (!startScope.allowed) {
     throw new Error(`Recording is outside the permitted capture scope (${startScope.reason}).`);
+  }
+
+  assertRuntimeStartRequirements(resolveInstalledRuntimeCapabilities(chromeApi), {
+    mode,
+    screenRecording:
+      mode === "full" && recorderConfig.capturePolicy?.categories.screenRecordings === "allow"
+  });
+
+  const existing = sessionsByTab.get(tabId);
+
+  if (existing) {
+    await stopSession(tabId);
   }
 
   await ensureOffscreenDocument();
@@ -5301,7 +5311,11 @@ async function ensureContentScriptInjected(runtime: SessionRuntime): Promise<voi
 }
 
 function installLiteWebRequestCapture(): void {
-  if (!chromeApi?.webRequest || liteWebRequestCaptureCleanup) {
+  if (
+    resolveInstalledRuntimeCapabilities(chromeApi).browserNetwork !== "webRequest" ||
+    !chromeApi?.webRequest ||
+    liteWebRequestCaptureCleanup
+  ) {
     return;
   }
 
@@ -6765,6 +6779,19 @@ async function restoreActiveRuntime(
     ...persisted,
     config
   };
+  try {
+    assertRuntimeStartRequirements(resolveInstalledRuntimeCapabilities(chromeApi), {
+      mode: persisted.mode,
+      screenRecording:
+        persisted.mode === "full" && config.capturePolicy?.categories.screenRecordings === "allow"
+    });
+  } catch (error) {
+    console.warn("[WebBlackbox] active session capability checkpoint rejected", {
+      sid: persisted.sid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return { kind: "rejected" };
+  }
   const decision = evaluateActiveRuntimeRestoration(candidate, tab, Date.now());
 
   if (!decision.allowed) {
