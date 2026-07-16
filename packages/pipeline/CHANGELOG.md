@@ -1,5 +1,17 @@
 # @webblackbox/pipeline
 
+## 0.7.0
+
+### Minor Changes
+
+- b3cfda9: Add durable content-delivery receipts, identity-safe session metadata rebinding, monotonic recovery
+  watermarks, bounded streaming privacy analysis, and strict encrypted-export enforcement.
+
+### Patch Changes
+
+- Updated dependencies [b3cfda9]
+  - @webblackbox/protocol@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

@@ -1,5 +1,21 @@
 # webblackbox
 
+## 0.7.0
+
+### Minor Changes
+
+- b3cfda9: Add capability-bound direct capture control with bounded replay reconciliation, inert duplicate
+  bootstrap, and complete final Lite DOM, storage, and screenshot artifacts.
+
+### Patch Changes
+
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+  - @webblackbox/protocol@0.7.0
+  - @webblackbox/pipeline@0.7.0
+  - @webblackbox/recorder@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

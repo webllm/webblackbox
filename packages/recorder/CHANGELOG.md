@@ -1,5 +1,14 @@
 # @webblackbox/recorder
 
+## 0.7.0
+
+### Patch Changes
+
+- b3cfda9: Tighten capture privacy for editable keys, storage names, WebSocket payloads, and masked screenshots,
+  and keep delayed events from corrupting action correlation or root-cause precursor windows.
+- Updated dependencies [b3cfda9]
+  - @webblackbox/protocol@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

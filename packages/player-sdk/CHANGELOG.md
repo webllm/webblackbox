@@ -1,5 +1,17 @@
 # @webblackbox/player-sdk
 
+## 0.7.0
+
+### Minor Changes
+
+- b3cfda9: Add bounded transient blob reads and fail closed on malformed UTF-8, ambiguous ZIP entries,
+  non-canonical blobs, inconsistent indexes, and archives that exceed configured resource limits.
+
+### Patch Changes
+
+- Updated dependencies [b3cfda9]
+  - @webblackbox/protocol@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

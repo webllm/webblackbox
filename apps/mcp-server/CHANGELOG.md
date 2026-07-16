@@ -1,5 +1,14 @@
 # @webblackbox/mcp-server
 
+## 0.7.0
+
+### Patch Changes
+
+- b3cfda9: Bound archive, HAR, filesystem, and tool-output resource consumption and use canonical archive blob
+  identities when exporting captured response bodies.
+- Updated dependencies [b3cfda9]
+  - @webblackbox/player-sdk@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

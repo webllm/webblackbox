@@ -1,5 +1,26 @@
 # @webblackbox/extension
 
+## 0.7.0
+
+### Minor Changes
+
+- b3cfda9: Harden the MV3 capture lifecycle with exact document-bound authorization, capability-protected Lite
+  injection, transactional start and restore, acknowledged event delivery, bounded stop drain, and
+  fail-closed recovery across navigation, service-worker restart, and offscreen reconnects.
+
+### Patch Changes
+
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+  - webblackbox@0.7.0
+  - @webblackbox/protocol@0.7.0
+  - @webblackbox/pipeline@0.7.0
+  - @webblackbox/recorder@0.7.0
+  - @webblackbox/cdp-router@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

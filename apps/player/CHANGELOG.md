@@ -1,5 +1,16 @@
 # @webblackbox/player
 
+## 0.7.0
+
+### Patch Changes
+
+- b3cfda9: Keep share credentials out of URLs, require secure share endpoints, bind client privacy claims, bound
+  archive buffering, and make concurrent archive loads deterministic.
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+  - @webblackbox/player-sdk@0.7.0
+  - @webblackbox/protocol@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

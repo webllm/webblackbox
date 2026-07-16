@@ -1,5 +1,21 @@
 # @webblackbox/share-server
 
+## 0.7.0
+
+### Minor Changes
+
+- b3cfda9: Add bounded upload-time privacy attestation and harden archive integrity, storage commits, capacity,
+  single-writer locking, proxy trust, audit durability, retention, and shutdown behavior.
+
+### Patch Changes
+
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+- Updated dependencies [b3cfda9]
+  - @webblackbox/player-sdk@0.7.0
+  - @webblackbox/protocol@0.7.0
+  - @webblackbox/pipeline@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

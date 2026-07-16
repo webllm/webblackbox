@@ -1,5 +1,13 @@
 # @webblackbox/cdp-router
 
+## 0.7.0
+
+### Patch Changes
+
+- b3cfda9: Rebuild publish artifacts deterministically and include the package license in the published tarball.
+- Updated dependencies [b3cfda9]
+  - @webblackbox/protocol@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes
