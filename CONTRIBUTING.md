@@ -5,7 +5,7 @@ This guide is for working on the monorepo itself: building apps locally, running
 ## Prerequisites
 
 - Node.js `>= 22.0.0`
-- pnpm `10.28.1`
+- pnpm `11.13.1`
 
 ## Setup
 
