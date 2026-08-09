@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -456,7 +457,84 @@ describe("share-server", () => {
     expect(html).not.toContain("?key=");
     expect(html).not.toContain(apiKey);
   });
+
+  it("rejects rebound Host headers instead of echoing them as an allowed origin", async () => {
+    const server = await startShareServer();
+
+    const rebound = await rawRequest(server, "/api/share/list", {
+      host: "evil.example",
+      origin: "http://evil.example",
+      "x-webblackbox-api-key": apiKey
+    });
+
+    expect(rebound.status).toBe(421);
+    expect(rebound.headers["access-control-allow-origin"]).toBeUndefined();
+
+    const loopback = await rawRequest(server, "/api/share/list", {
+      host: new URL(server.baseUrl).host,
+      "x-webblackbox-api-key": apiKey
+    });
+
+    expect(loopback.status).toBe(200);
+  });
+
+  it("accepts hosts listed in WEBBLACKBOX_SHARE_ALLOWED_HOSTS", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOWED_HOSTS: "share.example.test"
+    });
+
+    const allowed = await rawRequest(server, "/api/share/list", {
+      host: "share.example.test",
+      "x-webblackbox-api-key": apiKey
+    });
+    const rejected = await rawRequest(server, "/api/share/list", {
+      host: "other.example.test",
+      "x-webblackbox-api-key": apiKey
+    });
+
+    expect(allowed.status).toBe(200);
+    expect(rejected.status).toBe(421);
+  });
 });
+
+async function rawRequest(
+  server: RunningShareServer,
+  path: string,
+  headers: Record<string, string>
+): Promise<{ status: number; headers: Record<string, string | undefined>; body: string }> {
+  const target = new URL(path, server.baseUrl);
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        method: "GET",
+        // `setHost: false` keeps Node from overriding an explicit Host header.
+        setHost: false,
+        headers
+      },
+      (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          resolvePromise({
+            status: response.statusCode ?? 0,
+            headers: response.headers as Record<string, string | undefined>,
+            body
+          });
+        });
+      }
+    );
+
+    request.on("error", rejectPromise);
+    request.end();
+  });
+}
 
 async function startShareServer(
   envOverrides: Record<string, string> = {}

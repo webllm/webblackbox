@@ -98,6 +98,8 @@ const MAX_UPLOAD_BYTES = parsePositiveInteger(
   process.env.WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES,
   250 * 1024 * 1024
 );
+const SHARE_PORT = parsePort(process.env.PORT);
+const SHARE_BIND_HOST = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
 const DEFAULT_BASE_URL = `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
 const DATA_ROOT = resolve(process.env.WEBBLACKBOX_SHARE_DATA_DIR ?? ".webblackbox-share-data");
 const ARCHIVES_DIR = join(DATA_ROOT, "archives");
@@ -111,6 +113,12 @@ const SHARE_API_CREDENTIALS = parseShareApiCredentials(
 );
 const SHARE_ALLOWED_ORIGIN = normalizeAllowedOrigin(process.env.WEBBLACKBOX_SHARE_ALLOWED_ORIGIN);
 const TRUST_X_FORWARDED_FOR = parseBooleanFlag(process.env.WEBBLACKBOX_TRUST_X_FORWARDED_FOR);
+const SHARE_ALLOWED_HOSTS = parseAllowedHosts(
+  process.env.WEBBLACKBOX_SHARE_ALLOWED_HOSTS,
+  SHARE_BIND_HOST,
+  SHARE_PORT,
+  SHARE_ALLOWED_ORIGIN
+);
 const ALLOW_QUERY_API_KEY = parseBooleanFlag(process.env.WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
@@ -156,8 +164,8 @@ async function startShareServer(): Promise<void> {
   await ensureStorageLayout();
   await pruneExpiredShareRecords(Date.now());
 
-  const port = parsePort(process.env.PORT);
-  const host = parseBindHost(process.env.WEBBLACKBOX_SHARE_BIND_HOST);
+  const port = SHARE_PORT;
+  const host = SHARE_BIND_HOST;
   const server = createServer((request, response) => {
     void routeRequest(request, response).catch((error) => {
       console.warn("[share-server] request failed", error);
@@ -174,6 +182,18 @@ async function startShareServer(): Promise<void> {
 }
 
 async function routeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  // The Host header decides the origin this server believes it is serving, and
+  // that origin drives the same-origin CORS decision below. Without this gate a
+  // DNS-rebinding page can supply a matching Host/Origin pair and read every
+  // share from a loopback-trusted deployment.
+  if (!isAllowedRequestHost(request)) {
+    respondJson(response, 421, {
+      error:
+        "Unrecognized Host header. Set WEBBLACKBOX_SHARE_ALLOWED_HOSTS to the hostnames this server is reachable at."
+    });
+    return;
+  }
+
   const requestUrl = new URL(request.url ?? "/", requestBaseUrl(request));
   applyCorsHeaders(response, request, requestUrl);
 
@@ -1464,13 +1484,72 @@ function requestBaseUrl(request: IncomingMessage): string {
 }
 
 function requestOrigin(request: IncomingMessage, requestUrl: URL): string {
-  const forwardedProto = request.headers["x-forwarded-proto"];
+  const forwardedProto = TRUST_X_FORWARDED_FOR ? request.headers["x-forwarded-proto"] : undefined;
   const protocol =
     typeof forwardedProto === "string" && forwardedProto.length > 0
-      ? forwardedProto
+      ? forwardedProto.split(",")[0]?.trim() || requestUrl.protocol.replace(":", "")
       : requestUrl.protocol.replace(":", "");
   const host = request.headers.host ?? requestUrl.host;
   return `${protocol}://${host}`;
+}
+
+function parseAllowedHosts(
+  rawValue: string | undefined,
+  bindHost: string,
+  port: number,
+  allowedOrigin: string
+): Set<string> {
+  const hosts = new Set<string>();
+  const add = (value: string): void => {
+    const normalized = value.trim().toLowerCase();
+
+    if (!normalized) {
+      return;
+    }
+
+    hosts.add(normalized);
+
+    if (!normalized.includes(":") || normalized.startsWith("[")) {
+      hosts.add(`${normalized}:${port}`);
+    }
+  };
+
+  // Loopback names stay allowed unconditionally: a rebinding page only wins when
+  // the Host it sends also matches its own Origin, which loopback never does.
+  // Keeping them avoids breaking local health checks and the local UI.
+  for (const entry of ["localhost", "127.0.0.1", "[::1]"]) {
+    add(entry);
+  }
+
+  if (bindHost !== "0.0.0.0" && bindHost !== "::") {
+    add(bindHost);
+  }
+
+  if (typeof rawValue === "string" && rawValue.trim().length > 0) {
+    for (const entry of rawValue.split(",")) {
+      add(entry);
+    }
+  }
+
+  if (allowedOrigin !== "same-origin" && allowedOrigin !== "*") {
+    try {
+      add(new URL(allowedOrigin).host);
+    } catch {
+      // An unparsable allowed origin simply contributes no extra host.
+    }
+  }
+
+  return hosts;
+}
+
+function isAllowedRequestHost(request: IncomingMessage): boolean {
+  const header = request.headers.host;
+
+  if (typeof header !== "string" || header.length === 0) {
+    return false;
+  }
+
+  return SHARE_ALLOWED_HOSTS.has(header.trim().toLowerCase());
 }
 
 function publicArchiveFileName(id: string, rawName: string | undefined): string {
