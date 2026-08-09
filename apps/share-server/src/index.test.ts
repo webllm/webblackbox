@@ -478,6 +478,34 @@ describe("share-server", () => {
     expect(loopback.status).toBe(200);
   });
 
+  it("rejects cross-site writes while still allowing clients that send no Origin", async () => {
+    const server = await startShareServer();
+
+    const crossSite = await fetch(`${server.baseUrl}/api/share/deadbeef/revoke`, {
+      method: "POST",
+      headers: {
+        origin: "https://attacker.example",
+        "content-type": "text/plain"
+      }
+    });
+
+    expect(crossSite.status).toBe(403);
+    await expect(crossSite.json()).resolves.toEqual({
+      error: "Cross-site write requests are not allowed."
+    });
+
+    const sameOrigin = await fetch(`${server.baseUrl}/api/share/deadbeef/revoke`, {
+      method: "POST",
+      headers: {
+        origin: server.baseUrl,
+        "x-webblackbox-api-key": apiKey
+      }
+    });
+
+    // Authorized, so it reaches the lookup and reports the missing share.
+    expect(sameOrigin.status).toBe(404);
+  });
+
   it("rejects archives that decompress beyond the size budget", async () => {
     const server = await startShareServer();
 

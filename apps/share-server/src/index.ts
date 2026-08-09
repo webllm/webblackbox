@@ -211,6 +211,16 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const method = request.method ?? "GET";
   const pathname = requestUrl.pathname;
 
+  // Uploads and revokes are reachable as CORS "simple requests", so a page on any
+  // site could drive them against a loopback-trusted deployment. Browsers always
+  // attach Origin to a write; non-browser clients never do.
+  if (isStateChangingMethod(method) && !isAllowedWriteOrigin(request, requestUrl)) {
+    respondJson(response, 403, {
+      error: "Cross-site write requests are not allowed."
+    });
+    return;
+  }
+
   const requiredScope = resolveRequiredShareScope(method, pathname);
 
   if (requiredScope) {
@@ -1560,6 +1570,20 @@ function parseAllowedHosts(
   }
 
   return hosts;
+}
+
+function isStateChangingMethod(method: string): boolean {
+  return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+function isAllowedWriteOrigin(request: IncomingMessage, requestUrl: URL): boolean {
+  const originHeader = request.headers.origin;
+
+  if (typeof originHeader !== "string" || originHeader.trim().length === 0) {
+    return true;
+  }
+
+  return resolveAllowedOrigin(originHeader, requestOrigin(request, requestUrl)) !== null;
 }
 
 function isAllowedRequestHost(request: IncomingMessage): boolean {
