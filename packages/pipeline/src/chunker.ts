@@ -53,15 +53,18 @@ export class EventChunker {
   private async finalize(): Promise<FinalizedChunk> {
     this.sequence += 1;
 
-    const events = [...this.pending];
+    // Detach the buffer synchronously: encoding/hashing below yield to the
+    // microtask queue, and any append() that lands during those awaits must
+    // start the next chunk instead of being re-emitted here or dropped when
+    // this call clears the buffer.
+    const events = this.pending.splice(0, this.pending.length);
+    this.pendingBytes = 0;
+
     const encoded = await encodeChunkEvents(events, this.codec);
     const bytes = encoded.bytes;
     const first = events[0];
     const last = events[events.length - 1];
     const hash = await sha256Hex(bytes);
-
-    this.pending.length = 0;
-    this.pendingBytes = 0;
 
     return {
       meta: {

@@ -7,6 +7,7 @@ import {
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
 
+import { decodeChunkEvents } from "./codec.js";
 import { readWebBlackboxArchive } from "./exporter.js";
 import { FlightRecorderPipeline } from "./pipeline.js";
 import {
@@ -76,6 +77,18 @@ function createEvent(
       message: "hello"
     }
   };
+}
+
+async function readStoredEventIds(storage: MemoryPipelineStorage, sid: string): Promise<string[]> {
+  const chunks = await storage.listChunks(sid);
+  const ids: string[] = [];
+
+  for (const chunk of chunks) {
+    const events = await decodeChunkEvents(chunk.bytes, chunk.meta.codec);
+    ids.push(...events.map((event) => event.id));
+  }
+
+  return ids;
 }
 
 function createNoisyPayload(size: number, seed: number): string {
@@ -1152,5 +1165,50 @@ describe("pipeline", () => {
 
     await pipelineB.close({ purge: true });
     expect((await storage.listBlobs()).length).toBe(0);
+  });
+
+  it("does not duplicate or drop events when ingest calls interleave", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 600,
+      chunkCodec: "none"
+    });
+    await pipeline.start();
+
+    const batch = (offset: number) =>
+      [1, 2, 3, 4].map((index) =>
+        createEvent(`E-${offset + index}`, "console.entry", offset + index)
+      );
+
+    await Promise.all([pipeline.ingestBatch(batch(0)), pipeline.ingestBatch(batch(10))]);
+    await pipeline.flush();
+
+    const stored = await readStoredEventIds(storage, SESSION.sid);
+
+    expect(stored).toHaveLength(8);
+    expect(new Set(stored).size).toBe(8);
+  });
+
+  it("does not duplicate events when a flush races an in-flight ingest", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({
+      session: SESSION,
+      storage,
+      maxChunkBytes: 600,
+      chunkCodec: "none"
+    });
+    await pipeline.start();
+
+    const events = [1, 2, 3, 4].map((index) => createEvent(`E-${index}`, "console.entry", index));
+
+    await Promise.all([pipeline.ingestBatch(events), pipeline.flush()]);
+    await pipeline.flush();
+
+    const stored = await readStoredEventIds(storage, SESSION.sid);
+
+    expect(stored).toHaveLength(4);
+    expect(new Set(stored).size).toBe(4);
   });
 });
