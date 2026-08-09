@@ -1,3 +1,4 @@
+export * from "./archive.js";
 export * from "./blob.js";
 export * from "./constants.js";
 export * from "./defaults.js";

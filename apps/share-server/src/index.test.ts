@@ -478,6 +478,37 @@ describe("share-server", () => {
     expect(loopback.status).toBe(200);
   });
 
+  it("rejects archives that decompress beyond the size budget", async () => {
+    const server = await startShareServer();
+
+    const zip = new JSZip();
+    zip.file("manifest.json", JSON.stringify({ protocolVersion: 1 }));
+    // Tiny on the wire, far past the per-entry budget once inflated.
+    zip.file(BLOB_FIXTURE_PATH, Buffer.alloc(80 * 1024 * 1024));
+    const bomb = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 1 }
+    });
+
+    expect(bomb.byteLength).toBeLessThan(1024 * 1024);
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "bomb.webblackbox"
+      },
+      body: Buffer.from(bomb)
+    });
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "Archive decompresses beyond the accepted size budget."
+    });
+  }, 30_000);
+
   it("accepts hosts listed in WEBBLACKBOX_SHARE_ALLOWED_HOSTS", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_ALLOWED_HOSTS: "share.example.test"

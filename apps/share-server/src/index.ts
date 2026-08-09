@@ -5,6 +5,10 @@ import { join, resolve } from "node:path";
 
 import JSZip from "jszip";
 import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
+import {
+  ArchiveDecompressionLimitError,
+  assertArchiveDecompressionLimits
+} from "@webblackbox/protocol";
 
 type ShareRecord = {
   id: string;
@@ -43,6 +47,7 @@ type ArchiveEnvelopeSummary = {
   encryptedPrivatePathsConfidential: boolean;
   plaintextEncryptedPaths: string[];
   analysisError?: string;
+  tooLarge?: boolean;
 };
 
 type ShareSummary = {
@@ -340,6 +345,19 @@ async function handleUpload(
   }
 
   const archiveEnvelope = await inspectArchiveEnvelope(bytes);
+
+  if (archiveEnvelope.tooLarge) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, 413, {
+      error: "Archive decompresses beyond the accepted size budget."
+    });
+    return;
+  }
+
   const archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
   const summary = clientSummary
     ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
@@ -754,6 +772,7 @@ async function buildShareSummary(
 async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelopeSummary> {
   try {
     const zip = await JSZip.loadAsync(bytes);
+    assertArchiveDecompressionLimits(zip.files);
     const manifest = asRecord(JSON.parse(await readZipText(zip, "manifest.json")));
     const encryption = asRecord(manifest.encryption);
     const encrypted = Object.keys(encryption).length > 0;
@@ -780,7 +799,8 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
       missingEncryptedPaths: [],
       encryptedPrivatePathsConfidential: false,
       plaintextEncryptedPaths: [],
-      analysisError: redactText(error instanceof Error ? error.message : String(error), 240)
+      analysisError: redactText(error instanceof Error ? error.message : String(error), 240),
+      tooLarge: error instanceof ArchiveDecompressionLimitError
     };
   }
 }

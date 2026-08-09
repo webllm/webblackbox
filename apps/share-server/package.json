@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@webblackbox/player-sdk": "workspace:*",
+    "@webblackbox/protocol": "workspace:*",
     "jszip": "^3.10.1"
   }
 }

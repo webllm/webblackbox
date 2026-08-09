@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 
 import type {
+  ArchiveDecompressionLimits,
   ChunkCodec,
   ChunkTimeIndexEntry,
   EventLevel,
@@ -12,7 +13,12 @@ import type {
   WebBlackboxEvent,
   WebBlackboxEventType
 } from "@webblackbox/protocol";
-import { extractRequestId, inferBlobMime } from "@webblackbox/protocol";
+import {
+  archiveEntrySizeMatches,
+  assertArchiveDecompressionLimits,
+  extractRequestId,
+  inferBlobMime
+} from "@webblackbox/protocol";
 
 /** Player lifecycle status. */
 export type PlayerStatus = "idle" | "loaded";
@@ -24,6 +30,8 @@ export type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 export type PlayerOpenOptions = {
   passphrase?: string;
   range?: PlayerRange;
+  /** Overrides the decompression budget applied to untrusted archives. */
+  limits?: Partial<ArchiveDecompressionLimits>;
 };
 
 /** Monotonic-time query range in milliseconds. */
@@ -554,6 +562,7 @@ export class WebBlackboxPlayer {
   ): Promise<WebBlackboxPlayer> {
     const bytes = await normalizeOpenInput(input);
     const zip = await JSZip.loadAsync(bytes);
+    assertArchiveDecompressionLimits(zip.files, options.limits);
 
     const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
     assertArchiveFileSet(zip, integrity);
@@ -3469,7 +3478,15 @@ async function readZipFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  return file.async("uint8array");
+  const bytes = await file.async("uint8array");
+
+  // The decompression budget is enforced against the central directory, so
+  // reject entries whose real size disagrees with what it was computed from.
+  if (!archiveEntrySizeMatches(file, bytes.byteLength)) {
+    throw new Error(`Archive entry ${path} does not match its declared size.`);
+  }
+
+  return bytes;
 }
 
 async function readZipFileText(zip: JSZip, path: string): Promise<string> {
