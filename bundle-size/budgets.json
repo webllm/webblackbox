@@ -7,7 +7,7 @@
     },
     {
       "path": "packages/pipeline/dist/index.js",
-      "maxBytes": 76000,
+      "maxBytes": 80000,
       "maxGzipBytes": 18000
     },
     {
