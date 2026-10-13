@@ -29,7 +29,7 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_API_KEYS`: semicolon-separated scoped keys for rotation and least privilege. Format: `secret:scope,scope;next-secret:scope`. Supported scopes are `upload`, `read`, `list`, `revoke`, and `admin`. `admin` covers all scopes. Keep an old key and a new key configured during rotation, then remove the old key after clients are updated.
 - `WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY`: optional browser bootstrap for `GET /share/:id?key=<key>`. Keep this disabled in production unless the key is short-lived; when enabled, the server redirects to a clean URL and uses a short HttpOnly read-session cookie for page links.
 - `WEBBLACKBOX_SHARE_BIND_HOST`: bind host for the HTTP server (default `127.0.0.1`).
-- `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Use `*` only for trusted environments.
+- `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN`: CORS allow origin. Defaults to `same-origin`. Browser requests that change state (uploads, revokes) are rejected with `403` unless their `Origin` passes this setting; requests without an `Origin`, such as CLI clients, are unaffected. `*` therefore lets any site drive writes as well as reads, so use it only for trusted environments.
 - `WEBBLACKBOX_SHARE_ALLOWED_HOSTS`: comma-separated `Host` header values this server answers on, e.g. `share.example.com`. Entries may be bare hosts, `host:port`, IPv6 literals, or origins such as `https://share.example.com`. Loopback names on any port, the bind host, and the host of an explicit `WEBBLACKBOX_SHARE_ALLOWED_ORIGIN` are always accepted; every other `Host` gets `421`. Requests carry the `Host` that decides the effective origin for `same-origin` CORS, so a deployment reachable under a public hostname must list it here or browsers behind DNS rebinding could be answered as if they were same-origin.
 - `WEBBLACKBOX_SHARE_MAX_UPLOAD_BYTES`: max accepted upload body size in bytes (default `262144000`).
 - `WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS`: default `false`. Public deployments should keep this disabled so uploads must be encrypted before reaching the server.
@@ -38,7 +38,7 @@ Set these environment variables for production-like deployments:
 - `WEBBLACKBOX_SHARE_RETAIN_EXPIRED_MS`: how long expired share records/files are retained before pruning (default `2592000000`, 30 days).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_MAX`: max uploads per client in each window (default `10`).
 - `WEBBLACKBOX_UPLOAD_RATE_LIMIT_WINDOW_MS`: upload rate limit window in ms (default `60000`).
-- `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: set `true` only behind a trusted proxy; otherwise upload rate limiting uses socket IP.
+- `WEBBLACKBOX_TRUST_X_FORWARDED_FOR`: set `true` only behind a trusted proxy. It makes upload rate limiting use `X-Forwarded-For` instead of the socket IP, and makes the server take its scheme from `X-Forwarded-Proto`. Behind a proxy that terminates TLS, set it: otherwise the server sees `http://`, returns `http://` share URLs, and rejects same-origin browser writes whose `Origin` is `https://`.
 
 For production, prefer scoped keys over a single admin key:
 

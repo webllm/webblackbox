@@ -267,7 +267,7 @@ session.webblackbox (ZIP)
 │   ├── sha256-<hash>.webp  # Binary blobs (screenshots, etc.)
 │   └── ...
 └── integrity/
-    └── hashes.json         # SHA-256 hashes
+    └── hashes.json         # SHA-256 hashes (encrypted in encrypted archives)
 ```
 
 ### Encryption
@@ -282,9 +282,14 @@ When a passphrase is provided:
 
 - **KDF**: PBKDF2 with SHA-256, 120,000 iterations, random salt
 - **Encryption**: AES-GCM with per-file random IVs
-- **Scope**: Event chunks, indexes, and blobs are encrypted
-- **Manifest**: Remains unencrypted (contains encryption metadata)
+- **Scope**: Event chunks, indexes, blobs, and the integrity hash list are encrypted
+- **Manifest**: Remains unencrypted (contains encryption metadata); its hash is covered by the encrypted hash list
 - **Integrity**: SHA-256 hashes computed on encrypted content
+- **Readers**: refuse an encrypted archive whose hash list or any session-content entry is missing from the encryption map, so archives written before the hash list was encrypted cannot be opened
+
+### Decompression Limits
+
+Readers (`readWebBlackboxArchive`, `WebBlackboxPlayer.open`) refuse archives that decompress past 64 MiB for any single entry or decoded event chunk, or 1 GiB in total, and stop inflating as soon as an entry outgrows the size it declares. Pass `limits: { maxEntryBytes, maxTotalBytes }` to change the budget. `createWebBlackboxArchive` checks the same limits (or its own `limits` option) and fails instead of writing an archive readers would refuse, and `maxArchiveBytes` is capped at the 1 GiB total.
 
 ### Archive Creation
 

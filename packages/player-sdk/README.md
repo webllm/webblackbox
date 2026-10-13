@@ -348,6 +348,8 @@ type PlayerOpenInput = ArrayBuffer | Uint8Array | Blob;
 type PlayerOpenOptions = {
   passphrase?: string;
   range?: PlayerRange;
+  /** Decompression budget; defaults to 64 MiB per entry or decoded chunk and 1 GiB in total. */
+  limits?: Partial<ArchiveDecompressionLimits>;
 };
 
 type PlayerQuery = {
