@@ -5,6 +5,7 @@ import {
 } from "@webblackbox/cdp-router";
 import {
   createSessionId,
+  DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS,
   DEFAULT_CAPTURE_POLICY,
   DEFAULT_EXPORT_POLICY,
   DEFAULT_RECORDER_CONFIG,
@@ -3729,7 +3730,7 @@ function resolveExportPolicy(value: unknown): ExportPolicy {
       row?.maxArchiveBytes,
       DEFAULT_EXPORT_POLICY.maxArchiveBytes,
       64 * 1024,
-      5 * 1024 * 1024 * 1024
+      DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS.maxTotalBytes
     ),
     recentWindowMs: normalizeExportBoundedInt(
       row?.recentWindowMs,

@@ -4,6 +4,7 @@ import {
   ARCHIVE_INTEGRITY_PATH,
   ArchiveDecompressionLimitError,
   assertArchiveDecompressionLimits,
+  assertArchiveEntrySizes,
   assertEncryptedArchiveCoverage,
   inferBlobFileExtension,
   readArchiveEntryBytes,
@@ -44,6 +45,11 @@ export type ExportBundleOutput = {
 
 export type ArchiveExportOptions = {
   passphrase?: string;
+  /**
+   * Read budget the archive must fit. Export fails rather than produce an
+   * archive that readers using these limits would refuse to open.
+   */
+  limits?: Partial<ArchiveDecompressionLimits>;
 };
 
 export type ArchiveReadOptions = {
@@ -61,6 +67,7 @@ export async function createWebBlackboxArchive(
 ): Promise<ExportBundleOutput> {
   const zip = new JSZip();
   const fileHashes: Record<string, string> = {};
+  const entrySizes: Array<[string, number]> = [];
   const encryption = options.passphrase
     ? await createArchiveEncryptionState(options.passphrase)
     : null;
@@ -70,12 +77,17 @@ export async function createWebBlackboxArchive(
     const bytes = encryption ? await encryptForArchive(path, chunk.bytes, encryption) : chunk.bytes;
     zip.file(path, bytes);
     fileHashes[path] = await sha256Hex(bytes);
+    entrySizes.push([path, bytes.byteLength]);
   }
 
-  await addJsonFile(zip, "index/time.json", input.timeIndex, fileHashes, encryption);
-  await addJsonFile(zip, "index/req.json", input.requestIndex, fileHashes, encryption);
-  await addJsonFile(zip, "index/inv.json", input.invertedIndex, fileHashes, encryption);
-  await addJsonFile(zip, "privacy/manifest.json", input.privacyManifest, fileHashes, encryption);
+  for (const [path, value] of [
+    ["index/time.json", input.timeIndex],
+    ["index/req.json", input.requestIndex],
+    ["index/inv.json", input.invertedIndex],
+    ["privacy/manifest.json", input.privacyManifest]
+  ] as const) {
+    entrySizes.push([path, await addJsonFile(zip, path, value, fileHashes, encryption)]);
+  }
 
   for (const blob of input.blobs) {
     const extension = inferBlobFileExtension(blob.mime);
@@ -83,6 +95,7 @@ export async function createWebBlackboxArchive(
     const bytes = encryption ? await encryptForArchive(path, blob.bytes, encryption) : blob.bytes;
     zip.file(path, bytes);
     fileHashes[path] = await sha256Hex(bytes);
+    entrySizes.push([path, bytes.byteLength]);
   }
 
   // Reserve the integrity manifest's IV before sealing manifest.json, so the
@@ -98,7 +111,7 @@ export async function createWebBlackboxArchive(
       }
     : input.manifest;
 
-  await addJsonFile(zip, "manifest.json", manifest, fileHashes);
+  entrySizes.push(["manifest.json", await addJsonFile(zip, "manifest.json", manifest, fileHashes)]);
 
   const manifestHash = fileHashes["manifest.json"] ?? "";
   const integrity: HashesManifest = {
@@ -109,12 +122,25 @@ export async function createWebBlackboxArchive(
   };
 
   const integrityBytes = new TextEncoder().encode(JSON.stringify(integrity, null, 2));
-  zip.file(
-    ARCHIVE_INTEGRITY_PATH,
+  const storedIntegrityBytes =
     encryption && integrityIv
       ? await encryptBytes(integrityBytes, encryption.key, integrityIv)
-      : integrityBytes
-  );
+      : integrityBytes;
+  zip.file(ARCHIVE_INTEGRITY_PATH, storedIntegrityBytes);
+  entrySizes.push([ARCHIVE_INTEGRITY_PATH, storedIntegrityBytes.byteLength]);
+
+  try {
+    assertArchiveEntrySizes(entrySizes, options.limits);
+  } catch (error) {
+    if (error instanceof ArchiveDecompressionLimitError) {
+      throw new ArchiveDecompressionLimitError(
+        `${error.message} WebBlackbox readers refuse such archives by default; ` +
+          "export a shorter time window or set maxArchiveBytes."
+      );
+    }
+
+    throw error;
+  }
 
   const estimatedPayloadBytes = estimateArchivePayloadBytes(input);
   const preferStore =
@@ -254,17 +280,19 @@ export async function readWebBlackboxArchive(
   };
 }
 
+/** Adds a JSON entry and returns the number of bytes stored for it. */
 async function addJsonFile(
   zip: JSZip,
   path: string,
   value: unknown,
   fileHashes: Record<string, string>,
   encryption: ArchiveEncryptionState | null = null
-): Promise<void> {
+): Promise<number> {
   const content = new TextEncoder().encode(JSON.stringify(value, null, 2));
   const bytes = encryption ? await encryptForArchive(path, content, encryption) : content;
   zip.file(path, bytes);
   fileHashes[path] = await sha256Hex(bytes);
+  return bytes.byteLength;
 }
 
 async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {

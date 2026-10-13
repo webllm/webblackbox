@@ -10,7 +10,12 @@ import type {
   WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { CHUNK_CODECS, DEFAULT_EXPORT_POLICY, sanitizeUrlForPrivacy } from "@webblackbox/protocol";
+import {
+  CHUNK_CODECS,
+  DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS,
+  DEFAULT_EXPORT_POLICY,
+  sanitizeUrlForPrivacy
+} from "@webblackbox/protocol";
 
 import { decodeChunkEvents, encodeChunkEvents } from "./codec.js";
 import { EventChunker } from "./chunker.js";
@@ -751,12 +756,18 @@ function resolveExportPolicy(
     typeof options.includeScreenRecordings === "boolean"
       ? options.includeScreenRecordings
       : DEFAULT_EXPORT_POLICY.includeScreenRecordings;
-  const maxArchiveBytes =
+  const requestedMaxArchiveBytes =
     options.maxArchiveBytes === null
       ? null
       : normalizeBoundedPositiveInt(
           options.maxArchiveBytes ?? DEFAULT_EXPORT_POLICY.maxArchiveBytes
         );
+  // A size cap above the readers' default decompression budget would trim the
+  // export to an archive they still refuse, so cap the trim target at it.
+  const maxArchiveBytes =
+    requestedMaxArchiveBytes === null
+      ? null
+      : Math.min(requestedMaxArchiveBytes, DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS.maxTotalBytes);
   const recentWindowMs =
     options.recentWindowMs === null
       ? null

@@ -111,8 +111,7 @@ export function assertArchiveDecompressionLimits(
   files: Record<string, ArchiveZipEntryLike>,
   limits: Partial<ArchiveDecompressionLimits> = {}
 ): void {
-  const { maxEntryBytes, maxTotalBytes } = resolveArchiveDecompressionLimits(limits);
-  let total = 0;
+  const sizes: Array<[string, number]> = [];
 
   for (const [path, file] of Object.entries(files)) {
     if (file.dir) {
@@ -127,6 +126,25 @@ export function assertArchiveDecompressionLimits(
       );
     }
 
+    sizes.push([path, size]);
+  }
+
+  assertArchiveEntrySizes(sizes, limits);
+}
+
+/**
+ * Applies the decompression budget to known entry sizes. Writers call this on
+ * an archive they are about to produce, so they never emit one that readers
+ * refuse with the same limits.
+ */
+export function assertArchiveEntrySizes(
+  entries: Iterable<readonly [path: string, size: number]>,
+  limits: Partial<ArchiveDecompressionLimits> = {}
+): void {
+  const { maxEntryBytes, maxTotalBytes } = resolveArchiveDecompressionLimits(limits);
+  let total = 0;
+
+  for (const [path, size] of entries) {
     if (size > maxEntryBytes) {
       throw new ArchiveDecompressionLimitError(
         `Archive entry ${path} decompresses to ${size} bytes, above the ${maxEntryBytes} byte limit.`

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS,
   DEFAULT_EXPORT_POLICY,
   type CaptureMode,
   type ExportPolicy,
@@ -35,6 +36,8 @@ const POPUP_EXPORT_POLICY_STORAGE_KEY = "webblackbox.popup.export-policy";
 const POPUP_FULL_VISUAL_CAPTURE_STORAGE_KEY = "webblackbox.popup.full-visual-capture";
 const START_PENDING_TIMEOUT_MS = 45_000;
 const EXPORT_ACK_TIMEOUT_MS = 120_000;
+// Readers refuse archives above their default decompression budget by default.
+const MAX_EXPORT_ARCHIVE_MB = DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS.maxTotalBytes / (1024 * 1024);
 
 type PopupExportPolicyForm = {
   alertSensitiveFindings: boolean;
@@ -1026,7 +1029,7 @@ function toExportPolicy(
     Number(form.maxArchiveMb),
     Number(defaultPolicyForm.maxArchiveMb),
     1,
-    4096
+    MAX_EXPORT_ARCHIVE_MB
   );
   const recentMinutes = normalizeBoundedInt(
     Number(form.recentMinutes),
@@ -1273,7 +1276,7 @@ function createArchivePolicySection(): HTMLElement {
   sizeInput.id = "export-max-size-mb";
   sizeInput.type = "number";
   sizeInput.min = "1";
-  sizeInput.max = "4096";
+  sizeInput.max = String(MAX_EXPORT_ARCHIVE_MB);
   sizeInput.step = "1";
   sizeInput.className = "wb-input";
 

@@ -4,13 +4,15 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 
 import {
+  ArchiveDecompressionLimitError,
+  DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS,
   DEFAULT_CAPTURE_POLICY,
   type SessionMetadata,
   type WebBlackboxEvent
 } from "@webblackbox/protocol";
 
 import { decodeChunkEvents } from "./codec.js";
-import { readWebBlackboxArchive } from "./exporter.js";
+import { createWebBlackboxArchive, readWebBlackboxArchive } from "./exporter.js";
 import { FlightRecorderPipeline } from "./pipeline.js";
 import {
   derivePipelineStorageKey,
@@ -1297,5 +1299,50 @@ describe("pipeline", () => {
     await expect(
       readWebBlackboxArchive(forged, { passphrase: "secret-passphrase" })
     ).rejects.toThrow("unencrypted content at events/C-injected.ndjson");
+  });
+
+  it("caps the export size target at the readers' decompression budget", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({ session: SESSION, storage });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-cap-1", "user.click", Date.now()));
+
+    const exported = await pipeline.exportBundle({
+      ...FULL_EXPORT_OPTIONS,
+      maxArchiveBytes: 4 * 1024 * 1024 * 1024
+    });
+    const parsed = await readWebBlackboxArchive(exported.bytes);
+
+    expect(parsed.privacyManifest?.transfer?.maxArchiveBytes).toBe(
+      DEFAULT_ARCHIVE_DECOMPRESSION_LIMITS.maxTotalBytes
+    );
+  });
+
+  it("refuses to write an archive that readers would refuse to open", async () => {
+    const storage = new MemoryPipelineStorage();
+    const pipeline = new FlightRecorderPipeline({ session: SESSION, storage });
+
+    await pipeline.start();
+    await pipeline.ingest(createEvent("E-big-1", "user.click", 100));
+
+    const parsed = await readWebBlackboxArchive(
+      (await pipeline.exportBundle(FULL_EXPORT_OPTIONS)).bytes
+    );
+    const write = createWebBlackboxArchive(
+      {
+        manifest: parsed.manifest,
+        chunks: await storage.listChunks(SESSION.sid),
+        blobs: [],
+        timeIndex: parsed.timeIndex,
+        requestIndex: parsed.requestIndex,
+        invertedIndex: parsed.invertedIndex,
+        privacyManifest: parsed.privacyManifest!
+      },
+      { limits: { maxTotalBytes: 64 } }
+    );
+
+    await expect(write).rejects.toBeInstanceOf(ArchiveDecompressionLimitError);
+    await expect(write).rejects.toThrow(/export a shorter time window or set maxArchiveBytes/);
   });
 });
