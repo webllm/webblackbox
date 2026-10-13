@@ -24,8 +24,11 @@ export class EventChunker {
   ) {}
 
   public async append(event: WebBlackboxEvent): Promise<FinalizedChunk | null> {
+    // Size the event before buffering it: an event that cannot be serialized
+    // must be rejected here, not left behind to fail every later encode.
+    const eventBytes = estimateEventNdjsonBytes(event);
     this.pending.push(event);
-    this.pendingBytes += estimateEventNdjsonBytes(event);
+    this.pendingBytes += eventBytes;
 
     if (this.pendingBytes < this.maxChunkBytes) {
       return null;
@@ -51,25 +54,38 @@ export class EventChunker {
   }
 
   private async finalize(): Promise<FinalizedChunk> {
-    this.sequence += 1;
-
-    // Detach the buffer synchronously: encoding/hashing below yield to the
-    // microtask queue, and any append() that lands during those awaits must
-    // start the next chunk instead of being re-emitted here or dropped when
-    // this call clears the buffer.
+    // Claim the sequence number and detach the buffer synchronously: encoding
+    // and hashing below yield, and a finalize() that overlaps this one must get
+    // its own chunk id and its own events. Reading this.sequence after the
+    // awaits would hand both chunks the same id, and storage keyed by chunk id
+    // would then keep only one of them.
+    const sequence = ++this.sequence;
+    const pendingBytes = this.pendingBytes;
     const events = this.pending.splice(0, this.pending.length);
     this.pendingBytes = 0;
 
-    const encoded = await encodeChunkEvents(events, this.codec);
+    let encoded: Awaited<ReturnType<typeof encodeChunkEvents>>;
+    let hash: string;
+
+    try {
+      encoded = await encodeChunkEvents(events, this.codec);
+      hash = await sha256Hex(encoded.bytes);
+    } catch (error) {
+      // Put the events back so a later flush can retry them; otherwise callers
+      // whose appends already resolved would lose them silently.
+      this.pending.unshift(...events);
+      this.pendingBytes += pendingBytes;
+      throw error;
+    }
+
     const bytes = encoded.bytes;
     const first = events[0];
     const last = events[events.length - 1];
-    const hash = await sha256Hex(bytes);
 
     return {
       meta: {
-        chunkId: createChunkId(this.sequence),
-        seq: this.sequence,
+        chunkId: createChunkId(sequence),
+        seq: sequence,
         tStart: first?.t ?? 0,
         tEnd: last?.t ?? 0,
         monoStart: first?.mono ?? 0,

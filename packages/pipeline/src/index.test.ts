@@ -83,6 +83,10 @@ async function readStoredEventIds(storage: MemoryPipelineStorage, sid: string): 
   const chunks = await storage.listChunks(sid);
   const ids: string[] = [];
 
+  // Persistent storage keys chunks by id, so a repeated id would silently
+  // overwrite an earlier chunk there even though this in-memory store keeps both.
+  expect(new Set(chunks.map((chunk) => chunk.meta.chunkId)).size).toBe(chunks.length);
+
   for (const chunk of chunks) {
     const events = await decodeChunkEvents(chunk.bytes, chunk.meta.codec);
     ids.push(...events.map((event) => event.id));
