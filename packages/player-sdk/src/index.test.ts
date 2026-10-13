@@ -259,6 +259,30 @@ describe("WebBlackboxPlayer", () => {
     }
   });
 
+  it("stops decoding compressed chunks that outgrow the decompression budget", async () => {
+    for (const codec of supportedCompressedCodecsForTest()) {
+      const bytes = await createCompressedCodecArchive(codec, { paddingBytes: 8 * 1024 * 1024 });
+
+      expect(bytes.byteLength).toBeLessThan(1024 * 1024);
+      await expect(
+        WebBlackboxPlayer.open(bytes, { limits: { maxEntryBytes: 1024 * 1024 } })
+      ).rejects.toThrow(/event chunk decodes to more than the 1048576 byte limit/);
+      await expect(
+        WebBlackboxPlayer.open(bytes, { limits: { maxTotalBytes: 2 * 1024 * 1024 } })
+      ).rejects.toThrow(/decodes to more than/);
+    }
+  });
+
+  it("stops inflating zip entries that outgrow their declared size", async () => {
+    const zip = await JSZip.loadAsync(await createFixtureArchive());
+    const deflated = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    const forged = forgeDeclaredUncompressedSize(deflated, "manifest.json", 16);
+
+    await expect(WebBlackboxPlayer.open(forged)).rejects.toThrow(
+      "Archive entry manifest.json inflates beyond its declared 16 bytes."
+    );
+  });
+
   it("opens encrypted archives when passphrase is provided", async () => {
     const bytes = await createEncryptedArchive(await createFixtureArchive(), "test-passphrase");
 
@@ -1378,7 +1402,10 @@ function supportedCompressedCodecsForTest(): Array<"gzip" | "br" | "zst"> {
   return codecs;
 }
 
-async function createCompressedCodecArchive(codec: "gzip" | "br" | "zst"): Promise<Uint8Array> {
+async function createCompressedCodecArchive(
+  codec: "gzip" | "br" | "zst",
+  options: { paddingBytes?: number } = {}
+): Promise<Uint8Array> {
   const zip = new JSZip();
   const events: WebBlackboxEvent[] = [
     {
@@ -1411,7 +1438,11 @@ async function createCompressedCodecArchive(codec: "gzip" | "br" | "zst"): Promi
       }
     }
   ];
-  const ndjson = new TextEncoder().encode(events.map((event) => JSON.stringify(event)).join("\n"));
+  // Blank lines are skipped when decoding, so padding inflates the decoded chunk
+  // without changing its events, and it compresses to almost nothing.
+  const ndjson = new TextEncoder().encode(
+    events.map((event) => JSON.stringify(event)).join("\n") + "\n".repeat(options.paddingBytes ?? 0)
+  );
   const chunkBytes = compressBytesForCodec(ndjson, codec);
   const timeIndex: ChunkTimeIndexEntry[] = [
     {
@@ -1948,6 +1979,32 @@ async function createLiteDomFixtureArchive(): Promise<Uint8Array> {
   await writeIntegrityManifest(zip);
 
   return zip.generateAsync({ type: "uint8array" });
+}
+
+/** Rewrites the uncompressed size a zip records for one entry, as a hostile archive would. */
+function forgeDeclaredUncompressedSize(source: Uint8Array, path: string, size: number): Uint8Array {
+  const bytes = new Uint8Array(source);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const name = new TextEncoder().encode(path);
+
+  for (let offset = 0; offset + 46 <= bytes.byteLength; offset += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) {
+      continue;
+    }
+
+    const nameLength = view.getUint16(offset + 28, true);
+    const candidate = bytes.subarray(offset + 46, offset + 46 + nameLength);
+
+    if (nameLength !== name.byteLength || !candidate.every((byte, index) => byte === name[index])) {
+      continue;
+    }
+
+    view.setUint32(offset + 24, size, true);
+    view.setUint32(view.getUint32(offset + 42, true) + 22, size, true);
+    return bytes;
+  }
+
+  throw new Error(`Archive has no central directory record for ${path}.`);
 }
 
 async function tamperArchiveFile(

@@ -15,11 +15,13 @@ import type {
 } from "@webblackbox/protocol";
 import {
   ARCHIVE_INTEGRITY_PATH,
-  archiveEntrySizeMatches,
+  ArchiveDecompressionLimitError,
   assertArchiveDecompressionLimits,
   assertEncryptedArchiveCoverage,
   extractRequestId,
-  inferBlobMime
+  inferBlobMime,
+  readArchiveEntryBytes,
+  resolveArchiveDecompressionLimits
 } from "@webblackbox/protocol";
 
 /** Player lifecycle status. */
@@ -416,10 +418,14 @@ type ArchiveEncryptedFileMeta = {
   ivBase64: string;
 };
 
+type NodeZlibOptions = {
+  maxOutputLength?: number;
+};
+
 type NodeZlibLike = {
-  gunzipSync?: (input: Uint8Array) => Uint8Array;
-  brotliDecompressSync?: (input: Uint8Array) => Uint8Array;
-  zstdDecompressSync?: (input: Uint8Array) => Uint8Array;
+  gunzipSync?: (input: Uint8Array, options?: NodeZlibOptions) => Uint8Array;
+  brotliDecompressSync?: (input: Uint8Array, options?: NodeZlibOptions) => Uint8Array;
+  zstdDecompressSync?: (input: Uint8Array, options?: NodeZlibOptions) => Uint8Array;
 };
 
 const ACTION_TRIGGER_TYPES = new Set<WebBlackboxEventType>([
@@ -564,7 +570,8 @@ export class WebBlackboxPlayer {
   ): Promise<WebBlackboxPlayer> {
     const bytes = await normalizeOpenInput(input);
     const zip = await JSZip.loadAsync(bytes);
-    assertArchiveDecompressionLimits(zip.files, options.limits);
+    const limits = resolveArchiveDecompressionLimits(options.limits);
+    assertArchiveDecompressionLimits(zip.files, limits);
 
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
@@ -612,7 +619,8 @@ export class WebBlackboxPlayer {
       {
         range: options.range,
         timeIndex,
-        defaultCodec: manifest.chunkCodec
+        defaultCodec: manifest.chunkCodec,
+        limits
       },
       integrity
     );
@@ -856,7 +864,7 @@ export class WebBlackboxPlayer {
       return null;
     }
 
-    const rawBytes = await file.async("uint8array");
+    const rawBytes = await readArchiveEntryBytes(blob.path, file);
     await assertArchiveFileIntegrity(this.zip, this.archive.integrity, blob.path, rawBytes);
     const bytes = await this.decryptArchiveFile(blob.path, rawBytes);
 
@@ -2999,11 +3007,16 @@ async function readEventChunkSources(
     range?: PlayerRange;
     timeIndex?: ChunkTimeIndexEntry[];
     defaultCodec?: ChunkCodec;
+    limits?: ArchiveDecompressionLimits;
   } = {},
   integrity?: HashesManifest
 ): Promise<EventChunkSource[]> {
   const descriptors = buildEventChunkDescriptors(zip, options);
   const chunks: EventChunkSource[] = [];
+  const limits = options.limits ?? resolveArchiveDecompressionLimits();
+  // Chunk codecs are a second compression layer under the zip one, so decoded
+  // chunks get their own share of the same budget.
+  let decodeBudget = limits.maxTotalBytes;
 
   for (const descriptor of descriptors) {
     const { path } = descriptor;
@@ -3013,14 +3026,26 @@ async function readEventChunkSources(
       continue;
     }
 
-    const rawBytes = await file.async("uint8array");
+    const rawBytes = await readArchiveEntryBytes(path, file);
 
     if (integrity) {
       await assertArchiveFileIntegrity(zip, integrity, path, rawBytes);
     }
 
     const decrypted = await decryptArchiveBytes(path, rawBytes, archiveKey, encryptedFiles);
-    const bytes = await decodeChunkBytes(decrypted, descriptor.codec);
+    const bytes = await decodeChunkBytes(
+      decrypted,
+      descriptor.codec,
+      Math.min(limits.maxEntryBytes, decodeBudget)
+    );
+
+    decodeBudget -= bytes.byteLength;
+
+    if (decodeBudget < 0) {
+      throw new ArchiveDecompressionLimitError(
+        `Archive event chunks decode to more than the ${limits.maxTotalBytes} byte limit.`
+      );
+    }
 
     chunks.push({
       chunkId: descriptor.chunkId,
@@ -3144,29 +3169,39 @@ async function decryptArchiveBytes(
   return decryptBytes(bytes, archiveKey, fromBase64(encryptedFile.ivBase64));
 }
 
-async function decodeChunkBytes(bytes: Uint8Array, codec: ChunkCodec): Promise<Uint8Array> {
-  if (codec === "none") {
-    return bytes;
+/** Decodes one chunk's codec layer, stopping once it outgrows `maxOutputBytes`. */
+async function decodeChunkBytes(
+  bytes: Uint8Array,
+  codec: ChunkCodec,
+  maxOutputBytes: number
+): Promise<Uint8Array> {
+  const decoded =
+    codec === "none"
+      ? bytes
+      : ((await tryDecodeChunkWithStreams(bytes, codec, maxOutputBytes)) ??
+        (await tryDecodeChunkWithNodeZlib(bytes, codec, maxOutputBytes)));
+
+  if (!decoded) {
+    throw new Error(`Archive chunk codec '${codec}' is not supported in this runtime.`);
   }
 
-  const fromStreams = await tryDecodeChunkWithStreams(bytes, codec);
-
-  if (fromStreams) {
-    return fromStreams;
+  if (decoded.byteLength > maxOutputBytes) {
+    throw chunkDecodeLimitError(maxOutputBytes);
   }
 
-  const fromNodeZlib = await tryDecodeChunkWithNodeZlib(bytes, codec);
+  return decoded;
+}
 
-  if (fromNodeZlib) {
-    return fromNodeZlib;
-  }
-
-  throw new Error(`Archive chunk codec '${codec}' is not supported in this runtime.`);
+function chunkDecodeLimitError(maxOutputBytes: number): ArchiveDecompressionLimitError {
+  return new ArchiveDecompressionLimitError(
+    `Archive event chunk decodes to more than the ${maxOutputBytes} byte limit.`
+  );
 }
 
 async function tryDecodeChunkWithStreams(
   bytes: Uint8Array,
-  codec: ChunkCodec
+  codec: ChunkCodec,
+  maxOutputBytes: number
 ): Promise<Uint8Array | null> {
   if (typeof DecompressionStream === "undefined" || typeof Blob === "undefined") {
     return null;
@@ -3177,8 +3212,12 @@ async function tryDecodeChunkWithStreams(
       const stream = new Blob([toArrayBuffer(bytes)])
         .stream()
         .pipeThrough(new DecompressionStream(format as CompressionFormat));
-      return await readReadableStreamWithTimeout(stream, codec, format);
-    } catch {
+      return await readReadableStreamWithTimeout(stream, codec, format, maxOutputBytes);
+    } catch (error) {
+      if (error instanceof ArchiveDecompressionLimitError) {
+        throw error;
+      }
+
       continue;
     }
   }
@@ -3186,7 +3225,10 @@ async function tryDecodeChunkWithStreams(
   return null;
 }
 
-async function readReadableStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function readReadableStream(
+  stream: ReadableStream<Uint8Array>,
+  maxOutputBytes: number
+): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let totalLength = 0;
@@ -3203,8 +3245,14 @@ async function readReadableStream(stream: ReadableStream<Uint8Array>): Promise<U
     }
 
     const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-    chunks.push(chunk);
     totalLength += chunk.byteLength;
+
+    if (totalLength > maxOutputBytes) {
+      void reader.cancel().catch(() => undefined);
+      throw chunkDecodeLimitError(maxOutputBytes);
+    }
+
+    chunks.push(chunk);
   }
 
   const output = new Uint8Array(totalLength);
@@ -3221,10 +3269,11 @@ async function readReadableStream(stream: ReadableStream<Uint8Array>): Promise<U
 async function readReadableStreamWithTimeout(
   stream: ReadableStream<Uint8Array>,
   codec: ChunkCodec,
-  format: string
+  format: string,
+  maxOutputBytes: number
 ): Promise<Uint8Array> {
   return withTimeout(
-    readReadableStream(stream),
+    readReadableStream(stream, maxOutputBytes),
     STREAM_CODEC_TIMEOUT_MS,
     `Chunk codec '${codec}' decode timed out for format '${format}'.`
   );
@@ -3251,7 +3300,8 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 
 async function tryDecodeChunkWithNodeZlib(
   bytes: Uint8Array,
-  codec: ChunkCodec
+  codec: ChunkCodec,
+  maxOutputBytes: number
 ): Promise<Uint8Array | null> {
   const zlib = await loadNodeZlib();
 
@@ -3259,19 +3309,27 @@ async function tryDecodeChunkWithNodeZlib(
     return null;
   }
 
+  const options: NodeZlibOptions | undefined = Number.isFinite(maxOutputBytes)
+    ? { maxOutputLength: Math.max(1, Math.floor(maxOutputBytes)) }
+    : undefined;
+
   try {
     if (codec === "gzip" && typeof zlib.gunzipSync === "function") {
-      return cloneBytes(zlib.gunzipSync(bytes));
+      return cloneBytes(zlib.gunzipSync(bytes, options));
     }
 
     if (codec === "br" && typeof zlib.brotliDecompressSync === "function") {
-      return cloneBytes(zlib.brotliDecompressSync(bytes));
+      return cloneBytes(zlib.brotliDecompressSync(bytes, options));
     }
 
     if (codec === "zst" && typeof zlib.zstdDecompressSync === "function") {
-      return cloneBytes(zlib.zstdDecompressSync(bytes));
+      return cloneBytes(zlib.zstdDecompressSync(bytes, options));
     }
-  } catch {
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ERR_BUFFER_TOO_LARGE") {
+      throw chunkDecodeLimitError(maxOutputBytes);
+    }
+
     return null;
   }
 
@@ -3500,15 +3558,7 @@ async function readZipFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  const bytes = await file.async("uint8array");
-
-  // The decompression budget is enforced against the central directory, so
-  // reject entries whose real size disagrees with what it was computed from.
-  if (!archiveEntrySizeMatches(file, bytes.byteLength)) {
-    throw new Error(`Archive entry ${path} does not match its declared size.`);
-  }
-
-  return bytes;
+  return readArchiveEntryBytes(path, file);
 }
 
 async function readZipFileText(zip: JSZip, path: string): Promise<string> {
@@ -3518,7 +3568,7 @@ async function readZipFileText(zip: JSZip, path: string): Promise<string> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  return file.async("string");
+  return new TextDecoder().decode(await readArchiveEntryBytes(path, file));
 }
 
 async function assertManifestIntegrity(zip: JSZip, integrity: HashesManifest): Promise<void> {

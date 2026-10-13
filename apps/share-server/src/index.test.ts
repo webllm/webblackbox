@@ -538,6 +538,32 @@ describe("share-server", () => {
     });
   }, 30_000);
 
+  it("rejects archives whose entries inflate beyond their declared size", async () => {
+    const server = await startShareServer();
+
+    const zip = new JSZip();
+    // The central directory will claim 16 bytes; the entry really inflates to 80 MiB.
+    zip.file("manifest.json", Buffer.alloc(80 * 1024 * 1024, 0x20));
+    const deflated = await zip.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+      compressionOptions: { level: 1 }
+    });
+    const bomb = forgeDeclaredUncompressedSize(deflated, "manifest.json", 16);
+
+    const response = await fetch(`${server.baseUrl}/api/share/upload`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-webblackbox-api-key": apiKey,
+        "x-webblackbox-filename": "forged.webblackbox"
+      },
+      body: Buffer.from(bomb)
+    });
+
+    expect(response.status).toBe(413);
+  }, 30_000);
+
   it("accepts hosts listed in WEBBLACKBOX_SHARE_ALLOWED_HOSTS", async () => {
     const server = await startShareServer({
       WEBBLACKBOX_SHARE_ALLOWED_HOSTS: "share.example.test"
@@ -906,6 +932,30 @@ function addPrivateFile(
 
   zip.file(path, bytes);
   files[path] = createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Rewrites the uncompressed size a zip records for one entry, as a hostile archive would. */
+function forgeDeclaredUncompressedSize(source: Uint8Array, path: string, size: number): Uint8Array {
+  const bytes = Buffer.from(source);
+  const name = Buffer.from(path);
+
+  for (let offset = 0; offset + 46 <= bytes.byteLength; offset += 1) {
+    if (bytes.readUInt32LE(offset) !== 0x02014b50) {
+      continue;
+    }
+
+    const nameLength = bytes.readUInt16LE(offset + 28);
+
+    if (!bytes.subarray(offset + 46, offset + 46 + nameLength).equals(name)) {
+      continue;
+    }
+
+    bytes.writeUInt32LE(size, offset + 24);
+    bytes.writeUInt32LE(size, bytes.readUInt32LE(offset + 42) + 22);
+    return new Uint8Array(bytes);
+  }
+
+  throw new Error(`Archive has no central directory record for ${path}.`);
 }
 
 function toBase64(bytes: Uint8Array): string {

@@ -2,10 +2,12 @@ import JSZip from "jszip";
 
 import {
   ARCHIVE_INTEGRITY_PATH,
-  archiveEntrySizeMatches,
+  ArchiveDecompressionLimitError,
   assertArchiveDecompressionLimits,
   assertEncryptedArchiveCoverage,
-  inferBlobFileExtension
+  inferBlobFileExtension,
+  readArchiveEntryBytes,
+  resolveArchiveDecompressionLimits
 } from "@webblackbox/protocol";
 
 import type {
@@ -21,7 +23,7 @@ import type {
   WebBlackboxEvent
 } from "@webblackbox/protocol";
 
-import { decodeChunkEvents } from "./codec.js";
+import { decodeChunkBytes, decodeEventsNdjson } from "./codec.js";
 import { sha256Hex } from "./hash.js";
 import type { StoredBlob, StoredChunk } from "./storage.js";
 
@@ -164,7 +166,8 @@ export async function readWebBlackboxArchive(
   options: ArchiveReadOptions = {}
 ): Promise<ParsedWebBlackboxArchive> {
   const zip = await JSZip.loadAsync(bytes);
-  assertArchiveDecompressionLimits(zip.files, options.limits);
+  const limits = resolveArchiveDecompressionLimits(options.limits);
+  assertArchiveDecompressionLimits(zip.files, limits);
 
   const manifest = await readJson<ExportManifest>(zip, "manifest.json");
   const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
@@ -213,20 +216,31 @@ export async function readWebBlackboxArchive(
   const chunkCodecById = new Map(timeIndex.map((entry) => [entry.chunkId, entry.codec] as const));
 
   const events: WebBlackboxEvent[] = [];
+  // Chunk codecs are a second compression layer under the zip one, so decoded
+  // chunks get their own share of the same budget.
+  let decodeBudget = limits.maxTotalBytes;
 
   for (const path of eventEntries) {
-    const file = zip.file(path);
-
-    if (!file) {
-      continue;
-    }
-
-    const content = await file.async("uint8array");
-    const decoded = await decryptArchiveFile(path, content, manifest, archiveKey);
+    const content = await readFileBytes(zip, path);
+    const decrypted = await decryptArchiveFile(path, content, manifest, archiveKey);
     const chunkId = parseChunkIdFromPath(path);
     const codec =
       (chunkId ? chunkCodecById.get(chunkId) : undefined) ?? (manifest.chunkCodec as ChunkCodec);
-    events.push(...(await decodeChunkEvents(decoded, codec)));
+    const decoded = await decodeChunkBytes(
+      decrypted,
+      codec,
+      Math.min(limits.maxEntryBytes, decodeBudget)
+    );
+
+    decodeBudget -= decoded.byteLength;
+
+    if (decodeBudget < 0) {
+      throw new ArchiveDecompressionLimitError(
+        `Archive event chunks decode to more than the ${limits.maxTotalBytes} byte limit.`
+      );
+    }
+
+    events.push(...decodeEventsNdjson(decoded));
   }
 
   return {
@@ -260,7 +274,7 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  const content = await file.async("string");
+  const content = new TextDecoder().decode(await readArchiveEntryBytes(path, file));
   return JSON.parse(content) as TValue;
 }
 
@@ -343,16 +357,7 @@ async function readFileBytes(zip: JSZip, path: string): Promise<Uint8Array> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  const bytes = await file.async("uint8array");
-
-  // The budget in assertArchiveDecompressionLimits is enforced against the
-  // central directory, so reject entries whose real size disagrees with what
-  // that budget was computed from.
-  if (!archiveEntrySizeMatches(file, bytes.byteLength)) {
-    throw new Error(`Archive entry ${path} does not match its declared size.`);
-  }
-
-  return bytes;
+  return readArchiveEntryBytes(path, file);
 }
 
 type ArchiveEncryptionState = {

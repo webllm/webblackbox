@@ -9,7 +9,8 @@ import {
   ARCHIVE_INTEGRITY_PATH,
   ArchiveDecompressionLimitError,
   assertArchiveDecompressionLimits,
-  isPrivateArchivePath
+  isPrivateArchivePath,
+  readArchiveEntryBytes
 } from "@webblackbox/protocol";
 
 type ShareRecord = {
@@ -370,10 +371,22 @@ async function handleUpload(
     return;
   }
 
-  const archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
-  const summary = clientSummary
-    ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
-    : archiveEnvelopeSummary;
+  // These checks need only the manifest and the encryption map, so run them
+  // before buildShareSummary opens the whole archive with the player: an upload
+  // that is going to be refused should never be fully decoded.
+  if (!archiveEnvelope.encrypted && !ALLOW_PLAINTEXT_SHARE_UPLOADS) {
+    await writeShareAuditEvent(request, {
+      action: "upload",
+      shareId: id,
+      outcome: "blocked"
+    });
+    respondJson(response, archiveEnvelope.analysisError ? 400 : 422, {
+      error: archiveEnvelope.analysisError
+        ? "Upload is not a valid encrypted WebBlackbox archive."
+        : "Public share uploads require encrypted WebBlackbox archives."
+    });
+    return;
+  }
 
   if (archiveEnvelope.encrypted && !archiveEnvelope.encryptedPrivatePathsComplete) {
     await writeShareAuditEvent(request, {
@@ -400,6 +413,11 @@ async function handleUpload(
     });
     return;
   }
+
+  const archiveEnvelopeSummary = await buildShareSummary(bytes, archiveEnvelope);
+  const summary = clientSummary
+    ? applyArchiveEnvelopeToClientSummary(clientSummary, archiveEnvelopeSummary)
+    : archiveEnvelopeSummary;
 
   if (summary.analyzed && summary.privacy?.scanner.status === "blocked") {
     await writeShareAuditEvent(request, {
@@ -439,20 +457,6 @@ async function handleUpload(
     respondJson(response, 422, {
       error: "Encrypted public share uploads require a passed client privacy preflight summary.",
       scanner: clientSummary.privacy?.scanner
-    });
-    return;
-  }
-
-  if (!summary.encrypted && !ALLOW_PLAINTEXT_SHARE_UPLOADS) {
-    await writeShareAuditEvent(request, {
-      action: "upload",
-      shareId: id,
-      outcome: "blocked"
-    });
-    respondJson(response, summary.analyzed ? 422 : 400, {
-      error: summary.analyzed
-        ? "Public share uploads require encrypted WebBlackbox archives."
-        : "Upload is not a valid encrypted WebBlackbox archive."
     });
     return;
   }
@@ -856,7 +860,7 @@ async function collectPlaintextEncryptedPrivatePaths(
       continue;
     }
 
-    const bytes = await file.async("uint8array");
+    const bytes = await readArchiveEntryBytes(path, file);
     if (looksLikePlaintextPrivateArchiveFile(path, bytes)) {
       plaintextPaths.push(path);
     }
@@ -1044,7 +1048,7 @@ async function readZipText(zip: JSZip, path: string): Promise<string> {
     throw new Error(`Archive is missing required file: ${path}`);
   }
 
-  return file.async("string");
+  return new TextDecoder().decode(await readArchiveEntryBytes(path, file));
 }
 
 function readClientShareSummary(request: IncomingMessage): ShareSummary | null {
