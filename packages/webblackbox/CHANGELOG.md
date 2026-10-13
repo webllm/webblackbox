@@ -1,5 +1,14 @@
 # webblackbox
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [1fa66d0]
+  - @webblackbox/protocol@0.7.0
+  - @webblackbox/pipeline@0.7.0
+  - @webblackbox/recorder@0.6.1
+
 ## 0.6.0
 
 ### Minor Changes

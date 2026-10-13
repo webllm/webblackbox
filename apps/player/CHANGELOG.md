@@ -1,5 +1,13 @@
 # @webblackbox/player
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [1fa66d0]
+  - @webblackbox/protocol@0.7.0
+  - @webblackbox/player-sdk@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes
