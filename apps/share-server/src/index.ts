@@ -127,6 +127,7 @@ const SHARE_ALLOWED_HOSTS = parseAllowedHosts(
   SHARE_PORT,
   SHARE_ALLOWED_ORIGIN
 );
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ALLOW_QUERY_API_KEY = parseBooleanFlag(process.env.WEBBLACKBOX_SHARE_ALLOW_QUERY_API_KEY);
 const ALLOW_PLAINTEXT_SHARE_UPLOADS = parseBooleanFlag(
   process.env.WEBBLACKBOX_SHARE_ALLOW_PLAINTEXT_UPLOADS
@@ -1530,7 +1531,7 @@ function parseAllowedHosts(
 ): Set<string> {
   const hosts = new Set<string>();
   const add = (value: string): void => {
-    const normalized = value.trim().toLowerCase();
+    const normalized = normalizeAllowedHostEntry(value);
 
     if (!normalized) {
       return;
@@ -1538,17 +1539,10 @@ function parseAllowedHosts(
 
     hosts.add(normalized);
 
-    if (!normalized.includes(":") || normalized.startsWith("[")) {
+    if (hostHeaderHostname(normalized) === normalized) {
       hosts.add(`${normalized}:${port}`);
     }
   };
-
-  // Loopback names stay allowed unconditionally: a rebinding page only wins when
-  // the Host it sends also matches its own Origin, which loopback never does.
-  // Keeping them avoids breaking local health checks and the local UI.
-  for (const entry of ["localhost", "127.0.0.1", "[::1]"]) {
-    add(entry);
-  }
 
   if (bindHost !== "0.0.0.0" && bindHost !== "::") {
     add(bindHost);
@@ -1592,7 +1586,45 @@ function isAllowedRequestHost(request: IncomingMessage): boolean {
     return false;
   }
 
-  return SHARE_ALLOWED_HOSTS.has(header.trim().toLowerCase());
+  const host = header.trim().toLowerCase();
+
+  // Loopback names are accepted on any port. A rebinding page sends its own
+  // hostname as Host, never a loopback one, while port-forwarded access (docker
+  // -p, SSH tunnels, kubectl port-forward) reaches this server under a port
+  // other than the one it listens on.
+  return SHARE_ALLOWED_HOSTS.has(host) || LOOPBACK_HOSTNAMES.has(hostHeaderHostname(host));
+}
+
+/** Normalizes a configured host so it compares equal to a Host header. */
+function normalizeAllowedHostEntry(value: string): string {
+  let normalized = value.trim().toLowerCase();
+
+  // Accept an origin such as https://share.example.com as well as a bare host.
+  if (normalized.includes("://")) {
+    try {
+      normalized = new URL(normalized).host;
+    } catch {
+      return "";
+    }
+  }
+
+  // Host headers bracket IPv6 literals, so bracket a bare one to match them.
+  if (!normalized.startsWith("[") && normalized.split(":").length > 2) {
+    normalized = `[${normalized}]`;
+  }
+
+  return normalized;
+}
+
+/** Returns the hostname part of a Host header value, keeping IPv6 brackets. */
+function hostHeaderHostname(host: string): string {
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    return end === -1 ? host : host.slice(0, end + 1);
+  }
+
+  const colon = host.lastIndexOf(":");
+  return colon === -1 ? host : host.slice(0, colon);
 }
 
 function publicArchiveFileName(id: string, rawName: string | undefined): string {

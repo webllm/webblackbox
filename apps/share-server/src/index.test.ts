@@ -581,6 +581,24 @@ describe("share-server", () => {
     expect(allowed.status).toBe(200);
     expect(rejected.status).toBe(421);
   });
+
+  it("accepts loopback hosts on any port, IPv6 literals, and origin-style host entries", async () => {
+    const server = await startShareServer({
+      WEBBLACKBOX_SHARE_ALLOWED_HOSTS: "2001:db8::5, https://share.example.test"
+    });
+
+    const statusFor = async (host: string): Promise<number> =>
+      (await rawRequest(server, "/api/share/list", { host, "x-webblackbox-api-key": apiKey }))
+        .status;
+
+    expect(await statusFor("localhost:9000")).toBe(200);
+    expect(await statusFor("127.0.0.1:8443")).toBe(200);
+    expect(await statusFor("[::1]:9000")).toBe(200);
+    expect(await statusFor("[2001:db8::5]")).toBe(200);
+    expect(await statusFor("share.example.test")).toBe(200);
+    expect(await statusFor("localhost.evil.example")).toBe(421);
+    expect(await statusFor("evil.example:9000")).toBe(421);
+  });
 });
 
 async function rawRequest(
