@@ -213,6 +213,7 @@ describe("share-server", () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe("Encrypted WebBlackbox archive is missing encrypted file metadata.");
     expect(payload.missingEncryptedPaths).toContain("index/time.json");
+    expect(payload.missingEncryptedPaths).toContain("integrity/hashes.json");
   });
 
   it("rejects encrypted public share uploads with plaintext private files", async () => {
@@ -805,7 +806,8 @@ async function createEnvelopeArchive(
           "index/req.json": { ivBase64: toBase64(randomBytes(12)) },
           "index/inv.json": { ivBase64: toBase64(randomBytes(12)) },
           [BLOB_FIXTURE_PATH]: { ivBase64: toBase64(randomBytes(12)) },
-          [TEXT_BLOB_FIXTURE_PATH]: { ivBase64: toBase64(randomBytes(12)) }
+          [TEXT_BLOB_FIXTURE_PATH]: { ivBase64: toBase64(randomBytes(12)) },
+          "integrity/hashes.json": { ivBase64: toBase64(randomBytes(12)) }
         }
       : {};
   const manifest = {

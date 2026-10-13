@@ -156,7 +156,10 @@ async function createFixtureArchive() {
     .join("\n");
 
   const encryptedFiles = Object.fromEntries(
-    Object.keys(privateFiles).map((path) => [path, { ivBase64: toBase64(randomBytes(12)) }])
+    [...Object.keys(privateFiles), "integrity/hashes.json"].map((path) => [
+      path,
+      { ivBase64: toBase64(randomBytes(12)) }
+    ])
   );
   const manifest = {
     protocolVersion: 1,

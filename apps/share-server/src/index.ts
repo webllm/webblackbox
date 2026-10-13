@@ -6,8 +6,10 @@ import { join, resolve } from "node:path";
 import JSZip from "jszip";
 import { WebBlackboxPlayer } from "@webblackbox/player-sdk";
 import {
+  ARCHIVE_INTEGRITY_PATH,
   ArchiveDecompressionLimitError,
-  assertArchiveDecompressionLimits
+  assertArchiveDecompressionLimits,
+  isPrivateArchivePath
 } from "@webblackbox/protocol";
 
 type ShareRecord = {
@@ -788,8 +790,12 @@ async function inspectArchiveEnvelope(bytes: Uint8Array): Promise<ArchiveEnvelop
     const encrypted = Object.keys(encryption).length > 0;
     const encryptedFiles = asRecord(encryption.files);
     const privatePaths = collectArchivePrivatePaths(zip);
+    // Readers refuse an encrypted archive whose hash list is not encrypted too,
+    // so such an upload could never be opened.
     const missingEncryptedPaths = encrypted
-      ? privatePaths.filter((path) => !isEncryptedFileMeta(encryptedFiles[path]))
+      ? [ARCHIVE_INTEGRITY_PATH, ...privatePaths].filter(
+          (path) => !isEncryptedFileMeta(encryptedFiles[path])
+        )
       : [];
     const plaintextEncryptedPaths = encrypted
       ? await collectPlaintextEncryptedPrivatePaths(zip, privatePaths, encryptedFiles)
@@ -819,19 +825,8 @@ function collectArchivePrivatePaths(zip: JSZip): string[] {
   return Object.entries(zip.files)
     .filter(([, file]) => !file.dir)
     .map(([path]) => path)
-    .filter(isArchivePrivatePath)
+    .filter(isPrivateArchivePath)
     .sort();
-}
-
-function isArchivePrivatePath(path: string): boolean {
-  return (
-    path.startsWith("events/") ||
-    path.startsWith("blobs/") ||
-    path === "index/time.json" ||
-    path === "index/req.json" ||
-    path === "index/inv.json" ||
-    path === "privacy/manifest.json"
-  );
 }
 
 function isEncryptedFileMeta(value: unknown): boolean {

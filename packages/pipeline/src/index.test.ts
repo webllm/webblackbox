@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 
@@ -93,6 +95,42 @@ async function readStoredEventIds(storage: MemoryPipelineStorage, sid: string): 
   }
 
   return ids;
+}
+
+async function exportEncryptedFixture(passphrase: string): Promise<Uint8Array> {
+  const storage = new MemoryPipelineStorage();
+  const pipeline = new FlightRecorderPipeline({
+    session: SESSION,
+    storage,
+    maxChunkBytes: 128
+  });
+
+  await pipeline.start();
+  await pipeline.ingest(createEvent("E-enc-1", "user.click", 100));
+  await pipeline.ingest(createEvent("E-enc-2", "network.request", 120));
+
+  const exported = await pipeline.exportBundle({ ...FULL_EXPORT_OPTIONS, passphrase });
+  return exported.bytes;
+}
+
+async function rewritePlaintextIntegrity(zip: JSZip): Promise<Uint8Array> {
+  const files: Record<string, string> = {};
+
+  for (const [path, file] of Object.entries(zip.files)) {
+    if (file.dir || path === "integrity/hashes.json") {
+      continue;
+    }
+
+    files[path] = createHash("sha256")
+      .update(await file.async("uint8array"))
+      .digest("hex");
+  }
+
+  zip.file(
+    "integrity/hashes.json",
+    JSON.stringify({ manifestSha256: files["manifest.json"], files })
+  );
+  return zip.generateAsync({ type: "uint8array" });
 }
 
 function createNoisyPayload(size: number, seed: number): string {
@@ -1214,5 +1252,50 @@ describe("pipeline", () => {
 
     expect(stored).toHaveLength(4);
     expect(new Set(stored).size).toBe(4);
+  });
+
+  it("encrypts the integrity manifest of encrypted archives", async () => {
+    const bytes = await exportEncryptedFixture("secret-passphrase");
+    const zip = await JSZip.loadAsync(bytes);
+    const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as {
+      encryption: { files: Record<string, unknown> };
+    };
+    const rawIntegrity = await zip.file("integrity/hashes.json")!.async("string");
+
+    expect(manifest.encryption.files["integrity/hashes.json"]).toBeDefined();
+    expect(() => JSON.parse(rawIntegrity)).toThrow();
+
+    const parsed = await readWebBlackboxArchive(bytes, { passphrase: "secret-passphrase" });
+    expect(parsed.integrity?.files["manifest.json"]).toBe(parsed.integrity?.manifestSha256);
+  });
+
+  it("rejects encrypted archives whose hash list was downgraded to plaintext", async () => {
+    const zip = await JSZip.loadAsync(await exportEncryptedFixture("secret-passphrase"));
+    const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as {
+      encryption: { files: Record<string, unknown> };
+      tampered?: boolean;
+    };
+
+    delete manifest.encryption.files["integrity/hashes.json"];
+    manifest.tampered = true;
+    zip.file("manifest.json", JSON.stringify(manifest));
+
+    const forged = await rewritePlaintextIntegrity(zip);
+
+    await expect(
+      readWebBlackboxArchive(forged, { passphrase: "secret-passphrase" })
+    ).rejects.toThrow(/integrity\/hashes\.json unencrypted/);
+  });
+
+  it("rejects encrypted archives that carry unencrypted session content", async () => {
+    const zip = await JSZip.loadAsync(await exportEncryptedFixture("secret-passphrase"));
+
+    zip.file("events/C-injected.ndjson", "{}");
+
+    const forged = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(
+      readWebBlackboxArchive(forged, { passphrase: "secret-passphrase" })
+    ).rejects.toThrow("unencrypted content at events/C-injected.ndjson");
   });
 });

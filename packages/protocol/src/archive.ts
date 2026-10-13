@@ -1,3 +1,54 @@
+/** Archive path holding the per-file hash manifest. */
+export const ARCHIVE_INTEGRITY_PATH = "integrity/hashes.json";
+
+/**
+ * Reports whether an archive path carries captured session content.
+ *
+ * Every private path must be encrypted in an encrypted archive; see
+ * `assertEncryptedArchiveCoverage`.
+ */
+export function isPrivateArchivePath(path: string): boolean {
+  return (
+    path.startsWith("events/") ||
+    path.startsWith("blobs/") ||
+    path === "index/time.json" ||
+    path === "index/req.json" ||
+    path === "index/inv.json" ||
+    path === "privacy/manifest.json"
+  );
+}
+
+/**
+ * Rejects an encrypted archive whose layout would let unencrypted content in.
+ *
+ * Readers hand back any entry missing from the encryption map unchanged, so
+ * the map must cover the integrity manifest and every private path. A
+ * plaintext hash list could be rewritten without the passphrase to match
+ * removed or injected entries, and an unlisted private entry would be trusted
+ * as session content.
+ */
+export function assertEncryptedArchiveCoverage(
+  files: Record<string, ArchiveZipEntryLike>,
+  encryptedFiles: Record<string, unknown>
+): void {
+  if (!Object.hasOwn(encryptedFiles, ARCHIVE_INTEGRITY_PATH)) {
+    throw new Error(
+      `Encrypted archive stores ${ARCHIVE_INTEGRITY_PATH} unencrypted, so it cannot be verified. ` +
+        "It was written by an older exporter or has been tampered with."
+    );
+  }
+
+  for (const [path, file] of Object.entries(files)) {
+    if (file.dir || !isPrivateArchivePath(path)) {
+      continue;
+    }
+
+    if (!Object.hasOwn(encryptedFiles, path)) {
+      throw new Error(`Encrypted archive contains unencrypted content at ${path}.`);
+    }
+  }
+}
+
 /** Minimal shape of a zip entry needed to budget decompression. */
 export type ArchiveZipEntryLike = {
   dir?: boolean;

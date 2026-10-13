@@ -1,8 +1,10 @@
 import JSZip from "jszip";
 
 import {
+  ARCHIVE_INTEGRITY_PATH,
   archiveEntrySizeMatches,
   assertArchiveDecompressionLimits,
+  assertEncryptedArchiveCoverage,
   inferBlobFileExtension
 } from "@webblackbox/protocol";
 
@@ -81,6 +83,12 @@ export async function createWebBlackboxArchive(
     fileHashes[path] = await sha256Hex(bytes);
   }
 
+  // Reserve the integrity manifest's IV before sealing manifest.json, so the
+  // encryption map it carries already covers the hash list. Encrypting that list
+  // is what makes an encrypted archive tamper-evident: without the passphrase an
+  // attacker cannot rewrite it to match injected or removed entries.
+  const integrityIv = encryption ? reserveArchiveIv(ARCHIVE_INTEGRITY_PATH, encryption) : null;
+
   const manifest: ExportManifest = encryption
     ? {
         ...input.manifest,
@@ -98,7 +106,13 @@ export async function createWebBlackboxArchive(
     }
   };
 
-  zip.file("integrity/hashes.json", JSON.stringify(integrity, null, 2));
+  const integrityBytes = new TextEncoder().encode(JSON.stringify(integrity, null, 2));
+  zip.file(
+    ARCHIVE_INTEGRITY_PATH,
+    encryption && integrityIv
+      ? await encryptBytes(integrityBytes, encryption.key, integrityIv)
+      : integrityBytes
+  );
 
   const estimatedPayloadBytes = estimateArchivePayloadBytes(input);
   const preferStore =
@@ -151,12 +165,23 @@ export async function readWebBlackboxArchive(
 ): Promise<ParsedWebBlackboxArchive> {
   const zip = await JSZip.loadAsync(bytes);
   assertArchiveDecompressionLimits(zip.files, options.limits);
-  const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
-
-  await verifyArchiveIntegrity(zip, integrity);
 
   const manifest = await readJson<ExportManifest>(zip, "manifest.json");
   const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
+
+  if (manifest.encryption) {
+    assertEncryptedArchiveCoverage(zip.files, manifest.encryption.files);
+  }
+
+  const integrity = await readArchiveJson<HashesManifest>(
+    zip,
+    ARCHIVE_INTEGRITY_PATH,
+    manifest,
+    archiveKey
+  );
+
+  await verifyArchiveIntegrity(zip, integrity);
+
   const timeIndex = await readArchiveJson<ChunkTimeIndexEntry[]>(
     zip,
     "index/time.json",
@@ -296,7 +321,7 @@ function assertArchiveFileSet(zip: JSZip, integrity: HashesManifest): void {
   const actualPaths = Object.entries(zip.files)
     .filter(([, file]) => !file.dir)
     .map(([path]) => path)
-    .filter((path) => path !== "integrity/hashes.json")
+    .filter((path) => path !== ARCHIVE_INTEGRITY_PATH)
     .sort();
   const expectedPaths = Object.keys(integrity.files).sort();
 
@@ -359,19 +384,22 @@ async function createArchiveEncryptionState(passphrase: string): Promise<Archive
   };
 }
 
-async function encryptForArchive(
-  path: string,
-  bytes: Uint8Array,
-  state: ArchiveEncryptionState
-): Promise<Uint8Array> {
+function reserveArchiveIv(path: string, state: ArchiveEncryptionState): Uint8Array {
   const iv = randomBytes(AES_GCM_IV_BYTES);
-  const encrypted = await encryptBytes(bytes, state.key, iv);
 
   state.meta.files[path] = {
     ivBase64: toBase64(iv)
   };
 
-  return encrypted;
+  return iv;
+}
+
+async function encryptForArchive(
+  path: string,
+  bytes: Uint8Array,
+  state: ArchiveEncryptionState
+): Promise<Uint8Array> {
+  return encryptBytes(bytes, state.key, reserveArchiveIv(path, state));
 }
 
 async function resolveArchiveReadKey(

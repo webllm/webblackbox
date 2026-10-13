@@ -323,6 +323,32 @@ describe("WebBlackboxPlayer", () => {
     }
   });
 
+  it("rejects encrypted archives whose hash list is stored in plaintext", async () => {
+    const bytes = await createEncryptedArchive(await createFixtureArchive(), "test-passphrase", {
+      encryptIntegrity: false
+    });
+
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        passphrase: "test-passphrase"
+      })
+    ).rejects.toThrow(/integrity\/hashes\.json unencrypted/);
+  });
+
+  it("rejects encrypted archives that carry unencrypted session content", async () => {
+    const bytes = await tamperArchiveFile(
+      await createEncryptedArchive(await createFixtureArchive(), "test-passphrase"),
+      "events/C-injected.ndjson",
+      "{}"
+    );
+
+    await expect(
+      WebBlackboxPlayer.open(bytes, {
+        passphrase: "test-passphrase"
+      })
+    ).rejects.toThrow("unencrypted content at events/C-injected.ndjson");
+  });
+
   it("rejects archives that use deprecated index/integrity layout paths", async () => {
     const bytes = await createDeprecatedLayoutArchive();
 
@@ -1934,7 +1960,10 @@ async function tamperArchiveFile(
   return zip.generateAsync({ type: "uint8array" });
 }
 
-async function writeIntegrityManifest(zip: JSZip): Promise<void> {
+async function writeIntegrityManifest(
+  zip: JSZip,
+  seal: (bytes: Uint8Array) => Promise<Uint8Array> = async (bytes) => bytes
+): Promise<void> {
   const fileHashes: Record<string, string> = {};
 
   for (const path of Object.keys(zip.files).sort()) {
@@ -1953,13 +1982,17 @@ async function writeIntegrityManifest(zip: JSZip): Promise<void> {
 
   zip.file(
     "integrity/hashes.json",
-    JSON.stringify(
-      {
-        manifestSha256: fileHashes["manifest.json"] ?? "",
-        files: fileHashes
-      },
-      null,
-      2
+    await seal(
+      new TextEncoder().encode(
+        JSON.stringify(
+          {
+            manifestSha256: fileHashes["manifest.json"] ?? "",
+            files: fileHashes
+          },
+          null,
+          2
+        )
+      )
     )
   );
 }
@@ -1992,7 +2025,11 @@ function createDomSnapshotPayload(bodyChildren: string[]): Record<string, unknow
   };
 }
 
-async function createEncryptedArchive(source: Uint8Array, passphrase: string): Promise<Uint8Array> {
+async function createEncryptedArchive(
+  source: Uint8Array,
+  passphrase: string,
+  options: { encryptIntegrity?: boolean } = {}
+): Promise<Uint8Array> {
   const zip = await JSZip.loadAsync(source);
   const manifestFile = zip.file("manifest.json");
 
@@ -2026,6 +2063,14 @@ async function createEncryptedArchive(source: Uint8Array, passphrase: string): P
     };
   }
 
+  const integrityIv = options.encryptIntegrity === false ? null : randomBytes(12);
+
+  if (integrityIv) {
+    files["integrity/hashes.json"] = {
+      ivBase64: toBase64(integrityIv)
+    };
+  }
+
   manifest.encryption = {
     algorithm: "AES-GCM",
     kdf: {
@@ -2038,7 +2083,9 @@ async function createEncryptedArchive(source: Uint8Array, passphrase: string): P
   };
 
   zip.file("manifest.json", JSON.stringify(manifest, null, 2));
-  await writeIntegrityManifest(zip);
+  await writeIntegrityManifest(zip, async (bytes) =>
+    integrityIv ? encryptBytes(bytes, key, integrityIv) : bytes
+  );
   return zip.generateAsync({ type: "uint8array" });
 }
 

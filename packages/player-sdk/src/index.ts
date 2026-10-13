@@ -14,8 +14,10 @@ import type {
   WebBlackboxEventType
 } from "@webblackbox/protocol";
 import {
+  ARCHIVE_INTEGRITY_PATH,
   archiveEntrySizeMatches,
   assertArchiveDecompressionLimits,
+  assertEncryptedArchiveCoverage,
   extractRequestId,
   inferBlobMime
 } from "@webblackbox/protocol";
@@ -564,12 +566,17 @@ export class WebBlackboxPlayer {
     const zip = await JSZip.loadAsync(bytes);
     assertArchiveDecompressionLimits(zip.files, options.limits);
 
-    const integrity = await readJson<HashesManifest>(zip, "integrity/hashes.json");
-    assertArchiveFileSet(zip, integrity);
-    await assertManifestIntegrity(zip, integrity);
     const manifest = await readJson<ExportManifest>(zip, "manifest.json");
     const archiveKey = await resolveArchiveReadKey(manifest, options.passphrase);
     const encryptedFiles = manifest.encryption?.files ?? {};
+
+    if (manifest.encryption) {
+      assertEncryptedArchiveCoverage(zip.files, encryptedFiles);
+    }
+
+    const integrity = await readIntegrityManifest(zip, archiveKey, encryptedFiles);
+    assertArchiveFileSet(zip, integrity);
+    await assertManifestIntegrity(zip, integrity);
     const timeIndex = await readIntegrityArchiveJson<ChunkTimeIndexEntry[]>(
       zip,
       integrity,
@@ -3444,6 +3451,21 @@ async function readJson<TValue>(zip: JSZip, path: string): Promise<TValue> {
   return JSON.parse(content) as TValue;
 }
 
+async function readIntegrityManifest(
+  zip: JSZip,
+  archiveKey: CryptoKey | null,
+  encryptedFiles: Record<string, ArchiveEncryptedFileMeta>
+): Promise<HashesManifest> {
+  const rawBytes = await readZipFileBytes(zip, ARCHIVE_INTEGRITY_PATH);
+  const bytes = await decryptArchiveBytes(
+    ARCHIVE_INTEGRITY_PATH,
+    rawBytes,
+    archiveKey,
+    encryptedFiles
+  );
+  return JSON.parse(new TextDecoder().decode(bytes)) as HashesManifest;
+}
+
 async function readIntegrityArchiveJson<TValue>(
   zip: JSZip,
   integrity: HashesManifest,
@@ -3511,7 +3533,7 @@ function assertArchiveFileSet(zip: JSZip, integrity: HashesManifest): void {
   const actualPaths = Object.entries(zip.files)
     .filter(([, file]) => !file.dir)
     .map(([path]) => path)
-    .filter((path) => path !== "integrity/hashes.json")
+    .filter((path) => path !== ARCHIVE_INTEGRITY_PATH)
     .sort();
   const expectedPaths = Object.keys(integrity.files).sort();
 
